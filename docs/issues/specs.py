@@ -156,7 +156,7 @@ e2 = spec(
         "**Learning layer and licensing.** Honcho's server is AGPL-3.0; its SDKs are Apache-2.0. Start on the hosted "
         "`api.honcho.dev` through the SDK, never embed or modify the server, and rebuild the parts we keep as a Cratefield "
         "module before scale.\n\n"
-        "**Children**\n{{harness_embed}} {{pages}} {{extract}} {{citations}} {{search}} {{evolve}} {{learning}} {{export}}")},
+        "**Children**\n{{harness_embed}} {{pages}} {{extract}} {{citations}} {{search}} {{evolve}} {{learning}} {{crypto}} {{export}}")},
     [
         child("harness_embed", "Harness: Embeddings and VectorIndex ports (Workers AI + Vectorize, pgvector natively)", ["needs-harness", "backend"], [],
               "- `Embedder` port (batch embed text → `Vec<f32>`), adapters: `adapter-workers-ai`, `adapter-openai-compatible`.\n"
@@ -192,6 +192,9 @@ e2 = spec(
               "store returned peer representations per user and scope.\n- Use them to tailor answers and briefs (\"prefers small PRs\").\n"
               "- An ADR on replacing Honcho with an in-house Cratefield module (profiles + periodic \"dreaming\" passes).",
               ["Users can view and delete their own profile.", "No AGPL server code is embedded or modified."]),
+        child("crypto", "Per-scope envelope encryption, blind-index search and crypto-shredding", ["wiki", "security"], ["pages", "search"],
+              "Filed directly as #43; see the issue for the full body. One DEK per scope wrapped by a KMS workspace key (customer-managed on Teams), crypto-shredding, HMAC blind indexes for keyword search, per-scope vector namespaces, local decrypt-and-search in the CLI and PWA.",
+              ["No plaintext page body or source text at rest in D1 or R2."]),
         child("export", "Export and sync: Markdown zip and Obsidian-compatible vault", ["wiki"], ["pages"],
               "- One-click export of the whole wiki (respecting the exporter's scopes) as an Obsidian vault.\n- Optional one-way git sync to a customer repo.",
               ["An export opens in Obsidian with working backlinks.", "Export contains only what the exporter may see."]),

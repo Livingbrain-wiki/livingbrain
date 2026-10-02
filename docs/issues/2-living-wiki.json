@@ -59,7 +59,7 @@
    "wiki",
    "learning"
   ],
-  "body": "The memory is not a black-box vector store: it is a Markdown wiki the customer can read, edit and export (Karpathy's LLM-wiki pattern: raw sources, compiled pages, an index, and lint passes). The brain writes it from conversations, links every fact to its source, and on a schedule merges, reconciles and refreshes it. A learning layer models each person so answers and briefs improve every week.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Learning layer and licensing.** Honcho's server is AGPL-3.0; its SDKs are Apache-2.0. Start on the hosted `api.honcho.dev` through the SDK, never embed or modify the server, and rebuild the parts we keep as a Cratefield module before scale.\n\n**Children**\n{{harness_embed}} {{pages}} {{extract}} {{citations}} {{search}} {{evolve}} {{learning}} {{export}}"
+  "body": "The memory is not a black-box vector store: it is a Markdown wiki the customer can read, edit and export (Karpathy's LLM-wiki pattern: raw sources, compiled pages, an index, and lint passes). The brain writes it from conversations, links every fact to its source, and on a schedule merges, reconciles and refreshes it. A learning layer models each person so answers and briefs improve every week.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Learning layer and licensing.** Honcho's server is AGPL-3.0; its SDKs are Apache-2.0. Start on the hosted `api.honcho.dev` through the SDK, never embed or modify the server, and rebuild the parts we keep as a Cratefield module before scale.\n\n**Children**\n{{harness_embed}} {{pages}} {{extract}} {{citations}} {{search}} {{evolve}} {{learning}} {{crypto}} {{export}}"
  },
  "children": [
   {
@@ -125,6 +125,15 @@
     "backend"
    ],
    "body": "Part of {{epic}}. Depends on {{extract}}.\n\n- Feed messages (and, in Epic 3, agent sessions) to Honcho via the Apache-2.0 SDK against `api.honcho.dev`; store returned peer representations per user and scope.\n- Use them to tailor answers and briefs (\"prefers small PRs\").\n- An ADR on replacing Honcho with an in-house Cratefield module (profiles + periodic \"dreaming\" passes).\n\n**Acceptance criteria**\n- [ ] Users can view and delete their own profile.\n- [ ] No AGPL server code is embedded or modified."
+  },
+  {
+   "key": "crypto",
+   "title": "Per-scope envelope encryption, blind-index search and crypto-shredding",
+   "labels": [
+    "wiki",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{pages}}, {{search}}.\n\nFiled directly as #43; see the issue for the full body. One DEK per scope wrapped by a KMS workspace key (customer-managed on Teams), crypto-shredding, HMAC blind indexes for keyword search, per-scope vector namespaces, local decrypt-and-search in the CLI and PWA.\n\n**Acceptance criteria**\n- [ ] No plaintext page body or source text at rest in D1 or R2."
   },
   {
    "key": "export",
