@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>A brain for your team that writes its own company wiki, and keeps improving it.</b><br>
-  In Slack, in your coding agent over MCP, and in your terminal. One blazing-fast Rust binary. Plain Markdown you own.
+  In your coding agent over MCP, in your terminal, in the app, and in team chat (Slack, Discord). One blazing-fast Rust binary. Plain Markdown you own.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 50 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 53 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -38,12 +38,12 @@
 
 | | |
 | :--- | :--- |
-| **Remembers** | Turns Slack conversations into Markdown pages for people, projects, decisions and customers. Every fact links to its source message. |
+| **Remembers** | Turns team conversations (Slack, Discord), mail and agent logs into Markdown pages for people, projects, decisions and customers. Every fact links to its source message. |
 | **Evolves** | Nightly passes merge duplicates, surface contradictions and refresh stale facts. A learning layer models how each person works. |
 | **Acts** | Tools over MCP. Bigger jobs go to a [Colonizer](https://colonizer.dev) colony that comes back with a pull request. |
-| **Everywhere** | Slack first. Everywhere else through MCP (Claude Code, Codex, Cursor, OpenCode, Claude Desktop) or the `livingbrain` CLI: one static Rust binary with instant startup and a local cache. |
+| **Everywhere** | Coding agents and the terminal first, through MCP (Claude Code, Codex, Cursor, OpenCode, Claude Desktop) or the `livingbrain` CLI, then team chat (Slack and Discord; WhatsApp and Telegram later). The CLI is one static Rust binary with instant startup and a local cache. |
 | **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. The CLI gathers every agent's session logs (Claude Code, Codex, Cursor, OpenCode, Colonizer) into one searchable, costed record, redacted on your machine and uploaded only if you opt in. |
-| **Private by design** | It reads only with the asker's own access, in Slack, over MCP and in the CLI alike. Each scope (shared, a channel, a person) is encrypted with its own key, so search stays scoped and fast, and deleting a key erases that memory everywhere. |
+| **Private by design** | It reads only with the asker's own access, in chat, over MCP and in the CLI alike. Each scope (shared, a channel, a person) is encrypted with its own key, so search stays scoped and fast, and deleting a key erases that memory everywhere. |
 | **Fewer tokens** | Agents ask for a short cited brief instead of rereading threads and grepping the repo. Context is written once, at night, and reused by every agent. Decisions and dead ends are on record, so agents stop retrying rejected approaches. Yes/no decisions (reply, remember, fetch more, conflict?) go to a fast calibrated judge model (Jev, #53) instead of a large LLM. An [open benchmark](https://github.com/Livingbrain-wiki/livingbrain/issues/48) will measure it; no numbers until then. |
 | **Bring your history** | Import your ChatGPT or Claude export with `livingbrain import chatgpt <export.zip>`: read locally, choose what goes in, secrets redacted, kept in your personal encrypted memory. [Guide](https://livingbrain.wiki/guides/import-chatgpt/) |
 | **Knows when prod is down** | Connect Grafana or your logs read-only (Loki, Elasticsearch, Datadog, CloudWatch, Cloudflare, Sentry): it answers "is prod down?" with numbers, panel links and a summary of what the logs say, turns alerts into incident pages linked to the deploy, and drafts postmortems. It exports its own metrics, traces and logs over OpenTelemetry. |
@@ -65,7 +65,7 @@
 }} }%%
 flowchart LR
   subgraph IN["WHERE IT LISTENS"]
-    S["<b>Slack</b><br/>threads · DMs"]:::src
+    S["<b>Team chat</b><br/>Slack · Discord<br/>WhatsApp · Telegram later"]:::src
     M["<b>Mail</b><br/>Owlpost inbox<br/>Gmail · Outlook · IMAP"]:::src
     L["<b>Agent logs</b><br/>Claude Code · Codex<br/>Cursor · Colonizer"]:::src
   end
@@ -130,7 +130,7 @@ paces its writes.
 
 | Epic | Spec | Scope |
 | :--- | :--- | :--- |
-| [#1](https://github.com/Livingbrain-wiki/livingbrain/issues/1) | `1-foundation.json` | The brain in Slack: events, permissions, the agent loop, bring your own model, LiteLLM, logging and telemetry (13 issues) |
+| [#1](https://github.com/Livingbrain-wiki/livingbrain/issues/1) | `1-foundation.json` | The brain in team chat (Slack and Discord, a chat-agnostic core): events, permissions, the agent loop, bring your own model, LiteLLM, logging and telemetry (13 issues) |
 | [#13](https://github.com/Livingbrain-wiki/livingbrain/issues/13) | `2-living-wiki.json` | The living wiki: pages, citations, search, nightly evolution, learning layer, per-scope encryption, export (9 issues) |
 | [#22](https://github.com/Livingbrain-wiki/livingbrain/issues/22) | `3-agents.json` | Agents, Colonizer, Owlpost and the 3D brain, plus waitlist and billing (10 issues) |
 | [#33](https://github.com/Livingbrain-wiki/livingbrain/issues/33) | `4-everywhere.json` | Everywhere via MCP and the CLI: one Rust binary, local cache, Claude Code plugin, speed budget, agent log aggregation, open benchmark, ChatGPT and Claude import, PWA, `livingbrain view` (11 issues) |
