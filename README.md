@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 48 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 49 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -44,7 +44,7 @@
 | **Everywhere** | Slack first. Everywhere else through MCP (Claude Code, Codex, Cursor, OpenCode, Claude Desktop) or the `livingbrain` CLI: one static Rust binary with instant startup and a local cache. |
 | **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. The CLI gathers every agent's session logs (Claude Code, Codex, Cursor, OpenCode, Colonizer) into one searchable, costed record, redacted on your machine and uploaded only if you opt in. |
 | **Private by design** | It reads only with the asker's own access, in Slack, over MCP and in the CLI alike. Each scope (shared, a channel, a person) is encrypted with its own key, so search stays scoped and fast, and deleting a key erases that memory everywhere. |
-| **Fewer tokens** | Agents ask for a short cited brief instead of rereading threads and grepping the repo. Context is written once, at night, and reused by every agent. Decisions and dead ends are on record, so agents stop retrying rejected approaches. An [open benchmark](https://github.com/Livingbrain-wiki/livingbrain/issues/48) will measure it; no numbers until then. |
+| **Fewer tokens** | Agents ask for a short cited brief instead of rereading threads and grepping the repo. Context is written once, at night, and reused by every agent. Decisions and dead ends are on record, so agents stop retrying rejected approaches. Yes/no decisions (reply, remember, fetch more, conflict?) go to a fast calibrated judge model (Jev, #53) instead of a large LLM. An [open benchmark](https://github.com/Livingbrain-wiki/livingbrain/issues/48) will measure it; no numbers until then. |
 | **Bring your history** | Import your ChatGPT or Claude export with `livingbrain import chatgpt <export.zip>`: read locally, choose what goes in, secrets redacted, kept in your personal encrypted memory. [Guide](https://livingbrain.wiki/guides/import-chatgpt/) |
 | **Knows when prod is down** | Connect Grafana or your logs read-only (Loki, Elasticsearch, Datadog, CloudWatch, Cloudflare, Sentry): it answers "is prod down?" with numbers, panel links and a summary of what the logs say, turns alerts into incident pages linked to the deploy, and drafts postmortems. It exports its own metrics, traces and logs over OpenTelemetry. |
 | **Safe by design** | Everything it reads is screened for hidden text by [PromptDecode](https://promptdeco.de) before a page is written and again before context reaches an agent. Customers get answers through [SupportGenius](https://supportgeni.us), only from pages you published to them. |
