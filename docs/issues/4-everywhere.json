@@ -69,7 +69,7 @@
    "agents",
    "backend"
   ],
-  "body": "Living Brain is not only a Slack bot. Outside Slack, every surface reaches the same brain through two doors: **MCP** (Claude Code, Codex, Cursor, OpenCode, Claude Desktop and any other MCP client) and the **`livingbrain` CLI**. Both are one Rust binary: a single static executable, instant startup, a local cache so search answers before the network does.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Rule.** MCP and the CLI are clients of the same API and the same `scopes_for` permission model. They never hold their own memory or their own agent loop; the local cache only ever holds pages the signed-in user may see.\n\n**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}} {{pwa}} {{view3d}}"
+  "body": "Living Brain is not only a Slack bot. Outside Slack, every surface reaches the same brain through two doors: **MCP** (Claude Code, Codex, Cursor, OpenCode, Claude Desktop and any other MCP client) and the **`livingbrain` CLI**. Both are one Rust binary: a single static executable, instant startup, a local cache so search answers before the network does.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Rule.** MCP and the CLI are clients of the same API and the same `scopes_for` permission model. They never hold their own memory or their own agent loop; the local cache only ever holds pages the signed-in user may see.\n\n**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}} {{agent_logs}} {{pwa}} {{view3d}}"
  },
  "children": [
   {
@@ -126,6 +126,16 @@
     "backend"
    ],
    "body": "Part of {{epic}}. Depends on {{cli}}, {{local_cache}}, {{local_mcp}}.\n\n- Budgets: CLI cold start, warm-cache `search`, MCP `brain_search` round trip, binary size. Set them from the first measurements, then hold them.\n- A benchmark job in CI (criterion + hyperfine) that fails on regression; publish the numbers in the README only once measured.\n\n**Acceptance criteria**\n- [ ] CI fails when a budget regresses.\n- [ ] No speed claim appears on the site before it is measured."
+  },
+  {
+   "key": "agent_logs",
+   "title": "Aggregate coding agents' logs: Claude Code, Codex, Cursor, OpenCode, Colonizer",
+   "labels": [
+    "agents",
+    "learning",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{cli}}, {{local_cache}}.\n\nFiled directly as #45; see the issue for the full body. CLI collectors per agent, normalised schema, on-device redaction, opt-in upload, scope-encrypted storage counted toward plan storage, search, cost dashboard, outcome linking, decisions to wiki pages.\n\n**Acceptance criteria**\n- [ ] Nothing uploads until the user opts in for that repo."
   },
   {
    "key": "pwa",

@@ -258,7 +258,7 @@ e3 = spec(
               "- 2D SVG fallback when WebGL is missing or reduced motion is set.",
               ["Smooth with 5,000 nodes on a mid-range laptop.", "Graph only shows nodes the viewer may see."]),
         child("billing", "Open-core plans, Teams license and hosted billing", ["backend"], ["web_app"],
-              "- Plans (per workspace): Community free (self-hosted, up to 5 people, all core features); Teams $5/mo (unlimited people + SSO, admin/audit log, shared prompt library, per-channel policies; self-hosted license key or hosted BYOK); Crew $9/mo (hosted, model included, up to 25 people). No free hosted plan. Stripe via `adapter-stripe` / `control-plane-billing`.\n"
+              "- Plans (per workspace): Community free (self-hosted, up to 5 people, all core features); Teams $5/mo (unlimited people + SSO, admin/audit log, shared prompt library, per-channel policies; self-hosted license key or hosted BYOK); Crew $9/mo (hosted, model included, up to 25 people). Storage: Community uses the customer's own Cloudflare storage; hosted Teams includes 10 GB, Crew 25 GB; extra hosted storage $0.25/GB-month; storage counts wiki pages, sources, search indexes and aggregated agent logs (#45), metered per workspace and shown to the owner. No free hosted plan. Stripe via `adapter-stripe` / `control-plane-billing`.\n"
               "- Self-hosted license keys: signed offline-verifiable keys (harness `Signer`), checked at startup and daily; an expired key degrades to Community limits, never deletes data.\n"
               "- Hard usage caps per plan; overage pauses rather than bills by surprise.",
               ["A workspace over its cap is paused with a clear message, not charged.",
@@ -278,7 +278,7 @@ e4 = spec(
         f"{STACK}\n\n"
         "**Rule.** MCP and the CLI are clients of the same API and the same `scopes_for` permission model. They never hold "
         "their own memory or their own agent loop; the local cache only ever holds pages the signed-in user may see.\n\n"
-        "**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}} {{pwa}} {{view3d}}")},
+        "**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}} {{agent_logs}} {{pwa}} {{view3d}}")},
     [
         child("cli", "`livingbrain` CLI: one static Rust binary", ["agents", "backend"], [],
               "- Commands: `login` (device flow), `ask`, `search`, `note`, `page`, `export`, `mcp`.\n"
@@ -311,6 +311,9 @@ e4 = spec(
               "- Budgets: CLI cold start, warm-cache `search`, MCP `brain_search` round trip, binary size. Set them from the first measurements, then hold them.\n"
               "- A benchmark job in CI (criterion + hyperfine) that fails on regression; publish the numbers in the README only once measured.",
               ["CI fails when a budget regresses.", "No speed claim appears on the site before it is measured."]),
+        child("agent_logs", "Aggregate coding agents' logs: Claude Code, Codex, Cursor, OpenCode, Colonizer", ["agents", "learning", "security"], ["cli", "local_cache"],
+              "Filed directly as #45; see the issue for the full body. CLI collectors per agent, normalised schema, on-device redaction, opt-in upload, scope-encrypted storage counted toward plan storage, search, cost dashboard, outcome linking, decisions to wiki pages.",
+              ["Nothing uploads until the user opts in for that repo."]),
         child("pwa", "Easy to use: the web app as an installable, offline-first PWA", ["ui", "pwa"], ["local_cache"],
               "Filed directly as #40; see the issue for the full body. Manifest + service worker, offline reads of permitted pages, one-tap sign-in, one search-or-ask box, share target, web push.",
               ["Installs on iOS, Android and desktop.", "Logging out clears every cache."]),
