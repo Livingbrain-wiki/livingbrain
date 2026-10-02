@@ -45,7 +45,7 @@
 | **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. The CLI gathers every agent's session logs (Claude Code, Codex, Cursor, OpenCode, Colonizer) into one searchable, costed record, redacted on your machine and uploaded only if you opt in. |
 | **Private by design** | It reads only with the asker's own access, in Slack, over MCP and in the CLI alike. Each scope (shared, a channel, a person) is encrypted with its own key, so search stays scoped and fast, and deleting a key erases that memory everywhere. |
 | **Easy to use** | An installable app (PWA) for phone and desktop: one search-or-ask box, offline reading, and the 3D brain one tap away. `livingbrain view` opens the same 3D brain from the CLI. |
-| **Yours** | The wiki exports as plain Markdown and opens in Obsidian. Bring your own model (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint), or use the default. |
+| **Yours** | The wiki exports as plain Markdown and opens in Obsidian. Choose your own models on every plan, per role (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint). Crew also includes DeepSeek. |
 
 ## How it will work
 
@@ -67,7 +67,7 @@ flowchart LR
 | :--- | :--- | :--- |
 | **Community** | Free | Self-hosted on your own Cloudflare account and model key, up to 5 people, all core features. Storage: yours, no limit from us |
 | **Teams** | $5/mo | Unlimited people, plus SSO, admin and audit log, shared prompt library, per-channel policies. Self-hosted with a license key, or hosted with your own model key. Hosted: 10 GB included |
-| **Crew** | $9/mo | Hosted, model included, up to 25 people, team features included, 25 GB included |
+| **Crew** | $9/mo | Hosted, DeepSeek included or bring your own model, up to 25 people, team features included, 25 GB included |
 
 Storage covers wiki pages, sources, search indexes and aggregated agent logs. Extra hosted storage: $0.25 per GB a month.
 
