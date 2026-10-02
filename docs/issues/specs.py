@@ -256,7 +256,53 @@ e3 = spec(
                "A lapsed license or subscription never deletes or locks the wiki export."]),
     ])
 
+# ---------------------------------------------------------------- Epic 4
+e4 = spec(
+    {"title": "Epic 4: Everywhere via MCP and the CLI. One blazing-fast Rust binary",
+     "labels": ["epic", "agents", "backend"],
+     "body": (
+        "Living Brain is not only a Slack bot. Outside Slack, every surface reaches the same brain through two doors: "
+        "**MCP** (Claude Code, Codex, Cursor, OpenCode, Claude Desktop and any other MCP client) and the **`livingbrain` CLI**. "
+        "Both are one Rust binary: a single static executable, instant startup, a local cache so search answers before the network does.\n\n"
+        f"{STACK}\n\n"
+        "**Rule.** MCP and the CLI are clients of the same API and the same `scopes_for` permission model. They never hold "
+        "their own memory or their own agent loop; the local cache only ever holds pages the signed-in user may see.\n\n"
+        "**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}}")},
+    [
+        child("cli", "`livingbrain` CLI: one static Rust binary", ["agents", "backend"], [],
+              "- Commands: `login` (device flow), `ask`, `search`, `note`, `page`, `export`, `mcp`.\n"
+              "- Static binary per target (macOS arm64/x64, Linux musl x64/arm64, Windows) via cargo-dist; Homebrew tap, `curl | sh`, npm shim.\n"
+              "- Pipes well: `git log -5 | livingbrain note --project api`; `--json` on every command for scripts and agents.\n"
+              "- Tokens in the OS keychain, never a dotfile.",
+              ["`livingbrain ask` returns a cited answer.", "Every command supports `--json`.", "No token is ever written to disk in plain text."]),
+        child("local_cache", "Local cache: instant search, offline reads", ["agents", "wiki", "security"], ["cli"],
+              "- Sync the pages the user may see into a local SQLite (FTS5) cache, incrementally via a change feed; encrypted at rest with a key from the OS keychain.\n"
+              "- `search` and `page` answer from the cache first, then refresh; `ask` uses the cache as context and the server for the model.\n"
+              "- Logging out or losing access purges the cache.",
+              ["Search on a warm cache answers without a network call.", "Revoked access purges local pages on next sync (test)."]),
+        child("local_mcp", "MCP from the same binary: stdio and streamable HTTP", ["agents", "backend"], ["cli", "local_cache"],
+              "- `livingbrain mcp` serves the brain over stdio (and `--http` for clients that want streamable HTTP), backed by the local cache "
+              "and the API. Same tools as the remote MCP server (Epic 3): `brain_search`, `brain_page`, `brain_context_for`, `brain_note`.\n"
+              "- Works in any MCP client: Claude Code, Codex, Cursor, OpenCode, Claude Desktop.",
+              ["The MCP Inspector lists and calls every tool.", "Tool results never include pages outside the user's scopes."]),
+        child("claude_code", "Claude Code: first-class plugin (MCP + skills + slash commands + hooks)", ["agents", "learning", "security"], ["local_mcp"],
+              "One install gives Claude Code the whole brain:\n"
+              "- The `livingbrain mcp` server, preconfigured.\n- **Skills**: `brain-context` (pull conventions, owners and past decisions before "
+              "coding), `brain-note` (record a decision with its reason).\n- **Slash commands**: `/brain ask`, `/brain note`, `/brain colony` (start a Colonizer colony).\n"
+              "- **Hooks (opt-in)**: at session start, inject the brain's brief for this repo; at session end, send a redacted summary back "
+              "(feeds the learning layer and the prompt library).\n- Packaged as a Claude Code plugin in the Agent Plugins layout (`plugin.json`, `mcp.json`, `skills/`).",
+              ["`/brain ask` returns a cited answer.", "The session-end hook redacts a planted fake key before upload (test).", "Hooks are off until the user opts in."]),
+        child("agent_plugins", "Same package for Codex, Cursor, OpenCode, Claude Desktop", ["agents"], ["claude_code"],
+              "- Reuse the plugin's MCP config and skills; `livingbrain mcp install <agent>` writes the right config (Codex `config.toml`, Cursor `mcp.json`, OpenCode, Claude Desktop).\n"
+              "- One docs page per agent with a one-line install.",
+              ["Each listed client can call `brain_search` after `livingbrain mcp install`."]),
+        child("perf", "Speed budget and benchmarks in CI", ["agents", "backend"], ["cli", "local_cache", "local_mcp"],
+              "- Budgets: CLI cold start, warm-cache `search`, MCP `brain_search` round trip, binary size. Set them from the first measurements, then hold them.\n"
+              "- A benchmark job in CI (criterion + hyperfine) that fails on regression; publish the numbers in the README only once measured.",
+              ["CI fails when a budget regresses.", "No speed claim appears on the site before it is measured."]),
+    ])
+
 here = pathlib.Path(__file__).parent
-for name, s in [("1-foundation.json", e1), ("2-living-wiki.json", e2), ("3-agents.json", e3)]:
+for name, s in [("1-foundation.json", e1), ("2-living-wiki.json", e2), ("3-agents.json", e3), ("4-everywhere.json", e4)]:
     (here / name).write_text(json.dumps(s, indent=1) + "\n")
     print(name, 1 + len(s["children"]), "issues")

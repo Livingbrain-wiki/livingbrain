@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <b>A teammate in your Slack that writes its own company wiki, and keeps improving it.</b><br>
-  Every fact links back to the message it came from. Plain Markdown you own.
+  <b>A brain for your team that writes its own company wiki, and keeps improving it.</b><br>
+  In Slack, in your coding agent over MCP, and in your terminal. One blazing-fast Rust binary. Plain Markdown you own.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is three epics and 29 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 35 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -41,8 +41,9 @@
 | **Remembers** | Turns Slack conversations into Markdown pages for people, projects, decisions and customers. Every fact links to its source message. |
 | **Evolves** | Nightly passes merge duplicates, surface contradictions and refresh stale facts. A learning layer models how each person works. |
 | **Acts** | Tools over MCP. Bigger jobs go to a [Colonizer](https://colonizer.dev) colony that comes back with a pull request. |
-| **Coding agents** | An MCP server for Claude Code, Codex, Cursor and OpenCode. Opt-in session learning, with secrets redacted first. |
-| **Private by design** | It reads only with the asker's own Slack access: public channels, the channels you're in, your DMs. |
+| **Everywhere** | Slack first. Everywhere else through MCP (Claude Code, Codex, Cursor, OpenCode, Claude Desktop) or the `livingbrain` CLI: one static Rust binary with instant startup and a local cache. |
+| **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. Session learning is opt-in, with secrets redacted first. |
+| **Private by design** | It reads only with the asker's own access: in Slack, over MCP and in the CLI alike. |
 | **Yours** | The wiki exports as plain Markdown and opens in Obsidian. Bring your own model, or use the default. |
 
 ## How it will work
@@ -50,7 +51,8 @@
 ```mermaid
 flowchart LR
   S["Slack<br/>threads, DMs"] --> B
-  A["Coding agents<br/>over MCP"] <--> B
+  A["Claude Code · Codex · Cursor<br/>over MCP"] <--> B
+  T["livingbrain CLI<br/>Rust, local cache"] <--> B
   M["Email<br/>via Owlpost"] --> B
   B["<b>Living Brain</b><br/>Rust Worker<br/>Cratefield"] --> W[("Markdown wiki<br/>pages + citations")]
   W --> E["Nightly evolve<br/>merge · reconcile · refresh"] --> W
@@ -75,7 +77,7 @@ Durable Object. Modules only see ports; adapters are the only vendor-aware code.
 
 ## The plan
 
-Three epics, drafted in [`docs/issues/`](docs/issues/). Edit `specs.py`, regenerate, then file with `file.py`, which
+Four epics, drafted in [`docs/issues/`](docs/issues/). Edit `specs.py`, regenerate, then file with `file.py`, which
 paces its writes.
 
 | Epic | Spec | Scope |
@@ -83,6 +85,7 @@ paces its writes.
 | [#1](https://github.com/Livingbrain-wiki/livingbrain/issues/1) | `1-foundation.json` | The brain in Slack: events, permissions, the agent loop, bring your own model (11 issues) |
 | [#13](https://github.com/Livingbrain-wiki/livingbrain/issues/13) | `2-living-wiki.json` | The living wiki: pages, citations, search, nightly evolution, learning layer, export (8 issues) |
 | [#22](https://github.com/Livingbrain-wiki/livingbrain/issues/22) | `3-agents.json` | Agents, Colonizer, Owlpost and the 3D brain, plus waitlist and billing (10 issues) |
+| [#33](https://github.com/Livingbrain-wiki/livingbrain/issues/33) | `4-everywhere.json` | Everywhere via MCP and the CLI: one Rust binary, local cache, Claude Code plugin, speed budget (6 issues) |
 
 Issues labelled `needs-harness` are blocked on Cratefield changes: tool calling, an OpenAI-compatible adapter,
 embeddings and a vector index.
@@ -111,5 +114,5 @@ needs a Teams key to run. Community self-hosting (up to 5 people) is free. See [
 </p>
 
 <p align="center">
-  <sub>Listens. Writes. Evolves.</sub>
+  <sub>Listens. Writes. Evolves. Everywhere you work.</sub>
 </p>

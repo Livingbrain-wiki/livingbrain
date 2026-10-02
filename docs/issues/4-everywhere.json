@@ -1,0 +1,121 @@
+{
+ "repo": "Livingbrain-wiki/livingbrain",
+ "labels_create": [
+  [
+   "epic",
+   "5319e7",
+   "Parent issue with sub-issues"
+  ],
+  [
+   "backend",
+   "1d76db",
+   "The Living Brain service (Rust, Cratefield venture)"
+  ],
+  [
+   "slack",
+   "4a154b",
+   "Slack app, events, replies"
+  ],
+  [
+   "wiki",
+   "0e8a16",
+   "The Markdown wiki, citations, evolution"
+  ],
+  [
+   "learning",
+   "c5def5",
+   "Per-person modeling and the learning layer"
+  ],
+  [
+   "agents",
+   "fbca04",
+   "Coding agents, MCP, Colonizer"
+  ],
+  [
+   "ui",
+   "bfdadc",
+   "Web app and the 3D graph"
+  ],
+  [
+   "email",
+   "d93f0b",
+   "Owlpost: digests and the brain's inbox"
+  ],
+  [
+   "security",
+   "b60205",
+   "Permissions, redaction, secrets"
+  ],
+  [
+   "needs-harness",
+   "d4c5f9",
+   "Blocked on a Cratefield harness change"
+  ]
+ ],
+ "epic": {
+  "title": "Epic 4: Everywhere via MCP and the CLI. One blazing-fast Rust binary",
+  "labels": [
+   "epic",
+   "agents",
+   "backend"
+  ],
+  "body": "Living Brain is not only a Slack bot. Outside Slack, every surface reaches the same brain through two doors: **MCP** (Claude Code, Codex, Cursor, OpenCode, Claude Desktop and any other MCP client) and the **`livingbrain` CLI**. Both are one Rust binary: a single static executable, instant startup, a local cache so search answers before the network does.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Rule.** MCP and the CLI are clients of the same API and the same `scopes_for` permission model. They never hold their own memory or their own agent loop; the local cache only ever holds pages the signed-in user may see.\n\n**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}}"
+ },
+ "children": [
+  {
+   "key": "cli",
+   "title": "`livingbrain` CLI: one static Rust binary",
+   "labels": [
+    "agents",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- Commands: `login` (device flow), `ask`, `search`, `note`, `page`, `export`, `mcp`.\n- Static binary per target (macOS arm64/x64, Linux musl x64/arm64, Windows) via cargo-dist; Homebrew tap, `curl | sh`, npm shim.\n- Pipes well: `git log -5 | livingbrain note --project api`; `--json` on every command for scripts and agents.\n- Tokens in the OS keychain, never a dotfile.\n\n**Acceptance criteria**\n- [ ] `livingbrain ask` returns a cited answer.\n- [ ] Every command supports `--json`.\n- [ ] No token is ever written to disk in plain text."
+  },
+  {
+   "key": "local_cache",
+   "title": "Local cache: instant search, offline reads",
+   "labels": [
+    "agents",
+    "wiki",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{cli}}.\n\n- Sync the pages the user may see into a local SQLite (FTS5) cache, incrementally via a change feed; encrypted at rest with a key from the OS keychain.\n- `search` and `page` answer from the cache first, then refresh; `ask` uses the cache as context and the server for the model.\n- Logging out or losing access purges the cache.\n\n**Acceptance criteria**\n- [ ] Search on a warm cache answers without a network call.\n- [ ] Revoked access purges local pages on next sync (test)."
+  },
+  {
+   "key": "local_mcp",
+   "title": "MCP from the same binary: stdio and streamable HTTP",
+   "labels": [
+    "agents",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{cli}}, {{local_cache}}.\n\n- `livingbrain mcp` serves the brain over stdio (and `--http` for clients that want streamable HTTP), backed by the local cache and the API. Same tools as the remote MCP server (Epic 3): `brain_search`, `brain_page`, `brain_context_for`, `brain_note`.\n- Works in any MCP client: Claude Code, Codex, Cursor, OpenCode, Claude Desktop.\n\n**Acceptance criteria**\n- [ ] The MCP Inspector lists and calls every tool.\n- [ ] Tool results never include pages outside the user's scopes."
+  },
+  {
+   "key": "claude_code",
+   "title": "Claude Code: first-class plugin (MCP + skills + slash commands + hooks)",
+   "labels": [
+    "agents",
+    "learning",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{local_mcp}}.\n\nOne install gives Claude Code the whole brain:\n- The `livingbrain mcp` server, preconfigured.\n- **Skills**: `brain-context` (pull conventions, owners and past decisions before coding), `brain-note` (record a decision with its reason).\n- **Slash commands**: `/brain ask`, `/brain note`, `/brain colony` (start a Colonizer colony).\n- **Hooks (opt-in)**: at session start, inject the brain's brief for this repo; at session end, send a redacted summary back (feeds the learning layer and the prompt library).\n- Packaged as a Claude Code plugin in the Agent Plugins layout (`plugin.json`, `mcp.json`, `skills/`).\n\n**Acceptance criteria**\n- [ ] `/brain ask` returns a cited answer.\n- [ ] The session-end hook redacts a planted fake key before upload (test).\n- [ ] Hooks are off until the user opts in."
+  },
+  {
+   "key": "agent_plugins",
+   "title": "Same package for Codex, Cursor, OpenCode, Claude Desktop",
+   "labels": [
+    "agents"
+   ],
+   "body": "Part of {{epic}}. Depends on {{claude_code}}.\n\n- Reuse the plugin's MCP config and skills; `livingbrain mcp install <agent>` writes the right config (Codex `config.toml`, Cursor `mcp.json`, OpenCode, Claude Desktop).\n- One docs page per agent with a one-line install.\n\n**Acceptance criteria**\n- [ ] Each listed client can call `brain_search` after `livingbrain mcp install`."
+  },
+  {
+   "key": "perf",
+   "title": "Speed budget and benchmarks in CI",
+   "labels": [
+    "agents",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{cli}}, {{local_cache}}, {{local_mcp}}.\n\n- Budgets: CLI cold start, warm-cache `search`, MCP `brain_search` round trip, binary size. Set them from the first measurements, then hold them.\n- A benchmark job in CI (criterion + hyperfine) that fails on regression; publish the numbers in the README only once measured.\n\n**Acceptance criteria**\n- [ ] CI fails when a budget regresses.\n- [ ] No speed claim appears on the site before it is measured."
+  }
+ ]
+}
