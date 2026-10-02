@@ -48,7 +48,7 @@
 | **Bring your history** | Import your ChatGPT or Claude export with `livingbrain import chatgpt <export.zip>`: read locally, choose what goes in, secrets redacted, kept in your personal encrypted memory. [Guide](https://livingbrain.wiki/guides/import-chatgpt/) |
 | **Safe by design** | Everything it reads is screened for hidden text by [PromptDecode](https://promptdeco.de) before a page is written and again before context reaches an agent. Customers get answers through [SupportGenius](https://supportgeni.us), only from pages you published to them. |
 | **Easy to use** | An installable app (PWA) for phone and desktop: one search-or-ask box, offline reading, and the 3D brain one tap away. `livingbrain view` opens the same 3D brain from the CLI. |
-| **Yours** | The wiki lives in a git repo too: the Living Brain GitHub App proposes every change as a pull request, and edits you merge flow back in. It exports as plain Markdown and opens in Obsidian. Choose your own models on every plan, per role (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint). Crew also includes DeepSeek. |
+| **Yours** | The wiki lives in a git repo too: the Living Brain GitHub App proposes every change as a pull request, and edits you merge flow back in. It exports as plain Markdown and opens in Obsidian. Bring your own LLM on every plan, per role (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint). Crew also includes $3 of DeepSeek credit each month. |
 
 ## How it will work
 
@@ -109,9 +109,11 @@ flowchart LR
 | :--- | :--- | :--- |
 | **Community** | Free | Self-hosted on your own Cloudflare account and model key, up to 5 people, all core features. Storage: yours, no limit from us |
 | **Teams** | $5/mo | Unlimited people, plus SSO, admin and audit log, shared prompt library, per-channel policies. Self-hosted with a license key, or hosted with your own model key. Hosted: 10 GB included |
-| **Crew** | $9/mo | Hosted, DeepSeek included or bring your own model, up to 25 people, team features included, 25 GB included |
+| **Crew** | $9/mo | Hosted, $3 of DeepSeek credit each month or bring your own LLM, up to 25 people, team features included, 25 GB included |
 
 Storage covers wiki pages, sources, search indexes and aggregated agent logs. Extra hosted storage: $0.25 per GB a month.
+
+**Usage (hosted):** writing the brain $1 per million tokens (nightly evolve included); reading it unlimited. On-demand reasoning per question: Minimal $0.001 · Low $0.005 (default) · Medium $0.02 · High $0.05 · Max $0.25. On your own LLM key, nothing from us.
 
 ## Stack
 
