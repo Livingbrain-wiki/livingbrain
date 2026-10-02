@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 42 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 43 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -45,7 +45,7 @@
 | **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. The CLI gathers every agent's session logs (Claude Code, Codex, Cursor, OpenCode, Colonizer) into one searchable, costed record, redacted on your machine and uploaded only if you opt in. |
 | **Private by design** | It reads only with the asker's own access, in Slack, over MCP and in the CLI alike. Each scope (shared, a channel, a person) is encrypted with its own key, so search stays scoped and fast, and deleting a key erases that memory everywhere. |
 | **Easy to use** | An installable app (PWA) for phone and desktop: one search-or-ask box, offline reading, and the 3D brain one tap away. `livingbrain view` opens the same 3D brain from the CLI. |
-| **Yours** | The wiki exports as plain Markdown and opens in Obsidian. Choose your own models on every plan, per role (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint). Crew also includes DeepSeek. |
+| **Yours** | The wiki lives in a git repo too: the Living Brain GitHub App proposes every change as a pull request, and edits you merge flow back in. It exports as plain Markdown and opens in Obsidian. Choose your own models on every plan, per role (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint). Crew also includes DeepSeek. |
 
 ## How it will work
 
@@ -76,6 +76,7 @@ flowchart LR
 
   W[("<b>Markdown wiki</b><br/>pages + citations")]:::wiki
   E["<b>Nightly evolve</b><br/>merge · reconcile · refresh"]:::alive
+  G["<b>Git repo</b><br/>Living Brain GitHub App<br/>changes arrive as PRs"]:::git
 
   subgraph ACT["WHAT IT DOES FOR YOU"]
     C["<b>Colonizer colonies</b><br/>fix #142 → pull request<br/>write the missing tests<br/>update docs after a merge<br/>triage the backlog"]:::act
@@ -87,6 +88,7 @@ flowchart LR
   A & T & P <--> B
   B --> W
   W --> E --> W
+  W <-- "PRs out · merges in" --> G
   B --> C & O & I
   C -. "learnings, dead ends, the PR" .-> W
 
@@ -95,6 +97,7 @@ flowchart LR
   classDef wiki fill:#0E1719,stroke:#E8EFF0,stroke-width:1.5px,color:#E8EFF0
   classDef alive fill:#0E1719,stroke:#4BE3A9,stroke-dasharray:4 3,color:#4BE3A9
   classDef act fill:#0E1719,stroke:#5F7378,color:#E8EFF0
+  classDef git fill:#0E1719,stroke:#4BE3A9,color:#E8EFF0
 ```
 
 ## Pricing (planned, open core, per workspace)
