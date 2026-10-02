@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 35 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 37 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -44,6 +44,7 @@
 | **Everywhere** | Slack first. Everywhere else through MCP (Claude Code, Codex, Cursor, OpenCode, Claude Desktop) or the `livingbrain` CLI: one static Rust binary with instant startup and a local cache. |
 | **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. Session learning is opt-in, with secrets redacted first. |
 | **Private by design** | It reads only with the asker's own access: in Slack, over MCP and in the CLI alike. |
+| **Easy to use** | An installable app (PWA) for phone and desktop: one search-or-ask box, offline reading, and the 3D brain one tap away. `livingbrain view` opens the same 3D brain from the CLI. |
 | **Yours** | The wiki exports as plain Markdown and opens in Obsidian. Bring your own model, or use the default. |
 
 ## How it will work
@@ -85,7 +86,7 @@ paces its writes.
 | [#1](https://github.com/Livingbrain-wiki/livingbrain/issues/1) | `1-foundation.json` | The brain in Slack: events, permissions, the agent loop, bring your own model (11 issues) |
 | [#13](https://github.com/Livingbrain-wiki/livingbrain/issues/13) | `2-living-wiki.json` | The living wiki: pages, citations, search, nightly evolution, learning layer, export (8 issues) |
 | [#22](https://github.com/Livingbrain-wiki/livingbrain/issues/22) | `3-agents.json` | Agents, Colonizer, Owlpost and the 3D brain, plus waitlist and billing (10 issues) |
-| [#33](https://github.com/Livingbrain-wiki/livingbrain/issues/33) | `4-everywhere.json` | Everywhere via MCP and the CLI: one Rust binary, local cache, Claude Code plugin, speed budget (6 issues) |
+| [#33](https://github.com/Livingbrain-wiki/livingbrain/issues/33) | `4-everywhere.json` | Everywhere via MCP and the CLI: one Rust binary, local cache, Claude Code plugin, speed budget, PWA, `livingbrain view` (8 issues) |
 
 Issues labelled `needs-harness` are blocked on Cratefield changes: tool calling, an OpenAI-compatible adapter,
 embeddings and a vector index.

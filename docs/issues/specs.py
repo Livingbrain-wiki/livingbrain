@@ -267,7 +267,7 @@ e4 = spec(
         f"{STACK}\n\n"
         "**Rule.** MCP and the CLI are clients of the same API and the same `scopes_for` permission model. They never hold "
         "their own memory or their own agent loop; the local cache only ever holds pages the signed-in user may see.\n\n"
-        "**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}}")},
+        "**Children**\n{{cli}} {{local_cache}} {{local_mcp}} {{claude_code}} {{agent_plugins}} {{perf}} {{pwa}} {{view3d}}")},
     [
         child("cli", "`livingbrain` CLI: one static Rust binary", ["agents", "backend"], [],
               "- Commands: `login` (device flow), `ask`, `search`, `note`, `page`, `export`, `mcp`.\n"
@@ -300,6 +300,12 @@ e4 = spec(
               "- Budgets: CLI cold start, warm-cache `search`, MCP `brain_search` round trip, binary size. Set them from the first measurements, then hold them.\n"
               "- A benchmark job in CI (criterion + hyperfine) that fails on regression; publish the numbers in the README only once measured.",
               ["CI fails when a budget regresses.", "No speed claim appears on the site before it is measured."]),
+        child("pwa", "Easy to use: the web app as an installable, offline-first PWA", ["ui", "pwa"], ["local_cache"],
+              "Filed directly as #40; see the issue for the full body. Manifest + service worker, offline reads of permitted pages, one-tap sign-in, one search-or-ask box, share target, web push.",
+              ["Installs on iOS, Android and desktop.", "Logging out clears every cache."]),
+        child("view3d", "`livingbrain view`: the 3D brain, locally, from the CLI", ["agents", "ui"], ["cli", "local_cache"],
+              "Filed directly as #41; see the issue for the full body. Loopback-only local server with a one-time token, same renderer as the site, offline from the cache.",
+              ["Binds to 127.0.0.1 only and rejects requests without the token."]),
     ])
 
 here = pathlib.Path(__file__).parent
