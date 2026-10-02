@@ -12,9 +12,10 @@ A teammate in your Slack that writes its own company wiki and keeps improving it
 - **Connects to coding agents:** an MCP server for Claude Code, Codex, Cursor and OpenCode; opt-in session learning with secret redaction.
 - **Yours:** the wiki exports as plain Markdown and opens in Obsidian. Bring your own model, or use the default.
 
-## Pricing (planned)
-- **Self-hosted: free.** Run it on your own Cloudflare account with your own model key.
-- **Hosted: paid, per workspace.** Bring your own model $5/mo, or Crew $9/mo with the model included.
+## Pricing (planned, open core, per workspace)
+- **Community: free.** Self-hosted on your own Cloudflare account and model key, up to 5 people, all core features.
+- **Teams: $5/mo.** Unlimited people plus SSO, admin and audit log, shared prompt library, per-channel policies. Self-hosted with a license key, or hosted with your own model key.
+- **Crew: $9/mo.** Hosted, model included, up to 25 people, team features included.
 
 ## Stack
 Rust, built as a [Cratefield](https://github.com/Cratefield/harness) venture: one Cloudflare Worker with D1, R2, KV and a
