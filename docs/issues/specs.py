@@ -15,6 +15,8 @@ LABELS = [
     ["email", "d93f0b", "Owlpost: digests and the brain's inbox"],
     ["security", "b60205", "Permissions, redaction, secrets"],
     ["needs-harness", "d4c5f9", "Blocked on a Cratefield harness change"],
+    ["observability", "5319e7", "Logs, telemetry, audit"],
+    ["pwa", "0e8a16", "Installable web app"],
 ]
 
 STACK = (
@@ -57,7 +59,7 @@ e1 = spec(
         "bring-your-own-model per workspace. The Cratefield `TextModel` port has no tools, streaming or embeddings in v1 "
         "(`core/src/ports/text_model.rs`), so the harness issues come first.\n\n"
         "**Children**\n{{harness_tools}} {{harness_openai}} {{scaffold}} {{tenancy}} {{slack_events}} {{conversation_do}} "
-        "{{permissions}} {{agent_loop}} {{byok}} {{litellm}} {{mcp_tools}} {{deploy}}")},
+        "{{permissions}} {{agent_loop}} {{byok}} {{litellm}} {{telemetry}} {{mcp_tools}} {{deploy}}")},
     [
         child("harness_tools", "Harness: tool calling on the TextModel port", ["needs-harness", "backend"], [],
               "**Why.** The brain's answers chain tool calls (search memory, read a PR, open an issue). `TextModel` v1 completes "
@@ -130,6 +132,9 @@ e1 = spec(
         child("litellm", "LiteLLM gateway as a first-class model provider (BYOK and hosted virtual keys)", ["backend", "security"], ["harness_openai", "byok"],
               "Filed directly as #42; see the issue for the full body. Customer LiteLLM gateway as a connection type (model list + capability probe), hosted plans on our LiteLLM with one budgeted virtual key per workspace, spend sync, SSRF rules.",
               ["A hosted workspace that exhausts its virtual-key budget is paused, never billed over."]),
+        child("telemetry", "Logging and telemetry, the Colonizer way: anonymous usage data, opt-in live map, event log, audit log", ["backend", "observability", "security"], ["scaffold"],
+              "Filed directly as #44; see the issue for the full body. Bucketed closed-vocabulary usage data on Cratefield module-telemetry (on by default, announced, `livingbrain telemetry off`), opt-in live map heartbeat, schema-versioned event log with trace ids, redacted operational logs, Teams audit log, Colonizer-style docs.",
+              ["With telemetry off, nothing is sent (network-level test)."]),
         child("mcp_tools", "Tools over MCP with per-user connections", ["backend", "agents", "security"], ["agent_loop"],
               "- Remote MCP servers (GitHub, Linear, Notion, Google) connected per user via OAuth; tokens encrypted.\n"
               "- Per-connection and per-workspace `disabled_tools` (the same pattern HarnessRouter uses).\n"

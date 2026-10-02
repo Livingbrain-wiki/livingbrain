@@ -50,6 +50,16 @@
    "needs-harness",
    "d4c5f9",
    "Blocked on a Cratefield harness change"
+  ],
+  [
+   "observability",
+   "5319e7",
+   "Logs, telemetry, audit"
+  ],
+  [
+   "pwa",
+   "0e8a16",
+   "Installable web app"
   ]
  ],
  "epic": {
