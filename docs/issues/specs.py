@@ -246,8 +246,8 @@ e3 = spec(
               "- Click a node → side panel with its Markdown and sources. Live updates via the `Realtime` port.\n"
               "- 2D SVG fallback when WebGL is missing or reduced motion is set.",
               ["Smooth with 5,000 nodes on a mid-range laptop.", "Graph only shows nodes the viewer may see."]),
-        child("billing", "Plans and billing per workspace", ["backend"], ["web_app"],
-              "- Free (≤5 people), BYOK $5/mo, Crew $9/mo with model usage included; Stripe via `adapter-stripe` / `control-plane-billing`.\n"
+        child("billing", "Hosted plans and billing per workspace (self-hosted stays free)", ["backend"], ["web_app"],
+              "- Self-hosted is free (open source, own Cloudflare account and model key, no billing path). Hosted is paid per workspace: BYOK $5/mo, Crew $9/mo with model included; no free hosted tier. Stripe via `adapter-stripe` / `control-plane-billing`.\n"
               "- Hard usage caps per plan; overage pauses rather than bills by surprise.",
               ["A workspace over its cap is paused with a clear message, not charged.",
                "Model cost per workspace is visible to the owner."]),

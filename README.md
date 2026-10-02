@@ -12,6 +12,10 @@ A teammate in your Slack that writes its own company wiki and keeps improving it
 - **Connects to coding agents:** an MCP server for Claude Code, Codex, Cursor and OpenCode; opt-in session learning with secret redaction.
 - **Yours:** the wiki exports as plain Markdown and opens in Obsidian. Bring your own model, or use the default.
 
+## Pricing (planned)
+- **Self-hosted: free.** Run it on your own Cloudflare account with your own model key.
+- **Hosted: paid, per workspace.** Bring your own model $5/mo, or Crew $9/mo with the model included.
+
 ## Stack
 Rust, built as a [Cratefield](https://github.com/Cratefield/harness) venture: one Cloudflare Worker with D1, R2, KV and a
 Durable Object. Email through [Owlpost](https://owlpost.pages.dev). Design reference: supermemory's
@@ -24,7 +28,7 @@ Three epics, drafted in `docs/issues/` (edit `specs.py`, regenerate, then file w
 | :--- | :--- |
 | `1-foundation.json` | The brain in Slack: events, permissions, the agent loop, bring your own model (11 issues) |
 | `2-living-wiki.json` | The living wiki: pages, citations, search, nightly evolution, learning layer, export (8 issues) |
-| `3-agents.json` | Agents, Colonizer, Owlpost and the 3D brain, plus waitlist and billing (10 issues) |
+| `3-agents.json` | Agents, Colonizer, Owlpost and the 3D brain, plus waitlist and hosted billing (10 issues) |
 
 Issues labelled `needs-harness` are blocked on Cratefield changes (tool calling, an OpenAI-compatible adapter,
 embeddings and a vector index).
