@@ -33,3 +33,8 @@ Three epics, drafted in `docs/issues/` (edit `specs.py`, regenerate, then file w
 
 Issues labelled `needs-harness` are blocked on Cratefield changes (tool calling, an OpenAI-compatible adapter,
 embeddings and a vector index).
+
+## License
+Open core. Everything in this repository is [Apache-2.0](LICENSE), except the `ee/` directory (Teams features: SSO,
+admin and audit log, shared prompt library, per-channel policies), which will ship under a commercial license and
+needs a Teams key to run. Community self-hosting (up to 5 people) is free. See [NOTICE](NOTICE) for attributions.

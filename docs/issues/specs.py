@@ -53,7 +53,7 @@ e1 = spec(
         "Worker that receives events, decides whether to speak, answers using only what the asker is allowed to see, "
         "cites its sources, and runs tools. No wiki yet (Epic 2) and no coding agents yet (Epic 3).\n\n"
         f"{STACK}\n\n{REF}\n\n"
-        "**Models.** The default managed model is DeepSeek (funded account; Anthropic-compatible endpoint), with "
+        "**Models.** The default managed model is DeepSeek (Anthropic-compatible endpoint), with "
         "bring-your-own-model per workspace. The Cratefield `TextModel` port has no tools, streaming or embeddings in v1 "
         "(`core/src/ports/text_model.rs`), so the harness issues come first.\n\n"
         "**Children**\n{{harness_tools}} {{harness_openai}} {{scaffold}} {{tenancy}} {{slack_events}} {{conversation_do}} "
@@ -70,7 +70,7 @@ e1 = spec(
                "An adapter without tool support fails loudly with a typed error.",
                "Step budget enforced; the loop cannot run unbounded."]),
         child("harness_openai", "Harness: adapter-openai-compatible (DeepSeek, OpenRouter, LiteLLM, self-hosted)", ["needs-harness", "backend"], ["harness_tools"],
-              "**Why.** One adapter covers the default DeepSeek model, OpenRouter, Factory Zero's LiteLLM and customer "
+              "**Why.** One adapter covers the default DeepSeek model, OpenRouter, LiteLLM gateways and customer "
               "self-hosted endpoints (vLLM, Ollama behind a tunnel).\n\n**Proposed approach**\n"
               "- `adapter-openai-compatible`: base URL, key, model id sent verbatim; Chat Completions with tools and JSON mode.\n"
               "- Optional Anthropic-messages mode for endpoints such as `api.deepseek.com/anthropic`.\n"
@@ -129,7 +129,7 @@ e1 = spec(
                "A model without tool calling is marked \"answers only\".", "Keys never appear in logs or API responses."]),
         child("mcp_tools", "Tools over MCP with per-user connections", ["backend", "agents", "security"], ["agent_loop"],
               "- Remote MCP servers (GitHub, Linear, Notion, Google) connected per user via OAuth; tokens encrypted.\n"
-              "- Per-connection and per-workspace `disabled_tools` (pattern from HarnessRouter, see chi-infra `docs/HARNESSROUTER-FOR-COLONIZER.md`).\n"
+              "- Per-connection and per-workspace `disabled_tools` (the same pattern HarnessRouter uses).\n"
               "- Approval cards in Slack for actions that write.",
               ["A write action never runs without the asker's connection or an approved borrow.",
                "A disabled tool is never offered to the model."]),
