@@ -1,0 +1,138 @@
+{
+ "repo": "Livingbrain-wiki/livingbrain",
+ "labels_create": [
+  [
+   "epic",
+   "5319e7",
+   "Parent issue with sub-issues"
+  ],
+  [
+   "backend",
+   "1d76db",
+   "The Living Brain service (Rust, Cratefield venture)"
+  ],
+  [
+   "slack",
+   "4a154b",
+   "Slack app, events, replies"
+  ],
+  [
+   "wiki",
+   "0e8a16",
+   "The Markdown wiki, citations, evolution"
+  ],
+  [
+   "learning",
+   "c5def5",
+   "Per-person modeling and the learning layer"
+  ],
+  [
+   "agents",
+   "fbca04",
+   "Coding agents, MCP, Colonizer"
+  ],
+  [
+   "ui",
+   "bfdadc",
+   "Web app and the 3D graph"
+  ],
+  [
+   "email",
+   "d93f0b",
+   "Owlpost: digests and the brain's inbox"
+  ],
+  [
+   "security",
+   "b60205",
+   "Permissions, redaction, secrets"
+  ],
+  [
+   "needs-harness",
+   "d4c5f9",
+   "Blocked on a Cratefield harness change"
+  ]
+ ],
+ "epic": {
+  "title": "Epic 2: The living wiki. Markdown pages with sources that the brain keeps improving",
+  "labels": [
+   "epic",
+   "wiki",
+   "learning"
+  ],
+  "body": "The memory is not a black-box vector store: it is a Markdown wiki the customer can read, edit and export (Karpathy's LLM-wiki pattern: raw sources, compiled pages, an index, and lint passes). The brain writes it from conversations, links every fact to its source, and on a schedule merges, reconciles and refreshes it. A learning layer models each person so answers and briefs improve every week.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Learning layer and licensing.** Honcho's server is AGPL-3.0; its SDKs are Apache-2.0. Start on the hosted `api.honcho.dev` through the SDK, never embed or modify the server, and rebuild the parts we keep as a Cratefield module before scale.\n\n**Children**\n{{harness_embed}} {{pages}} {{extract}} {{citations}} {{search}} {{evolve}} {{learning}} {{export}}"
+ },
+ "children": [
+  {
+   "key": "harness_embed",
+   "title": "Harness: Embeddings and VectorIndex ports (Workers AI + Vectorize, pgvector natively)",
+   "labels": [
+    "needs-harness",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- `Embedder` port (batch embed text \u2192 `Vec<f32>`), adapters: `adapter-workers-ai`, `adapter-openai-compatible`.\n- `VectorIndex` port (upsert, delete, query with metadata filter), adapters: Cloudflare Vectorize; pgvector on `runtime-native`.\n- Metadata filters must support the scope field so permission filtering happens inside the query.\n\n**Acceptance criteria**\n- [ ] Parity test: same results shape on Vectorize and pgvector.\n- [ ] Scope filter applied in the index query, not after."
+  },
+  {
+   "key": "pages",
+   "title": "Page store: entities, Markdown, links, history",
+   "labels": [
+    "wiki",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- Page = entity (person, project, decision, customer, system, glossary) with Markdown body in R2 and metadata in D1: slug, type, scope, `[[backlinks]]`, version history.\n- Typed frontmatter schema per entity type (as in chi-brain's `schemas/`).\n- Human edits are first-class and win over machine edits until reconciled.\n\n**Acceptance criteria**\n- [ ] Every page version is recoverable.\n- [ ] A human edit is never silently overwritten by the brain."
+  },
+  {
+   "key": "extract",
+   "title": "Listen \u2192 Write: turn conversations into page updates",
+   "labels": [
+    "wiki",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{pages}}.\n\n- Batch new messages per channel (cron + `Defer`), extract facts, decisions, owners, and propose page diffs.\n- Each fact keeps its source: Slack permalink, author, timestamp, scope.\n- Skip noise (reactions, \"thanks\", bots).\n\n**Acceptance criteria**\n- [ ] A decision stated in a thread appears on the right project page with its permalink.\n- [ ] Facts from a private channel never land on a shared page."
+  },
+  {
+   "key": "citations",
+   "title": "Citations everywhere: fact \u2192 source, answer \u2192 page",
+   "labels": [
+    "wiki",
+    "backend",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{extract}}.\n\n- Inline citation markers in page Markdown resolve to sources the reader is allowed to see; others render as \"restricted source\".\n- Answers in Slack cite wiki pages, and pages cite messages.\n\n**Acceptance criteria**\n- [ ] Clicking a citation as a user without access shows no content from it."
+  },
+  {
+   "key": "search",
+   "title": "Hybrid search over pages and sources",
+   "labels": [
+    "wiki",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{harness_embed}}, {{pages}}.\n\n- Embeddings per page section + full-text (D1 FTS5); rank by both with recency.\n- Exposed as a tool to the agent loop and to MCP clients (Epic 3).\n\n**Acceptance criteria**\n- [ ] Search respects scopes (test with a private-channel fact).\n- [ ] p95 latency recorded."
+  },
+  {
+   "key": "evolve",
+   "title": "Evolve: nightly merge, reconcile, refresh (the wiki lints itself)",
+   "labels": [
+    "wiki",
+    "learning"
+   ],
+   "body": "Part of {{epic}}. Depends on {{extract}}, {{search}}.\n\nCron jobs (`Module::scheduled`):\n- **Merge** duplicate pages (same entity, different names).\n- **Reconcile** contradictions: open a \"needs a human\" card in Slack with both sources instead of guessing.\n- **Refresh** stale facts (age + newer conflicting mention), rewrite summaries, fix broken backlinks.\n- A changelog page per night: what the brain changed and why.\n\n**Acceptance criteria**\n- [ ] Every automated change is in the nightly changelog with a reason.\n- [ ] Contradictions are surfaced, never silently resolved."
+  },
+  {
+   "key": "learning",
+   "title": "Learning layer: per-person profiles and what works",
+   "labels": [
+    "learning",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{extract}}.\n\n- Feed messages (and, in Epic 3, agent sessions) to Honcho via the Apache-2.0 SDK against `api.honcho.dev`; store returned peer representations per user and scope.\n- Use them to tailor answers and briefs (\"prefers small PRs\").\n- An ADR on replacing Honcho with an in-house Cratefield module (profiles + periodic \"dreaming\" passes).\n\n**Acceptance criteria**\n- [ ] Users can view and delete their own profile.\n- [ ] No AGPL server code is embedded or modified."
+  },
+  {
+   "key": "export",
+   "title": "Export and sync: Markdown zip and Obsidian-compatible vault",
+   "labels": [
+    "wiki"
+   ],
+   "body": "Part of {{epic}}. Depends on {{pages}}.\n\n- One-click export of the whole wiki (respecting the exporter's scopes) as an Obsidian vault.\n- Optional one-way git sync to a customer repo.\n\n**Acceptance criteria**\n- [ ] An export opens in Obsidian with working backlinks.\n- [ ] Export contains only what the exporter may see."
+  }
+ ]
+}

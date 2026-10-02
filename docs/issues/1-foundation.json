@@ -1,0 +1,165 @@
+{
+ "repo": "Livingbrain-wiki/livingbrain",
+ "labels_create": [
+  [
+   "epic",
+   "5319e7",
+   "Parent issue with sub-issues"
+  ],
+  [
+   "backend",
+   "1d76db",
+   "The Living Brain service (Rust, Cratefield venture)"
+  ],
+  [
+   "slack",
+   "4a154b",
+   "Slack app, events, replies"
+  ],
+  [
+   "wiki",
+   "0e8a16",
+   "The Markdown wiki, citations, evolution"
+  ],
+  [
+   "learning",
+   "c5def5",
+   "Per-person modeling and the learning layer"
+  ],
+  [
+   "agents",
+   "fbca04",
+   "Coding agents, MCP, Colonizer"
+  ],
+  [
+   "ui",
+   "bfdadc",
+   "Web app and the 3D graph"
+  ],
+  [
+   "email",
+   "d93f0b",
+   "Owlpost: digests and the brain's inbox"
+  ],
+  [
+   "security",
+   "b60205",
+   "Permissions, redaction, secrets"
+  ],
+  [
+   "needs-harness",
+   "d4c5f9",
+   "Blocked on a Cratefield harness change"
+  ]
+ ],
+ "epic": {
+  "title": "Epic 1: The brain in Slack. A Cratefield venture that listens, answers with sources and acts",
+  "labels": [
+   "epic",
+   "backend",
+   "slack"
+  ],
+  "body": "Living Brain is a teammate in Slack that keeps its own company wiki and keeps improving it (see [livingbrain.wiki](https://livingbrain.wiki)). This epic builds the core: a Slack app on a Cratefield Worker that receives events, decides whether to speak, answers using only what the asker is allowed to see, cites its sources, and runs tools. No wiki yet (Epic 2) and no coding agents yet (Epic 3).\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Reference design.** supermemory's open-sourced Company Brain ([supermemoryai/company-brain](https://github.com/supermemoryai/company-brain), Apache-2.0, TypeScript on Workers). Port the design, not the code; where an idea is taken nearly verbatim, credit it in `NOTICE`.\n\n**Models.** The default managed model is DeepSeek (funded account; Anthropic-compatible endpoint), with bring-your-own-model per workspace. The Cratefield `TextModel` port has no tools, streaming or embeddings in v1 (`core/src/ports/text_model.rs`), so the harness issues come first.\n\n**Children**\n{{harness_tools}} {{harness_openai}} {{scaffold}} {{tenancy}} {{slack_events}} {{conversation_do}} {{permissions}} {{agent_loop}} {{byok}} {{mcp_tools}} {{deploy}}"
+ },
+ "children": [
+  {
+   "key": "harness_tools",
+   "title": "Harness: tool calling on the TextModel port",
+   "labels": [
+    "needs-harness",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n**Why.** The brain's answers chain tool calls (search memory, read a PR, open an issue). `TextModel` v1 completes one prompt with no tools.\n\n**Proposed approach** (to be filed upstream in Cratefield/harness, tracked here)\n- Extend `Prompt` with `tools: Vec<ToolSpec>` (name, description, JSON schema) and `Completion` with `tool_calls`; `Turn` gains tool-result content. Non-breaking, as the port docs already anticipate.\n- Implement in `adapter-anthropic` and `adapter-workers-ai`; adapters that cannot do tools return a typed `Unsupported` instead of silently dropping them.\n- A `run_tool_loop` helper with a max-step budget.\n\n**Acceptance criteria**\n- [ ] Anthropic adapter round-trips a two-step tool call in a test.\n- [ ] An adapter without tool support fails loudly with a typed error.\n- [ ] Step budget enforced; the loop cannot run unbounded."
+  },
+  {
+   "key": "harness_openai",
+   "title": "Harness: adapter-openai-compatible (DeepSeek, OpenRouter, LiteLLM, self-hosted)",
+   "labels": [
+    "needs-harness",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{harness_tools}}.\n\n**Why.** One adapter covers the default DeepSeek model, OpenRouter, Factory Zero's LiteLLM and customer self-hosted endpoints (vLLM, Ollama behind a tunnel).\n\n**Proposed approach**\n- `adapter-openai-compatible`: base URL, key, model id sent verbatim; Chat Completions with tools and JSON mode.\n- Optional Anthropic-messages mode for endpoints such as `api.deepseek.com/anthropic`.\n- Report provider token usage in `Completion` so cost can be metered.\n\n**Acceptance criteria**\n- [ ] Works against DeepSeek and OpenRouter in a recorded-fixture test.\n- [ ] Model id is passed through unchanged; no silent remapping.\n- [ ] Token usage populated whenever the provider returns it."
+  },
+  {
+   "key": "scaffold",
+   "title": "Venture scaffold: workspace, Worker, D1, CI",
+   "labels": [
+    "backend"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- Cargo workspace `crates/livingbrain-*` plus `crates/livingbrain-venture` (the Worker), generated with the Cratefield venture CLI.\n- D1 `livingbrain`, R2 `livingbrain-blobs`, KV, `wrangler.toml`, `worker-build`.\n- CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module.\n- `/__health`, `NOTICE` crediting Company Brain, README in the Factory Zero style (what is built vs planned).\n\n**Acceptance criteria**\n- [ ] `wrangler dev` serves `/__health`.\n- [ ] CI green on an empty module.\n- [ ] README states plainly that nothing is live yet."
+  },
+  {
+   "key": "tenancy",
+   "title": "Workspaces, Slack sign-in and members",
+   "labels": [
+    "backend",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{scaffold}}.\n\n- One tenant per Slack workspace (`TenantDatabases` if a per-workspace D1 is warranted; decide and record in an ADR).\n- Sign in with Slack through `auth-oidc` (Slack supports OIDC). The first person to sign in owns the workspace.\n- Members table mirrors Slack users (id, name, timezone, is_admin) and is refreshed on `user_change`.\n\n**Acceptance criteria**\n- [ ] Sign in with Slack works end to end under `wrangler dev` with a tunnel.\n- [ ] A user from workspace A can never read workspace B (test).\n- [ ] Owner is set exactly once."
+  },
+  {
+   "key": "slack_events",
+   "title": "Slack app: manifest, install, event intake with signature checks",
+   "labels": [
+    "slack",
+    "backend",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{tenancy}}.\n\n- Slack app manifest generated with the deployment's URLs (as Company Brain's `/setup` does).\n- OAuth install per workspace; bot token encrypted with the harness `kms`/`secrets` crates, never logged.\n- `POST /slack/events`: verify `X-Slack-Signature` + timestamp (5 min window), ack within 3 s, hand work to `Defer`. Idempotent on `event_id`.\n- Handles `app_mention`, `message.channels`, `message.groups`, `message.im`, `member_joined_channel`.\n\n**Acceptance criteria**\n- [ ] A bad or stale signature is rejected (test).\n- [ ] Retries with the same `event_id` are processed once.\n- [ ] The 3 s ack holds even when the model is slow."
+  },
+  {
+   "key": "conversation_do",
+   "title": "Per-conversation Durable Object for multiplayer concurrency",
+   "labels": [
+    "backend",
+    "slack"
+   ],
+   "body": "Part of {{epic}}. Depends on {{slack_events}}.\n\nSeveral people can talk in one thread at once. Company Brain solves this with one Durable Object per conversation.\n\n- A venture-owned `#[durable_object]` keyed by `team:channel:thread_ts` serialises turns, keeps a short working context and coalesces messages that arrive mid-turn.\n- Reuse the harness `Realtime` pattern (the DO class lives in the venture).\n\n**Acceptance criteria**\n- [ ] Two messages in the same thread never produce interleaved replies.\n- [ ] A message arriving mid-turn is folded into the next turn, not dropped."
+  },
+  {
+   "key": "permissions",
+   "title": "Read-with-the-asker's-access permission model",
+   "labels": [
+    "security",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{tenancy}}.\n\nThe brain must never leak what the asker could not see.\n\n| Asked in | May draw on |\n|---|---|\n| Public channel | Shared memory |\n| Private channel | That channel's memory + shared |\n| DM | Personal memory + every private channel the asker is in + shared |\n\n- Every memory item carries a scope (`shared`, `channel:<id>`, `user:<id>`). All reads go through one `scopes_for(asker, location)` function; nothing queries memory without it.\n- Writes to external tools run under the asker's own connection; borrowing a teammate's connection needs their approve/deny card.\n\n**Acceptance criteria**\n- [ ] Property test: no answer cites an item outside `scopes_for`.\n- [ ] Leaving a private channel removes its memory from that user's DMs within one sync."
+  },
+  {
+   "key": "agent_loop",
+   "title": "The turn: triage, answer with citations, speak-up policy",
+   "labels": [
+    "backend",
+    "slack"
+   ],
+   "body": "Part of {{epic}}. Depends on {{harness_tools}}, {{conversation_do}}, {{permissions}}.\n\n- **Triage** on a cheap tier (`ModelTier`): reply, react, or stay silent. Proactivity level per org and per channel.\n- **Answer** on the main tier with the tool loop; every factual claim carries a citation chip linking to the Slack permalink (later: the wiki page).\n- Model profile per role (triage / main / research) stored per workspace.\n\n**Acceptance criteria**\n- [ ] With proactivity off, the brain only answers when mentioned.\n- [ ] Every answer that states a fact has at least one citation, or says it does not know.\n- [ ] Triage cost per message is recorded."
+  },
+  {
+   "key": "byok",
+   "title": "Bring your own model, with a capability check",
+   "labels": [
+    "backend",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{harness_openai}}, {{tenancy}}.\n\n- Per workspace and per role: provider key or custom OpenAI-compatible endpoint (base URL + key + model).\n- On connect, probe: tool calling, JSON output, context size. Show \"works\" or what is missing.\n- Custom URLs: HTTPS only; reject private, loopback and link-local addresses (SSRF).\n- No silent fallback to the managed model; fallback is an explicit opt-in.\n- Keys encrypted, shown as last 4 only.\n\n**Acceptance criteria**\n- [ ] A URL resolving to 10.0.0.0/8 or 169.254.0.0/16 is refused.\n- [ ] A model without tool calling is marked \"answers only\".\n- [ ] Keys never appear in logs or API responses."
+  },
+  {
+   "key": "mcp_tools",
+   "title": "Tools over MCP with per-user connections",
+   "labels": [
+    "backend",
+    "agents",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{agent_loop}}.\n\n- Remote MCP servers (GitHub, Linear, Notion, Google) connected per user via OAuth; tokens encrypted.\n- Per-connection and per-workspace `disabled_tools` (pattern from HarnessRouter, see chi-infra `docs/HARNESSROUTER-FOR-COLONIZER.md`).\n- Approval cards in Slack for actions that write.\n\n**Acceptance criteria**\n- [ ] A write action never runs without the asker's connection or an approved borrow.\n- [ ] A disabled tool is never offered to the model."
+  },
+  {
+   "key": "deploy",
+   "title": "Deploy to api.livingbrain.wiki and an internal pilot",
+   "labels": [
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{agent_loop}}, {{byok}}.\n\n- Production Worker on `api.livingbrain.wiki`; secrets via `wrangler secret`.\n- Pilot in one internal Slack workspace for two weeks; record cost per workspace per day (model, D1, email).\n\n**Acceptance criteria**\n- [ ] The brain answers a question in the pilot workspace with a citation.\n- [ ] Daily cost per workspace is visible and below the $9/month plan's budget."
+  }
+ ]
+}

@@ -1,0 +1,157 @@
+{
+ "repo": "Livingbrain-wiki/livingbrain",
+ "labels_create": [
+  [
+   "epic",
+   "5319e7",
+   "Parent issue with sub-issues"
+  ],
+  [
+   "backend",
+   "1d76db",
+   "The Living Brain service (Rust, Cratefield venture)"
+  ],
+  [
+   "slack",
+   "4a154b",
+   "Slack app, events, replies"
+  ],
+  [
+   "wiki",
+   "0e8a16",
+   "The Markdown wiki, citations, evolution"
+  ],
+  [
+   "learning",
+   "c5def5",
+   "Per-person modeling and the learning layer"
+  ],
+  [
+   "agents",
+   "fbca04",
+   "Coding agents, MCP, Colonizer"
+  ],
+  [
+   "ui",
+   "bfdadc",
+   "Web app and the 3D graph"
+  ],
+  [
+   "email",
+   "d93f0b",
+   "Owlpost: digests and the brain's inbox"
+  ],
+  [
+   "security",
+   "b60205",
+   "Permissions, redaction, secrets"
+  ],
+  [
+   "needs-harness",
+   "d4c5f9",
+   "Blocked on a Cratefield harness change"
+  ]
+ ],
+ "epic": {
+  "title": "Epic 3: Agents, Colonizer, Owlpost and the 3D brain",
+  "labels": [
+   "epic",
+   "agents",
+   "ui",
+   "email"
+  ],
+  "body": "Everything around the core: coding agents connect over MCP in both directions, Colonizer colonies do the bigger jobs, Owlpost sends digests and gives the brain an inbox, and the web app shows the brain as a live 3D graph. Also billing and the waitlist.\n\n**Stack.** A Rust Cargo workspace consumed as a Cratefield venture (`cratefield-core`, `cratefield-runtime-cloudflare`, modules from the harness repo by git until the 0.5 release round, [Cratefield/harness#464](https://github.com/Cratefield/harness/issues/464)), deployed as one Cloudflare Worker with D1, R2, KV and a venture-owned Durable Object, the same shape as `Owlpost-to/backend`. Modules only see ports (`Database`, `TextModel`, `Mailer`, `Realtime`, `Defer`, `Blob`, `KeyValue`, `Signer`, `Payments`); adapters are the only vendor-aware code. Email goes through **Owlpost** (Resend-compatible API, inbound agent inboxes).\n\n**Children**\n{{waitlist}} {{mcp_server}} {{session_ingest}} {{prompt_library}} {{colonizer}} {{owlpost_digests}} {{owlpost_inbox}} {{web_app}} {{graph3d}} {{billing}}"
+ },
+ "children": [
+  {
+   "key": "waitlist",
+   "title": "Waitlist at api.livingbrain.wiki with Owlpost confirmation mail",
+   "labels": [
+    "backend",
+    "email"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- Cratefield `waitlist` module (as in `cratefield-backend`), product `livingbrain`, Turnstile captcha.\n- Double opt-in mail through Owlpost (`adapter-owlpost`, or `adapter-resend` pointed at Owlpost's Resend-compatible API until it lands).\n- Wire the website's forms to it.\n\n**Acceptance criteria**\n- [ ] Joining from livingbrain.wiki sends one confirmation email.\n- [ ] CSV export behind the admin token."
+  },
+  {
+   "key": "mcp_server",
+   "title": "MCP server for coding agents (Claude Code, Codex, Cursor, OpenCode)",
+   "labels": [
+    "agents",
+    "backend",
+    "security"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- Remote MCP at `mcp.livingbrain.wiki`, OAuth per user, tools: `brain_search`, `brain_page`, `brain_context_for(repo, task)`, `brain_note`.\n- Same `scopes_for` permission model as Slack.\n- One-line connect docs per agent.\n\n**Acceptance criteria**\n- [ ] `claude mcp add` + a question returns a cited answer.\n- [ ] An agent never sees pages outside its user's scopes."
+  },
+  {
+   "key": "session_ingest",
+   "title": "Agent sessions \u2192 wiki (opt-in) with secret redaction",
+   "labels": [
+    "agents",
+    "learning",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{mcp_server}}.\n\n- Opt-in per user: agent prompts, decisions and outcomes posted via `brain_note` or a session-upload endpoint.\n- Redact secrets before storage (key patterns, entropy check, `.env`-style lines); never store source code unless the workspace allows it.\n- Feeds the learning layer (Epic 2): which prompts lead to merged PRs, where agents get stuck.\n\n**Acceptance criteria**\n- [ ] A fake API key in a session is redacted before it reaches D1/R2 (test).\n- [ ] Opt-out deletes that user's ingested sessions."
+  },
+  {
+   "key": "prompt_library",
+   "title": "Team prompt library that learns what works",
+   "labels": [
+    "agents",
+    "learning"
+   ],
+   "body": "Part of {{epic}}. Depends on {{session_ingest}}.\n\n- Versioned prompts per workspace, suggested in Slack and over MCP.\n- Score by outcome (merged PR, rework, abandon) from session ingest and Colonizer results.\n\n**Acceptance criteria**\n- [ ] Prompts show usage and outcome counts.\n- [ ] Scores only use outcomes the viewer may see."
+  },
+  {
+   "key": "colonizer",
+   "title": "Colonizer: launch a colony from Slack, brief it, learn from it",
+   "labels": [
+    "agents",
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{mcp_server}}.\n\n- `@livingbrain fix #142` \u2192 `POST /api/sessions` on the configured Colonizer mothership (`{repo, issue, instructions, autopilot, model_tier}`, bearer token stored encrypted).\n- Instructions include `brain_context_for(repo, issue)`; the colony can call the MCP server for more.\n- Progress posted to the Slack thread; on finish, the PR and the colony's learnings (`pr.md`, dead ends) become wiki updates.\n\n**Acceptance criteria**\n- [ ] A colony started from Slack posts its PR link back to the thread.\n- [ ] The colony never receives Slack or wiki credentials, only scoped MCP access."
+  },
+  {
+   "key": "owlpost_digests",
+   "title": "Digests by email through Owlpost",
+   "labels": [
+    "email"
+   ],
+   "body": "Part of {{epic}}. Depends on {{waitlist}}.\n\n- Scheduled daily/weekly digests per user or channel: what changed in the wiki, open contradictions, colonies finished.\n- Sent via Owlpost `POST /v1/emails`; one-click unsubscribe (RFC 8058) as Owlpost already enforces.\n\n**Acceptance criteria**\n- [ ] Unsubscribe works in one click.\n- [ ] Digest only contains what the recipient may see."
+  },
+  {
+   "key": "owlpost_inbox",
+   "title": "The brain's own inbox (Owlpost inbound)",
+   "labels": [
+    "email",
+    "wiki",
+    "security"
+   ],
+   "body": "Part of {{epic}}. Depends on {{owlpost_digests}}.\n\n- `brain@<workspace>.livingbrain.wiki` via Owlpost agent inboxes; forwarded mail becomes a source for the wiki.\n- Owlpost's screening (DMARC/SPF+DKIM, lookalike domains, prompt-injection hold) runs before ingestion.\n\n**Acceptance criteria**\n- [ ] Mail held by screening never reaches the wiki until released.\n- [ ] Forwarded mail appears as a cited source."
+  },
+  {
+   "key": "web_app",
+   "title": "Web app: sign in with Slack, settings, wiki reader/editor",
+   "labels": [
+    "ui"
+   ],
+   "body": "Part of {{epic}}. No dependencies inside the epic.\n\n- Static front end on Cloudflare (same no-build style as the venture sites), talking to the API.\n- Settings: models/BYOK, proactivity, tools, automations, skills, Colonizer connection.\n- Wiki reader and Markdown editor with backlinks and citations.\n\n**Acceptance criteria**\n- [ ] Works at 360 px wide.\n- [ ] All settings changes are audited."
+  },
+  {
+   "key": "graph3d",
+   "title": "The 3D brain: live graph of every entity",
+   "labels": [
+    "ui",
+    "wiki"
+   ],
+   "body": "Part of {{epic}}. Depends on {{web_app}}.\n\n- `3d-force-graph` (three.js) from a CDN: pages as nodes coloured by type, links as edges, colonies as orbiting capsules.\n- Click a node \u2192 side panel with its Markdown and sources. Live updates via the `Realtime` port.\n- 2D SVG fallback when WebGL is missing or reduced motion is set.\n\n**Acceptance criteria**\n- [ ] Smooth with 5,000 nodes on a mid-range laptop.\n- [ ] Graph only shows nodes the viewer may see."
+  },
+  {
+   "key": "billing",
+   "title": "Plans and billing per workspace",
+   "labels": [
+    "backend"
+   ],
+   "body": "Part of {{epic}}. Depends on {{web_app}}.\n\n- Free (\u22645 people), BYOK $5/mo, Crew $9/mo with model usage included; Stripe via `adapter-stripe` / `control-plane-billing`.\n- Hard usage caps per plan; overage pauses rather than bills by surprise.\n\n**Acceptance criteria**\n- [ ] A workspace over its cap is paused with a clear message, not charged.\n- [ ] Model cost per workspace is visible to the owner."
+  }
+ ]
+}
