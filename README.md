@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 53 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 54 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -39,7 +39,7 @@
 | | |
 | :--- | :--- |
 | **Remembers** | Turns team conversations (Slack, Discord), mail and agent logs into Markdown pages for people, projects, decisions and customers. Every fact links to its source message. |
-| **Evolves** | Nightly passes merge duplicates, surface contradictions and refresh stale facts. A learning layer models how each person works. |
+| **Evolves** | Nightly passes merge duplicates, surface contradictions and refresh stale facts. They also scan new arXiv papers, news and releases about your stack, and write cited notes on how each could apply to your projects (#58). A learning layer models how each person works. |
 | **Acts** | Tools over MCP. Bigger jobs go to a [Colonizer](https://colonizer.dev) colony that comes back with a pull request. |
 | **Everywhere** | Coding agents and the terminal first, through MCP (Claude Code, Codex, Cursor, OpenCode, Claude Desktop) or the `livingbrain` CLI, then team chat (Slack and Discord; WhatsApp and Telegram later). The CLI is one static Rust binary with instant startup and a local cache. |
 | **Coding agents** | A Claude Code plugin with skills, slash commands and opt-in hooks. The CLI gathers every agent's session logs (Claude Code, Codex, Cursor, OpenCode, Colonizer) into one searchable, costed record, redacted on your machine and uploaded only if you opt in. |
