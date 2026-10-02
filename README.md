@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 41 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 42 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -50,15 +50,51 @@
 ## How it will work
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{
+  "background":"transparent",
+  "fontFamily":"ui-monospace, SFMono-Regular, Menlo, monospace",
+  "fontSize":"13px",
+  "primaryColor":"#0E1719","primaryTextColor":"#E8EFF0","primaryBorderColor":"#2C3B3F",
+  "lineColor":"#5F7378","textColor":"#9DB0B4",
+  "clusterBkg":"transparent","clusterBorder":"#2C3B3F",
+  "edgeLabelBackground":"#0B1214"
+}} }%%
 flowchart LR
-  S["Slack<br/>threads, DMs"] --> B
-  A["Claude Code · Codex · Cursor<br/>over MCP"] <--> B
-  T["livingbrain CLI<br/>Rust, local cache"] <--> B
-  M["Email<br/>via Owlpost"] --> B
-  B["<b>Living Brain</b><br/>Rust Worker<br/>Cratefield"] --> W[("Markdown wiki<br/>pages + citations")]
-  W --> E["Nightly evolve<br/>merge · reconcile · refresh"] --> W
-  B --> C["Colonizer colony<br/>microVM → pull request"] --> W
-  W --> G["3D graph<br/>web app"]
+  subgraph IN["WHERE IT LISTENS"]
+    S["<b>Slack</b><br/>threads · DMs"]:::src
+    M["<b>Mail</b><br/>Owlpost inbox<br/>Gmail · Outlook · IMAP"]:::src
+    L["<b>Agent logs</b><br/>Claude Code · Codex<br/>Cursor · Colonizer"]:::src
+  end
+
+  subgraph USE["WHERE YOU ASK"]
+    A["<b>Coding agents</b><br/>Claude Code · Codex<br/>Cursor · over MCP"]:::src
+    T["<b>livingbrain CLI</b><br/>one Rust binary<br/>local cache"]:::src
+    P["<b>App · PWA</b><br/>3D graph"]:::src
+  end
+
+  B(["<b>LIVING BRAIN</b><br/>Rust Worker · Cratefield<br/>per-scope encryption"]):::core
+
+  W[("<b>Markdown wiki</b><br/>pages + citations")]:::wiki
+  E["<b>Nightly evolve</b><br/>merge · reconcile · refresh"]:::alive
+
+  subgraph ACT["WHAT IT DOES FOR YOU"]
+    C["<b>Colonizer colonies</b><br/>fix #142 → pull request<br/>write the missing tests<br/>update docs after a merge<br/>triage the backlog"]:::act
+    O["<b>Owlpost</b><br/>digests · replies"]:::act
+    I["<b>Your tools over MCP</b><br/>open the issue · read the PR<br/>update Linear / Notion"]:::act
+  end
+
+  S & M & L --> B
+  A & T & P <--> B
+  B --> W
+  W --> E --> W
+  B --> C & O & I
+  C -. "learnings, dead ends, the PR" .-> W
+
+  classDef src fill:#0E1719,stroke:#2C3B3F,color:#E8EFF0
+  classDef core fill:#0B1214,stroke:#4BE3A9,stroke-width:2px,color:#E8EFF0
+  classDef wiki fill:#0E1719,stroke:#E8EFF0,stroke-width:1.5px,color:#E8EFF0
+  classDef alive fill:#0E1719,stroke:#4BE3A9,stroke-dasharray:4 3,color:#4BE3A9
+  classDef act fill:#0E1719,stroke:#5F7378,color:#E8EFF0
 ```
 
 ## Pricing (planned, open core, per workspace)
