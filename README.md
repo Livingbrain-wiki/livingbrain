@@ -104,17 +104,16 @@ flowchart LR
   classDef git fill:#0E1719,stroke:#4BE3A9,color:#E8EFF0
 ```
 
-## Pricing (planned, open core, per workspace)
+## Pricing (planned, per workspace)
 
 | Plan | Price | What you get |
 | :--- | :--- | :--- |
-| **Community** | Free | Self-hosted on your own Cloudflare account and model key, up to 5 people, all core features. Storage: yours, no limit from us |
-| **Teams** | $5/mo | Unlimited people, plus SSO, admin and audit log, shared prompt library, per-channel policies. Self-hosted with a license key, or hosted with your own model key. Hosted: 10 GB included |
-| **Crew** | $9/mo | Hosted, $3 of DeepSeek credit each month or bring your own LLM, up to 25 people, team features included, 25 GB included |
+| **Community** | Free | Self-hosted on your own Cloudflare account and LLM key, up to 5 people, all core features, your own storage |
+| **Teams, self-hosted** | $5/mo | License key: unlimited people, SSO, admin and audit log, shared prompt library, per-channel policies, white-label app |
+| **Teams, hosted** | $9/mo or $90/yr | We run it, you bring your own LLM. 25 people included, 10 GB, team features and white-label |
+| **Crew, hosted** | $15/mo or $150/yr | We run it with $5 of DeepSeek credit each month (or your own LLM). 25 people included, 25 GB |
 
-Storage covers wiki pages, sources, search indexes and aggregated agent logs. Extra hosted storage: $0.25 per GB a month.
-
-**Usage (hosted):** writing the brain $1 per million tokens (nightly evolve included); reading it unlimited. On-demand reasoning per question: Minimal $0.001 · Low $0.005 (default) · Medium $0.02 · High $0.05 · Max $0.25. On your own LLM key, nothing from us.
+Extra people on hosted plans: +$5/mo per 25. Annual billing is the default. **Usage (hosted):** writing the brain $1 per million tokens (nightly evolve included); reading it unlimited; reasoning per question Minimal $0.001 · Low $0.005 · Medium $0.02 · High $0.05 · Max $0.25; extra storage $0.25/GB-month. On your own LLM key, nothing from us.
 
 ## Stack
 
