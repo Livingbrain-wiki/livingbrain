@@ -147,11 +147,11 @@
   },
   {
    "key": "billing",
-   "title": "Hosted plans and billing per workspace (self-hosted stays free)",
+   "title": "Open-core plans, Teams license and hosted billing",
    "labels": [
     "backend"
    ],
-   "body": "Part of {{epic}}. Depends on {{web_app}}.\n\n- Self-hosted is free (open source, own Cloudflare account and model key, no billing path). Hosted is paid per workspace: BYOK $5/mo, Crew $9/mo with model included; no free hosted tier. Stripe via `adapter-stripe` / `control-plane-billing`.\n- Hard usage caps per plan; overage pauses rather than bills by surprise.\n\n**Acceptance criteria**\n- [ ] A workspace over its cap is paused with a clear message, not charged.\n- [ ] Model cost per workspace is visible to the owner."
+   "body": "Part of {{epic}}. Depends on {{web_app}}.\n\n- Plans (per workspace): Community free (self-hosted, up to 5 people, all core features); Teams $5/mo (unlimited people + SSO, admin/audit log, shared prompt library, per-channel policies; self-hosted license key or hosted BYOK); Crew $9/mo (hosted, model included, up to 25 people). No free hosted plan. Stripe via `adapter-stripe` / `control-plane-billing`.\n- Self-hosted license keys: signed offline-verifiable keys (harness `Signer`), checked at startup and daily; an expired key degrades to Community limits, never deletes data.\n- Hard usage caps per plan; overage pauses rather than bills by surprise.\n\n**Acceptance criteria**\n- [ ] A workspace over its cap is paused with a clear message, not charged.\n- [ ] Model cost per workspace is visible to the owner.\n- [ ] Community self-hosted never calls Stripe; over 5 people it asks for a Teams key instead of breaking.\n- [ ] A lapsed license or subscription never deletes or locks the wiki export."
   }
  ]
 }

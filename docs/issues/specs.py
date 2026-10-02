@@ -247,12 +247,13 @@ e3 = spec(
               "- 2D SVG fallback when WebGL is missing or reduced motion is set.",
               ["Smooth with 5,000 nodes on a mid-range laptop.", "Graph only shows nodes the viewer may see."]),
         child("billing", "Open-core plans, Teams license and hosted billing", ["backend"], ["web_app"],
-              "- Plans (per workspace): Community free (self-hosted, up to 5 people, all core features); Teams $5/mo (unlimited people + SSO, admin/audit log, shared prompt library, per-channel policies; self-hosted license key or hosted BYOK); Crew $9/mo (hosted, model included, up to 25 people). No free hosted plan. Stripe via `adapter-stripe` / `control-plane-billing`.
-- Self-hosted license keys: signed offline-verifiable keys (harness `Signer`), checked at startup and daily; an expired key degrades to Community limits, never deletes data.
-"
+              "- Plans (per workspace): Community free (self-hosted, up to 5 people, all core features); Teams $5/mo (unlimited people + SSO, admin/audit log, shared prompt library, per-channel policies; self-hosted license key or hosted BYOK); Crew $9/mo (hosted, model included, up to 25 people). No free hosted plan. Stripe via `adapter-stripe` / `control-plane-billing`.\n"
+              "- Self-hosted license keys: signed offline-verifiable keys (harness `Signer`), checked at startup and daily; an expired key degrades to Community limits, never deletes data.\n"
               "- Hard usage caps per plan; overage pauses rather than bills by surprise.",
               ["A workspace over its cap is paused with a clear message, not charged.",
-               "Model cost per workspace is visible to the owner."]),
+               "Model cost per workspace is visible to the owner.",
+               "Community self-hosted never calls Stripe; over 5 people it asks for a Teams key instead of breaking.",
+               "A lapsed license or subscription never deletes or locks the wiki export."]),
     ])
 
 here = pathlib.Path(__file__).parent
