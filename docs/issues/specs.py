@@ -57,7 +57,7 @@ e1 = spec(
         "bring-your-own-model per workspace. The Cratefield `TextModel` port has no tools, streaming or embeddings in v1 "
         "(`core/src/ports/text_model.rs`), so the harness issues come first.\n\n"
         "**Children**\n{{harness_tools}} {{harness_openai}} {{scaffold}} {{tenancy}} {{slack_events}} {{conversation_do}} "
-        "{{permissions}} {{agent_loop}} {{byok}} {{mcp_tools}} {{deploy}}")},
+        "{{permissions}} {{agent_loop}} {{byok}} {{litellm}} {{mcp_tools}} {{deploy}}")},
     [
         child("harness_tools", "Harness: tool calling on the TextModel port", ["needs-harness", "backend"], [],
               "**Why.** The brain's answers chain tool calls (search memory, read a PR, open an issue). `TextModel` v1 completes "
@@ -127,6 +127,9 @@ e1 = spec(
               "- No silent fallback to the managed model; fallback is an explicit opt-in.\n- Keys encrypted, shown as last 4 only.",
               ["A URL resolving to 10.0.0.0/8 or 169.254.0.0/16 is refused.",
                "A model without tool calling is marked \"answers only\".", "Keys never appear in logs or API responses."]),
+        child("litellm", "LiteLLM gateway as a first-class model provider (BYOK and hosted virtual keys)", ["backend", "security"], ["harness_openai", "byok"],
+              "Filed directly as #42; see the issue for the full body. Customer LiteLLM gateway as a connection type (model list + capability probe), hosted plans on our LiteLLM with one budgeted virtual key per workspace, spend sync, SSRF rules.",
+              ["A hosted workspace that exhausts its virtual-key budget is paused, never billed over."]),
         child("mcp_tools", "Tools over MCP with per-user connections", ["backend", "agents", "security"], ["agent_loop"],
               "- Remote MCP servers (GitHub, Linear, Notion, Google) connected per user via OAuth; tokens encrypted.\n"
               "- Per-connection and per-workspace `disabled_tools` (the same pattern HarnessRouter uses).\n"
