@@ -7,3 +7,7 @@ except for code in the ee/ directory, which is under a separate commercial licen
 Its design draws on Company Brain by supermemory
 (https://github.com/supermemoryai/company-brain), licensed under the Apache License 2.0.
 The design is ported; no Company Brain source code is included unless noted in the file that uses it.
+
+Its memory model draws on ideas from Hindsight by Vectorize
+(https://github.com/vectorize-io/hindsight), licensed under the MIT License.
+Where patterns or code are reused, the file that uses them says so.

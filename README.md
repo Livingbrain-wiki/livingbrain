@@ -28,7 +28,7 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 49 issues in the
+> **Planned. Nothing here runs yet.** The plan is four epics and 50 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
