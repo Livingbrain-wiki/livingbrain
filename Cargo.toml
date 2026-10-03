@@ -7,9 +7,10 @@
 # check); `crates/livingbrain-venture` is the Worker, the composition root and
 # the only crate that names `worker` and `cratefield-runtime-cloudflare`.
 #
-# Harness crates come from git, not crates.io, until the 0.5 release round
-# (Cratefield/harness#464). No `rev` on the git deps on purpose: the committed
-# `Cargo.lock`, which records the resolved commit, is where the pin lives.
+# Harness crates come from crates.io, every `cratefield-*` pinned exactly to
+# one release round (harness docs/COMPATIBILITY.md: ventures pin exact
+# versions), so they all resolve to the same `cratefield-core`: two copies of
+# core in one graph is a type error, not a version skew. Move them together.
 [workspace]
 members = ["crates/*"]
 resolver = "3"
@@ -22,12 +23,12 @@ license = "Apache-2.0"
 repository = "https://github.com/Livingbrain-wiki/livingbrain"
 
 [workspace.dependencies]
-# Harness, by git (see the note above). `cratefield-core` is the ports-only
+# Harness, from crates.io (see the note above). `cratefield-core` is the ports-only
 # crate every module depends on; the other two are dev/test and runtime and
 # must not appear in a module's normal dependency tree.
-cratefield-core = { git = "https://github.com/Cratefield/harness" }
-cratefield-runtime-cloudflare = { git = "https://github.com/Cratefield/harness" }
-cratefield-testing = { git = "https://github.com/Cratefield/harness" }
+cratefield-core = "=0.7.0"
+cratefield-runtime-cloudflare = "=0.3.0"
+cratefield-testing = "=0.4.0"
 
 # The Workers SDK, pinned to the version the runtime crate targets. Only the
 # venture crate names it.

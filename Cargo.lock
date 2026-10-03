@@ -223,8 +223,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-adapter-postgres"
-version = "0.2.0"
-source = "git+https://github.com/Cratefield/harness#e458b76a819abf46b5797470439ffdd5f89b0ee1"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80db5d57be0aaf7e98e3ff800a649dfc8c1c1324d6ca796e3716fdd9d36f788c"
 dependencies = [
  "async-trait",
  "cratefield-core",
@@ -238,8 +239,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-adapter-sqlite"
-version = "0.2.0"
-source = "git+https://github.com/Cratefield/harness#e458b76a819abf46b5797470439ffdd5f89b0ee1"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89d9f9f07d7ca89e873353914cb4715164ae0c4fbcde3f61cc6ef7d5262b0a33"
 dependencies = [
  "async-trait",
  "cratefield-core",
@@ -251,8 +253,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-auth-client"
-version = "0.2.0"
-source = "git+https://github.com/Cratefield/harness#e458b76a819abf46b5797470439ffdd5f89b0ee1"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "739351599c26447aaede8bc4d5bf2400f991ded0d88f42dfffbfba626d53b62a"
 dependencies = [
  "async-trait",
  "axum",
@@ -270,8 +273,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-core"
-version = "0.6.0"
-source = "git+https://github.com/Cratefield/harness#e458b76a819abf46b5797470439ffdd5f89b0ee1"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81ad996962e9d76cfacc39b7ee209ca87cd815f38bd50d9db19850ef0c1421ca"
 dependencies = [
  "async-trait",
  "axum",
@@ -300,8 +304,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-runtime-cloudflare"
-version = "0.2.0"
-source = "git+https://github.com/Cratefield/harness#e458b76a819abf46b5797470439ffdd5f89b0ee1"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78d6c1762f4b34c5e61d413d0f8bf4159b81f1183aef49a27dfb7c8245d44e5a"
 dependencies = [
  "async-trait",
  "axum",
@@ -325,21 +330,25 @@ dependencies = [
 
 [[package]]
 name = "cratefield-testing"
-version = "0.3.0"
-source = "git+https://github.com/Cratefield/harness#e458b76a819abf46b5797470439ffdd5f89b0ee1"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef5ca2c562a418d42c9b029569866ba3d987dd7eb350c331392cecd2b1a5b32b"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "bytes",
  "cratefield-adapter-postgres",
  "cratefield-adapter-sqlite",
  "cratefield-core",
  "futures-core",
+ "hmac 0.13.0",
  "http",
  "pollster",
  "sea-query",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "time",
  "tokio",
  "tower",
