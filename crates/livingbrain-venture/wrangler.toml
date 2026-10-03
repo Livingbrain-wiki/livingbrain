@@ -1,0 +1,33 @@
+# The Living Brain Worker's Wrangler config, beside the venture crate. Run
+# `npx wrangler dev --local` from this directory (npx, so no package.json or
+# node_modules lands in the repo). `worker-build` compiles the crate to wasm
+# and writes `build/worker/shim.mjs`, the Worker's entry point. Nothing here
+# is deployed.
+name = "livingbrain"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-09-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[observability]
+enabled = true
+
+# D1 database `livingbrain`. The id is a PLACEHOLDER: `wrangler dev --local`
+# simulates the database and ignores it, so this is enough locally. A real
+# deployment needs the id printed by `wrangler d1 create livingbrain`, which
+# this scaffold deliberately never runs (it touches a Cloudflare account).
+[[d1_databases]]
+binding = "DB"
+database_name = "livingbrain"
+database_id = "placeholder-run-wrangler-d1-create-livingbrain"
+
+# R2 bucket `livingbrain-blobs`, simulated under `--local`.
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "livingbrain-blobs"
+
+# KV namespace; the id is a PLACEHOLDER (`wrangler kv namespace create`).
+[[kv_namespaces]]
+binding = "KV"
+id = "placeholder-run-wrangler-kv-namespace-create"

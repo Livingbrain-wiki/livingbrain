@@ -1,0 +1,22 @@
+[package]
+name = "livingbrain-canary"
+description = "The empty module: no ports, no tables, no routes. It exists so CI and the Cratefield parity matrix have a module to run before the first real one lands"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only dependency a module is allowed: Cratefield's ports. `axum` arrives
+# through `cratefield_core::axum`, so it is not named directly.
+cratefield-core = { workspace = true }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20). Dev-only, so sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }

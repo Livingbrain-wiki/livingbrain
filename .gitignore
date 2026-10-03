@@ -1,0 +1,22 @@
+# Rust and worker-build output.
+target/
+build/
+
+# Wrangler's local dev state and its dev-secret file.
+.wrangler/
+.dev.vars
+
+# Node, if a tool ever pulls it in. Wrangler is run through `npx wrangler`,
+# so there is deliberately no package.json or node_modules committed.
+node_modules/
+
+# Local environment and credential files. The harness stages the working
+# tree, so these must never be staged: they are secrets, not source.
+/.env
+/.envrc
+/.git-credentials
+/.gitmodules
+/.mcp.json
+/.netrc
+/.npmrc
+/.pypirc

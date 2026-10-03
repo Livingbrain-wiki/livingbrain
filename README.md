@@ -28,7 +28,9 @@
   <a href="https://factory0.ventures">Factory Zero</a>
 </p>
 
-> **Planned. Nothing here runs yet.** The plan is four epics and 54 issues in the
+> **Planned. Nothing is live yet.** The workspace scaffold builds and CI runs
+> (see [What is built today](#what-is-built-today)), but there is no product
+> code and nothing is deployed. The plan is four epics and 54 issues in the
 > [issue tracker](https://github.com/Livingbrain-wiki/livingbrain/issues); code lands issue by issue.
 > Early access is a waitlist at [livingbrain.wiki](https://livingbrain.wiki).
 
@@ -50,6 +52,43 @@
 | **Safe by design** | Everything it reads is screened for hidden text by [PromptDecode](https://promptdeco.de) before a page is written and again before context reaches an agent. Customers get answers through [SupportGenius](https://supportgeni.us), only from pages you published to them. |
 | **Easy to use** | An installable app (PWA) for phone and desktop: one search-or-ask box, offline reading, and the 3D brain one tap away. `livingbrain view` opens the same 3D brain from the CLI. |
 | **Yours** | The wiki lives in a git repo too: the Living Brain GitHub App proposes every change as a pull request, and edits you merge flow back in. It exports as plain Markdown and opens in Obsidian. Bring your own LLM on every plan, per role (Anthropic, OpenAI, OpenRouter, your LiteLLM gateway, any OpenAI-compatible endpoint). Crew also includes $3 of DeepSeek credit each month. |
+
+## What is built today
+
+**Nothing is deployed.** Everything below runs locally and in CI; there is no
+public endpoint and no product code yet. This section says what exists in the
+repository today, and what does not, and is updated as issues land.
+
+| | |
+| :--- | :--- |
+| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health` |
+| **Not built** | Every product feature: Slack, the wiki, permissions, the agent loop, MCP, the CLI, the app. The module set is one empty `canary` module that exists only to prove the scaffold |
+
+The composition is one Worker mounting modules into a Cratefield harness; the
+venture crate is the only place a runtime or a vendor SDK appears.
+
+```rust
+Harness::builder()
+    .venture(Venture::new("livingbrain", "api.livingbrain.wiki")
+        .public_url("https://api.livingbrain.wiki")
+        .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"]))
+    .module(Canary::new())          // the empty module; real modules are added beside it
+    .runtime(Cloudflare::new().db("DB").blob("R2").kv("KV"))
+    .build()
+```
+
+### Develop locally
+
+```sh
+cargo test --workspace                    # fmt, clippy and the parity matrix also run in CI
+cd crates/livingbrain-venture
+npx wrangler dev --local                  # builds the Worker to wasm and serves it locally
+curl -s http://127.0.0.1:8787/__health    # the harness health route — the only route today
+```
+
+Nothing here is deployed: `wrangler dev` is local only, the D1/R2/KV ids in
+`wrangler.toml` are placeholders, and no `wrangler deploy` or `wrangler d1
+create` runs anywhere in this repository.
 
 ## How it will work
 

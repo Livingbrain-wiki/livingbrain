@@ -1,0 +1,7 @@
+# Pinned to the harness's own toolchain (Cratefield/harness/rust-toolchain.toml):
+# edition 2024 and rust-version 1.98. CI installs this via dtolnay/rust-toolchain.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
