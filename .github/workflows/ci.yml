@@ -1,0 +1,110 @@
+# fmt, clippy and tests run over everything; the parity matrix runs the
+# Cratefield conformance suite for every module crate (SQLite always, Postgres
+# against a postgres:16 service); the wasm job builds the Worker, so a
+# native-only dependency can never slip into a module. The module list is
+# discovered by glob, so a new `crates/livingbrain-*` module needs no edit here.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  parity:
+    name: parity (${{ matrix.dialect }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dialect: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Only the postgres leg points the kit at the service container; the
+      # sqlite leg leaves it unset, so only that dialect runs there.
+      FZ_TEST_POSTGRES_URL: ${{ matrix.dialect == 'postgres' && 'postgres://postgres:postgres@localhost:5432/postgres' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@v2
+      - name: Conformance for every module crate (${{ matrix.dialect }})
+        run: |
+          for dir in crates/livingbrain-*/; do
+            name=$(basename "$dir")
+            # The venture crate is the Worker, not a module; every other
+            # livingbrain-* crate mounts a conformance test.
+            if [ "$name" = "livingbrain-venture" ]; then continue; fi
+            if [ ! -f "$dir/tests/conformance.rs" ]; then continue; fi
+            echo "::group::$name (${{ matrix.dialect }})"
+            cargo test -p "$name" --test conformance
+            echo "::endgroup::"
+          done
+
+  wasm:
+    name: worker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the Worker and assert the shim
+        working-directory: crates/livingbrain-venture
+        run: |
+          cargo install -q --locked worker-build
+          worker-build --release
+          test -f build/worker/shim.mjs

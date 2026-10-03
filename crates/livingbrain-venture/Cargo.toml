@@ -1,0 +1,28 @@
+[package]
+name = "livingbrain-venture"
+description = "The Living Brain Worker: the composition root that mounts every livingbrain module and serves it on Cloudflare"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `cdylib` for worker-build's wasm output; `rlib` so the harness can be built
+# and inspected from a native test.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# This is the one crate allowed to name a runtime and a vendor SDK. Modules
+# depend on `cratefield-core` only; see the root Cargo.toml.
+cratefield-core = { workspace = true }
+cratefield-runtime-cloudflare = { workspace = true }
+livingbrain-canary = { path = "../livingbrain-canary" }
+worker = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }
