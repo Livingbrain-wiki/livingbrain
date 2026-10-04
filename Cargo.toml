@@ -6,6 +6,8 @@
 # runtime or a vendor SDK (a module that names `worker` fails CI's wasm-safety
 # check); `crates/livingbrain-venture` is the Worker, the composition root and
 # the only crate that names `worker` and `cratefield-runtime-cloudflare`.
+# `crates/livingbrain-cli` is neither: it is the native `livingbrain` client
+# binary, a client of the API that is never a dependency of the Worker.
 #
 # Harness crates come from crates.io, every `cratefield-*` pinned exactly to
 # one release round (harness docs/COMPATIBILITY.md: ventures pin exact
