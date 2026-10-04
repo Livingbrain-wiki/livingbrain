@@ -1,0 +1,32 @@
+[package]
+name = "livingbrain-pages"
+description = "The Living Brain pages module: versioned entities (person, project, decision, customer, system, glossary) with Markdown bodies in R2 and metadata in D1"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed: the ports. `axum`
+# arrives through `cratefield_core::axum`, so it is not named directly.
+cratefield-core = { workspace = true }
+# `sea_query::Value` is what a `Statement` binds, and `time` formats the
+# version timestamps — neither is re-exported by `cratefield-core`. Both are
+# pure Rust, already in the tree and wasm-safe (a module's wasm build is
+# checked by CI's worker-build job and the conformance suite).
+sea-query = { version = "0.32", default-features = false, features = ["backend-sqlite", "thread-safe"] }
+time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20). Dev-only, so sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# An executor for the store's async tests, the same one the harness's own
+# module suites use. Dev-only, so it never reaches the module's dependency
+# tree either.
+pollster = "0.4"
