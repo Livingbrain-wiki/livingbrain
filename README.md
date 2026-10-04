@@ -61,8 +61,8 @@ repository today, and what does not, and is updated as issues land.
 
 | | |
 | :--- | :--- |
-| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health` |
-| **Not built** | Every product feature: Slack, the wiki, permissions, the agent loop, MCP, the CLI, the app. The module set is one empty `canary` module that exists only to prove the scaffold |
+| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, and a member mirror (#5) |
+| **Not built** | Every other product feature: the wiki, permissions, the agent loop, MCP, the CLI, the app — and, within Slack, the Events webhook that keeps the member mirror fresh (#6). The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
 
 The composition is one Worker mounting modules into a Cratefield harness; the
 venture crate is the only place a runtime or a vendor SDK appears.
@@ -73,6 +73,7 @@ Harness::builder()
         .public_url("https://api.livingbrain.wiki")
         .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"]))
     .module(Canary::new())          // the empty module; real modules are added beside it
+    .module(Workspaces::new())      // Slack sign-in and one tenant per workspace (#5)
     .runtime(Cloudflare::new().db("DB").blob("R2").kv("KV"))
     .build()
 ```
@@ -82,13 +83,45 @@ Harness::builder()
 ```sh
 cargo test --workspace                    # fmt, clippy and the parity matrix also run in CI
 cd crates/livingbrain-venture
+npx wrangler d1 migrations apply livingbrain --local   # creates the tables (see below)
 npx wrangler dev --local                  # builds the Worker to wasm and serves it locally
-curl -s http://127.0.0.1:8787/__health    # the harness health route — the only route today
+curl -s http://127.0.0.1:8787/__health    # the harness health route
+curl -si http://127.0.0.1:8787/v1/workspaces/slack/start   # 302 to Slack, or 503 without credentials
 ```
 
 Nothing here is deployed: `wrangler dev` is local only, the D1/R2/KV ids in
 `wrangler.toml` are placeholders, and no `wrangler deploy` or `wrangler d1
 create` runs anywhere in this repository.
+
+#### Sign in with Slack locally
+
+Slack will only call back over HTTPS, so a local run needs a tunnel in front
+of it:
+
+```sh
+npx cloudflared tunnel --url http://localhost:8787   # prints https://<name>.trycloudflare.com
+```
+
+Then create a Slack app (From scratch) with **OpenID Connect** as the only
+user scope, and add `<tunnel>/v1/workspaces/slack/callback` as a redirect URL,
+where `<tunnel>` is the URL cloudflared printed. Fill in the two non-secret
+placeholders in `crates/livingbrain-venture/wrangler.toml` `[vars]`: the app's
+client id, and that same tunnel URL as `WORKSPACES_REDIRECT_BASE`. The two
+secrets go in `crates/livingbrain-venture/.dev.vars` instead — gitignored, and
+deliberately not in this repository (wrangler reads secrets before vars):
+
+```
+HARNESS_SECRET="at-least-32-bytes-of-random-text"
+WORKSPACES_SLACK_CLIENT_SECRET="the-secret-from-the-Slack-app"
+```
+
+`HARNESS_SECRET` signs the flow and session cookies, so a request that carries
+one answers `500 internal` without it — that is the cue that it is missing.
+With all of that in place, open
+`http://localhost:8787/v1/workspaces/slack/start`, approve the app in Slack,
+and you land back on `/` signed in: `GET /v1/workspaces/me` and
+`GET /v1/workspaces/members` then answer for that workspace. The first person
+to sign in becomes the owner, and that never changes.
 
 ## How it will work
 
