@@ -125,6 +125,34 @@ and you land back on `/` signed in: `GET /v1/workspaces/me` and
 `GET /v1/workspaces/members` then answer for that workspace. The first person
 to sign in becomes the owner, and that never changes.
 
+#### Mail from the Worker (Owlpost)
+
+Transactional mail goes through Owlpost. Every mail renders in the theme in
+`crates/livingbrain-venture/src/mail-theme.json`, compiled into the Worker, so
+its `logo_url` must stay a reachable hosted PNG — the layout shows it in the
+header and reads the same without it. The theme brands the venture's own mail
+and, once the `waitlist` module is mounted, that module's confirm mails: the
+change that mounts it also composes `.templates(themed_templates(&mail_theme()))`,
+because a template whose id names a module that is not registered is refused
+when the harness is built.
+
+Three more values configure sending. `OWLPOST_API_KEY` is a secret; put it in
+`crates/livingbrain-venture/.dev.vars` (gitignored, never in the repository) or
+set it for real with `wrangler secret put OWLPOST_API_KEY`. The two addresses
+are non-secret:
+
+```
+OWLPOST_API_KEY="the-key-from-your-Owlpost-project"
+MAIL_FROM="Living Brain <hello@livingbrain.wiki>"   # on a domain verified in Owlpost
+MAIL_REPLY_TO="hello@livingbrain.wiki"              # optional
+```
+
+With no key — or a blank one — the mailer reports `not-configured` and sends
+nothing, so the route that would mail keeps working and nothing goes out. The
+address in `MAIL_FROM` must be on a sending domain verified in Owlpost, or
+Owlpost refuses the send. Every message leaves as `multipart/alternative`: the
+HTML body and its plain-text twin.
+
 ## How it will work
 
 ```mermaid

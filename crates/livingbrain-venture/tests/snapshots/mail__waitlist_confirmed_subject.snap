@@ -1,0 +1,5 @@
+---
+source: crates/livingbrain-venture/tests/mail.rs
+expression: mail.subject
+---
+You are #42 on the Living Brain waitlist

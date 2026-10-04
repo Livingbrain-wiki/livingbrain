@@ -24,11 +24,19 @@ repository = "https://github.com/Livingbrain-wiki/livingbrain"
 
 [workspace.dependencies]
 # Harness, from crates.io (see the note above). `cratefield-core` is the ports-only
-# crate every module depends on; the other two are dev/test and runtime and
-# must not appear in a module's normal dependency tree.
-cratefield-core = "=0.7.0"
-cratefield-runtime-cloudflare = "=0.3.0"
-cratefield-testing = "=0.4.0"
+# crate every module depends on; `runtime-cloudflare` is the Worker's runtime and
+# `testing` is the test double, neither of which a module names.
+cratefield-core = "=0.8.0"
+cratefield-runtime-cloudflare = "=0.4.0"
+cratefield-testing = "=0.5.0"
+
+# The mail round (issue #63): `module-waitlist` ships the confirm mails,
+# `mail-templates` renders them in this venture's theme, and `adapter-owlpost`
+# is the `Mailer` port. Pinned to the same release round as the rest, so every
+# one of them resolves to the single `cratefield-core` above.
+cratefield-adapter-owlpost = "=0.2.0"
+cratefield-mail-templates = "=0.1.0"
+cratefield-module-waitlist = "=0.4.0"
 
 # The Workers SDK, pinned to the version the runtime crate targets. Only the
 # venture crate names it.
@@ -56,6 +64,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 time = { version = "0.3.45", default-features = false, features = ["std", "formatting"] }
 tower = { version = "0.5.3", features = ["util"] }
+
+# Snapshot tests for the venture's branded mail (issue #63). Dev-only; pinned
+# like the rest so the workspace resolves one `insta`.
+insta = "1.49.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

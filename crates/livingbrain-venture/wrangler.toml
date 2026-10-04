@@ -41,13 +41,25 @@ binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
 
 # Non-secret configuration. Secrets — `HARNESS_SECRET` (which signs every
-# cookie this Worker issues) and `WORKSPACES_SLACK_CLIENT_SECRET` — belong in
-# `.dev.vars`, which is gitignored and deliberately not in this repository;
-# wrangler reads secrets before vars, so a name in both resolves to the
-# secret. The Slack client id is public (it is in the authorize URL) and the
-# redirect base is the tunnel a local run is reached on.
+# cookie this Worker issues), `WORKSPACES_SLACK_CLIENT_SECRET` and
+# `OWLPOST_API_KEY` (which sends mail) — belong in `.dev.vars`, which is
+# gitignored and deliberately not in this repository; wrangler reads secrets
+# before vars, so a name in both resolves to the secret. The Slack client id is
+# public (it is in the authorize URL) and the redirect base is the tunnel a
+# local run is reached on.
+#
+# Mail (issue #63). `OWLPOST_API_KEY` is a secret (`wrangler secret put
+# OWLPOST_API_KEY`); with it absent or blank the adapter reports `not-configured`
+# and sends nothing. `MAIL_FROM` is declared below — the sender must be on a
+# domain verified in Owlpost, or sends are refused — and `MAIL_REPLY_TO` is
+# optional and left unset until there is an address to reply to. The theme every
+# mail renders in is `src/mail-theme.json` beside this file, compiled into the
+# Worker. Mail leaves as `multipart/alternative` — HTML and its text twin.
 [vars]
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 # The origin this Worker answers on — under `wrangler dev` that is the
 # cloudflared tunnel, because Slack must call the callback back over HTTPS.
 WORKSPACES_REDIRECT_BASE = "https://replace-with-your-tunnel.trycloudflare.com"
+# The mail sender. The Worker falls back to this same address when the binding
+# is absent, so this line documents the default as much as it sets it.
+MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"

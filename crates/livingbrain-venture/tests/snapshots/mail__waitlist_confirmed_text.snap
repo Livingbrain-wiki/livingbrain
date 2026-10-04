@@ -1,0 +1,14 @@
+---
+source: crates/livingbrain-venture/tests/mail.rs
+expression: mail.text
+---
+You are #42
+
+Your spot on the Living Brain waitlist is confirmed. You are number 42 in line.
+
+Check my place:
+https://livingbrain.wiki/v1/waitlist/status?token=example-token
+
+--
+Sent to ada@example.com because you confirmed your spot on the Living Brain waitlist.
+Living Brain · https://livingbrain.wiki · hello@livingbrain.wiki

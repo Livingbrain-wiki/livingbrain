@@ -1,0 +1,16 @@
+---
+source: crates/livingbrain-venture/tests/mail.rs
+expression: mail.text
+---
+Hold your spot
+
+Living Brain is admitting members in join order. Confirm your address to hold your place on the waitlist.
+
+Confirm my spot:
+https://livingbrain.wiki/v1/waitlist/confirm?token=example-token
+
+If you did not join this waitlist, ignore this email: nothing happens until the link is opened.
+
+--
+Sent to ada@example.com because this address was entered on the Living Brain waitlist.
+Living Brain · https://livingbrain.wiki · hello@livingbrain.wiki

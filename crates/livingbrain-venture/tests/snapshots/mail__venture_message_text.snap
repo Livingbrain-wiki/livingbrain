@@ -1,0 +1,14 @@
+---
+source: crates/livingbrain-venture/tests/mail.rs
+expression: mail.text
+---
+This week on Living Brain
+
+The wiki gained three pages, and a colony landed a pull request.
+
+Open Living Brain:
+https://livingbrain.wiki
+
+--
+Sent to ada@example.com because you have a Living Brain account.
+Living Brain · https://livingbrain.wiki · hello@livingbrain.wiki
