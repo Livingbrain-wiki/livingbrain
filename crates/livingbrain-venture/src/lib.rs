@@ -2,15 +2,21 @@
 //! names a runtime and a vendor SDK.
 //!
 //! It mounts every `livingbrain-*` module into one Cratefield harness and
-//! serves it on Cloudflare Workers. Today the module set is the single empty
-//! `canary` module, so the Worker answers the harness's own `/__health` and
-//! nothing else — the scaffold proven end to end before any product code
-//! exists to blame. `wrangler.toml` is beside this crate.
+//! serves it on Cloudflare Workers: the empty `canary` module from the
+//! scaffold, and `workspaces` — one tenant per Slack workspace, sign in with
+//! Slack, and the member mirror the Events webhook (issue #6) refreshes.
+//! `wrangler.toml` and the D1 migrations are beside this crate.
+//!
+//! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
+//! The runtime provides the last four unconditionally (`Signer` from
+//! `HARNESS_SECRET`) and `Db` from the `.db("DB")` binding below, so
+//! `Harness::build` refuses a composition that leaves any of them unwired.
 #![forbid(unsafe_code)]
 
 use cratefield_core::{Harness, Venture};
 use cratefield_runtime_cloudflare::{Cloudflare, serve};
 use livingbrain_canary::Canary;
+use livingbrain_workspaces::Workspaces;
 use std::sync::OnceLock;
 use worker::{Context, Env, Request, Response, event};
 
@@ -25,11 +31,10 @@ static INSTANCE: OnceLock<(Harness, Cloudflare)> = OnceLock::new();
 fn instance() -> &'static (Harness, Cloudflare) {
     INSTANCE.get_or_init(|| {
         let runtime = Cloudflare::new()
-            // The three bindings `wrangler.toml` declares. The canary requires
-            // no port, so nothing resolves through them yet; they are wired
-            // here so the deployment shape (D1, R2, KV) is exercised from the
-            // first commit and the first real module finds its ports already
-            // in place.
+            // The three bindings `wrangler.toml` declares. `workspaces` reads
+            // its two tables through the D1 binding; the canary requires no
+            // port, so R2 and KV are still wired ahead of a module that needs
+            // them — the deployment shape (D1, R2, KV) from the scaffold.
             .db("DB")
             .blob("R2")
             .kv("KV");
@@ -40,6 +45,7 @@ fn instance() -> &'static (Harness, Cloudflare) {
                     .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"]),
             )
             .module(Canary::new())
+            .module(Workspaces::new())
             .runtime(runtime.clone())
             .build()
             .expect("the livingbrain harness is valid");
@@ -56,4 +62,28 @@ fn instance() -> &'static (Harness, Cloudflare) {
 pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
     let (harness, runtime) = instance();
     serve(harness, runtime, req, env, ctx).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `instance()` panics if the composition is invalid, so reaching past
+    /// it is the assertion: `workspaces` requires `Db`, `Signer`,
+    /// `HttpClient`, `Clock` and `IdGen`, and `Harness::build` refuses a
+    /// runtime that does not provide one of them. Natively, where the
+    /// Worker's bindings do not exist, `provides()` is still the static set
+    /// the build checks — so this catches a module whose ports were never
+    /// wired long before a deploy would.
+    #[test]
+    fn the_composition_provides_every_port_its_modules_require() {
+        let (harness, _) = instance();
+        let names: Vec<&str> = harness
+            .modules()
+            .iter()
+            .map(|module| module.name())
+            .collect();
+        assert!(names.contains(&"canary"), "{names:?}");
+        assert!(names.contains(&"workspaces"), "{names:?}");
+    }
 }

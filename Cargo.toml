@@ -37,5 +37,24 @@ worker = { version = "0.8.5", default-features = false, features = ["d1"] }
 # crate pulls it for the wasm32 target only.
 getrandom = { version = "0.4.3", default-features = false, features = ["wasm_js"] }
 
+# Non-harness crates a module names directly. All pure Rust and wasm-safe;
+# CI's wasm job and each module's `assert_wasm_safe_deps` keep it that way.
+# Pinned to the versions the harness already resolves, so they add no new
+# entry to the lockfile beyond the one the module itself needs.
+async-trait = "0.1.92"
+# `base64` is the version `cratefield-core` already resolves, so naming it adds
+# no new lockfile entry. `alloc` only: a Worker has no `std`, and this crate is
+# wasm-safe by construction.
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+bytes = "1.12.1"
+# The URL-encoding `axum` and `url` already resolve.
+percent-encoding = "2.3"
+pollster = { version = "0.4", features = ["macro"] }
+sea-query = { version = "0.32.7", default-features = false, features = ["thread-safe", "backend-sqlite"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3.45", default-features = false, features = ["std", "formatting"] }
+tower = { version = "0.5.3", features = ["util"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"

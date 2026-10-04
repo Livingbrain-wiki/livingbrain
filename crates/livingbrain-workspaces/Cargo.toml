@@ -1,0 +1,46 @@
+[package]
+name = "livingbrain-workspaces"
+description = "Living Brain module: one tenant per Slack workspace — sign in with Slack, and the member mirror the events webhook refreshes"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed. `axum` and `http`
+# arrive through `cratefield_core::axum`, so neither is named directly.
+cratefield-core = { workspace = true }
+
+# The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
+bytes = { workspace = true }
+# The `id_token` payload's encoding, and the URL-encoding of the authorize
+# call and the token form. Pure Rust, wasm-safe, already in the lockfile.
+base64 = { workspace = true }
+percent-encoding = { workspace = true }
+# Portable SQL built as parameterized statements over the `Database` port
+# (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
+sea-query = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# ISO-8601 timestamps for the rows (the portable subset stores TEXT, not a
+# dialect date type). The `wasm-bindgen` half of this crate arrives only on
+# wasm32, so it never enters a host `cargo tree`.
+time = { workspace = true }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
+# sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# Only so the test kit's Slack token fake can implement the `HttpClient`
+# port, whose trait is declared with `#[async_trait]`.
+async-trait = { workspace = true }
+pollster = { workspace = true }
+tower = { workspace = true }
+serde_json = { workspace = true }

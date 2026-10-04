@@ -17,10 +17,18 @@ enabled = true
 # simulates the database and ignores it, so this is enough locally. A real
 # deployment needs the id printed by `wrangler d1 create livingbrain`, which
 # this scaffold deliberately never runs (it touches a Cloudflare account).
+#
+# `migrations_dir` is what `wrangler d1 migrations apply livingbrain --local`
+# reads. The files there are the collected form of each module's own
+# `migrations/` (see crates/livingbrain-workspaces/migrations/) with the
+# module and id in the name; `.harness-lock.json` beside them pins each one so
+# `fz migrations collect` appends rather than renumbers. Run the apply before
+# `wrangler dev` the first time — the runtime never migrates at startup.
 [[d1_databases]]
 binding = "DB"
 database_name = "livingbrain"
 database_id = "placeholder-run-wrangler-d1-create-livingbrain"
+migrations_dir = "migrations"
 
 # R2 bucket `livingbrain-blobs`, simulated under `--local`.
 [[r2_buckets]]
@@ -31,3 +39,15 @@ bucket_name = "livingbrain-blobs"
 [[kv_namespaces]]
 binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
+
+# Non-secret configuration. Secrets — `HARNESS_SECRET` (which signs every
+# cookie this Worker issues) and `WORKSPACES_SLACK_CLIENT_SECRET` — belong in
+# `.dev.vars`, which is gitignored and deliberately not in this repository;
+# wrangler reads secrets before vars, so a name in both resolves to the
+# secret. The Slack client id is public (it is in the authorize URL) and the
+# redirect base is the tunnel a local run is reached on.
+[vars]
+WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
+# The origin this Worker answers on — under `wrangler dev` that is the
+# cloudflared tunnel, because Slack must call the callback back over HTTPS.
+WORKSPACES_REDIRECT_BASE = "https://replace-with-your-tunnel.trycloudflare.com"

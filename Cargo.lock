@@ -1054,7 +1054,26 @@ dependencies = [
  "cratefield-runtime-cloudflare",
  "getrandom 0.4.3",
  "livingbrain-canary",
+ "livingbrain-workspaces",
  "worker",
+]
+
+[[package]]
+name = "livingbrain-workspaces"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "cratefield-core",
+ "cratefield-testing",
+ "percent-encoding",
+ "pollster",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "time",
+ "tower",
 ]
 
 [[package]]
