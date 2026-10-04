@@ -29,6 +29,14 @@ cratefield-core = { git = "https://github.com/Cratefield/harness" }
 cratefield-runtime-cloudflare = { git = "https://github.com/Cratefield/harness" }
 cratefield-testing = { git = "https://github.com/Cratefield/harness" }
 
+# The early-access waitlist (issue #23): the harness `waitlist` module and the
+# two adapters it is wired to — Owlpost for the Resend-compatible double
+# opt-in mail, Turnstile for the captcha on the public join form. Same git pin
+# as the crates above; only the venture crate names them.
+cratefield-module-waitlist = { git = "https://github.com/Cratefield/harness" }
+cratefield-adapter-owlpost = { git = "https://github.com/Cratefield/harness" }
+cratefield-adapter-turnstile = { git = "https://github.com/Cratefield/harness" }
+
 # The Workers SDK, pinned to the version the runtime crate targets. Only the
 # venture crate names it.
 worker = { version = "0.8.5", default-features = false, features = ["d1"] }
@@ -36,6 +44,10 @@ worker = { version = "0.8.5", default-features = false, features = ["d1"] }
 # `wasm_js` is what makes `getrandom` work in a Workers isolate; the venture
 # crate pulls it for the wasm32 target only.
 getrandom = { version = "0.4.3", default-features = false, features = ["wasm_js"] }
+
+# `#[pollster::test]`, the async test attribute `cratefield-testing` uses.
+# Dev-only: it must never reach a crate's normal (wasm) dependency graph.
+pollster = "0.4.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

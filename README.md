@@ -90,6 +90,35 @@ Nothing here is deployed: `wrangler dev` is local only, the D1/R2/KV ids in
 `wrangler.toml` are placeholders, and no `wrangler deploy` or `wrangler d1
 create` runs anywhere in this repository.
 
+### Waitlist (issue #23)
+
+The early-access list lives on the [website](https://github.com/Livingbrain-wiki/website)
+repo's form, which posts to this Worker. `POST /v1/waitlist` takes a JSON body:
+
+```json
+{ "email": "you@example.com", "product": "livingbrain", "captchaToken": "<turnstile>" }
+```
+
+`captchaToken` comes from a Turnstile widget on livingbrain.wiki (whose secret
+is the `TURNSTILE_SECRET` Worker secret); `product` must be `livingbrain`.
+`ref`, `answers` and `locale` are optional. A join answers `202 {"ok":true}`
+for any address — it never reveals whether the address was already known (a
+repeat inside the send cooldown answers the same and sends nothing). `400` is
+an unknown `product`, `403` a refused captcha, `429` a tripped rate limit.
+
+Joining sends one confirmation mail through Owlpost. Following the link
+(`GET /v1/waitlist/confirm?token=…`) confirms the entry, assigns its place in
+the queue, and redirects to the site. The operator reads the list with:
+
+```sh
+curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://api.livingbrain.wiki/v1/waitlist/admin/export.csv
+```
+
+The D1 schema is in `crates/livingbrain-venture/migrations/`, applied with
+`npx wrangler d1 migrations apply livingbrain`. The Worker secrets to set are
+`HARNESS_SECRET`, `OWLPOST_API_KEY`, `TURNSTILE_SECRET` and `ADMIN_TOKEN`.
+
 ## How it will work
 
 ```mermaid

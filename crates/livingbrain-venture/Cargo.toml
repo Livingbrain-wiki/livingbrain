@@ -21,8 +21,20 @@ workspace = true
 # depend on `cratefield-core` only; see the root Cargo.toml.
 cratefield-core = { workspace = true }
 cratefield-runtime-cloudflare = { workspace = true }
+# The waitlist (issue #23): the harness module plus the Owlpost mail and
+# Turnstile captcha adapters it needs. The venture, not a module, names them.
+cratefield-module-waitlist = { workspace = true }
+cratefield-adapter-owlpost = { workspace = true }
+cratefield-adapter-turnstile = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
 worker = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true }
+
+[dev-dependencies]
+# Native-only: mounts the venture's waitlist composition over the kit's fakes
+# and an in-memory SQLite database (cratefield-testing's default `harness`
+# feature). Never part of the wasm graph.
+cratefield-testing = { workspace = true }
+pollster = { workspace = true }
