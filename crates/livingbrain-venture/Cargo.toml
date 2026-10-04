@@ -21,9 +21,25 @@ workspace = true
 # depend on `cratefield-core` only; see the root Cargo.toml.
 cratefield-core = { workspace = true }
 cratefield-runtime-cloudflare = { workspace = true }
+# The mail round (issue #63): `mail-templates` renders mail in the theme beside
+# this crate and Owlpost is the `Mailer` port the runtime holds.
+cratefield-adapter-owlpost = { workspace = true }
+cratefield-mail-templates = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 worker = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true }
+
+[dev-dependencies]
+# The fake HTTP client the Owlpost test records a send with, the snapshot tool
+# for the rendered mail layouts, `serde_json` for the sample data and the
+# recorded body, the block-on the async `Mailer::send` needs, and the waitlist
+# whose templates the tests render directly (the module is not mounted). Dev-only:
+# none of them reach the wasm graph.
+cratefield-module-waitlist = { workspace = true }
+cratefield-testing = { workspace = true }
+insta = { workspace = true }
+pollster = { workspace = true }
+serde_json = { workspace = true }

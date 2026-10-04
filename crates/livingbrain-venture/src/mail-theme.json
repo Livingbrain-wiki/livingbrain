@@ -1,0 +1,18 @@
+{
+  "brand_name": "Living Brain",
+  "wordmark": "livingbrain.wiki",
+  "site_url": "https://livingbrain.wiki",
+  "logo_url": "https://livingbrain.wiki/assets/email/logo-64.png",
+  "logo_alt": "Living Brain",
+  "logo_width": 32,
+  "logo_height": 32,
+  "logo_bg": null,
+  "light": {"bg":"#f2f8f8","card":"#fbfefe","border":"#d7e0e0","ink":"#101d21","text":"#3c4b4e","muted":"#4f5e62","accent":"#00704e","button":"#00704e","button_text":"#f6fefa","code_bg":"#e6efee"},
+  "dark":  {"bg":"#070f11","card":"#0c1719","border":"#1c272a","ink":"#e9f0f0","text":"#b4c0c2","muted":"#8e9b9e","accent":"#56f1b0","button":"#56f1b0","button_text":"#001d10","code_bg":"#142023"},
+  "font": "'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif",
+  "mono": "'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace",
+  "radius": 16,
+  "button_radius": 10,
+  "footer": [],
+  "contact": "hello@livingbrain.wiki"
+}

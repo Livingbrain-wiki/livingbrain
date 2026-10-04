@@ -1,0 +1,5 @@
+---
+source: crates/livingbrain-venture/tests/mail.rs
+expression: mail.subject
+---
+Confirm your spot on the Living Brain waitlist
