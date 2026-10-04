@@ -1047,6 +1047,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-pages"
+version = "0.1.0"
+dependencies = [
+ "cratefield-core",
+ "cratefield-testing",
+ "pollster",
+ "sea-query",
+ "time",
+]
+
+[[package]]
 name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
@@ -1054,6 +1065,7 @@ dependencies = [
  "cratefield-runtime-cloudflare",
  "getrandom 0.4.3",
  "livingbrain-canary",
+ "livingbrain-pages",
  "worker",
 ]
 

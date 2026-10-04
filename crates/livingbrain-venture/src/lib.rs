@@ -11,6 +11,7 @@
 use cratefield_core::{Harness, Venture};
 use cratefield_runtime_cloudflare::{Cloudflare, serve};
 use livingbrain_canary::Canary;
+use livingbrain_pages::Pages;
 use std::sync::OnceLock;
 use worker::{Context, Env, Request, Response, event};
 
@@ -40,6 +41,7 @@ fn instance() -> &'static (Harness, Cloudflare) {
                     .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"]),
             )
             .module(Canary::new())
+            .module(Pages::new())
             .runtime(runtime.clone())
             .build()
             .expect("the livingbrain harness is valid");

@@ -22,6 +22,7 @@ workspace = true
 cratefield-core = { workspace = true }
 cratefield-runtime-cloudflare = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
+livingbrain-pages = { path = "../livingbrain-pages" }
 worker = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
