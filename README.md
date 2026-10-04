@@ -23,6 +23,8 @@
   &nbsp;·&nbsp;
   <a href="docs/issues/">Issue specs</a>
   &nbsp;·&nbsp;
+  <a href="docs/origin-and-plan.md">Origin and plan</a>
+  &nbsp;·&nbsp;
   <a href="https://livingbrain.wiki/llms.txt">llms.txt</a>
   &nbsp;·&nbsp;
   <a href="https://factory0.ventures">Factory Zero</a>
