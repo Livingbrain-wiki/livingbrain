@@ -37,6 +37,8 @@ cratefield-testing = "=0.5.0"
 cratefield-adapter-owlpost = "=0.2.0"
 cratefield-mail-templates = "=0.1.0"
 cratefield-module-waitlist = "=0.4.0"
+# Turnstile, the captcha on the waitlist's public join form (issue #23).
+cratefield-adapter-turnstile = "=0.3.0"
 
 # The Workers SDK, pinned to the version the runtime crate targets. Only the
 # venture crate names it.

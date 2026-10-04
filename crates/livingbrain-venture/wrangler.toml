@@ -13,6 +13,40 @@ command = "cargo install -q worker-build && worker-build --release"
 [observability]
 enabled = true
 
+# The deployment's environment, read by the harness (`EnvConfig`, shared
+# secrets-before-vars) to arm the production-only rules: the fail-closed
+# captcha gate and the readiness checks. Declared here, not in `src/lib.rs`,
+# because `Harness::build` takes no config — a compiled-in production would
+# refuse to build rather than serve and say what it is missing (issue #143).
+# `ENV` is set in the `[vars]` table below.
+
+# Required Worker secrets, set with `wrangler secret put <NAME>` (names only;
+# no values here). `HARNESS_SECRET` is the `Signer` behind the confirm links,
+# `OWLPOST_API_KEY` the mailer (absent → joins are captured but nothing sends),
+# `TURNSTILE_SECRET` the captcha on the join form, `ADMIN_TOKEN` the CSV
+# export.
+
+# Workers Rate Limiting backs the harness's throttle: the waitlist module's
+# public join route and the admin floor both consult it, and readiness
+# refuses a venture with public writes unless a limiter resolves (issue #437).
+# `simple` allows 30 `limit()` calls per key per 60s — the only supported
+# shape. The id is a placeholder, as the D1/KV ids above are.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "4001"
+
+[ratelimits.simple]
+limit = 30
+period = 60
+
+# The Worker's own cron. `serve_scheduled` fans a firing out over this
+# Worker's modules — the `waitlist` module prunes expired confirmation claims
+# on it. A trigger configured on some other Worker never reaches this
+# handler, so the cron has to live here or the pass silently never runs.
+# Daily, in a quiet hour; the pass is safe at any cadence.
+[triggers]
+crons = ["19 4 * * *"]
+
 # D1 database `livingbrain`. The id is a PLACEHOLDER: `wrangler dev --local`
 # simulates the database and ignores it, so this is enough locally. A real
 # deployment needs the id printed by `wrangler d1 create livingbrain`, which
@@ -56,6 +90,7 @@ id = "placeholder-run-wrangler-kv-namespace-create"
 # mail renders in is `src/mail-theme.json` beside this file, compiled into the
 # Worker. Mail leaves as `multipart/alternative` — HTML and its text twin.
 [vars]
+ENV = "production"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 # The origin this Worker answers on — under `wrangler dev` that is the
 # cloudflared tunnel, because Slack must call the callback back over HTTPS.
