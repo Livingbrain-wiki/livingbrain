@@ -83,31 +83,53 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
+      # Until docs/deploy.md's one-time setup is done (the Cloudflare secrets
+      # and the real ids in wrangler.toml), a merge skips staging with a
+      # notice instead of failing main. Production is not gated: a `v*` tag
+      # without the setup still fails loudly.
+      - name: Check the deploy setup
+        id: gate
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::staging deploy skipped: set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (docs/deploy.md)"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.ok == 'true'
       - uses: dtolnay/rust-toolchain@master
+        if: steps.gate.outputs.ok == 'true'
         with:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.ok == 'true'
       - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ok == 'true'
         with:
           node-version: lts/*
       - name: Build the Worker
+        if: steps.gate.outputs.ok == 'true'
         working-directory: crates/livingbrain-venture
         run: cargo install -q --locked worker-build
       - name: Apply D1 migrations
+        if: steps.gate.outputs.ok == 'true'
         working-directory: crates/livingbrain-venture
         run: npx --yes "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env staging --remote
       - name: Deploy to staging
+        if: steps.gate.outputs.ok == 'true'
         id: deploy
         working-directory: crates/livingbrain-venture
         run: npx --yes "wrangler@$WRANGLER_VERSION" deploy --env staging
       - name: Seed the smoke-test workspace
+        if: steps.gate.outputs.ok == 'true'
         working-directory: crates/livingbrain-venture
         run: |
           npx --yes "wrangler@$WRANGLER_VERSION" d1 execute DB --env staging --remote \
             --file ../../scripts/deploy/seed-staging.sql
       - name: Smoke test
+        if: steps.gate.outputs.ok == 'true'
         env:
           HARNESS_SECRET: ${{ secrets.STAGING_HARNESS_SECRET }}
           ENV: staging
