@@ -1,6 +1,10 @@
 //! Behaviour tests for the page store, against a real SQL database (the kit's
 //! in-memory SQLite adapter, with the module's migrations applied) and a
-//! `MemoryBlob`/`FixedClock`.
+//! `MemoryBlob`/`FixedClock`. Bodies are sealed on the way in, so "exactly
+//! what was written" is now also a statement about the envelope; the
+//! encryption itself is in `crypto.rs`.
+
+mod common;
 
 use std::sync::Arc;
 
@@ -19,7 +23,13 @@ fn store() -> PageStore {
     let kit = TestHarness::new(vec![Box::new(Pages::new())]);
     let blob: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
-    PageStore::new(kit.db.clone(), blob, clock, Arc::new(UlidIdGen))
+    PageStore::new(
+        kit.db.clone(),
+        blob,
+        common::kms(),
+        clock,
+        Arc::new(UlidIdGen),
+    )
 }
 
 /// A Person page body, so the store tests do not repeat the frontmatter.
@@ -343,7 +353,13 @@ fn every_write_gets_its_own_body_key() {
         let kit = TestHarness::new(vec![Box::new(Pages::new())]);
         let blob: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
         let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
-        let store = PageStore::new(kit.db.clone(), blob, clock, Arc::new(UlidIdGen));
+        let store = PageStore::new(
+            kit.db.clone(),
+            blob,
+            common::kms(),
+            clock,
+            Arc::new(UlidIdGen),
+        );
 
         store
             .write("team", "ada", human("u1", None, person("v1")))

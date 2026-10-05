@@ -39,6 +39,10 @@ cratefield-testing = "=0.5.0"
 cratefield-adapter-owlpost = "=0.2.0"
 cratefield-mail-templates = "=0.1.0"
 cratefield-module-waitlist = "=0.4.0"
+# The KMS port: the only thing the page store asks of a key custodian is
+# wrap and unwrap a data key (issue #43). It has no dependency on
+# `cratefield-core` at all, so it cannot pull a second copy of the ports in.
+cratefield-kms = "=0.2.0"
 # Turnstile, the captcha on the waitlist's public join form (issue #23).
 cratefield-adapter-turnstile = "=0.3.0"
 
@@ -60,6 +64,18 @@ async-trait = "0.1.92"
 # wasm-safe by construction.
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 bytes = "1.12.1"
+# The page store's cipher (issue #43): XChaCha20-Poly1305, `alloc` only, safe
+# with random 24-byte nonces. It is the cipher the harness's own KMS port
+# (`cratefield-kms`) seals with, so there is one cipher in the graph and one
+# set of constants to reason about.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+# The blind index (issue #43): `HMAC-SHA256` over a key derived from the scope
+# DEK. Both are the `0.12`/`0.10` pair the tree already resolves.
+hmac = "0.12.1"
+sha2 = "0.10.9"
+# Wipes the derived blind-index key when the call that needed it is over, the
+# way `cratefield-kms` wipes a DEK.
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 # The URL-encoding `axum` and `url` already resolve.
 percent-encoding = "2.3"
 pollster = { version = "0.4", features = ["macro"] }
@@ -72,6 +88,10 @@ tower = { version = "0.5.3", features = ["util"] }
 # Snapshot tests for the venture's branded mail (issue #63). Dev-only; pinned
 # like the rest so the workspace resolves one `insta`.
 insta = "1.49.0"
+
+# The blind-index scope property test (issue #43). Dev-only, so proptest's tree
+# never reaches a module's wasm graph.
+proptest = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
