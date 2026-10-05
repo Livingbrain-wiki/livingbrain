@@ -1,14 +1,18 @@
 # The Living Brain Worker's Wrangler config, beside the venture crate. Run
 # `npx wrangler dev --local` from this directory (npx, so no package.json or
 # node_modules lands in the repo). `worker-build` compiles the crate to wasm
-# and writes `build/worker/shim.mjs`, the Worker's entry point. Nothing here
-# is deployed.
+# and writes `build/worker/shim.mjs`, the Worker's entry point.
+#
+# The top-level config is local development and is never deployed. The
+# `[env.staging]` and `[env.production]` blocks below are what CI deploys;
+# docs/deploy.md is the runbook, including the one-time setup every
+# placeholder id here still needs.
 name = "livingbrain"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+command = "cargo install -q --locked worker-build && worker-build --release"
 
 [observability]
 enabled = true
@@ -62,4 +66,72 @@ WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 WORKSPACES_REDIRECT_BASE = "https://replace-with-your-tunnel.trycloudflare.com"
 # The mail sender. The Worker falls back to this same address when the binding
 # is absent, so this line documents the default as much as it sets it.
+MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
+
+# ---------------------------------------------------------------------------
+# Deployed environments (issue #93). Wrangler does NOT inherit bindings or
+# vars into an environment, so each block below repeats the whole set. The
+# ids are PLACEHOLDERS of the same kind as the ones above: the owner replaces
+# each with the id `wrangler d1 create livingbrain-staging` or
+# `wrangler kv namespace create` prints. Secrets are never in this file —
+# they are per environment, set with `wrangler secret put <NAME> --env
+# staging` (or `production`), which stores them in Cloudflare and not here.
+# docs/deploy.md lists the exact set and the GitHub secrets the workflow
+# reads. ---------------------------------------------------------------------------
+
+# Staging: every merge to `main`. A failed smoke test rolls this back.
+[env.staging]
+name = "livingbrain-staging"
+compatibility_date = "2026-09-01"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "livingbrain-staging"
+database_id = "placeholder-run-wrangler-d1-create-livingbrain-staging"
+migrations_dir = "migrations"
+
+[[env.staging.r2_buckets]]
+binding = "R2"
+bucket_name = "livingbrain-blobs-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "KV"
+id = "placeholder-run-wrangler-kv-namespace-create-staging"
+
+# `ENV` is what the harness reads: it names the deployment environment to the
+# production readiness gate and binds every cookie this Worker signs, so a
+# token minted in staging never verifies in production. `HARNESS_VENTURE` is
+# left unset; set it per environment only if the same `HARNESS_SECRET` is ever
+# shared with another venture, which nothing here does.
+[env.staging.vars]
+ENV = "staging"
+WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
+WORKSPACES_REDIRECT_BASE = "https://staging-api.livingbrain.wiki"
+MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
+
+# Production: tags only, and only through the `production` GitHub
+# environment's required reviewers (the owner). Same placeholder rule; the
+# database and bucket carry no `-staging` suffix.
+[env.production]
+name = "livingbrain"
+compatibility_date = "2026-09-01"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "livingbrain"
+database_id = "placeholder-run-wrangler-d1-create-livingbrain"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "R2"
+bucket_name = "livingbrain-blobs"
+
+[[env.production.kv_namespaces]]
+binding = "KV"
+id = "placeholder-run-wrangler-kv-namespace-create"
+
+[env.production.vars]
+ENV = "production"
+WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
+WORKSPACES_REDIRECT_BASE = "https://api.livingbrain.wiki"
 MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
