@@ -4,7 +4,9 @@
 //! It mounts every `livingbrain-*` module into one Cratefield harness and
 //! serves it on Cloudflare Workers: the empty `canary` module from the
 //! scaffold, and `workspaces` — one tenant per Slack workspace, sign in with
-//! Slack, and the member mirror the Events webhook (issue #6) refreshes.
+//! Slack, and the member mirror the Events webhook (issue #6) refreshes;
+//! and `pages` — versioned entity pages, Markdown bodies in R2 and metadata,
+//! links and history in D1 (issue #15).
 //! `wrangler.toml` and the D1 migrations are beside this crate.
 //!
 //! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
@@ -22,6 +24,7 @@ use cratefield_core::{Harness, Venture};
 use cratefield_mail_templates::MailTheme;
 use cratefield_runtime_cloudflare::{Cloudflare, FetchClient, WorkersClock, serve};
 use livingbrain_canary::Canary;
+use livingbrain_pages::Pages;
 use livingbrain_workspaces::Workspaces;
 use std::sync::{Arc, OnceLock};
 use worker::{Context, Env, Request, Response, event};
@@ -116,6 +119,7 @@ fn build(mail: MailSettings) -> (Harness, Cloudflare) {
         )
         .module(Canary::new())
         .module(Workspaces::new())
+        .module(Pages::new())
         .runtime(runtime.clone())
         .build()
         .expect("the livingbrain harness is valid");
