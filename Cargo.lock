@@ -1465,6 +1465,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-channel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "livingbrain-cli"
 version = "0.1.0"
 dependencies = [

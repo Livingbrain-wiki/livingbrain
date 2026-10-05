@@ -1,0 +1,18 @@
+[package]
+name = "livingbrain-channel"
+description = "The chat-app port: normalised messages, scopes and the Slack and Discord adapters. The agent loop and memory only ever see what this crate hands them"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The normalised event and reply shapes are (de)serialised over these two. Pure
+# Rust, wasm-safe, already in the lockfile.
+serde = { workspace = true }
+serde_json = { workspace = true }
