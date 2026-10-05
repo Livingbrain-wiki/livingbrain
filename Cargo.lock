@@ -279,6 +279,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cratefield-adapter-turnstile"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9a5887fe245caf04f5a66d3c91e07321f7cb8363610191db9dfc9a5e51fdb1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cratefield-core",
+ "http",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "cratefield-auth-client"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1170,6 +1185,7 @@ name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
  "cratefield-adapter-owlpost",
+ "cratefield-adapter-turnstile",
  "cratefield-core",
  "cratefield-mail-templates",
  "cratefield-module-waitlist",
