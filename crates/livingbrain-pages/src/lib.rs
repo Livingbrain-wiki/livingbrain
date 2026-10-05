@@ -12,6 +12,13 @@
 //!   page `human_pending_version`; a brain write that has not seen that edit
 //!   is refused. A human edit is first-class.
 //!
+//! A third property arrived with issue #43: **a body is sealed at rest.** Each
+//! scope has a data key, held only wrapped by a key custodian; bodies are
+//! XChaCha20-Poly1305 envelopes in R2, search runs off a blind index of keyed
+//! HMACs rather than over the Markdown, and forgetting a scope destroys the
+//! key so the bodies left in the blob store are unreadable. See
+//! `docs/adr/0003-per-scope-encryption.md`.
+//!
 //! There is no HTTP surface yet: authentication and workspaces are a sibling
 //! issue, and an unauthenticated write route would be a hole. The module ships
 //! its tables and its [`PageStore`]; the routes arrive with the auth work.
@@ -19,24 +26,36 @@
 #![forbid(unsafe_code)]
 
 mod entity;
+mod keys;
 mod store;
 
 pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
-pub use store::{Author, AuthorKind, Page, PageError, PageStore, PageWrite, VersionMeta};
+pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
+pub use store::{
+    Author, AuthorKind, Page, PageError, PageStore, PageWrite, ReencryptReport, SearchHit,
+    VersionMeta,
+};
 
 use cratefield_core::{
     Config, ConfigError, DataKind, Migrations, Module, ModuleContext, PersonalDataSet, Port,
     SqlMigration,
 };
 
-/// The one migration: `pages`, `page_versions` and `page_links`, in the
-/// portable SQL subset so Postgres runs the same file.
+/// The pages, links and history tables, in the portable SQL subset so
+/// Postgres runs the same file.
 const MIGRATION_INIT: SqlMigration = SqlMigration::new(
     "0001",
     "init",
     include_str!("../migrations/sqlite/0001_init.sql"),
+);
+
+/// The scope keys and the blind index (issue #43), same portable subset.
+const MIGRATION_SCOPE_KEYS: SqlMigration = SqlMigration::new(
+    "0002",
+    "scope_keys",
+    include_str!("../migrations/sqlite/0002_scope_keys.sql"),
 );
 
 /// The pages module.
@@ -60,12 +79,21 @@ impl Module for Pages {
         env!("CARGO_PKG_VERSION")
     }
 
+    /// The key custodian is not here: `cratefield-core` has no `Kms` port,
+    /// and `PageStore::new` is handed one by whoever composes the store. When
+    /// the runtime grows a `Port::Kms` this moves beside it.
     fn requires(&self) -> &'static [Port] {
         &[Port::Db, Port::Blob, Port::Clock, Port::IdGen]
     }
 
     fn tables(&self) -> &'static [&'static str] {
-        &["pages", "page_versions", "page_links"]
+        &[
+            "pages",
+            "page_versions",
+            "page_links",
+            "scope_keys",
+            "page_terms",
+        ]
     }
 
     /// A page may describe a person, so all three tables are declared — and
@@ -96,12 +124,32 @@ impl Module for Pages {
                 "The `[[wiki-link]]` targets a page names, which can be people.",
                 WHY,
             ),
+            // The two tables issue #43 added. Both hold a body's words only
+            // in a keyed form — the blind index stores an HMAC, and the key
+            // table stores a key that is itself wrapped — so an equality
+            // predicate cannot reach a word in either, and saying `none`
+            // would report them as holding nobody's data.
+            PersonalDataSet::unreachable(
+                "scope_keys",
+                DataKind::Identifier,
+                "One wrapped data key per scope version, and the key custodian's name for it.",
+                "the row holds a KMS-wrapped key and no subject column; a scope's keys are \
+                 destroyed wholesale by PageStore::forget_scope, which is the erasure",
+            ),
+            PersonalDataSet::unreachable(
+                "page_terms",
+                DataKind::Content,
+                "A blind index of the words in each page's current body, one keyed HMAC per \
+                 distinct token.",
+                "the row holds HMACs of tokens, not tokens, so no erasure query can match a \
+                 word; forgetting a scope deletes its rows with its key",
+            ),
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_SCOPE_KEYS];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);

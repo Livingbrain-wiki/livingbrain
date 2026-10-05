@@ -12,9 +12,14 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-# The only Cratefield dependency a module is allowed: the ports. `axum`
-# arrives through `cratefield_core::axum`, so it is not named directly.
+# The only Cratefield dependencies a module is allowed: the ports, and the
+# KMS port beside them. `axum` arrives through `cratefield_core::axum`, so it
+# is not named directly.
 cratefield-core = { workspace = true }
+# Wrap/unwrap a scope's data key (issue #43). A harness port, like the ones
+# above, and it names no `cratefield-core` — so it cannot split the ports in
+# two.
+cratefield-kms = { workspace = true }
 # `sea_query::Value` is what a `Statement` binds, and `time` formats the
 # version timestamps — neither is re-exported by `cratefield-core`. Both are
 # pure Rust, already in the tree and wasm-safe (a module's wasm build is
@@ -22,10 +27,24 @@ cratefield-core = { workspace = true }
 sea-query = { version = "0.32", default-features = false, features = ["backend-sqlite", "thread-safe"] }
 time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
 
+# Envelope encryption for page bodies and the blind index (issue #43), all
+# pinned to the versions the harness already resolves.
+base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+getrandom = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
 # (issue #20). Dev-only, so sqlx and tokio never reach the module's wasm graph.
 cratefield-testing = { workspace = true, features = ["postgres"] }
+# `common`'s recording fakes implement the `Blob` and `Database` ports, and
+# those ports are declared with `async_trait`. It is already in the tree.
+async-trait = { workspace = true }
+# The blind-index scope property test (issue #43). Dev-only.
+proptest = { workspace = true }
 # An executor for the store's async tests, the same one the harness's own
 # module suites use. Dev-only, so it never reaches the module's dependency
 # tree either.

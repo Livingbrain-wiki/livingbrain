@@ -30,5 +30,9 @@
   "waitlist/0006": {
     "file": "0008_waitlist_0006_position_counter.sql",
     "sha256": "671812656c87303ee53fd845c3745bbe9d47d12ffecc9e7485d3395541cb821a"
+  },
+  "pages/0002": {
+    "file": "0009_pages_0002_scope_keys.sql",
+    "sha256": "8af0624508cb33d326fc87b37d6a11f4f06c12f6c04843b11a46c3f679219b37"
   }
 }
