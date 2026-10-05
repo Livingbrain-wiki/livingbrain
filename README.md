@@ -63,8 +63,8 @@ repository today, and what does not, and is updated as issues land.
 
 | | |
 | :--- | :--- |
-| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, and a member mirror (#5) |
-| **Not built** | Every other product feature: the wiki, permissions, the agent loop, MCP, the CLI, the app — and, within Slack, the Events webhook that keeps the member mirror fresh (#6). The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
+| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the `livingbrain` CLI (`crates/livingbrain-cli`, a client of the API: `login`, `ask`, `search`, `note`, `page`, `export`, `mcp`), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, and a member mirror (#5) |
+| **Not built** | Every other product feature: the wiki, permissions, the agent loop, the API the CLI talks to, the app — and, within Slack, the Events webhook that keeps the member mirror fresh (#6). The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
 
 The composition is one Worker mounting modules into a Cratefield harness; the
 venture crate is the only place a runtime or a vendor SDK appears.
@@ -84,6 +84,8 @@ Harness::builder()
 
 ```sh
 cargo test --workspace                    # fmt, clippy and the parity matrix also run in CI
+cargo run -p livingbrain-cli -- --help    # the CLI: login, ask, search, note, page, export, mcp
+cargo run -p livingbrain-cli -- login     # device flow; the token goes in your OS keychain
 cd crates/livingbrain-venture
 npx wrangler d1 migrations apply livingbrain --local   # creates the tables (see below)
 npx wrangler dev --local                  # builds the Worker to wasm and serves it locally
