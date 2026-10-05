@@ -46,7 +46,7 @@ async fn joining_sends_one_confirmation_and_the_cooldown_suppresses_a_repeat() {
     let mail = kit.mailer.last_message().expect("a confirmation mail");
     assert!(mail.to.contains("nick@example.com"), "to: {}", mail.to);
     assert!(
-        mail.subject.contains("livingbrain"),
+        mail.subject.contains("Living Brain"),
         "subject names the product: {}",
         mail.subject
     );
