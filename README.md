@@ -93,9 +93,10 @@ curl -s http://127.0.0.1:8787/__health    # the harness health route
 curl -si http://127.0.0.1:8787/v1/workspaces/slack/start   # 302 to Slack, or 503 without credentials
 ```
 
-Nothing here is deployed: `wrangler dev` is local only, the D1/R2/KV ids in
-`wrangler.toml` are placeholders, and no `wrangler deploy` or `wrangler d1
-create` runs anywhere in this repository.
+Nothing here is deployed: `wrangler dev` is local only, and the D1/R2/KV ids in
+`wrangler.toml` are placeholders. Staging and production are deployed by
+`.github/workflows/deploy.yml`; [`docs/deploy.md`](docs/deploy.md) is the
+runbook.
 
 #### Sign in with Slack locally
 
