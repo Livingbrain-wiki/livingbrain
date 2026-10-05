@@ -9,6 +9,11 @@
 //! Both names start with `__Host-`, which a browser accepts only with
 //! `Secure`, `Path=/` and no `Domain`; the header builders below set
 //! exactly that.
+//!
+//! ADR 0002 made the session's workspace id ours rather than a Slack team
+//! id, and gave the flow cookie an optional workspace: a cookie with one is
+//! a *link* (the caller is already signed in and is binding a team to their
+//! workspace), a cookie without one is a *sign in*.
 
 use cratefield_core::axum::http::{HeaderMap, HeaderValue, header};
 use cratefield_core::{Clock, Kid, Payload, Signer};
@@ -27,6 +32,10 @@ pub const SESSION_PURPOSE: &str = "workspaces.session";
 
 /// How long a started sign-in stays valid, in seconds.
 pub(crate) const FLOW_TTL_SECS: i64 = 600;
+/// How long a sign-in link can be spent, in seconds — fifteen minutes, the
+/// TTL ADR 0002 names for a magic link. Long enough to read a mail and
+/// click, short enough that a link forwarded by accident stops working.
+pub(crate) const SIGN_IN_TTL_SECS: i64 = 900;
 /// How long a session lasts, in seconds — seven days.
 pub(crate) const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
@@ -40,6 +49,20 @@ pub(crate) struct Flow {
     pub nonce: String,
     /// Unix seconds; the cookie is refused at or after this instant.
     pub expires_at: i64,
+    /// The workspace the caller was signed in to when the flow was started,
+    /// which is what tells a *link* apart from a *sign in* (ADR 0002).
+    ///
+    /// It rides in the cookie rather than in the request because it is
+    /// only trustworthy if the server put it there: a caller cannot ask to
+    /// link a team to somebody else's workspace by editing a parameter.
+    /// `None` on a `/slack/start` cookie, which is a sign in and resolves
+    /// its workspace from the `id_token` instead.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The member the caller was signed in as, the row a linked Slack
+    /// user id is bound to. `None` on a sign-in flow, for the same reason.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 /// The signed payload of the session cookie. It names *who* is signed in
@@ -47,9 +70,14 @@ pub(crate) struct Flow {
 /// ids, and never from request input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Session {
-    /// The Slack team id — the workspace.
-    pub team_id: String,
-    /// The Slack user id within that workspace.
+    /// The workspace — opaque and ours to mint since ADR 0002, not a Slack
+    /// team id. The alias reads a cookie sealed before this change, whose
+    /// payload named the Slack team id the workspace was created from;
+    /// those rows keep that id, so the old name still resolves.
+    #[serde(alias = "team_id")]
+    pub workspace_id: String,
+    /// The member within that workspace — a Slack user id for a member
+    /// first seen through Slack, a `usr_` id for one first seen by email.
     pub user_id: String,
     /// Unix seconds; the session is refused at or after this instant.
     pub exp: i64,

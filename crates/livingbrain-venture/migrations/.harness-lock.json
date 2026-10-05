@@ -34,5 +34,9 @@
   "pages/0002": {
     "file": "0009_pages_0002_scope_keys.sql",
     "sha256": "8af0624508cb33d326fc87b37d6a11f4f06c12f6c04843b11a46c3f679219b37"
+  },
+  "workspaces/0002": {
+    "file": "0010_workspaces_0002_identities.sql",
+    "sha256": "de7f6811c3753bd643158130f3d46aa16cfe7159e8f0f942c3b669ea57519168"
   }
 }
