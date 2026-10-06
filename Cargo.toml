@@ -70,7 +70,9 @@ bytes = "1.12.1"
 # set of constants to reason about.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 # The blind index (issue #43): `HMAC-SHA256` over a key derived from the scope
-# DEK. Both are the `0.12`/`0.10` pair the tree already resolves.
+# DEK. Both are the `0.12`/`0.10` pair the tree already resolves. `sha2` is
+# also the SHA-256 of a sign-in token, so only the hash of a magic link is
+# stored (issue #71).
 hmac = "0.12.1"
 sha2 = "0.10.9"
 # Wipes the derived blind-index key when the call that needed it is over, the

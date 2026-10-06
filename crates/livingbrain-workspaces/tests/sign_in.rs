@@ -8,7 +8,7 @@ mod support;
 
 use cratefield_core::axum::http::StatusCode;
 use cratefield_core::{HmacSigner, Kid, MapConfig, Payload, Signer};
-use livingbrain_workspaces::{FLOW_COOKIE, SESSION_COOKIE, UserChange};
+use livingbrain_workspaces::{FLOW_COOKIE, SESSION_COOKIE, SESSION_PURPOSE, UserChange};
 use serde_json::{Value, json};
 use support::*;
 
@@ -67,12 +67,19 @@ async fn start_seals_a_flow_cookie_and_sends_the_browser_to_slack() {
 async fn signing_in_creates_the_workspace_and_serves_me() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let session = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
 
-    let me = get(&kit.router, ME, &[(SESSION_COOKIE, &session)]).await;
+    let me = get(&kit.router, ME, &alice.cookies()).await;
     assert_eq!(me.status, StatusCode::OK);
     let body = me.json();
-    assert_eq!(body["workspace"]["id"], TEAM_A);
+    // ADR 0002: the workspace id is ours, not the Slack team id, so a team
+    // that has never been seen here gets `ws_` plus a minted id.
+    assert!(
+        alice.workspace_id.starts_with("ws_"),
+        "a new workspace id is ours: {}",
+        alice.workspace_id
+    );
+    assert_eq!(body["workspace"]["id"], alice.workspace_id);
     assert_eq!(body["workspace"]["owner_id"], ALICE);
     assert_eq!(body["workspace"]["name"], "T0AAAAAAA workspace");
     assert_eq!(body["member"]["user_id"], ALICE);
@@ -81,7 +88,7 @@ async fn signing_in_creates_the_workspace_and_serves_me() {
     assert_eq!(body["member"]["timezone"], Value::Null);
     assert_eq!(body["is_owner"], true);
 
-    let members = get(&kit.router, MEMBERS, &[(SESSION_COOKIE, &session)]).await;
+    let members = get(&kit.router, MEMBERS, &alice.cookies()).await;
     assert_eq!(members.status, StatusCode::OK);
     let list = members.json();
     let rows = list.as_array().expect("an array");
@@ -138,14 +145,15 @@ async fn the_first_signer_owns_the_workspace_and_no_later_one_can_change_it() {
     let kit = harness(&http);
 
     let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
-    let alice_me = get(&kit.router, ME, &[(SESSION_COOKIE, &alice)])
-        .await
-        .json();
+    let alice_me = get(&kit.router, ME, &alice.cookies()).await.json();
     assert_eq!(alice_me["is_owner"], true);
     assert_eq!(alice_me["workspace"]["owner_id"], ALICE);
 
     let bob = sign_in(&kit, &http, TEAM_A, BOB, "Bob").await;
-    let bob_me = get(&kit.router, ME, &[(SESSION_COOKIE, &bob)]).await.json();
+    // A team that is already linked keeps the workspace it was linked to,
+    // so signing a second person into it is not a second workspace.
+    assert_eq!(bob.workspace_id, alice.workspace_id);
+    let bob_me = get(&kit.router, ME, &bob.cookies()).await.json();
     assert_eq!(bob_me["is_owner"], false);
     assert_eq!(
         bob_me["workspace"]["owner_id"], ALICE,
@@ -153,22 +161,17 @@ async fn the_first_signer_owns_the_workspace_and_no_later_one_can_change_it() {
     );
 
     let carol = sign_in(&kit, &http, TEAM_A, CAROL, "Carol").await;
-    let carol_me = get(&kit.router, ME, &[(SESSION_COOKIE, &carol)])
-        .await
-        .json();
+    assert_eq!(carol.workspace_id, alice.workspace_id);
+    let carol_me = get(&kit.router, ME, &carol.cookies()).await.json();
     assert_eq!(carol_me["is_owner"], false);
     assert_eq!(carol_me["workspace"]["owner_id"], ALICE);
 
     // Alice's own view never stops saying she owns it.
-    let alice_again = get(&kit.router, ME, &[(SESSION_COOKIE, &alice)])
-        .await
-        .json();
+    let alice_again = get(&kit.router, ME, &alice.cookies()).await.json();
     assert_eq!(alice_again["is_owner"], true);
 
     // Three members, one owner.
-    let rows = get(&kit.router, MEMBERS, &[(SESSION_COOKIE, &alice)])
-        .await
-        .json();
+    let rows = get(&kit.router, MEMBERS, &alice.cookies()).await.json();
     assert_eq!(rows.as_array().expect("an array").len(), 3);
 }
 
@@ -176,13 +179,20 @@ async fn the_first_signer_owns_the_workspace_and_no_later_one_can_change_it() {
 async fn a_second_workspace_has_its_own_owner() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
     let dave = sign_in(&kit, &http, TEAM_B, DAVE, "Dave").await;
 
-    let dave_me = get(&kit.router, ME, &[(SESSION_COOKIE, &dave)])
-        .await
-        .json();
-    assert_eq!(dave_me["workspace"]["id"], TEAM_B);
+    // Two teams, two workspaces, two ids — and neither is a team id.
+    assert!(
+        dave.workspace_id.starts_with("ws_"),
+        "{}",
+        dave.workspace_id
+    );
+    assert_ne!(dave.workspace_id, alice.workspace_id);
+    assert_ne!(dave.workspace_id, TEAM_B);
+
+    let dave_me = get(&kit.router, ME, &dave.cookies()).await.json();
+    assert_eq!(dave_me["workspace"]["id"], dave.workspace_id);
     assert_eq!(dave_me["workspace"]["owner_id"], DAVE);
     assert_eq!(dave_me["is_owner"], true);
 }
@@ -199,30 +209,27 @@ async fn a_member_of_one_workspace_can_never_read_another() {
     let dave = sign_in(&kit, &http, TEAM_B, DAVE, "Dave").await;
     let _ = &bob;
 
-    let a = get(&kit.router, MEMBERS, &[(SESSION_COOKIE, &alice)])
-        .await
-        .json();
+    let a = get(&kit.router, MEMBERS, &alice.cookies()).await.json();
     assert_eq!(user_ids(&a), vec![ALICE, BOB]);
-    let b = get(&kit.router, MEMBERS, &[(SESSION_COOKIE, &dave)])
-        .await
-        .json();
+    let b = get(&kit.router, MEMBERS, &dave.cookies()).await.json();
     assert_eq!(user_ids(&b), vec![DAVE]);
 
-    let a_me = get(&kit.router, ME, &[(SESSION_COOKIE, &alice)])
-        .await
-        .json();
-    assert_eq!(a_me["workspace"]["id"], TEAM_A);
-    let b_me = get(&kit.router, ME, &[(SESSION_COOKIE, &dave)])
-        .await
-        .json();
-    assert_eq!(b_me["workspace"]["id"], TEAM_B);
+    let a_me = get(&kit.router, ME, &alice.cookies()).await.json();
+    assert_eq!(a_me["workspace"]["id"], alice.workspace_id);
+    let b_me = get(&kit.router, ME, &dave.cookies()).await.json();
+    assert_eq!(b_me["workspace"]["id"], dave.workspace_id);
 
     // No route takes a workspace id from the request, so pointing one at
-    // the other workspace changes nothing.
+    // the other workspace changes nothing. Every spelling the old id went
+    // by is in the query string, because every one of them is a value the
+    // caller could have edited.
     let forced = get(
         &kit.router,
-        &format!("{MEMBERS}?workspace_id={TEAM_B}&team_id={TEAM_B}&id={TEAM_B}"),
-        &[(SESSION_COOKIE, &alice)],
+        &format!(
+            "{MEMBERS}?workspace_id={}&team_id={}&id={}",
+            dave.workspace_id, TEAM_B, dave.workspace_id
+        ),
+        &alice.cookies(),
     )
     .await;
     assert_eq!(forced.status, StatusCode::OK);
@@ -230,12 +237,12 @@ async fn a_member_of_one_workspace_can_never_read_another() {
 
     let forced_me = get(
         &kit.router,
-        &format!("{ME}?workspace_id={TEAM_B}"),
-        &[(SESSION_COOKIE, &alice)],
+        &format!("{ME}?workspace_id={}", dave.workspace_id),
+        &alice.cookies(),
     )
     .await
     .json();
-    assert_eq!(forced_me["workspace"]["id"], TEAM_A);
+    assert_eq!(forced_me["workspace"]["id"], alice.workspace_id);
     assert_eq!(forced_me["is_owner"], true);
 }
 
@@ -243,13 +250,13 @@ async fn a_member_of_one_workspace_can_never_read_another() {
 async fn a_validly_signed_session_for_a_workspace_you_are_not_in_is_refused() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
-    let _dave = sign_in(&kit, &http, TEAM_B, DAVE, "Dave").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let dave = sign_in(&kit, &http, TEAM_B, DAVE, "Dave").await;
 
     // The signature is genuine — this is what a tampered *claim* looks
     // like once it has been re-signed. The workspace exists; the person is
     // simply not a member of it, so the member lookup is what refuses.
-    let cross = signed_session(&kit, TEAM_B, ALICE, NOW + 3600);
+    let cross = signed_session(&kit, &dave.workspace_id, ALICE, NOW + 3600);
     assert_eq!(
         get(&kit.router, MEMBERS, &[(SESSION_COOKIE, &cross)])
             .await
@@ -264,7 +271,7 @@ async fn a_validly_signed_session_for_a_workspace_you_are_not_in_is_refused() {
     );
 
     // A user who has never signed in anywhere is refused too.
-    let ghost = signed_session(&kit, TEAM_A, "U0GHOST00", NOW + 3600);
+    let ghost = signed_session(&kit, &alice.workspace_id, "U0GHOST00", NOW + 3600);
     assert_eq!(
         get(&kit.router, ME, &[(SESSION_COOKIE, &ghost)])
             .await
@@ -282,17 +289,46 @@ async fn a_validly_signed_session_for_a_workspace_you_are_not_in_is_refused() {
     );
 }
 
+/// A session sealed before ADR 0002 named the Slack team id; the rows it
+/// names keep that id, so the old name still resolves to the workspace.
+#[pollster::test]
+async fn a_session_sealed_before_the_rename_still_resolves() {
+    let http = TokenHttp::new();
+    let kit = harness(&http);
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+
+    let before = kit.signer.sign(&Payload {
+        purpose: SESSION_PURPOSE.to_owned(),
+        subject: json!({
+            "team_id": alice.workspace_id,
+            "user_id": ALICE,
+            "exp": NOW + 3600,
+        })
+        .to_string(),
+        exp: None,
+        kid: Kid::Cur,
+    });
+    let me = get(&kit.router, ME, &[(SESSION_COOKIE, &before)]).await;
+    assert_eq!(me.status, StatusCode::OK, "the alias is honoured");
+    assert_eq!(me.json()["workspace"]["id"], alice.workspace_id);
+}
+
 #[pollster::test]
 async fn a_session_signed_with_another_key_is_refused() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
 
     let other = HmacSigner::new("a-different-signing-secret-for-the-tests", None)
         .expect("a long enough secret");
     let forged = other.sign(&Payload {
-        purpose: livingbrain_workspaces::SESSION_PURPOSE.to_owned(),
-        subject: json!({"team_id": TEAM_A, "user_id": ALICE, "exp": NOW + 3600}).to_string(),
+        purpose: SESSION_PURPOSE.to_owned(),
+        subject: json!({
+            "workspace_id": alice.workspace_id,
+            "user_id": ALICE,
+            "exp": NOW + 3600,
+        })
+        .to_string(),
         exp: None,
         kid: Kid::Cur,
     });
@@ -324,9 +360,9 @@ async fn reads_without_a_session_at_all_are_refused() {
 async fn an_expired_session_is_refused() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
 
-    let stale = signed_session(&kit, TEAM_A, ALICE, NOW - 1);
+    let stale = signed_session(&kit, &alice.workspace_id, ALICE, NOW - 1);
     assert_eq!(
         get(&kit.router, ME, &[(SESSION_COOKIE, &stale)])
             .await
@@ -334,7 +370,7 @@ async fn an_expired_session_is_refused() {
         StatusCode::UNAUTHORIZED
     );
     // Freshly signed, so only the expiry can be what refuses it.
-    let live = signed_session(&kit, TEAM_A, ALICE, NOW + 1);
+    let live = signed_session(&kit, &alice.workspace_id, ALICE, NOW + 1);
     assert_eq!(
         get(&kit.router, ME, &[(SESSION_COOKIE, &live)])
             .await
@@ -420,11 +456,11 @@ async fn a_flow_cookie_is_not_a_session_cookie() {
 
     // And the other way round: a session cookie offered at the callback is
     // not a flow cookie.
-    let session = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
     let response = get(
         &kit.router,
         "/v1/workspaces/slack/callback?code=c&state=whatever",
-        &[(FLOW_COOKIE, &session)],
+        &[(FLOW_COOKIE, &alice.cookie)],
     )
     .await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
@@ -544,7 +580,7 @@ async fn a_deployment_without_slack_credentials_answers_503_not_a_panic() {
 async fn a_user_change_refreshes_the_name_timezone_and_admin_flag_only() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
 
     let event = json!({
         "type": "user_change",
@@ -561,7 +597,7 @@ async fn a_user_change_refreshes_the_name_timezone_and_admin_flag_only() {
     });
     assert_eq!(apply_event(&kit, TEAM_A, &event).await, UserChange::Applied);
 
-    let session = signed_session(&kit, TEAM_A, ALICE, NOW + 3600);
+    let session = signed_session(&kit, &alice.workspace_id, ALICE, NOW + 3600);
     let me = get(&kit.router, ME, &[(SESSION_COOKIE, &session)])
         .await
         .json();
@@ -592,7 +628,7 @@ async fn a_user_change_refreshes_the_name_timezone_and_admin_flag_only() {
 async fn a_user_change_leaves_fields_slack_omitted_alone() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
 
     let first = json!({
         "type": "user_change",
@@ -610,7 +646,7 @@ async fn a_user_change_leaves_fields_slack_omitted_alone() {
         UserChange::Applied
     );
 
-    let session = signed_session(&kit, TEAM_A, ALICE, NOW + 3600);
+    let session = signed_session(&kit, &alice.workspace_id, ALICE, NOW + 3600);
     let me = get(&kit.router, ME, &[(SESSION_COOKIE, &session)])
         .await
         .json();
@@ -639,9 +675,7 @@ async fn a_user_change_for_an_unknown_workspace_is_ignored() {
     let http2 = TokenHttp::new();
     let kit2 = harness(&http2);
     let dave = sign_in(&kit2, &http2, TEAM_B, DAVE, "Dave").await;
-    let me = get(&kit2.router, ME, &[(SESSION_COOKIE, &dave)])
-        .await
-        .json();
+    let me = get(&kit2.router, ME, &dave.cookies()).await.json();
     assert_eq!(me["is_owner"], true);
     assert_eq!(me["member"]["is_admin"], false);
 }
@@ -661,20 +695,9 @@ async fn a_user_change_naming_another_team_is_ignored() {
     });
     assert_eq!(apply_event(&kit, TEAM_A, &event).await, UserChange::Ignored);
 
-    let rows = get(
-        &kit.router,
-        MEMBERS,
-        &[(
-            SESSION_COOKIE,
-            &signed_session(&kit, TEAM_A, ALICE, NOW + 3600),
-        )],
-    )
-    .await
-    .json();
+    let rows = get(&kit.router, MEMBERS, &alice.cookies()).await.json();
     assert_eq!(user_ids(&rows), vec![ALICE], "Dave was not added to A");
-    let me = get(&kit.router, ME, &[(SESSION_COOKIE, &alice)])
-        .await
-        .json();
+    let me = get(&kit.router, ME, &alice.cookies()).await.json();
     assert_eq!(me["member"]["is_admin"], false, "Alice was not promoted");
 }
 
@@ -702,7 +725,7 @@ async fn events_that_are_not_user_changes_are_ignored() {
 async fn a_user_change_can_add_a_member_the_workspace_already_has() {
     let http = TokenHttp::new();
     let kit = harness(&http);
-    let _alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
+    let alice = sign_in(&kit, &http, TEAM_A, ALICE, "Alice").await;
 
     // Bob has never signed in, but Slack says he is in the workspace.
     let event = json!({
@@ -711,16 +734,7 @@ async fn a_user_change_can_add_a_member_the_workspace_already_has() {
     });
     assert_eq!(apply_event(&kit, TEAM_A, &event).await, UserChange::Applied);
 
-    let rows = get(
-        &kit.router,
-        MEMBERS,
-        &[(
-            SESSION_COOKIE,
-            &signed_session(&kit, TEAM_A, ALICE, NOW + 3600),
-        )],
-    )
-    .await
-    .json();
+    let rows = get(&kit.router, MEMBERS, &alice.cookies()).await.json();
     assert_eq!(user_ids(&rows), vec![ALICE, BOB]);
 }
 

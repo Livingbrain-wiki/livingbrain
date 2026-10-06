@@ -3,6 +3,11 @@
 //! Module `workspaces`, so `ModuleConfig` derives the env keys by prefix:
 //! `WORKSPACES_SLACK_CLIENT_ID`, `WORKSPACES_SLACK_CLIENT_SECRET` and
 //! `WORKSPACES_REDIRECT_BASE`.
+//!
+//! Since ADR 0002 Slack is one sign-in method among two, so [`Settings`] is
+//! only the *Slack* half: the public origin and the sign-in sender are read
+//! separately, by functions that a deployment with no Slack app can still
+//! call.
 
 use cratefield_core::{Config, ConfigError, ModuleConfig};
 
@@ -85,6 +90,49 @@ impl Settings {
     pub fn callback_url(&self) -> String {
         format!("{}/v1/workspaces/slack/callback", self.redirect_base)
     }
+}
+
+/// The sender a sign-in link is sent from when `WORKSPACES_MAIL_FROM` is
+/// unset. It is a person-readable name on the venture's own domain, which
+/// the mail provider must be configured to send for.
+pub const DEFAULT_MAIL_FROM: &str = "Living Brain <no-reply@livingbrain.wiki>";
+
+/// The sender for the sign-in mail (`WORKSPACES_MAIL_FROM`), or
+/// [`DEFAULT_MAIL_FROM`].
+///
+/// Read outside [`Settings`] on purpose: a deployment with no Slack app
+/// still sends sign-in mail, and `Settings` cannot be built without one.
+/// A blank value reads as unset, so an empty secret in a `.dev.vars` cannot
+/// become an empty sender.
+#[must_use]
+pub fn mail_from(cfg: &dyn Config) -> String {
+    let configured = ModuleConfig::new("workspaces", cfg)
+        .get_opt("MAIL_FROM")
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty());
+    configured.unwrap_or_else(|| DEFAULT_MAIL_FROM.to_owned())
+}
+
+/// The public origin a sign-in link points at (`WORKSPACES_REDIRECT_BASE`),
+/// without a trailing slash, or [`None`] when it is unset or is not an
+/// absolute http(s) origin.
+///
+/// Same key as [`Settings::redirect_base`] and read the same way, but
+/// without the two Slack credentials: a magic link is an absolute URL, so a
+/// deployment that signs people in by email alone still needs the origin —
+/// and must be refused one rather than mail a relative link nobody can
+/// click. A configured-but-malformed value is a configuration error, so it
+/// is reported as absent here and in [`Settings::from_config`].
+#[must_use]
+pub fn public_base(cfg: &dyn Config) -> Option<String> {
+    let base = ModuleConfig::new("workspaces", cfg)
+        .get_opt("REDIRECT_BASE")
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty())?;
+    if !(base.starts_with("https://") || base.starts_with("http://")) {
+        return None;
+    }
+    Some(base.trim_end_matches('/').to_owned())
 }
 
 /// One required key, recording a named error when it is absent or empty.

@@ -22,6 +22,17 @@ const ISSUER: &str = "https://slack.com";
 /// The scopes requested. `openid` is what makes it OIDC; `profile` is what
 /// carries the name; `email` is asked for because a Slack workspace's
 /// people are usually identified by address elsewhere in the product.
+///
+/// These three are all Slack's OpenID Connect has: its discovery document
+/// (`https://slack.com/.well-known/openid-configuration`) advertises
+/// `"scopes_supported": ["openid","profile","email"]`, and the `id_token`
+/// claims documented for `openid.connect.token` are identity and team/user
+/// identifiers — there is no admin flag and no `entitlements` claim. So an
+/// admin of a team cannot be told apart from an ordinary member of it out
+/// of a token from this endpoint, which is why the linking route has a
+/// hole: see `handlers::link_slack_workspace`. Widening this constant will
+/// not close it; a second Slack app that can ask Slack who the admins are
+/// can.
 const SCOPE: &str = "openid profile email";
 
 /// The claim naming the workspace.
