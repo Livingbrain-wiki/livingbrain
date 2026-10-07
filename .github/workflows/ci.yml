@@ -3,6 +3,7 @@
 # against a postgres:16 service); the wasm job builds the Worker, so a
 # native-only dependency can never slip into a module. The module list is
 # discovered by glob, so a new `crates/livingbrain-*` module needs no edit here.
+# `redact-wasm` runs one plain library crate's own tests inside a Worker.
 
 name: CI
 
@@ -91,6 +92,31 @@ jobs:
             cargo test -p "$name" --test conformance
             echo "::endgroup::"
           done
+
+  redact-wasm:
+    # The redaction library runs in the Worker, so its tests run in one. The
+    # wasm-bindgen CLI version is read from the lockfile rather than pinned
+    # again here: the runner refuses a wasm-bindgen whose version does not
+    # match the `wasm-bindgen` in the crate graph, and a second version in
+    # this file is a second thing to forget to update.
+    name: redact (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the wasm-bindgen runner (version from Cargo.lock)
+        run: |
+          version=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p}' Cargo.lock)
+          echo "wasm-bindgen $version"
+          cargo install -q --locked wasm-bindgen-cli --version "$version"
+      - name: Test livingbrain-redact in a Worker
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test -p livingbrain-redact --target wasm32-unknown-unknown
 
   wasm:
     name: worker-build
