@@ -79,12 +79,23 @@ binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
 
 # Non-secret configuration. Secrets — `HARNESS_SECRET` (which signs every
-# cookie this Worker issues), `WORKSPACES_SLACK_CLIENT_SECRET` and
+# cookie this Worker issues), `WORKSPACES_SLACK_CLIENT_SECRET`,
+# `MODEL_KEYS_SECRET` (issue #10: the AES-256-GCM key the `models` module
+# encrypts a connected provider key under, SHA-256 of this value) and
 # `OWLPOST_API_KEY` (which sends mail) — belong in `.dev.vars`, which is
 # gitignored and deliberately not in this repository; wrangler reads secrets
-# before vars, so a name in both resolves to the secret. The Slack client id is
-# public (it is in the authorize URL) and the redirect base is the tunnel a
-# local run is reached on.
+# before vars, so a name in both resolves to the secret. The Slack client id
+# is public (it is in the authorize URL) and the redirect base is the tunnel
+# a local run is reached on.
+#
+# `MODEL_KEYS_SECRET` is optional rather than required: with it absent the
+# reads still answer, and a connect answers 500 instead of storing a key in
+# plaintext. Set it before connecting a model. The key is a bare SHA-256 of
+# this value with no key-stretching, so the value *is* the entropy: it must
+# be at least 32 bytes of random text (`openssl rand -base64 32`), which
+# `validate_config` refuses at build. Rotating it makes every already-stored
+# ciphertext undecryptable — the connections have to be re-entered, which is
+# the point of a rotate.
 #
 # Mail (issue #63). `OWLPOST_API_KEY` is a secret (`wrangler secret put
 # OWLPOST_API_KEY`); with it absent or blank the adapter reports `not-configured`

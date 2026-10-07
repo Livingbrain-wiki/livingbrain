@@ -30,6 +30,7 @@ cratefield-mail-templates = { workspace = true }
 cratefield-module-waitlist = { workspace = true }
 cratefield-adapter-turnstile = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
+livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 worker = { workspace = true }

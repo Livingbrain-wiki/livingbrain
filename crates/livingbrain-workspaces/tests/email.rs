@@ -327,13 +327,21 @@ async fn a_token_nobody_holds_is_refused() {
     let real = mailed_token(&kit);
 
     // A token that was never minted, and two that are a character off a
-    // real one.
-    for token in [
-        "0".repeat(64),
-        format!("{}0", &real[..63]),
-        format!("0{}", &real[1..]),
-        String::new(),
-    ] {
+    // real one. The replacement character is chosen to *differ*: a real
+    // token whose first or last hex character already is the replacement
+    // would leave this loop signing in with the very token it means to
+    // be refusing.
+    let off = |at: usize| {
+        let replacement = if real.as_bytes()[at] == b'0' {
+            "1"
+        } else {
+            "0"
+        };
+        let mut token = real.clone();
+        token.replace_range(at..at + 1, replacement);
+        token
+    };
+    for token in ["0".repeat(64), off(63), off(0), String::new()] {
         let response = post_form(&kit.router, VERIFY, &[], &format!("token={token}")).await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST, "{token}");
         assert!(response.cookie(SESSION_COOKIE).is_none(), "{token}");

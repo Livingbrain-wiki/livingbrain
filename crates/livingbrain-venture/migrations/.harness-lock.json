@@ -38,5 +38,9 @@
   "workspaces/0002": {
     "file": "0010_workspaces_0002_identities.sql",
     "sha256": "de7f6811c3753bd643158130f3d46aa16cfe7159e8f0f942c3b669ea57519168"
+  },
+  "models/0001": {
+    "file": "0011_models_0001_init.sql",
+    "sha256": "f32f60c7db7c85c6cbf46f1fd69d6ba1ca9d57f832fc7d1bd8053de6282f23be"
   }
 }

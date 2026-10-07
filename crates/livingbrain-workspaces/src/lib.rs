@@ -20,6 +20,10 @@
 //! refresh the member mirror, after it has verified the event's signature
 //! and read the team id out of the signed envelope.
 //!
+//! [`caller`] is the same kind of seam for a sibling module (issue #10's
+//! `models`): who is signed in, read through this module's own session
+//! check rather than a second implementation of it.
+//!
 //! [`link_connection`] and [`link_identity`] are the same kind of seam for
 //! issue #56: a caller that has verified a Discord guild or user id binds it
 //! to a workspace and a member. Discord's OAuth route is not here yet.
@@ -34,6 +38,7 @@ mod store;
 
 pub use config::Settings;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
+pub use handlers::{Caller, caller};
 pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};
 
 use cratefield_core::{

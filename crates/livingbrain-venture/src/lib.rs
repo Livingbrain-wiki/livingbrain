@@ -5,8 +5,10 @@
 //! serves it on Cloudflare Workers: the empty `canary` module from the
 //! scaffold; `workspaces` — one tenant per Slack workspace, sign in with
 //! Slack, and the member mirror the Events webhook (issue #6) refreshes;
-//! `pages` — versioned entity pages, Markdown bodies in R2 and metadata,
-//! links and history in D1 (issue #15); and the harness `waitlist` module —
+//! and `models` — bring your own model per workspace and role, with the
+//! capability check issue #10 asks for; `pages` — versioned entity pages,
+//! Markdown bodies in R2 and metadata, links and history in D1 (issue #15);
+//! and the harness `waitlist` module —
 //! the early-access list behind issue #23: joins from livingbrain.wiki, double
 //! opt-in mail through Owlpost, and the CSV export behind the admin token.
 //! `wrangler.toml` and the D1 migrations are beside this crate.
@@ -29,6 +31,7 @@ use cratefield_runtime_cloudflare::{
     Cloudflare, FetchClient, WorkersClock, serve, serve_scheduled,
 };
 use livingbrain_canary::Canary;
+use livingbrain_models::Models;
 use livingbrain_pages::Pages;
 use livingbrain_workspaces::Workspaces;
 use std::sync::{Arc, OnceLock};
@@ -187,6 +190,7 @@ fn build(mail: MailSettings, captcha: Option<Turnstile>) -> (Harness, Cloudflare
         .templates(templates())
         .module(Canary::new())
         .module(Workspaces::new())
+        .module(Models::new())
         .module(Pages::new())
         .module(waitlist_module())
         .runtime(runtime.clone())
@@ -252,6 +256,7 @@ mod tests {
             .collect();
         assert!(names.contains(&"canary"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
+        assert!(names.contains(&"models"), "{names:?}");
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"waitlist"), "{names:?}");
     }
