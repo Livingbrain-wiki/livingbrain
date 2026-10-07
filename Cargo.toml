@@ -69,5 +69,10 @@ tower = { version = "0.5.3", features = ["util"] }
 # like the rest so the workspace resolves one `insta`.
 insta = "1.49.0"
 
+# Property testing for the access model's permission invariants (issue #8).
+# Dev-only; default features are off so the `fork` and timeout extras (and
+# their processes/filesystem deps) stay out of the lockfile.
+proptest = { version = "1.7", default-features = false, features = ["std"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
