@@ -1,0 +1,29 @@
+[package]
+name = "livingbrain-cli"
+description = "The `livingbrain` CLI: a native client of the Living Brain API. Not a module — it holds no memory and runs no agent loop; the server does."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "livingbrain"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+serde_json = "1"
+# Blocking HTTP, rustls only: no OpenSSL, and static-musl friendly.
+ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
+# The OS keychain, never a file. `linux-native` is the kernel keyutils backend:
+# pure Rust, no D-Bus or OpenSSL system libraries. The other two are inert here.
+keyring = { version = "3.6", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "linux-native",
+] }

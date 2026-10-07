@@ -63,8 +63,8 @@ repository today, and what does not, and is updated as issues land.
 
 | | |
 | :--- | :--- |
-| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, and a member mirror (#5) |
-| **Not built** | Every other product feature: the wiki, permissions, the agent loop, MCP, the CLI, the app — and, within Slack, the Events webhook that keeps the member mirror fresh (#6). The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
+| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the `livingbrain` CLI (`crates/livingbrain-cli`, a client of the API: `login`, `ask`, `search`, `note`, `page`, `export`, `mcp`), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, and a member mirror (#5) |
+| **Not built** | Every other product feature: the wiki, permissions, the agent loop, the API the CLI talks to, the app — and, within Slack, the Events webhook that keeps the member mirror fresh (#6). The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
 
 The composition is one Worker mounting modules into a Cratefield harness; the
 venture crate is the only place a runtime or a vendor SDK appears.
@@ -84,6 +84,8 @@ Harness::builder()
 
 ```sh
 cargo test --workspace                    # fmt, clippy and the parity matrix also run in CI
+cargo run -p livingbrain-cli -- --help    # the CLI: login, ask, search, note, page, export, mcp
+cargo run -p livingbrain-cli -- login     # device flow; the token goes in your OS keychain
 cd crates/livingbrain-venture
 npx wrangler d1 migrations apply livingbrain --local   # creates the tables (see below)
 npx wrangler dev --local                  # builds the Worker to wasm and serves it locally
@@ -91,9 +93,10 @@ curl -s http://127.0.0.1:8787/__health    # the harness health route
 curl -si http://127.0.0.1:8787/v1/workspaces/slack/start   # 302 to Slack, or 503 without credentials
 ```
 
-Nothing here is deployed: `wrangler dev` is local only, the D1/R2/KV ids in
-`wrangler.toml` are placeholders, and no `wrangler deploy` or `wrangler d1
-create` runs anywhere in this repository.
+Nothing here is deployed: `wrangler dev` is local only, and the D1/R2/KV ids in
+`wrangler.toml` are placeholders. Staging and production are deployed by
+`.github/workflows/deploy.yml`; [`docs/deploy.md`](docs/deploy.md) is the
+runbook.
 
 #### Sign in with Slack locally
 
@@ -152,6 +155,34 @@ nothing, so the route that would mail keeps working and nothing goes out. The
 address in `MAIL_FROM` must be on a sending domain verified in Owlpost, or
 Owlpost refuses the send. Every message leaves as `multipart/alternative`: the
 HTML body and its plain-text twin.
+### Waitlist (issue #23)
+
+The early-access list lives on the [website](https://github.com/Livingbrain-wiki/website)
+repo's form, which posts to this Worker. `POST /v1/waitlist` takes a JSON body:
+
+```json
+{ "email": "you@example.com", "product": "livingbrain", "captchaToken": "<turnstile>" }
+```
+
+`captchaToken` comes from a Turnstile widget on livingbrain.wiki (whose secret
+is the `TURNSTILE_SECRET` Worker secret); `product` must be `livingbrain`.
+`ref`, `answers` and `locale` are optional. A join answers `202 {"ok":true}`
+for any address — it never reveals whether the address was already known (a
+repeat inside the send cooldown answers the same and sends nothing). `400` is
+an unknown `product`, `403` a refused captcha, `429` a tripped rate limit.
+
+Joining sends one confirmation mail through Owlpost. Following the link
+(`GET /v1/waitlist/confirm?token=…`) confirms the entry, assigns its place in
+the queue, and redirects to the site. The operator reads the list with:
+
+```sh
+curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://api.livingbrain.wiki/v1/waitlist/admin/export.csv
+```
+
+The D1 schema is in `crates/livingbrain-venture/migrations/`, applied with
+`npx wrangler d1 migrations apply livingbrain`. The Worker secrets to set are
+`HARNESS_SECRET`, `OWLPOST_API_KEY`, `TURNSTILE_SECRET` and `ADMIN_TOKEN`.
 
 ## How it will work
 
