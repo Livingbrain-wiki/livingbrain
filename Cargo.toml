@@ -91,8 +91,9 @@ tower = { version = "0.5.3", features = ["util"] }
 # like the rest so the workspace resolves one `insta`.
 insta = "1.49.0"
 
-# The blind-index scope property test (issue #43). Dev-only, so proptest's tree
-# never reaches a module's wasm graph.
+# Property tests, dev-only in both crates that use them: the blind-index scope
+# property test (issue #43) and the access model's permission invariants
+# (issue #8). Dev-only, so proptest's tree never reaches a module's wasm graph.
 proptest = "1.9"
 
 [workspace.lints.rust]

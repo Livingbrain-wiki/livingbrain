@@ -1,0 +1,20 @@
+[package]
+name = "livingbrain-access"
+description = "The read-with-the-asker's-access permission model: one scopes_for function every memory read goes through"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# A pure-Rust library: no Cratefield ports, no runtime, no vendor SDK. The
+# model is types and logic only, so a module crate can compose it.
+[dependencies]
+
+[dev-dependencies]
+# Property tests for the permission invariants (issue #8). Dev-only.
+proptest = { workspace = true }
