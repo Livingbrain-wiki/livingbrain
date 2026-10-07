@@ -13,7 +13,9 @@ use cratefield_core::axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::get;
 use cratefield_core::axum::{self, Json};
-use cratefield_core::{DbError, IdGen, ModuleContext, Problem, ProblemDef, constant_time_eq};
+use cratefield_core::{
+    Clock, Database, DbError, IdGen, ModuleContext, Problem, ProblemDef, Signer, constant_time_eq,
+};
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 
@@ -353,13 +355,69 @@ async fn session_scope(
     let Some(session) = flow::open_session(&*signer, &*clock, &cookie) else {
         return Err(no_session());
     };
-    let Some(workspace) = store::workspace(&*db, &session.team_id)
+    session_scope_of(&*db, &session).await
+}
+
+/// Who is calling: the workspace the session names, the member within it,
+/// and whether that member may administer the workspace.
+///
+/// The seam a sibling module reads when it needs tenancy without
+/// reimplementing the cookie check — [`caller`] hands it over. The ids are
+/// opaque: a caller may only carry them into a query scoped by both.
+#[derive(Debug, Clone)]
+pub struct Caller {
+    /// The workspace the verified session names.
+    pub workspace_id: String,
+    /// The member within that workspace.
+    pub user_id: String,
+    /// The workspace's owner, or a member the sign-in method marks admin.
+    pub is_admin: bool,
+}
+
+/// Resolves the caller from the session cookie, through the same
+/// [`session_scope`] the module's own routes use, so there is one
+/// implementation of "who is signed in" rather than two that can drift.
+///
+/// # Errors
+///
+/// The same [`Problem`] `session_scope` answers: no cookie, one that does
+/// not verify or has expired, or a verified session whose workspace or
+/// member row is gone.
+pub async fn caller(
+    signer: &dyn Signer,
+    clock: &dyn Clock,
+    db: &dyn Database,
+    headers: &HeaderMap,
+) -> Result<Caller, Problem> {
+    let Some(cookie) = flow::cookie_value(headers, flow::SESSION_COOKIE) else {
+        return Err(no_session());
+    };
+    let Some(session) = flow::open_session(signer, clock, &cookie) else {
+        return Err(no_session());
+    };
+    let (workspace, member, is_owner) = session_scope_of(db, &session).await?;
+    Ok(Caller {
+        workspace_id: workspace.id,
+        user_id: member.user_id,
+        is_admin: is_owner || member.is_admin,
+    })
+}
+
+/// The one place the session's workspace field is read: a verified
+/// [`Session`] resolved to its workspace and member, or refused exactly
+/// like no session at all. Both the module's routes and [`caller`] go
+/// through here.
+async fn session_scope_of(
+    db: &dyn Database,
+    session: &Session,
+) -> Result<(Workspace, Member, bool), Problem> {
+    let Some(workspace) = store::workspace(db, &session.team_id)
         .await
         .map_err(database)?
     else {
         return Err(no_session());
     };
-    let Some(member) = store::member(&*db, &session.team_id, &session.user_id)
+    let Some(member) = store::member(db, &session.team_id, &session.user_id)
         .await
         .map_err(database)?
     else {

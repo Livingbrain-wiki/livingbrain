@@ -26,6 +26,7 @@ cratefield-runtime-cloudflare = { workspace = true }
 cratefield-adapter-owlpost = { workspace = true }
 cratefield-mail-templates = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
+livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 worker = { workspace = true }
 

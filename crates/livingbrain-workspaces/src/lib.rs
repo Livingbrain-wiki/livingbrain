@@ -13,6 +13,10 @@
 //! [`apply_user_change`] is the seam issue #6's Events webhook calls to
 //! refresh the member mirror, after it has verified the event's signature
 //! and read the team id out of the signed envelope.
+//!
+//! [`caller`] is the same kind of seam for a sibling module (issue #10's
+//! `models`): who is signed in, read through this module's own session
+//! check rather than a second implementation of it.
 
 #![forbid(unsafe_code)]
 
@@ -24,6 +28,7 @@ mod store;
 
 pub use config::Settings;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
+pub use handlers::{Caller, caller};
 pub use store::{UserChange, apply_user_change};
 
 use cratefield_core::{

@@ -1,0 +1,64 @@
+# Living Brain module: bring your own model, with a capability check.
+# Per workspace and per role a member with admin or owner rights can
+# connect a provider key or a custom OpenAI-compatible endpoint. The
+# module probes the model for tool calling, JSON output and context size,
+# stores the connection with the key encrypted, and never falls back to
+# the managed model unless the member explicitly opts in.
+
+[package]
+name = "livingbrain-models"
+description = "Living Brain module: bring your own model, with a capability check"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed. `axum` and `http`
+# arrive through `cratefield_core::axum`, so neither is named directly.
+cratefield-core = { workspace = true }
+
+# The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
+bytes = { workspace = true }
+# Percent-encoding for the DoH query string. Pure Rust, wasm-safe, and the
+# version `axum` and `url` already resolve.
+percent-encoding = { workspace = true }
+# Portable SQL built as parameterized statements over the `Database` port
+# (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
+sea-query = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# ISO-8601 timestamps for the rows (the portable subset stores TEXT, not a
+# dialect date type). The `wasm-bindgen` half of this crate arrives only
+# on wasm32, so it never enters a host `cargo tree`.
+time = { workspace = true }
+# URL parsing for the SSRF guard. Pure Rust, wasm-safe, already in the
+# lockfile through `axum`.
+url = "2"
+# SHA-256 for deriving the encryption key from `MODEL_KEYS_SECRET`. Pure
+# Rust, wasm-safe, already in the lockfile through `cratefield-core`.
+sha2 = "0.10"
+# AES-256-GCM for encrypting provider keys at rest. Pure Rust, wasm-safe.
+# `aes` for the block cipher, `alloc` for heap-backed buffers; no `std`.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+# The session the workspaces module sealed is verified through its public
+# `caller` helper, so this module shares the session without reimplementing it.
+livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
+# sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# Only so a test fake can implement the `HttpClient` port, whose trait is
+# declared with `#[async_trait]`.
+async-trait = { workspace = true }
+pollster = { workspace = true }
+tower = { workspace = true }
+serde_json = { workspace = true }
