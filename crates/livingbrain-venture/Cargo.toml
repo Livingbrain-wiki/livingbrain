@@ -25,7 +25,12 @@ cratefield-runtime-cloudflare = { workspace = true }
 # this crate and Owlpost is the `Mailer` port the runtime holds.
 cratefield-adapter-owlpost = { workspace = true }
 cratefield-mail-templates = { workspace = true }
+# The waitlist (issue #23): the harness module and the Turnstile captcha
+# adapter on its join form. The venture, not a module, names them.
+cratefield-module-waitlist = { workspace = true }
+cratefield-adapter-turnstile = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
+livingbrain-pages = { path = "../livingbrain-pages" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 worker = { workspace = true }
 
@@ -35,10 +40,9 @@ getrandom = { workspace = true }
 [dev-dependencies]
 # The fake HTTP client the Owlpost test records a send with, the snapshot tool
 # for the rendered mail layouts, `serde_json` for the sample data and the
-# recorded body, the block-on the async `Mailer::send` needs, and the waitlist
-# whose templates the tests render directly (the module is not mounted). Dev-only:
-# none of them reach the wasm graph.
-cratefield-module-waitlist = { workspace = true }
+# recorded body, and the block-on the async tests need. The waitlist test
+# mounts the venture's composition over the kit's fakes and an in-memory
+# SQLite database. Dev-only: none of them reach the wasm graph.
 cratefield-testing = { workspace = true }
 insta = { workspace = true }
 pollster = { workspace = true }

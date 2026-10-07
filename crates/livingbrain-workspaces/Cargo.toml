@@ -26,6 +26,9 @@ percent-encoding = { workspace = true }
 # Portable SQL built as parameterized statements over the `Database` port
 # (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
 sea-query = { workspace = true }
+# The SHA-256 of a sign-in token: `sign_in_links` stores the hash, never the
+# token (ADR 0002). Pure Rust, wasm-safe, already in the lockfile.
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # ISO-8601 timestamps for the rows (the portable subset stores TEXT, not a

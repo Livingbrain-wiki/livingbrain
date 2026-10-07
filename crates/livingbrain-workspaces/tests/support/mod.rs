@@ -1,6 +1,11 @@
 //! The kit the workspaces tests share: a harness wired to a fake Slack, a
 //! request helper that can carry a `Cookie` header, and the small pieces
 //! of a Slack `id_token` a test needs to craft one.
+//!
+//! Each integration test file declares `mod support;` and Cargo compiles
+//! each of them as its own binary, so a helper only one of the three uses
+//! is dead code in the other two.
+#![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
@@ -10,11 +15,15 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use cratefield_core::axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use cratefield_core::axum::{self, body::Body};
-use cratefield_core::{Config, HttpClient, HttpError, Kid, MapConfig, Payload, Signer};
+use cratefield_core::{
+    Config, DbError, HttpClient, HttpError, Kid, MapConfig, Payload, Row, Signer, Statement,
+};
 use cratefield_testing::{FixedClock, TestHarness};
 use livingbrain_workspaces::{
-    FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, UserChange, Workspaces, apply_user_change,
+    FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE, UserChange, Workspaces,
+    apply_user_change,
 };
+use sea_query::Value as SeaValue;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 
@@ -195,6 +204,44 @@ pub async fn get(router: &axum::Router, path: &str, cookies: &[(&str, &str)]) ->
     send(router, Method::GET, path, cookies).await
 }
 
+/// A `POST` carrying a JSON body, which is how the email start route is
+/// called.
+pub async fn post_json(
+    router: &axum::Router,
+    path: &str,
+    cookies: &[(&str, &str)],
+    body: &Value,
+) -> Res {
+    send_with_body(
+        router,
+        Method::POST,
+        path,
+        cookies,
+        Some("application/json"),
+        &body.to_string(),
+    )
+    .await
+}
+
+/// A `POST` carrying an `application/x-www-form-urlencoded` body, which is
+/// what the browser submits the verify form as.
+pub async fn post_form(
+    router: &axum::Router,
+    path: &str,
+    cookies: &[(&str, &str)],
+    body: &str,
+) -> Res {
+    send_with_body(
+        router,
+        Method::POST,
+        path,
+        cookies,
+        Some("application/x-www-form-urlencoded"),
+        body,
+    )
+    .await
+}
+
 /// A request carrying a `Cookie` header. The kit's `request` helper cannot
 /// send one, and every route this module reads needs one.
 pub async fn send(
@@ -202,6 +249,18 @@ pub async fn send(
     method: Method,
     path: &str,
     cookies: &[(&str, &str)],
+) -> Res {
+    send_with_body(router, method, path, cookies, None, "").await
+}
+
+/// [`send`] with a body and, when there is one, a `Content-Type`.
+async fn send_with_body(
+    router: &axum::Router,
+    method: Method,
+    path: &str,
+    cookies: &[(&str, &str)],
+    content_type: Option<&str>,
+    body: &str,
 ) -> Res {
     use tower::ServiceExt;
     let mut builder = Request::builder().method(method).uri(path);
@@ -213,7 +272,12 @@ pub async fn send(
             .join("; ");
         builder = builder.header(header::COOKIE, header);
     }
-    let request = builder.body(Body::empty()).expect("request builds");
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    let request = builder
+        .body(Body::from(body.to_owned()))
+        .expect("request builds");
     let response = router
         .clone()
         .oneshot(request)
@@ -299,15 +363,34 @@ pub async fn start_flow(kit: &TestHarness) -> Flow {
     }
 }
 
-/// Signs `user_id` of `team_id` in, end to end, and returns the session
-/// cookie. Panics if any step of the sign-in does not succeed.
+/// A completed sign-in: the session cookie, and the workspace it is for.
+///
+/// ADR 0002 made the workspace id ours to mint — `ws_` plus an IdGen id for
+/// a team that has never been seen — so a test cannot name one up front.
+/// It reads it back out of the cookie the module just sealed, which is the
+/// same value `/me` reports.
+pub struct SignIn {
+    pub cookie: String,
+    pub workspace_id: String,
+}
+
+impl SignIn {
+    /// The `Cookie` header a browser would send with this session.
+    #[must_use]
+    pub fn cookies(&self) -> [(&str, &str); 1] {
+        [(SESSION_COOKIE, self.cookie.as_str())]
+    }
+}
+
+/// Signs `user_id` of `team_id` in, end to end. Panics if any step of the
+/// sign-in does not succeed.
 pub async fn sign_in(
     kit: &TestHarness,
     http: &TokenHttp,
     team_id: &str,
     user_id: &str,
     name: &str,
-) -> String {
+) -> SignIn {
     let flow = start_flow(kit).await;
     http.will_return(&id_token(&claims(&flow.nonce, team_id, user_id, name)));
     let callback = get(&kit.router, &flow.callback("code-1"), &flow.cookies()).await;
@@ -317,9 +400,26 @@ pub async fn sign_in(
         "callback redirects: {}",
         String::from_utf8_lossy(&callback.body)
     );
-    callback
+    let cookie = callback
         .cookie(SESSION_COOKIE)
-        .expect("callback sets a session cookie")
+        .expect("callback sets a session cookie");
+    let workspace_id = session_payload(kit, &cookie)["workspace_id"]
+        .as_str()
+        .expect("a workspace in the session")
+        .to_owned();
+    SignIn {
+        cookie,
+        workspace_id,
+    }
+}
+
+/// The signed payload behind a session cookie.
+pub fn session_payload(kit: &TestHarness, cookie: &str) -> Value {
+    let payload = kit
+        .signer
+        .verify(cookie, SESSION_PURPOSE)
+        .expect("the session cookie verifies");
+    serde_json::from_str(&payload.subject).expect("the session payload is JSON")
 }
 
 /// The signed flow payload behind a flow cookie.
@@ -335,14 +435,172 @@ pub fn flow_payload(kit: &TestHarness, cookie: &str) -> Value {
 /// (workspace, user) pair that need not exist. The signature is good; it
 /// is the member row that the handler must find.
 #[must_use]
-pub fn signed_session(kit: &TestHarness, team_id: &str, user_id: &str, exp: i64) -> String {
+pub fn signed_session(kit: &TestHarness, workspace_id: &str, user_id: &str, exp: i64) -> String {
     kit.signer.sign(&Payload {
-        purpose: livingbrain_workspaces::SESSION_PURPOSE.to_owned(),
-        subject: json!({"team_id": team_id, "user_id": user_id, "exp": exp}).to_string(),
+        purpose: SESSION_PURPOSE.to_owned(),
+        subject: json!({"workspace_id": workspace_id, "user_id": user_id, "exp": exp}).to_string(),
         exp: None,
         kid: Kid::Cur,
     })
 }
+
+// ---------------------------------------------------------------------------
+// The email magic link
+
+/// The sign-in token out of the last message the fake mailer recorded — the
+/// 32 random bytes the module hex encoded into the link, and the only place
+/// a test can see them.
+#[must_use]
+pub fn mailed_token(kit: &TestHarness) -> String {
+    let message = kit.mailer.last_message().expect("a sign-in mail went out");
+    let link = message
+        .text
+        .lines()
+        .find(|line| line.contains("/v1/workspaces/email/verify?token="))
+        .expect("the mail carries the sign-in link");
+    let token = query_param(link, "token");
+    assert!(!token.is_empty(), "the link carries a token: {link}");
+    token
+}
+
+/// One `sign_in_links` row, by its `token_hash`, as the raw columns the
+/// module wrote.
+pub async fn sign_in_link(kit: &TestHarness, token_hash: &str) -> Option<Row> {
+    let rows = kit
+        .db
+        .query(&Statement::with_values(
+            "SELECT token_hash, email, workspace_id, workspace_name, expires_at, spent_at \
+             FROM sign_in_links WHERE token_hash = ?",
+            vec![text(token_hash)],
+        ))
+        .await
+        .expect("sign_in_links reads");
+    rows.first().cloned()
+}
+
+/// Moves an unspent link's expiry into the past.
+///
+/// The kit's clock is fixed when the harness — and with it the database —
+/// is built, so the only way a row can be aged within one kit is to write
+/// the timestamp the handler compares against.
+pub async fn expire_link(kit: &TestHarness, token_hash: &str) {
+    kit.db
+        .execute(&Statement::with_values(
+            "UPDATE sign_in_links SET expires_at = ? WHERE token_hash = ?",
+            vec![text("2000-01-01T00:00:00Z"), text(token_hash)],
+        ))
+        .await
+        .expect("the link expires");
+}
+
+// ---------------------------------------------------------------------------
+// Reaching past the module, for a test that seeds or reads a row directly
+
+/// A non-null text bind.
+#[must_use]
+pub fn text(value: &str) -> SeaValue {
+    SeaValue::String(Some(Box::new(value.to_owned())))
+}
+
+/// Runs one statement against the harness's database, so a test can plant a
+/// row the module has no public seam for. `# Panics` when it fails, which is
+/// what a failing seed should say.
+pub async fn exec(kit: &TestHarness, sql: &str, values: Vec<SeaValue>) -> u64 {
+    exec_result(kit, sql, values)
+        .await
+        .unwrap_or_else(|error| panic!("{sql} applies: {error}"))
+}
+
+/// [`exec`] with the error as the answer rather than a panic, for a test
+/// that is asserting a constraint refuses a write.
+pub async fn exec_result(
+    kit: &TestHarness,
+    sql: &str,
+    values: Vec<SeaValue>,
+) -> Result<u64, DbError> {
+    kit.db.execute(&Statement::with_values(sql, values)).await
+}
+
+/// The rows one statement returns, for the same reason as [`exec`].
+pub async fn rows(kit: &TestHarness, sql: &str, values: Vec<SeaValue>) -> Vec<Row> {
+    kit.db
+        .query(&Statement::with_values(sql, values))
+        .await
+        .unwrap_or_else(|error| panic!("{sql} reads: {error}"))
+        .rows
+}
+
+/// One column of one row, by query, as a string.
+pub async fn column(kit: &TestHarness, sql: &str, values: Vec<SeaValue>) -> Option<String> {
+    rows(kit, sql, values)
+        .await
+        .first()
+        .and_then(|row| row.get::<String>("value"))
+}
+
+/// A workspace and its owner, planted as ADR 0001 wrote one: a row whose id
+/// *is* the Slack team id, and no connections or identities at all.
+pub async fn seed_workspace(kit: &TestHarness, id: &str, name: &str, owner: &str) {
+    exec(
+        kit,
+        "INSERT INTO workspaces (id, name, owner_id, created_at) VALUES (?, ?, ?, ?)",
+        vec![text(id), text(name), text(owner), text(RFC3339_NOW)],
+    )
+    .await;
+    for member in [owner] {
+        exec(
+            kit,
+            "INSERT INTO workspace_members (workspace_id, user_id, name, timezone, is_admin, updated_at) \
+             VALUES (?, ?, ?, NULL, 0, ?)",
+            vec![
+                text(id),
+                text(member),
+                text(&format!("{member} of {id}")),
+                text(RFC3339_NOW),
+            ],
+        )
+        .await;
+    }
+}
+
+/// A workspace created before ADR 0002, plus the Slack links migration
+/// `0002`'s backfill gave it — which is the state every Slack-created
+/// workspace is in once the migration has run.
+///
+/// The two `INSERT … SELECT` statements are the backfill's own, quoted from
+/// `migrations/sqlite/0002_identities.sql`; running them here rather than
+/// writing the links out by hand is what makes the fixture the migration's
+/// output rather than this test's idea of it.
+pub async fn seed_legacy_workspace(kit: &TestHarness, id: &str, name: &str, owner: &str) {
+    seed_workspace(kit, id, name, owner).await;
+    exec(
+        kit,
+        "INSERT INTO workspace_connections (workspace_id, platform, external_id, created_at)
+         SELECT id, 'slack', id, created_at FROM workspaces
+         WHERE NOT EXISTS (
+             SELECT 1 FROM workspace_connections c
+             WHERE c.workspace_id = workspaces.id AND c.platform = 'slack'
+         )",
+        vec![],
+    )
+    .await;
+    exec(
+        kit,
+        "INSERT INTO member_identities (workspace_id, platform, external_id, user_id, created_at)
+         SELECT workspace_id, 'slack', user_id, user_id, updated_at FROM workspace_members
+         WHERE NOT EXISTS (
+             SELECT 1 FROM member_identities i
+             WHERE i.workspace_id = workspace_members.workspace_id
+               AND i.platform = 'slack'
+               AND i.external_id = workspace_members.user_id
+         )",
+        vec![],
+    )
+    .await;
+}
+
+/// The kit's [`NOW`] in the RFC 3339 the rows are written in.
+pub const RFC3339_NOW: &str = "2027-01-15T08:00:00Z";
 
 /// One query parameter out of a URL, or the empty string.
 #[must_use]

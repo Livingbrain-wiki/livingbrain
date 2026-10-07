@@ -1,0 +1,196 @@
+# Deploys the Living Brain Worker. Three jobs, in the order the risk
+# justifies: a dry run on every pull request that needs no secrets and so
+# works on a fork, staging on every merge to main, and production only on a
+# `v*` tag and only through the `production` GitHub environment's required
+# reviewers. A failed smoke test fails the job and rolls the environment
+# back, which is what stops a broken build reaching production. docs/deploy.md
+# is the runbook, including the one-time setup the placeholder ids in
+# crates/livingbrain-venture/wrangler.toml still need.
+
+name: Deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+# Deploys are serialised per ref and never cancelled: a half-finished
+# migration followed by a newer run is the outcome worth paying a few
+# minutes to avoid.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned, because a floating wrangler changes the shape of the config
+  # between a green run and a failing one. Run through npx, so no
+  # package.json or node_modules lands in the repository.
+  WRANGLER_VERSION: "4.147.0"
+
+jobs:
+  dry-run:
+    name: dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Build the Worker and dry-run every environment
+        working-directory: crates/livingbrain-venture
+        run: |
+          cargo install -q --locked worker-build
+          # The top-level config too: it is what `wrangler dev` uses, and a
+          # dry run is the only thing that reads it without a Cloudflare
+          # account. No secret is needed for any of the three, which is why
+          # this job runs on a fork's pull request.
+          for env in local staging production; do
+            echo "::group::wrangler deploy --dry-run ($env)"
+            if [ "$env" = local ]; then
+              npx --yes "wrangler@$WRANGLER_VERSION" deploy --dry-run \
+                --outdir "$RUNNER_TEMP/dry-$env"
+            else
+              npx --yes "wrangler@$WRANGLER_VERSION" deploy --dry-run \
+                --env "$env" --outdir "$RUNNER_TEMP/dry-$env"
+            fi
+            echo "::endgroup::"
+          done
+
+  staging:
+    name: staging
+    needs: dry-run
+    # Every push, not only pushes to main: a `v*` tag has to run this job
+    # too, because `production` needs it and a skipped need skips its
+    # dependants. Re-deploying staging for the same commit is idempotent.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # A named environment, so a deployment shows up under Settings →
+    # Environments and can later be given its own reviewers or a wait timer.
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      # Until docs/deploy.md's one-time setup is done (the Cloudflare secrets
+      # and the real ids in wrangler.toml), a merge skips staging with a
+      # notice instead of failing main. Production is not gated: a `v*` tag
+      # without the setup still fails loudly.
+      - name: Check the deploy setup
+        id: gate
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::staging deploy skipped: set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (docs/deploy.md)"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.ok == 'true'
+      - uses: dtolnay/rust-toolchain@master
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.ok == 'true'
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          node-version: lts/*
+      - name: Build the Worker
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: crates/livingbrain-venture
+        run: cargo install -q --locked worker-build
+      - name: Apply D1 migrations
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: crates/livingbrain-venture
+        run: npx --yes "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env staging --remote
+      - name: Deploy to staging
+        if: steps.gate.outputs.ok == 'true'
+        id: deploy
+        working-directory: crates/livingbrain-venture
+        run: npx --yes "wrangler@$WRANGLER_VERSION" deploy --env staging
+      - name: Seed the smoke-test workspace
+        if: steps.gate.outputs.ok == 'true'
+        working-directory: crates/livingbrain-venture
+        run: |
+          npx --yes "wrangler@$WRANGLER_VERSION" d1 execute DB --env staging --remote \
+            --file ../../scripts/deploy/seed-staging.sql
+      - name: Smoke test
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          HARNESS_SECRET: ${{ secrets.STAGING_HARNESS_SECRET }}
+          ENV: staging
+          # The vars are read from the environment, never interpolated into
+          # the script text, so a repository value cannot become shell.
+          BASE_URL: ${{ vars.STAGING_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::error::the STAGING_URL repository variable is not set"
+            exit 1
+          fi
+          ./scripts/deploy/smoke.sh "$BASE_URL"
+      - name: Roll staging back
+        if: failure() && steps.deploy.outcome == 'success'
+        run: ./scripts/deploy/rollback.sh staging
+
+  production:
+    name: production
+    needs: staging
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # The owner configures this environment with themselves as a required
+    # reviewer, so a tag cannot reach production unattended. That approval
+    # is the whole of the production gate.
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Build the Worker
+        working-directory: crates/livingbrain-venture
+        run: cargo install -q --locked worker-build
+      - name: Apply D1 migrations
+        working-directory: crates/livingbrain-venture
+        run: npx --yes "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env production --remote
+      - name: Deploy to production
+        id: deploy
+        working-directory: crates/livingbrain-venture
+        run: npx --yes "wrangler@$WRANGLER_VERSION" deploy --env production
+      - name: Smoke test
+        # Health only: production is never seeded, and no production key is
+        # ever handed to a runner, so there is no cookie to mint here.
+        env:
+          BASE_URL: ${{ vars.PRODUCTION_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::error::the PRODUCTION_URL repository variable is not set"
+            exit 1
+          fi
+          ./scripts/deploy/smoke.sh "$BASE_URL"
+      - name: Roll production back
+        if: failure() && steps.deploy.outcome == 'success'
+        run: ./scripts/deploy/rollback.sh production
