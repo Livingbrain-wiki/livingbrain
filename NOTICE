@@ -11,3 +11,10 @@ The design is ported; no Company Brain source code is included unless noted in t
 Its memory model draws on ideas from Hindsight by Vectorize
 (https://github.com/vectorize-io/hindsight), licensed under the MIT License.
 Where patterns or code are reused, the file that uses them says so.
+
+crates/livingbrain-redact includes secret and PII detection patterns adapted
+from Hindsight's memory_defense module
+(https://github.com/vectorize-io/hindsight/blob/3d39e6f452c6119ebbca34a6cb30a1e5f0a6edec/hindsight-api-slim/hindsight_api/extensions/memory_defense.py),
+MIT License, Copyright (c) 2025 Vectorize AI, Inc. The patterns were rewritten
+for Rust's regex engine — which has no lookaround — and reorganised; the source
+file and commit are named at the top of the table in src/patterns.rs.

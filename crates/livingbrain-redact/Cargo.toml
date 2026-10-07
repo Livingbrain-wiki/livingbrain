@@ -1,0 +1,34 @@
+[package]
+name = "livingbrain-redact"
+description = "Redact secrets and PII from text on every ingest path: the Worker and a CLI, one library, no secrets in the findings"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The detectors are one `regex` pattern each. `regex` is a finite automaton
+# engine: it matches in time linear in the input and has no backtracking, so
+# no planted text can make it blow up. Named here rather than through
+# `[workspace.dependencies]` because this crate is deliberately a plain
+# library, not a Cratefield module: no ports, no tables, no routes.
+regex = { version = "1.13.1", default-features = false, features = [
+  "std",
+  "perf",
+  "unicode-perl",
+  # One detector matches an AWS label case-insensitively, which is what pulls
+  # in the case table. The other Unicode tables are left off: the detectors
+  # use ASCII character classes, and the Worker's binary is the reason.
+  "unicode-case",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+# The same test suite runs in a Worker and on a host. `wasm-bindgen-test`
+# pins the `wasm-bindgen` the lockfile already resolves, so the wasm leg adds
+# no second copy of it.
+wasm-bindgen-test = "=0.3.79"
