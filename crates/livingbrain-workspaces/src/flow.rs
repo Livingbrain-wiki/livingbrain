@@ -29,6 +29,12 @@ pub const SESSION_COOKIE: &str = "__Host-lb_session";
 pub const FLOW_PURPOSE: &str = "workspaces.flow";
 /// The signing purpose of the session cookie.
 pub const SESSION_PURPOSE: &str = "workspaces.session";
+/// The signing purpose of the Slack install flow's cookie.
+///
+/// Its own purpose, not [`FLOW_PURPOSE`], because the two round trips
+/// protect different things: a sign-in decides *who is signed in*, an install
+/// decides *which workspace a bot token is bound to*.
+pub const INSTALL_PURPOSE: &str = "workspaces.install";
 
 /// How long a started sign-in stays valid, in seconds.
 pub(crate) const FLOW_TTL_SECS: i64 = 600;
@@ -106,6 +112,17 @@ pub(crate) fn seal<T: Serialize>(signer: &dyn Signer, purpose: &str, value: &T) 
 /// wrong purpose, JSON that is not a [`Flow`], or one already expired.
 pub(crate) fn open_flow(signer: &dyn Signer, clock: &dyn Clock, cookie: &str) -> Option<Flow> {
     let payload = signer.verify(cookie, FLOW_PURPOSE)?;
+    let flow: Flow = serde_json::from_str(&payload.subject).ok()?;
+    if flow.expires_at <= clock.now().unix_timestamp() {
+        return None;
+    }
+    Some(flow)
+}
+
+/// Verifies and decodes an install flow cookie: the same payload as a sign-in
+/// flow, sealed under [`INSTALL_PURPOSE`].
+pub(crate) fn open_install(signer: &dyn Signer, clock: &dyn Clock, cookie: &str) -> Option<Flow> {
+    let payload = signer.verify(cookie, INSTALL_PURPOSE)?;
     let flow: Flow = serde_json::from_str(&payload.subject).ok()?;
     if flow.expires_at <= clock.now().unix_timestamp() {
         return None;

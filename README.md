@@ -63,8 +63,8 @@ repository today, and what does not, and is updated as issues land.
 
 | | |
 | :--- | :--- |
-| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the `livingbrain` CLI (`crates/livingbrain-cli`, a client of the API: `login`, `ask`, `search`, `note`, `page`, `export`, `mcp`), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, and a member mirror (#5) |
-| **Not built** | Every other product feature: the wiki, permissions, the agent loop, the API the CLI talks to, the app — and, within Slack, the Events webhook that keeps the member mirror fresh (#6). The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
+| **Built** | The Cargo workspace (`crates/livingbrain-*` modules plus `crates/livingbrain-venture`, the Worker), the `livingbrain` CLI (`crates/livingbrain-cli`, a client of the API: `login`, `ask`, `search`, `note`, `page`, `export`, `mcp`), the D1/R2/KV deployment shape in `crates/livingbrain-venture/wrangler.toml`, and CI: fmt, clippy, tests, the Cratefield parity matrix (SQLite + Postgres) for every module, and a wasm build of the Worker. The Worker serves the harness's own `/__health`, and `workspaces`: **sign in with Slack**, one tenant per Slack workspace, the first person in owns it, a member mirror (#5), and the Slack app itself: its manifest, an OAuth install that seals the bot token under the KMS, and a signature-verified Events webhook (#6) |
+| **Not built** | Every other product feature: the wiki, permissions, the agent loop, the API the CLI talks to, the app. The module set is `canary` (the empty module that proves the scaffold) and `workspaces` |
 
 The composition is one Worker mounting modules into a Cratefield harness; the
 venture crate is the only place a runtime or a vendor SDK appears.
@@ -111,13 +111,14 @@ Then create a Slack app (From scratch) with **OpenID Connect** as the only
 user scope, and add `<tunnel>/v1/workspaces/slack/callback` as a redirect URL,
 where `<tunnel>` is the URL cloudflared printed. Fill in the two non-secret
 placeholders in `crates/livingbrain-venture/wrangler.toml` `[vars]`: the app's
-client id, and that same tunnel URL as `WORKSPACES_REDIRECT_BASE`. The two
+client id, and that same tunnel URL as `WORKSPACES_REDIRECT_BASE`. The
 secrets go in `crates/livingbrain-venture/.dev.vars` instead — gitignored, and
 deliberately not in this repository (wrangler reads secrets before vars):
 
 ```
 HARNESS_SECRET="at-least-32-bytes-of-random-text"
 WORKSPACES_SLACK_CLIENT_SECRET="the-secret-from-the-Slack-app"
+WORKSPACES_SLACK_SIGNING_SECRET="the-signing-secret-from-the-Slack-app"
 ```
 
 `HARNESS_SECRET` signs the flow and session cookies, so a request that carries

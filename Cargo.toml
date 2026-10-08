@@ -98,3 +98,8 @@ proptest = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Test builds skip debug info: panic messages still carry file:line, and
+# this keeps `cargo test` inside small CI and sandbox disks.
+[profile.test]
+debug = false

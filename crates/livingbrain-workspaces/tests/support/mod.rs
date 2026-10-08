@@ -2,9 +2,9 @@
 //! request helper that can carry a `Cookie` header, and the small pieces
 //! of a Slack `id_token` a test needs to craft one.
 //!
-//! Each integration test file declares `mod support;` and Cargo compiles
-//! each of them as its own binary, so a helper only one of the three uses
-//! is dead code in the other two.
+//! Each integration test file declares `mod support;` and Cargo compiles each
+//! of them as its own binary, so a helper only one of them uses is dead code
+//! in the others.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,11 @@ use time::OffsetDateTime;
 pub const CLIENT_ID: &str = "1234.5678";
 pub const CLIENT_SECRET: &str = "slack-client-secret-not-real";
 pub const REDIRECT_BASE: &str = "https://brain.example";
+/// The Events API signing secret (`WORKSPACES_SLACK_SIGNING_SECRET`).
+pub const SIGNING_SECRET: &str = "8f742231b10e8888abcd99yyyzzz85a5";
+/// The base64 of a 32-byte key ring: `HARNESS_KEK_CURRENT` plus
+/// `HARNESS_KEK_V1`, which is what `WorkerSecretKms` reads. Not a secret.
+pub const KEK: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
 /// The fixed instant every test runs at, matching the kit's default clock.
 pub const NOW: i64 = 1_800_000_000;
 
@@ -42,12 +47,17 @@ pub fn callback_url() -> String {
         .replace('/', "%2F")
 }
 
-/// The harness config a deployment would set.
+/// The harness config a deployment would set: the sign-in keys, the Events
+/// signing secret and a key ring. The negative cases take [`config`] and
+/// remove one key.
 pub fn config() -> MapConfig {
     MapConfig::from_pairs([
         ("WORKSPACES_SLACK_CLIENT_ID", CLIENT_ID),
         ("WORKSPACES_SLACK_CLIENT_SECRET", CLIENT_SECRET),
         ("WORKSPACES_REDIRECT_BASE", REDIRECT_BASE),
+        ("WORKSPACES_SLACK_SIGNING_SECRET", SIGNING_SECRET),
+        ("HARNESS_KEK_CURRENT", "1"),
+        ("HARNESS_KEK_V1", KEK),
     ])
 }
 
@@ -253,6 +263,111 @@ pub async fn send(
     send_with_body(router, method, path, cookies, None, "").await
 }
 
+// ---------------------------------------------------------------------------
+// Slack event deliveries
+
+/// The events endpoint, as the harness mounts it.
+pub const EVENTS: &str = "/v1/workspaces/slack/events";
+
+/// `POST /slack/events` carrying a body Slack signed at `timestamp`.
+pub async fn post_signed(router: &axum::Router, body: &Value, timestamp: i64) -> Res {
+    let raw = body.to_string();
+    post_signed_with(router, &raw, timestamp, SIGNING_SECRET).await
+}
+
+/// [`post_signed`] with the secret spelled out, so a test can sign with the
+/// wrong one.
+pub async fn post_signed_with(
+    router: &axum::Router,
+    raw: &str,
+    timestamp: i64,
+    secret: &str,
+) -> Res {
+    let builder = Request::builder()
+        .method(Method::POST)
+        .uri(EVENTS)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-slack-request-timestamp", timestamp.to_string());
+    // No signature at all is a refusal too, and a test says so by signing
+    // with nothing.
+    let builder = if secret.is_empty() {
+        builder
+    } else {
+        builder.header("x-slack-signature", signature(secret, timestamp, raw))
+    };
+    respond(
+        router,
+        builder
+            .body(Body::from(raw.to_owned()))
+            .expect("request builds"),
+    )
+    .await
+}
+
+/// The signature Slack would put in `X-Slack-Signature` for this body:
+/// `v0=` + hex(`HMAC-SHA256(secret, "v0:{timestamp}:{body}")`).
+///
+/// Written out here rather than borrowed from the module, because a test
+/// that signs with the module's own code proves only that the module agrees
+/// with itself.
+pub fn signature(secret: &str, timestamp: i64, body: &str) -> String {
+    use hmac::Mac as _;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(format!("v0:{timestamp}:{body}").as_bytes());
+    let hex =
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .fold(String::with_capacity(64), |mut out, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{byte:02x}");
+                out
+            });
+    format!("v0={hex}")
+}
+
+/// A `url_verification` handshake Slack sends when an app's request URL is
+/// first saved.
+pub fn url_verification(challenge: &str) -> Value {
+    json!({"type": "url_verification", "challenge": challenge})
+}
+
+/// An `event_callback` envelope around `event`, the shape Slack sends.
+///
+/// `event_id` is what the inbox dedups on and `team_id` is what the module is
+/// allowed to read the workspace from — never `event.user.team_id`.
+pub fn envelope(event_id: &str, team_id: &str, event: Value) -> Value {
+    json!({
+        "token": "legacy-verification-token-slack-no-longer-sends",
+        "team_id": team_id,
+        "api_app_id": "A0APP",
+        "event": event,
+        "type": "event_callback",
+        "event_id": event_id,
+        "event_time": NOW,
+    })
+}
+
+/// Drives one request through the router and reads the whole answer.
+pub async fn respond(router: &axum::Router, request: Request<Body>) -> Res {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router answers");
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, 1024 * 1024)
+        .await
+        .expect("body reads");
+    Res {
+        status: parts.status,
+        headers: parts.headers,
+        body: bytes.to_vec(),
+    }
+}
+
 /// [`send`] with a body and, when there is one, a `Content-Type`.
 async fn send_with_body(
     router: &axum::Router,
@@ -445,6 +560,64 @@ pub fn signed_session(kit: &TestHarness, workspace_id: &str, user_id: &str, exp:
 }
 
 // ---------------------------------------------------------------------------
+// Installing the Slack app (issue #6)
+
+/// An install attempt `GET /slack/install` has begun: the flow cookie and the
+/// CSRF state Slack will send back.
+pub struct Install {
+    pub cookie: String,
+    pub state: String,
+}
+
+impl Install {
+    /// The install callback path for this attempt, carrying `code`.
+    #[must_use]
+    pub fn callback(&self, code: &str) -> String {
+        format!(
+            "/v1/workspaces/slack/install/callback?code={code}&state={}",
+            self.state
+        )
+    }
+
+    /// The `Cookie` header a browser would send to the callback.
+    #[must_use]
+    pub fn cookies(&self) -> [(&str, &str); 1] {
+        [(FLOW_COOKIE, self.cookie.as_str())]
+    }
+}
+
+/// Begins an install: drives `/slack/install` and returns the attempt.
+pub async fn start_install(kit: &TestHarness) -> Install {
+    let install = get(&kit.router, "/v1/workspaces/slack/install", &[]).await;
+    assert_eq!(install.status, StatusCode::FOUND, "install redirects");
+    Install {
+        cookie: install
+            .cookie(FLOW_COOKIE)
+            .expect("install sets a flow cookie"),
+        state: query_param(&install.location(), "state"),
+    }
+}
+
+/// The Slack answer `oauth.v2.access` gives for one install. `token` is what
+/// the row must be sealed against and what the test reads back — the only
+/// place a test sees the plaintext.
+#[must_use]
+pub fn install_answer(team_id: &str, app_id: &str, bot_user_id: &str, token: &str) -> String {
+    json!({
+        "ok": true,
+        "access_token": token,
+        "token_type": "bot",
+        "scope": "app_mentions:read,channels:history,chat:write",
+        "app_id": app_id,
+        "team": {"id": team_id, "name": format!("{team_id} workspace")},
+        "enterprise": null,
+        "authed_user": {"id": "UINSTALLER"},
+        "bot_user_id": bot_user_id,
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
 // The email magic link
 
 /// The sign-in token out of the last message the fake mailer recorded — the
@@ -621,6 +794,21 @@ pub fn query_param(url: &str, name: &str) -> String {
 #[must_use]
 pub fn clock() -> FixedClock {
     FixedClock(OffsetDateTime::from_unix_timestamp(NOW).expect("a valid instant"))
+}
+
+/// A key custodian over an in-process key ring: the production
+/// `WorkerSecretKms` shape, served by a closure so a test needs no file and
+/// no environment variable.
+#[must_use]
+pub fn kms() -> Arc<dyn cratefield_kms::Kms> {
+    Arc::new(
+        cratefield_kms::WorkerSecretKms::from_lookup(|name| match name {
+            "HARNESS_KEK_CURRENT" => Some("1".to_owned()),
+            "HARNESS_KEK_V1" => Some(KEK.to_owned()),
+            _ => None,
+        })
+        .expect("the key ring is well formed"),
+    )
 }
 
 /// Applies a Slack event the way issue #6's webhook will: after verifying

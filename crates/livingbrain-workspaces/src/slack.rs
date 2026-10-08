@@ -65,6 +65,13 @@ impl SlackError {
         Self(None)
     }
 
+    /// A failure of this deployment rather than of Slack: the key ring could
+    /// not wrap the token, say. The detail is the KMS error's own text, which
+    /// names the secret and the fix and never the token.
+    pub(crate) fn internal(detail: String) -> Self {
+        Self(Some(detail))
+    }
+
     /// A Slack refusal, keeping its `error` code only when it is a plain
     /// snake_case token — which is what Slack's own codes are, and is not
     /// true of anything else that might reach this field.
@@ -112,9 +119,6 @@ pub(crate) fn authorize_url(
 }
 
 /// Exchanges an authorization code for an `id_token`.
-///
-/// A form POST to Slack's token endpoint, authenticated with the client
-/// secret, returning only after `ok: true`.
 pub(crate) async fn exchange_code(
     http: &dyn HttpClient,
     client_id: &str,
@@ -122,16 +126,41 @@ pub(crate) async fn exchange_code(
     redirect_uri: &str,
     code: &str,
 ) -> Result<String, SlackError> {
-    let form = format!(
+    let body = post_form(
+        http,
+        TOKEN_URL,
+        code_form(client_id, client_secret, redirect_uri, code),
+    )
+    .await?;
+    body.get("id_token")
+        .and_then(serde_json::Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(SlackError::opaque)
+}
+
+/// The form both token endpoints take: the app's credentials, the code, and
+/// the redirect URI it was issued against.
+fn code_form(client_id: &str, client_secret: &str, redirect_uri: &str, code: &str) -> String {
+    format!(
         "client_id={}&client_secret={}&code={}&redirect_uri={}",
         encode(client_id),
         encode(client_secret),
         encode(code),
         encode(redirect_uri),
-    );
+    )
+}
+
+/// A form POST to one of Slack's token endpoints, returning only after
+/// `ok: true`.
+async fn post_form(
+    http: &dyn HttpClient,
+    uri: &str,
+    form: String,
+) -> Result<serde_json::Value, SlackError> {
     let request = http::Request::builder()
         .method(http::Method::POST)
-        .uri(TOKEN_URL)
+        .uri(uri)
         .header(
             http::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
@@ -149,11 +178,116 @@ pub(crate) async fn exchange_code(
                 .unwrap_or_default(),
         ));
     }
-    body.get("id_token")
+    Ok(body)
+}
+
+/// Where a workspace's owner sends a browser to install the app (OAuth v2).
+const INSTALL_URL: &str = "https://slack.com/oauth/v2/authorize";
+/// Where the install's authorization code becomes a bot token.
+const INSTALL_TOKEN_URL: &str = "https://slack.com/api/oauth.v2.access";
+
+/// What Slack's install endpoint says about the workspace that installed the
+/// app, narrowed to what [`install_code`]'s caller stores.
+///
+/// The token is a `BotToken` and not a `String` so that it cannot reach a
+/// log through a `Debug`: every error path here is a log line, and a
+/// `Debug`-printed `String` in a struct is exactly how a token ends up in
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlackInstall {
+    /// The team that installed the app.
+    pub team_id: String,
+    /// The app's own id, which a re-install keeps.
+    pub app_id: String,
+    /// The bot user Slack created for this installation.
+    pub bot_user_id: String,
+    /// The `xoxb-` bot token, sealed by the caller and never printed.
+    pub token: BotToken,
+}
+
+/// A Slack bot token. The `Debug` impl prints `[redacted]`, so the one
+/// derived trait that reaches logs and error messages cannot print it.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BotToken(String);
+
+impl BotToken {
+    /// The token's own bytes, for the seal that stores it. Named so that a
+    /// reader has to notice.
+    #[must_use]
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for BotToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BotToken([redacted])")
+    }
+}
+
+/// The URL a workspace's owner is sent to in order to install the app.
+///
+/// `scopes` is comma-joined: OAuth v2 scopes one kind of token at a time, and
+/// asking for a user scope here would be asking Slack for a user token this
+/// module has no use for.
+pub(crate) fn install_url(
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[&str],
+    state: &str,
+) -> String {
+    format!(
+        "{INSTALL_URL}?client_id={}&scope={}&redirect_uri={}&state={}",
+        encode(client_id),
+        encode(&scopes.join(",")),
+        encode(redirect_uri),
+        encode(state),
+    )
+}
+
+/// Exchanges an install code for the bot token, the team that installed the
+/// app and the bot user Slack made for it.
+///
+/// The same form POST as [`exchange_code`], to a different endpoint: Slack's
+/// install endpoint is OAuth v2 and answers `access_token` where the OpenID
+/// one answers `id_token`.
+pub(crate) async fn install_code(
+    http: &dyn HttpClient,
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    code: &str,
+) -> Result<SlackInstall, SlackError> {
+    let body = post_form(
+        http,
+        INSTALL_TOKEN_URL,
+        code_form(client_id, client_secret, redirect_uri, code),
+    )
+    .await?;
+    let token = body
+        .get("access_token")
         .and_then(serde_json::Value::as_str)
         .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(SlackError::opaque)
+        .ok_or_else(SlackError::opaque)?;
+    let team_id = body
+        .pointer("/team/id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(SlackError::opaque)?;
+    Ok(SlackInstall {
+        team_id: team_id.to_owned(),
+        app_id: text(body.get("app_id")),
+        bot_user_id: text(body.get("bot_user_id")),
+        token: BotToken(token.to_owned()),
+    })
+}
+
+/// An optional string field, empty when absent.
+fn text(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Checks an `id_token` and reads the Slack claims out of it.
@@ -296,5 +430,13 @@ mod tests {
             assert_eq!(SlackError::refused(hostile), SlackError(None), "{hostile}");
         }
         assert_eq!(SlackError::opaque(), SlackError(None));
+    }
+
+    #[test]
+    fn a_bot_token_never_prints_itself() {
+        let token = BotToken("xoxb-1111-2222-secret".to_owned());
+        assert_eq!(format!("{token:?}"), "BotToken([redacted])");
+        assert!(!format!("{token:?}").contains("xoxb"));
+        assert_eq!(token.expose(), "xoxb-1111-2222-secret");
     }
 }
