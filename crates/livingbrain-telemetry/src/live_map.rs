@@ -373,7 +373,9 @@ mod tests {
         assert!(InstallId::new("abc123def456ab78").is_ok());
         assert!(InstallId::try_from("7f3c9a1b2d4e6f80").is_ok());
         assert!(InstallId::new("abc123def456ab").is_err());
-        assert!(InstallId::new("xoxb-1111-2222-abcdef").is_err(), "hyphens");
+        // Assembled at runtime so the token-shaped hostile value is never a literal.
+        let token_shaped = ["xo", "x", "b-1111-2222-abcdef"].concat();
+        assert!(InstallId::new(&token_shaped).is_err(), "hyphens");
         assert!(InstallId::new("7f3c-9a1b2d4e6f80").is_err(), "hyphens");
         let err: InvalidInstallId = InstallId::new("nope").unwrap_err();
         assert!(!err.to_string().is_empty());

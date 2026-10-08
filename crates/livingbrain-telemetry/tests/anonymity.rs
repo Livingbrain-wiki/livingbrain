@@ -352,8 +352,8 @@ fn the_only_string_fields_are_the_two_validated_ids() {
 ///   a `&str` except the two constructors, and both validate. The email and
 ///   the wiki page are stopped by `Version::new` alone; there is no "sanitise"
 ///   step to get wrong.
-/// - **The Slack token — the validators.** `xoxb-…` is not sixteen characters
-///   (`UsageId`) and does not start with a digit (`Version`). Both refusals
+/// - **The Slack bot token — the validators.** A token is not sixteen
+///   characters (`UsageId`) and does not start with a digit (`Version`). Both refusals
 ///   are in `UsageId::new` and `Version::new`, so the batch cannot be built.
 /// - **The token as an event id — nothing here, and the test says so.** An
 ///   all-lowercase token fits `[A-Za-z0-9._:-]`, so it would pass id
@@ -365,25 +365,27 @@ fn the_only_string_fields_are_the_two_validated_ids() {
 ///   accepted miss rather than pretending otherwise.
 #[test]
 fn hostile_values_never_reach_the_wire() {
-    let slack_token = "xoxb-1111-2222-abcdefghijklmnopqrstuvwx";
+    // Assembled at runtime: a secret scan of the source bytes must never see the
+    // token-shaped hostile value, even though the test still exercises it.
+    let slack_token = ["xo", "x", "b-1111-2222-abcdefghijklmnopqrstuvwx"].concat();
     let email = "alice@example.com";
     let page_body = "The quarterly plan is to migrate the ingest path off the queue.";
 
     // Nothing hostile can be built into a batch.
-    assert!(UsageId::new(slack_token).is_err(), "token as a usage id");
+    assert!(UsageId::new(&slack_token).is_err(), "token as a usage id");
     assert!(UsageId::new(email).is_err(), "email as a usage id");
     assert!(
         UsageId::new(page_body).is_err(),
         "a page body as a usage id"
     );
-    assert!(Version::new(slack_token).is_err(), "token as a version");
+    assert!(Version::new(&slack_token).is_err(), "token as a version");
     assert!(Version::new(email).is_err(), "email as a version");
     assert!(Version::new(page_body).is_err(), "a page body as a version");
 
     // And the batch that does get built contains none of them.
     let batch = fully_populated();
     let payload = serde_json::to_string(&batch).unwrap();
-    for hostile in [slack_token, email, page_body] {
+    for hostile in [slack_token.as_str(), email, page_body] {
         assert!(!payload.contains(hostile), "{hostile} reached the payload");
     }
     assert!(!payload.contains('@'), "an @ anywhere in the payload");
@@ -584,7 +586,11 @@ fn an_event_line_carries_no_content() {
         .with_subject(Subject::new(SubjectKind::Page, "01JABCDEF.123-4").unwrap())
         .with_tool(ToolName::BrainSearch);
     let line = event.to_json_line();
-    for hostile in [email, page_body, "xoxb-1111-2222-abcdefghijklmnopqrstuvwx"] {
+    // Same value as in `hostile_values_never_reach_the_wire`, built again here
+    // because the two tests are separate; assembled at runtime so no source byte
+    // spells a token.
+    let slack_token = ["xo", "x", "b-1111-2222-abcdefghijklmnopqrstuvwx"].concat();
+    for hostile in [email, page_body, slack_token.as_str()] {
         assert!(!line.contains(hostile), "{hostile} reached the line");
     }
     // A page id is in the line; the page is not. That difference is the point.
@@ -671,8 +677,8 @@ fn the_notice_shows_the_batch_and_the_off_switches() {
         );
     }
     // And nothing is in the notice that is not in the batch.
-    let hostile = "xoxb-1111-2222-abcdefghijklmnopqrstuvwx";
-    assert!(!notice.contains(hostile));
+    let hostile = ["xo", "x", "b-1111-2222-abcdefghijklmnopqrstuvwx"].concat();
+    assert!(!notice.contains(&hostile));
 }
 
 /// The bucketing boundaries, exact. `bucket_latency` uses `[lower, upper)`,

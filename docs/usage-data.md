@@ -196,8 +196,10 @@ A charset cannot tell a ULID from a token. Any string matching
 `[A-Za-z0-9._:-]` of at most 128 characters passes the opaque-id validators used
 by the event log — and **hyphens are in that charset**, so a real, hyphenated
 Slack bot token fits it. Reproduced against the crate:
-`Event::new(BrainTurn, "xoxb-1111-2222-abcdefghijklmnopqrstuvwx", 1)` returns
-`Ok`, and the token lands verbatim in the emitted line. The same is true of
+`Event::new(BrainTurn, "<slack-token-shaped id>", 1)` — the placeholder stands
+for a real hyphenated Slack bot token, not printed here so a secret scan of the
+source bytes never matches it — returns
+`Ok`, and that token lands verbatim in the emitted line. The same is true of
 `Subject::new` and of `Event::with_colony`.
 
 **That limitation is not about this payload.** A Slack token is 39 characters,

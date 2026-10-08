@@ -240,9 +240,11 @@ refuses `"trace 1"`.
 
 **The honest limit, stated rather than softened.** Any string matching
 `[A-Za-z0-9._:-]` of at most 128 characters passes all three validators —
-**including a hyphenated Slack token**. Reproduced against the crate:
-`Event::new(EventKind::BrainTurn, "xoxb-1111-2222-abcdefghijklmnopqrstuvwx", 1)`
-returns `Ok`, and `to_json_line()` emits the token verbatim as `trace_id`. The
+**including a hyphenated Slack bot token**. Reproduced against the crate:
+`Event::new(EventKind::BrainTurn, "<slack-token-shaped id>", 1)` — the
+placeholder stands for a real hyphenated Slack bot token, kept out of this file
+so a secret scan of the source bytes never matches it — returns `Ok`, and
+`to_json_line()` emits that token verbatim as `trace_id`. The
 same holds for `Subject::new` and `Event::with_colony`. This is not a rare edge
 case to be waved at; it is what the charset is.
 

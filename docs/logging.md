@@ -102,8 +102,10 @@ The honest limit, stated in
 charset stops free text and nothing more. **Any** string matching
 `[A-Za-z0-9._:-]` of at most 128 characters passes — hyphens are in that set, so
 a real hyphenated Slack bot token passes, and
-`Event::new(EventKind::BrainTurn, "xoxb-1111-2222-abcdefghijklmnopqrstuvwx", 1)`
-returns `Ok` and emits the token verbatim. What holds today is that no writer
+`Event::new(EventKind::BrainTurn, "<slack-token-shaped id>", 1)` — the
+placeholder standing for a real hyphenated Slack bot token, which is not printed
+here because a secret scan of the source bytes must never match it —
+returns `Ok` and emits that token verbatim. What holds today is that no writer
 exists, so no line is written; what a caller must hold is that ids come **only**
 from its `IdGen`, never from content; and the usage batch is not affected,
 because `UsageId::new` and `Version::new` both refuse it
