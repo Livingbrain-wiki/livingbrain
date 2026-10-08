@@ -1,0 +1,46 @@
+# Living Brain module: the settings audit log. Every settings change is
+# recorded — who changed what, when, and in which workspace — with the
+# value redacted before it reaches the table. Storage and the seam only:
+# the web app's routes arrive with issue #30's route work.
+
+[package]
+name = "livingbrain-audit"
+description = "Living Brain module: the settings audit log, one redacted row per settings change"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed. `axum` arrives through
+# `cratefield_core::axum`, so it is not named directly.
+cratefield-core = { workspace = true }
+
+# The shared secret/PII redaction pass (commit b7e2ac4). A settings value
+# can be a credential — a BYOK API key is a setting — and this is the one
+# piece of code that decides what gets stored, so the audit log runs it
+# rather than keeping a second, weaker detector. Pure Rust and wasm-safe.
+livingbrain-redact = { path = "../livingbrain-redact" }
+
+# Portable SQL built as parameterized statements over the `Database` port
+# (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
+sea-query = { workspace = true }
+# ISO-8601 timestamps for the rows (the portable subset stores TEXT, not a
+# dialect date type). Pure Rust and wasm-safe.
+time = { workspace = true }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
+# sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# An executor for the store's async tests, the same one the harness's own
+# module suites use. Dev-only, so it never reaches the module's dependency
+# tree either.
+pollster = { workspace = true }

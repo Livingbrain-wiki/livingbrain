@@ -19,9 +19,11 @@
 //! key so the bodies left in the blob store are unreadable. See
 //! `docs/adr/0003-per-scope-encryption.md`.
 //!
-//! There is no HTTP surface yet: authentication and workspaces are a sibling
-//! issue, and an unauthenticated write route would be a hole. The module ships
-//! its tables and its [`PageStore`]; the routes arrive with the auth work.
+//! There is no HTTP surface of its own: authentication and workspaces are a
+//! sibling issue, and an unauthenticated write route would be a hole. A
+//! composition that has one mounts it with [`Pages::nest`], which builds it
+//! from this module's own context — the harness scopes `Blob` per module
+//! name, so only a nested surface can open a body this module writes.
 
 #![forbid(unsafe_code)]
 
@@ -38,6 +40,7 @@ pub use store::{
     VersionMeta,
 };
 
+use cratefield_core::axum::Router;
 use cratefield_core::{
     Config, ConfigError, DataKind, Migrations, Module, ModuleContext, PersonalDataSet, Port,
     SqlMigration,
@@ -58,15 +61,53 @@ const MIGRATION_SCOPE_KEYS: SqlMigration = SqlMigration::new(
     include_str!("../migrations/sqlite/0002_scope_keys.sql"),
 );
 
+/// Routes a composition mounts inside this module.
+///
+/// The closure is handed the one `ModuleContext` the mount got, so the
+/// surface it builds reads what this module reads.
+type Nest = Box<dyn Fn(ModuleContext) -> Router + Send + Sync>;
+
 /// The pages module.
-#[derive(Debug, Default)]
-pub struct Pages;
+#[derive(Default)]
+pub struct Pages {
+    nest: Option<(&'static str, Nest)>,
+}
+
+// A nested surface is a closure, which is not `Debug`; the module itself is
+// still one, so a composition that prints its modules keeps working.
+impl std::fmt::Debug for Pages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pages")
+            .field("nested", &self.nest.as_ref().map(|(path, _)| path))
+            .finish()
+    }
+}
 
 impl Pages {
     /// A new pages module. There is nothing to configure.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Mount `routes` at `path` inside this module.
+    ///
+    /// A nested surface is built from *this* module's context, so it reads
+    /// the same blob prefix the pages do — the harness scopes `Blob` per
+    /// module name, and a sibling module could not open a body this one
+    /// writes (issue #24).
+    ///
+    /// One surface per module, and the type says so: `ModuleContext` is not
+    /// `Clone` and a mount gets exactly one.
+    #[must_use]
+    pub fn nest(
+        self,
+        path: &'static str,
+        routes: impl Fn(ModuleContext) -> Router + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            nest: Some((path, Box::new(routes))),
+        }
     }
 }
 
@@ -84,6 +125,15 @@ impl Module for Pages {
     /// the runtime grows a `Port::Kms` this moves beside it.
     fn requires(&self) -> &'static [Port] {
         &[Port::Db, Port::Blob, Port::Clock, Port::IdGen]
+    }
+
+    /// `Signer` is **optional**, and only because a nested surface may need
+    /// one to verify a caller's credential (issue #24). Optional, so a
+    /// composition with no signer is a working pages module rather than one
+    /// `Harness::build` refuses; a nested surface that needs it finds it
+    /// absent and says so.
+    fn optional(&self) -> &'static [Port] {
+        &[Port::Signer]
     }
 
     fn tables(&self) -> &'static [&'static str] {
@@ -163,9 +213,13 @@ impl Module for Pages {
         Ok(())
     }
 
-    /// No routes yet — see the module docs. A `PageStore` is built from
-    /// [`ModuleContext::ports`] when the auth surface lands.
-    fn router(&self, _ctx: ModuleContext) -> cratefield_core::axum::Router {
-        cratefield_core::axum::Router::new()
+    /// Whatever a composition nested, and nothing otherwise — see the module
+    /// docs. A `PageStore` is built from [`ModuleContext::ports`].
+    fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
+        let mut api = cratefield_core::axum::Router::new();
+        if let Some((path, build)) = &self.nest {
+            api = api.nest(path, build(ctx));
+        }
+        api
     }
 }

@@ -39,6 +39,13 @@ cratefield-testing = "=0.5.0"
 cratefield-adapter-owlpost = "=0.2.0"
 cratefield-mail-templates = "=0.1.0"
 cratefield-module-waitlist = "=0.4.0"
+# The two classifiers the judge thresholds for (issue #53): the
+# purpose-trained one (`Calibration::Classifier`) and the language-model
+# fallback over a `TextModel` (`Calibration::LanguageModel`). Dev-only here,
+# in the judge's test that proves the family mapping against the real
+# adapters; the venture is what wires either of them.
+cratefield-adapter-classifier-llm = "=0.3.0"
+cratefield-adapter-typesafe = "=0.3.0"
 # The KMS port: the only thing the page store asks of a key custodian is
 # wrap and unwrap a data key (issue #43). It has no dependency on
 # `cratefield-core` at all, so it cannot pull a second copy of the ports in.
@@ -99,7 +106,16 @@ proptest = "1.9"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# Test builds skip debug info: panic messages still carry file:line, and
-# this keeps `cargo test` inside small CI and sandbox disks.
+# Test binaries are enormous — the largest are 120-147 MB, almost all of it DWARF.
+# `line-tables-only` keeps the file and line for a panic and a backtrace while
+# dropping ~1.7 GB from a cold `cargo test --workspace` (4.1 GB -> 2.4 GB here),
+# which is what makes the full suite fit on a small CI runner. `debug = 0` would
+# save a little more and cost every test failure its line number, which is not a
+# trade worth making.
+[profile.dev]
+debug = "line-tables-only"
+
+# The test profile inherits from `dev`; setting it here as well so the setting
+# survives anything that changes the dev profile above it.
 [profile.test]
-debug = false
+debug = "line-tables-only"

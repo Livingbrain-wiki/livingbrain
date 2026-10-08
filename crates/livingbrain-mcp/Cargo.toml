@@ -1,0 +1,40 @@
+[package]
+name = "livingbrain-mcp"
+description = "Living Brain: the remote MCP server — brain_search, brain_page, brain_context_for and brain_note, every read scoped to the asker"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependencies a module is allowed: the ports, and the
+# KMS port beside them. `axum` arrives through `cratefield_core::axum`, so it
+# is not named directly.
+cratefield-core = { workspace = true }
+# Wrap/unwrap a scope's data key (issue #43). `cratefield-core` has no `Kms`
+# port, so the composition hands one to `router` beside the context.
+cratefield-kms = { workspace = true }
+# The read-with-the-asker's-access model (issue #8): `scopes_for` is the only
+# way a read gets its scopes, in Slack and here alike.
+livingbrain-access = { path = "../livingbrain-access" }
+# The store the tools read and write, and the module this surface is mounted
+# inside — the harness scopes `Blob` per module name, so only a nested
+# surface can open a body `pages` writes.
+livingbrain-pages = { path = "../livingbrain-pages" }
+# Secrets and PII leave `brain_note` before it reaches a body (issue #108).
+livingbrain-redact = { path = "../livingbrain-redact" }
+# `BearerAuth` is an async trait, declared the way every harness port is.
+async-trait = { workspace = true }
+# SHA-256 of a workspace and a scope, so an access scope becomes a page slug.
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+cratefield-testing = { workspace = true, features = ["postgres"] }
+async-trait = { workspace = true }
+pollster = { workspace = true }

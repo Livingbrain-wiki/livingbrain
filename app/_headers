@@ -1,0 +1,55 @@
+# Cloudflare Pages headers for the static app.
+#
+# The app is a static shell that talks to the Worker API. The API's own
+# security headers are set in Rust on every `/v1/*` response (Cratefield
+# harness, architecture section 6, issue #435) and on the email-verify page
+# (`crates/livingbrain-workspaces/src/handlers.rs`, `verify_page`); these
+# mirror them here so the *static* pages carry the same guarantees before a
+# request ever reaches the Worker.
+#
+# `_headers` has no block-comment syntax: `#` is the only comment marker. Every
+# other line is either a route path or an indented `Name: value` rule — so the
+# `/*` below is the wildcard route covering every page, not an opening
+# delimiter, and nothing else here may be wrapped in `/* */`.
+#
+# The inline theme bootstrap in each page's <head> is the one inline script —
+# it is genuinely needed there, because it has to run before the first paint or
+# the page flashes the wrong theme, and a deferred module runs after it. Its
+# SHA-256 is in the CSP below and is identical across all three pages, because
+# the script is byte-identical. If you edit it, recompute the hash with the
+# raw text between the tags — the browser hashes the exact text content of the
+# element, so the leading newline and the trailing indentation before
+# </script> must be kept (do NOT strip it):
+#   python3 -c "import re,hashlib,base64; s=open('app/index.html').read(); print(base64.b64encode(hashlib.sha256(re.search(r'<script>(.*?)</script>', s, re.S).group(1).encode()).digest()).decode())"
+# and update it below. Nothing else may be inlined: `script-src` has no
+# 'unsafe-inline' and no 'unsafe-eval', so anything new must move to a file
+# under assets/ and be loaded with <script type="module">.
+
+# Every route: the CSP and the security headers.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-GsRRMiFErXfPA/V4np3z0CtFFGhxjhelBLl+TjY8sYA='; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.livingbrain.wiki; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' https://api.livingbrain.wiki; frame-ancestors 'none'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
+  Permissions-Policy: geolocation=(), camera=(), microphone=(), interest-cohort=()
+  Cross-Origin-Opener-Policy: same-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+# The session is an HttpOnly cookie on the API. No HTML page carries a token,
+# but nothing here may be cached either: a shared cache that held a signed-in
+# person's rendered page would be a leak.
+/index.html
+  Cache-Control: no-store
+/settings.html
+  Cache-Control: no-store
+/wiki.html
+  Cache-Control: no-store
+
+# The static shell carries no per-person data, so a short shared cache is safe.
+/assets/*
+  Cache-Control: public, max-age=3600
+/sw.js
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Content-Type: application/manifest+json
+  Cache-Control: public, max-age=3600
