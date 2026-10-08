@@ -1588,6 +1588,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-audit"
+version = "0.1.0"
+dependencies = [
+ "cratefield-core",
+ "cratefield-testing",
+ "livingbrain-redact",
+ "pollster",
+ "sea-query",
+ "time",
+]
+
+[[package]]
 name = "livingbrain-canary"
 version = "0.1.0"
 dependencies = [
@@ -1642,6 +1654,15 @@ dependencies = [
  "pollster",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "livingbrain-memory"
+version = "0.1.0"
+dependencies = [
+ "livingbrain-access",
+ "livingbrain-redact",
+ "proptest",
 ]
 
 [[package]]
@@ -1741,8 +1762,12 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
+ "chacha20poly1305",
  "cratefield-core",
+ "cratefield-kms",
  "cratefield-testing",
+ "getrandom 0.4.3",
+ "hmac 0.12.1",
  "percent-encoding",
  "pollster",
  "sea-query",

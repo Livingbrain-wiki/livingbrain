@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings — Living Brain</title>
+    <meta name="color-scheme" content="dark light" />
+    <meta name="lb-api" content="" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="assets/app.css" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("lb-theme");
+          if (t !== "light" && t !== "dark") {
+            t = window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+          }
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body data-page="settings">
+    <a class="skip" href="#main">Skip to settings</a>
+    <div class="wrap">
+      <div class="topbar">
+        <a class="brand" href="wiki.html">Living Brain</a>
+        <nav>
+          <a href="wiki.html">Wiki</a>
+          <a href="index.html">Sign in</a>
+          <button id="theme-toggle" type="button" class="btn">Theme</button>
+        </nav>
+      </div>
+
+      <main id="main">
+        <h1>Settings</h1>
+        <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
+
+        <div class="settings">
+          <!-- models: the one section with a server route today -->
+          <section class="card" id="models">
+            <h2>Models and keys</h2>
+            <p class="muted">
+              Bring your own model, one connection per role. Keys are encrypted
+              before they are stored and only their last four characters are
+              ever shown back.
+            </p>
+
+            <fieldset>
+              <legend>Connected models</legend>
+              <div id="models-status" class="notice" role="status"></div>
+              <table class="table">
+                <caption>
+                  Read from <code>GET /v1/models/</code>. Connecting a key is
+                  <code>PUT /v1/models/{role}</code>.
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Role</th>
+                    <th scope="col">Provider</th>
+                    <th scope="col">Model</th>
+                    <th scope="col">Key</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="model-rows"></tbody>
+              </table>
+            </fieldset>
+
+            <fieldset>
+              <legend>Connect a model</legend>
+              <p class="row">
+                <label for="role">Role</label>
+                <select id="role">
+                  <option value="main">main</option>
+                  <option value="triage">triage</option>
+                  <option value="research">research</option>
+                </select>
+              </p>
+              <p class="row">
+                <label for="provider">Provider</label>
+                <select id="provider">
+                  <option value="openai-compatible">openai-compatible</option>
+                  <option value="deepseek">deepseek</option>
+                  <option value="openrouter">openrouter</option>
+                  <option value="anthropic">anthropic</option>
+                </select>
+              </p>
+              <p class="row">
+                <label for="base-url">Base URL</label>
+                <input
+                  id="base-url"
+                  type="url"
+                  placeholder="https://api.deepseek.com/v1"
+                />
+              </p>
+              <p class="row">
+                <label for="api-key">API key</label>
+                <input
+                  id="api-key"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </p>
+              <p class="row">
+                <label for="model-name">Model</label>
+                <input id="model-name" type="text" placeholder="deepseek-chat" />
+              </p>
+              <p class="row">
+                <button
+                  type="button"
+                  data-variant="primary"
+                  id="connect-model"
+                >
+                  Connect for the selected role
+                </button>
+              </p>
+              <p class="tiny">
+                Needs admin or owner rights. Nothing falls back to the managed
+                model unless you ask for it.
+              </p>
+            </fieldset>
+          </section>
+
+          <!-- the rest: visible, honestly marked, not wired to a backend -->
+          <section class="card" id="proactivity">
+            <h2>Proactivity</h2>
+            <p class="muted">
+              When the brain is allowed to work without being asked.
+            </p>
+            <p class="row">
+              <label for="proactive-nightly">Nightly evolve pass</label>
+              <input
+                type="checkbox"
+                id="proactive-nightly"
+                data-section="proactivity" data-key="nightly-evolve"
+                disabled
+                aria-describedby="proactivity-note"
+              />
+            </p>
+            <p class="row">
+              <label for="proactive-briefs">Personnel briefs</label>
+              <input
+                type="checkbox"
+                id="proactive-briefs"
+                data-section="proactivity" data-key="personnel-briefs"
+                disabled
+                aria-describedby="proactivity-note"
+              />
+            </p>
+            <p id="proactivity-note" class="pill" data-state="disabled">
+              No server route yet
+            </p>
+          </section>
+
+          <section class="card" id="tools">
+            <h2>Tools</h2>
+            <p class="muted">
+              Which tools the brain may call, per person.
+            </p>
+            <p class="row">
+              <label for="tools-mcp">Tools over MCP</label>
+              <input
+                type="checkbox"
+                id="tools-mcp"
+                data-section="tools" data-key="mcp-tools"
+                disabled
+                aria-describedby="tools-note"
+              />
+            </p>
+            <p id="tools-note" class="pill" data-state="disabled">
+              No server route yet
+            </p>
+          </section>
+
+          <section class="card" id="automations">
+            <h2>Automations</h2>
+            <p class="muted">
+              Scheduled passes: digest, dream, lint.
+            </p>
+            <p class="row">
+              <label for="automation-digest">Daily digest</label>
+              <select id="automation-digest"
+                data-section="automations" data-key="digest" disabled aria-describedby="automations-note">
+                <option>Off</option>
+                <option>Weekdays</option>
+                <option>Daily</option>
+              </select>
+            </p>
+            <p id="automations-note" class="pill" data-state="disabled">
+              No server route yet
+            </p>
+          </section>
+
+          <section class="card" id="skills">
+            <h2>Skills</h2>
+            <p class="muted">
+              The shared prompt library behind the plan.
+            </p>
+            <p class="row">
+              <label for="skills-shared">Shared skill library</label>
+              <input
+                type="checkbox"
+                id="skills-shared"
+                data-section="skills" data-key="shared-library"
+                disabled
+                aria-describedby="skills-note"
+              />
+            </p>
+            <p id="skills-note" class="pill" data-state="disabled">
+              No server route yet
+            </p>
+          </section>
+
+          <section class="card" id="colonizer">
+            <h2>Colonizer</h2>
+            <p class="muted">
+              The colonies that do real work in microVMs and come back as pull
+              requests.
+            </p>
+            <p class="row">
+              <label for="colonizer-enabled">Let Colonizer open pull requests</label>
+              <input
+                type="checkbox"
+                id="colonizer-enabled"
+                data-section="colonizer" data-key="open-pull-requests"
+                disabled
+                aria-describedby="colonizer-note"
+              />
+            </p>
+            <p id="colonizer-note" class="pill" data-state="disabled">
+              No server route yet
+            </p>
+          </section>
+        </div>
+
+        <p class="tiny">
+          Every setting change goes through one function,
+          <code>LB.setting(section, key, value)</code> in
+          <code>assets/app.js</code>, which sends the section, key and value
+          with the change so the server can audit it. There is no second path.
+        </p>
+      </main>
+    </div>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

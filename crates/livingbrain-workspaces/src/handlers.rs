@@ -24,12 +24,16 @@ use cratefield_core::{
     Clock, Database, DbError, IdGen, MailError, Message, ModuleContext, Problem, ProblemDef,
     SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email,
 };
+use cratefield_kms::Kms;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
 use crate::config::{self, Settings};
+use crate::events;
+use crate::events::events as slack_events;
 use crate::flow::{self, Flow, Session};
+use crate::install;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
 
@@ -127,11 +131,43 @@ const NOT_A_MEMBER: ProblemDef = ProblemDef {
     description: "Ask somebody who is already a member to send a link.",
 };
 
+/// The key custodian is absent, so no bot token can be sealed or opened. A
+/// 503 for the same reason the Slack credentials are one: the deployment is
+/// missing what these routes need, and nothing about the request is wrong.
+const NO_KEY_CUSTODIAN: ProblemDef = ProblemDef {
+    slug: "workspaces/no-key-custodian",
+    status: StatusCode::SERVICE_UNAVAILABLE,
+    title: "Slack install is not configured",
+    description: "An operator sets HARNESS_KEK_CURRENT and HARNESS_KEK_V1.",
+};
+
+/// The install callback could not be matched to an attempt this server
+/// started. The same refusal as a sign-in whose flow cookie is gone: an
+/// install is a CSRF-protected round trip exactly as a sign-in is.
+const INSTALL_EXPIRED: ProblemDef = ProblemDef {
+    slug: "workspaces/install-expired",
+    status: StatusCode::BAD_REQUEST,
+    title: "The Slack install attempt expired",
+    description: "Start again from /v1/workspaces/slack/install.",
+};
+
+/// Slack would not complete the install, or the key ring would not seal the
+/// token. A 502: the failure is upstream, not in the request.
+const INSTALL_FAILED: ProblemDef = ProblemDef {
+    slug: "workspaces/install-failed",
+    status: StatusCode::BAD_GATEWAY,
+    title: "The Slack install failed",
+    description: "Start again from /v1/workspaces/slack/install.",
+};
+
 /// The router state: the module's ports, and the Slack settings as a
 /// `Result` so a missing credential is a 503 per request, not a panic at
-/// startup.
-struct ModuleState {
-    ctx: ModuleContext,
+/// startup. `pub(crate)` because [`crate::events`] serves the Events API out
+/// of the same state — the ports and the deployment's Slack configuration are
+/// one thing, and a second copy of it is how the two halves of a Slack app
+/// end up reading different secrets.
+pub(crate) struct ModuleState {
+    pub(crate) ctx: ModuleContext,
     settings: Result<Settings, String>,
     /// Where a sign-in link points. Read apart from [`Settings`] so a
     /// deployment with no Slack app can still send one, and resolved once
@@ -139,10 +175,17 @@ struct ModuleState {
     public_base: Option<String>,
     /// The `From` of a sign-in mail.
     mail_from: String,
+    /// The Slack app's Events API signing secret, read lazily: a deployment
+    /// that signs people in with Slack OpenID and takes no events is
+    /// correctly configured without it.
+    signing_secret: Option<String>,
+    /// The key custodian the bot token is sealed under; `None` is a
+    /// deployment with no key ring, which still serves sign-in and email.
+    kms: Option<Arc<dyn Kms>>,
 }
 
 impl ModuleState {
-    fn settings(&self) -> Result<&Settings, Problem> {
+    pub(crate) fn settings(&self) -> Result<&Settings, Problem> {
         self.settings
             .as_ref()
             .map_err(|reason| Problem::new(&NOT_CONFIGURED).with_detail(reason.clone()))
@@ -159,6 +202,19 @@ impl ModuleState {
             )
         })
     }
+
+    /// The Events API signing secret, or [`None`] when this deployment takes
+    /// no Slack events.
+    pub(crate) fn signing_secret(&self) -> Option<String> {
+        self.signing_secret.clone()
+    }
+
+    /// The key custodian, or the 503 that says a bot token cannot be sealed.
+    fn kms(&self) -> Result<&Arc<dyn Kms>, Problem> {
+        self.kms
+            .as_ref()
+            .ok_or_else(|| Problem::new(&NO_KEY_CUSTODIAN))
+    }
 }
 
 /// The module's routes.
@@ -166,16 +222,24 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
     let mail_from = config::mail_from(&*ctx.config);
+    let signing_secret = config::signing_secret(&*ctx.config);
+    let kms = install::key_custodian(&*ctx.config).ok();
     let state = Arc::new(ModuleState {
         ctx,
         settings,
         public_base,
         mail_from,
+        signing_secret,
+        kms,
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))
         .route("/slack/callback", get(slack_callback))
         .route("/connections/slack/start", get(slack_link_start))
+        .route("/slack/install", get(slack_install))
+        .route("/slack/install/callback", get(slack_install_callback))
+        .route("/slack/manifest", get(slack_manifest))
+        .route("/slack/events", post(slack_events))
         .route("/me", get(me))
         .route("/members", get(members))
         .route("/email/start", post(email_start))
@@ -185,12 +249,12 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
 
 /// A port the module declared and the runtime did not supply: a deployment
 /// fault, answered with nothing more than a 500.
-fn port<T: ?Sized>(slot: Option<Arc<T>>) -> Result<Arc<T>, Problem> {
+pub(crate) fn port<T: ?Sized>(slot: Option<Arc<T>>) -> Result<Arc<T>, Problem> {
     slot.ok_or_else(Problem::internal)
 }
 
 /// A failed statement. The adapter's message never reaches the body.
-fn database(_error: DbError) -> Problem {
+pub(crate) fn database(_error: DbError) -> Problem {
     Problem::internal()
 }
 
@@ -243,7 +307,7 @@ fn new_user_id(id_gen: &dyn IdGen) -> String {
 /// workspace in it.
 async fn slack_start(State(state): State<Arc<ModuleState>>) -> Result<Response, Problem> {
     let settings = state.settings()?;
-    slack_redirect(&state, settings, None, None).await
+    slack_redirect(&state, settings, SlackFlow::SignIn, None, None).await
 }
 
 /// `GET /connections/slack/start` — the same Slack OAuth flow, for a caller
@@ -273,7 +337,26 @@ async fn slack_link_start(
         return Err(not_allowed());
     }
     let settings = state.settings()?;
-    slack_redirect(&state, settings, Some(workspace.id), Some(member.user_id)).await
+    slack_redirect(
+        &state,
+        settings,
+        SlackFlow::SignIn,
+        Some(workspace.id),
+        Some(member.user_id),
+    )
+    .await
+}
+
+/// Which Slack round trip a flow cookie is for. They are the same shape — a
+/// CSRF state in a sealed cookie and a redirect to Slack — and differ only in
+/// what comes back and in the purpose that seals the cookie, so a cookie
+/// minted for one cannot verify as the other.
+#[derive(Debug, Clone, Copy)]
+enum SlackFlow {
+    /// An OpenID Connect sign-in.
+    SignIn,
+    /// An OAuth v2 bot install (issue #6).
+    Install,
 }
 
 /// Mints the flow cookie and answers with Slack's authorize redirect.
@@ -282,6 +365,7 @@ async fn slack_link_start(
 async fn slack_redirect(
     state: &ModuleState,
     settings: &Settings,
+    flow: SlackFlow,
     workspace: Option<String>,
     user: Option<String>,
 ) -> Result<Response, Problem> {
@@ -296,7 +380,10 @@ async fn slack_redirect(
     let expires_at = clock.now().unix_timestamp() + flow::FLOW_TTL_SECS;
     let sealed = flow::seal(
         &*signer,
-        flow::FLOW_PURPOSE,
+        match flow {
+            SlackFlow::SignIn => flow::FLOW_PURPOSE,
+            SlackFlow::Install => flow::INSTALL_PURPOSE,
+        },
         &Flow {
             state: state_value.clone(),
             nonce: nonce.clone(),
@@ -307,12 +394,20 @@ async fn slack_redirect(
     )
     .ok_or_else(Problem::internal)?;
 
-    let url = slack::authorize_url(
-        &settings.client_id,
-        &settings.callback_url(),
-        &state_value,
-        &nonce,
-    );
+    let url = match flow {
+        SlackFlow::SignIn => slack::authorize_url(
+            &settings.client_id,
+            &settings.callback_url(),
+            &state_value,
+            &nonce,
+        ),
+        SlackFlow::Install => slack::install_url(
+            &settings.client_id,
+            &events::install_callback_url(state.public_base()?),
+            &events::bot_scopes(),
+            &state_value,
+        ),
+    };
     Ok((
         StatusCode::FOUND,
         [
@@ -641,6 +736,129 @@ async fn sign_in_slack_workspace(
     .await
     .map_err(database)?;
     Ok((workspace_id, member_id))
+}
+
+// ---------------------------------------------------------------------------
+// Installing the Slack app into a workspace (issue #6)
+
+/// `GET /slack/install` — send a workspace's owner to Slack to approve the
+/// app. The whole point is a bot token in `slack_installs`, so it needs the
+/// app credentials *and* the public origin (the callback URL has to be
+/// byte-identical to the one the token call carries, or Slack refuses the
+/// exchange), and the key ring that token will be sealed under — refused
+/// before the round trip, because an install that cannot seal what it is
+/// about to receive is a 503, not a Slack screen followed by a failure.
+async fn slack_install(State(state): State<Arc<ModuleState>>) -> Result<Response, Problem> {
+    let settings = state.settings()?;
+    state.kms()?;
+    slack_redirect(&state, settings, SlackFlow::Install, None, None).await
+}
+
+/// `GET /slack/install/callback?code&state` — verify the state, exchange the
+/// code, and seal the bot token.
+///
+/// The response is a small JSON body rather than a redirect, because the
+/// browser that arrives here is Slack's approval screen following a link and
+/// there is no session for it to land in: signing somebody in is a different
+/// route (`/slack/callback`), and an install never signs anybody in. The
+/// team is named in the body — the installer needs to see that *their*
+/// workspace is the one that was installed.
+async fn slack_install_callback(
+    State(state): State<Arc<ModuleState>>,
+    Query(query): Query<CallbackQuery>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let settings = state.settings()?;
+    let kms = state.kms()?;
+    let signer = port(state.ctx.ports.signer.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let http = port(state.ctx.ports.http.clone())?;
+    let db = port(state.ctx.ports.db.clone())?;
+
+    let Some(cookie) = flow::cookie_value(&headers, flow::FLOW_COOKIE) else {
+        return Err(install_expired());
+    };
+    let Some(flow_cookie) = flow::open_install(&*signer, &*clock, &cookie) else {
+        return Err(install_expired());
+    };
+    let (Some(code), Some(returned_state)) = (query.code.as_deref(), query.state.as_deref()) else {
+        return Err(install_expired());
+    };
+    // Constant time, like the sign-in callback: the state is what proves this
+    // redirect belongs to an attempt this server started.
+    if !constant_time_eq(flow_cookie.state.as_bytes(), returned_state.as_bytes()) {
+        return Err(install_expired());
+    }
+
+    let installed = slack::install_code(
+        &*http,
+        &settings.client_id,
+        &settings.client_secret,
+        &events::install_callback_url(state.public_base()?),
+        code,
+    )
+    .await
+    .map_err(install_failed)?;
+
+    // The KMS error text names the key ring, never the token: it is a
+    // deployment fault and its own detail is already scrubbed.
+    let sealed = install::seal(&**kms, &installed.team_id, installed.token.expose())
+        .await
+        .map_err(|err| install_failed(slack::SlackError::internal(err.to_string())))?;
+    let now = clock.now().format(&Rfc3339).unwrap_or_default();
+    install::put_install(
+        &*db,
+        &installed.team_id,
+        &installed.app_id,
+        &installed.bot_user_id,
+        &sealed,
+        &now,
+    )
+    .await
+    .map_err(database)?;
+
+    let mut response = Json(Installed {
+        status: "installed",
+        team_id: &installed.team_id,
+        app_id: &installed.app_id,
+    })
+    .into_response();
+    // The flow cookie is spent either way: one install attempt, one token.
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        flow::clear_cookie(flow::FLOW_COOKIE).ok_or_else(Problem::internal)?,
+    );
+    Ok(response)
+}
+
+/// `GET /slack/manifest` — this deployment's Slack app manifest. A 503 when
+/// the public origin is unset, because a manifest built without it names URLs
+/// nobody can reach, and an operator pasting that into Slack gets an app that
+/// installs and then silently receives nothing.
+async fn slack_manifest(State(state): State<Arc<ModuleState>>) -> Result<Response, Problem> {
+    Ok(Json(events::manifest(state.public_base()?)).into_response())
+}
+
+/// The one body the install callback answers with. It names the team that was
+/// installed and nothing else — in particular never the token, which is in the
+/// database and nowhere else.
+#[derive(Debug, Serialize)]
+struct Installed<'a> {
+    status: &'static str,
+    team_id: &'a str,
+    app_id: &'a str,
+}
+
+fn install_expired() -> Problem {
+    Problem::new(&INSTALL_EXPIRED)
+}
+
+fn install_failed(error: slack::SlackError) -> Problem {
+    let problem = Problem::new(&INSTALL_FAILED);
+    match error.0 {
+        Some(detail) => problem.with_detail(detail),
+        None => problem,
+    }
 }
 
 #[derive(Debug, Serialize)]

@@ -92,6 +92,27 @@ impl Settings {
     }
 }
 
+/// The Slack app's signing secret (`WORKSPACES_SLACK_SIGNING_SECRET`), or
+/// [`None`] when it is unset or blank.
+///
+/// Read outside [`Settings`] and read *lazily*, per request, because it is
+/// the one Slack credential an Events API app has that an OpenID Connect
+/// sign-in app does not: a deployment may have both client keys set — signing
+/// people in works fine — and no Events subscription at all, and requiring it
+/// in [`Settings`] would fail `validate_config` for it. So
+/// `POST /slack/events` answers `503` when it is absent, exactly as the
+/// sign-in routes answer `503` without their keys.
+///
+/// A secret: it belongs in a Worker secret, never in `wrangler.toml`
+/// `[vars]`, and no error message quotes it.
+#[must_use]
+pub fn signing_secret(cfg: &dyn Config) -> Option<String> {
+    ModuleConfig::new("workspaces", cfg)
+        .get_opt("SLACK_SIGNING_SECRET")
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty())
+}
+
 /// The sender a sign-in link is sent from when `WORKSPACES_MAIL_FROM` is
 /// unset. It is a person-readable name on the venture's own domain, which
 /// the mail provider must be configured to send for.

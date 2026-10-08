@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Living Brain">
+  <rect width="64" height="64" rx="14" fill="#16191c" />
+  <circle cx="32" cy="24" r="5" fill="#5ce0a8" />
+  <circle cx="18" cy="44" r="5" fill="#5ce0a8" />
+  <circle cx="46" cy="44" r="5" fill="#5ce0a8" />
+  <path
+    d="M32 24 L18 44 M32 24 L46 44 M18 44 L46 44"
+    stroke="#5ce0a8"
+    stroke-width="2.5"
+    fill="none"
+    stroke-linecap="round"
+  />
+</svg>

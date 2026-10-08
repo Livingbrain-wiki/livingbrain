@@ -1,0 +1,24 @@
+[package]
+name = "livingbrain-memory"
+description = "The memory model: typed facts, consolidated observations, mental models and four-strategy recall under a token budget"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# A pure-Rust library: no ports, no runtime, no vendor SDK, no I/O. The
+# store is in-memory and the only two neighbours are the permission model
+# every read goes through (`livingbrain-access`) and the redaction every write
+# goes through (`livingbrain-redact`).
+[dependencies]
+livingbrain-access = { path = "../livingbrain-access" }
+livingbrain-redact = { path = "../livingbrain-redact" }
+
+[dev-dependencies]
+# Property tests for the budget invariant (issue #54). Dev-only.
+proptest = { workspace = true }
