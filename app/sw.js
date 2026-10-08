@@ -21,6 +21,9 @@ const SHELL = [
   "./assets/app.js",
   "./assets/markdown.js",
   "./assets/settings.js",
+  // settings.js imports this statically, and an ES module import fails
+  // atomically, so an offline settings page would not render at all without it.
+  "./assets/stack.json",
   "./manifest.webmanifest",
 ];
 

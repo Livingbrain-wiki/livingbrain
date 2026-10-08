@@ -283,6 +283,22 @@ hr {
   border-color: var(--warn);
 }
 
+/* the registry's two statuses. `live` is the only green; `planned` stays in
+   the muted ink so nothing merely decided can read as running today. */
+.pill[data-state="live"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.pill[data-state="planned"] {
+  color: var(--ink3);
+  border-style: dashed;
+}
+
+.stack-rows > p {
+  margin: var(--space-2) 0;
+}
+
 /*   controls
    ---------------------------------------------------------------- */
 

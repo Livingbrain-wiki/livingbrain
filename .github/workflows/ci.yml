@@ -130,6 +130,23 @@ jobs:
             exit 1
           fi
 
+  vendored-stack:
+    # The "Built with" list is a vendored copy of the registry entry for this
+    # venture: nothing fetches it at runtime, so it can only go stale silently.
+    # This job fails the build when the vendored copy drifts from the published
+    # registry. It is the one job that does reach the network, which is why it
+    # lives beside `app` (the other non-Rust job) and not among the crate jobs.
+    # Python is pinned like every other toolchain here; the script uses only the
+    # standard library, so there is nothing to install.
+    name: vendored stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: scripts/check-vendored-stack.sh
+
   redact-wasm:
     # The redaction library runs in the Worker, so its tests run in one. The
     # wasm-bindgen CLI version is read from the lockfile rather than pinned
