@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Livingbrain-wiki/livingbrain/blob/main/docs/brain-events.schema.json",
+  "title": "Living Brain brain event",
+  "description": "One JSON object per brain turn, nightly-evolve change, MCP call, colony hand-off or operational beat, written by livingbrain-telemetry. Every field is an opaque id, a closed vocabulary word, a number or a null: content is referenced by id and never copied, so no line can carry message text or a page body. The `fields` list below is the same list, in the same order, that `Event::schema()` returns, every vocabulary is the enum's own `as_str()` values, and `crates/livingbrain-telemetry/tests/schema.rs` asserts all three of them — this file, the serialised keys of a real `Event`, and the fixtures in `docs/telemetry/` — against each other on every build, so they cannot drift apart without a failing test. Adding a field, renaming one, retyping one, or adding a variant to a vocabulary is a bump of `version`, never an edit in place.",
+  "version": 1,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_id",
+    "kind",
+    "at_unix",
+    "outcome",
+    "duration_ms",
+    "subject",
+    "error_kind",
+    "tool",
+    "colonizer_colony"
+  ],
+  "fields": [
+    {
+      "name": "schema_version",
+      "type": "integer",
+      "description": "The version of this schema. Always the current one."
+    },
+    {
+      "name": "trace_id",
+      "type": "string",
+      "description": "Opaque id carried across Slack, Worker, MCP and CLI. Non-empty, at most 128 characters, [A-Za-z0-9._:-] only."
+    },
+    {
+      "name": "kind",
+      "type": "enum",
+      "description": "What happened. Closed; a new kind is a schema-version bump."
+    },
+    {
+      "name": "at_unix",
+      "type": "integer",
+      "description": "When, in seconds since the Unix epoch."
+    },
+    {
+      "name": "outcome",
+      "type": "enum",
+      "description": "success, failure or skipped."
+    },
+    {
+      "name": "duration_ms",
+      "type": "integer",
+      "description": "How long it took, in milliseconds. Not bucketed: this line stays on the machine that wrote it."
+    },
+    {
+      "name": "subject",
+      "type": "object?",
+      "description": "{ kind, id } — what it was about, by opaque id. Never the content. Null when there was none."
+    },
+    {
+      "name": "error_kind",
+      "type": "enum?",
+      "description": "config, upstream, timeout, decode, permission or internal. Null when it did not fail."
+    },
+    {
+      "name": "tool",
+      "type": "enum?",
+      "description": "The MCP tool called: brain_search, brain_page or brain_note. Null when no tool was called."
+    },
+    {
+      "name": "colonizer_colony",
+      "type": "string?",
+      "description": "Opaque colony id for a hand-off. Null when this is not a hand-off."
+    }
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The version of this schema. Always the current one."
+    },
+    "trace_id": {
+      "$ref": "#/$defs/opaque_id",
+      "description": "Opaque id carried across Slack, Worker, MCP and CLI. Non-empty, at most 128 characters, [A-Za-z0-9._:-] only."
+    },
+    "kind": {
+      "$ref": "#/$defs/kind",
+      "description": "What happened. Closed; a new kind is a schema-version bump."
+    },
+    "at_unix": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "When, in seconds since the Unix epoch."
+    },
+    "outcome": {
+      "$ref": "#/$defs/outcome",
+      "description": "success, failure or skipped."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How long it took, in milliseconds. Not bucketed: this line stays on the machine that wrote it."
+    },
+    "subject": {
+      "anyOf": [
+        { "$ref": "#/$defs/subject" },
+        { "type": "null" }
+      ],
+      "description": "{ kind, id } — what it was about, by opaque id. Never the content. Null when there was none."
+    },
+    "error_kind": {
+      "anyOf": [
+        { "$ref": "#/$defs/error_kind" },
+        { "type": "null" }
+      ],
+      "description": "config, upstream, timeout, decode, permission or internal. Null when it did not fail."
+    },
+    "tool": {
+      "anyOf": [
+        { "$ref": "#/$defs/tool" },
+        { "type": "null" }
+      ],
+      "description": "The MCP tool called: brain_search, brain_page or brain_note. Null when no tool was called."
+    },
+    "colonizer_colony": {
+      "anyOf": [
+        { "$ref": "#/$defs/opaque_id" },
+        { "type": "null" }
+      ],
+      "description": "Opaque colony id for a hand-off. Null when this is not a hand-off."
+    }
+  },
+  "$defs": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "An opaque reference, not a name and not content: non-empty, at most 128 characters, drawn from [A-Za-z0-9._:-]. This is the shape that stops free text, and nothing more."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "brain_turn",
+        "nightly_evolve",
+        "mcp_call",
+        "colony_handoff",
+        "operational"
+      ],
+      "description": "What happened. `EventKind::as_str()`."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failure",
+        "skipped"
+      ],
+      "description": "Whether it worked, and if it was attempted at all. `Outcome::as_str()`."
+    },
+    "error_kind": {
+      "type": "string",
+      "enum": [
+        "config",
+        "upstream",
+        "timeout",
+        "decode",
+        "permission",
+        "internal"
+      ],
+      "description": "How it failed. `ErrorKind::as_str()`."
+    },
+    "tool": {
+      "type": "string",
+      "enum": [
+        "brain_search",
+        "brain_page",
+        "brain_note"
+      ],
+      "description": "The MCP tool called. `ToolName::as_str()`."
+    },
+    "subject_kind": {
+      "type": "string",
+      "enum": [
+        "page",
+        "message",
+        "workspace",
+        "tool"
+      ],
+      "description": "Which store a subject id refers to. `SubjectKind::as_str()`."
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": { "$ref": "#/$defs/subject_kind" },
+        "id": { "$ref": "#/$defs/opaque_id" }
+      },
+      "description": "A reference to content: what kind of thing, and which one. Never the thing."
+    }
+  }
+}

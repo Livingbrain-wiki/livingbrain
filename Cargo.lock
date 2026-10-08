@@ -1621,6 +1621,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "keyring",
+ "livingbrain-telemetry",
  "serde_json",
  "ureq",
 ]
@@ -1728,6 +1729,14 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "livingbrain-telemetry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
