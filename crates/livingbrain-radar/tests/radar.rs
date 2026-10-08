@@ -868,13 +868,16 @@ fn the_watch_list_asks_arxiv_from_the_wiki_and_refuses_a_watched_payload() {
 
 #[test]
 fn a_secret_in_an_abstract_is_redacted_before_a_page() {
-    let token = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    // Assembled at run time so that no source file holds a token-shaped
+    // literal. The body is obviously fake but still matches the shape
+    // `gh[pousr]_[A-Za-z0-9]{36}` that livingbrain-redact looks for.
+    let token = format!("{}{}{}", "ghp", "_", "a1".repeat(18));
     let mut leaky = relevant_item();
     leaky.summary =
         format!("Late interaction retrieval with BM25 fusion. Token {token} for the corpus.");
     let night = run_night(&watch(), vec![leaky], RadarBudget::default());
     assert!(
-        !night.pages[0].markdown.contains(token),
+        !night.pages[0].markdown.contains(token.as_str()),
         "a GitHub token survived redaction:\n{}",
         night.pages[0].markdown
     );
