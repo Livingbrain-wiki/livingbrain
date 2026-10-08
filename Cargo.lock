@@ -1657,6 +1657,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-memory"
+version = "0.1.0"
+dependencies = [
+ "livingbrain-access",
+ "livingbrain-redact",
+ "proptest",
+]
+
+[[package]]
 name = "livingbrain-models"
 version = "0.1.0"
 dependencies = [
