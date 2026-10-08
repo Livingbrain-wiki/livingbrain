@@ -20,7 +20,7 @@ deployed.
 | R2 bucket | simulated by `--local` | `livingbrain-blobs-staging` | `livingbrain-blobs` |
 | KV namespace | simulated by `--local` | a per-environment namespace | a per-environment namespace |
 | Deployed by | nothing — `wrangler dev` | every push, `main` or `v*` tag | a `v*` tag, after approval |
-| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | not set yet |
+| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | `app.livingbrain.wiki` (API and app) and `mcp.livingbrain.wiki`; `api.livingbrain.wiki` stays on the waitlist Worker |
 
 `ENV` is not decoration. The harness reads it twice: it names the
 environment to the production readiness gate at boot, and it binds every

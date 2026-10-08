@@ -182,9 +182,32 @@ WORKSPACES_MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
 # Production: tags only, and only through the `production` GitHub
 # environment's required reviewers (the owner). Same placeholder rule; the
 # database and bucket carry no `-staging` suffix.
+#
+# Hosts: `app.livingbrain.wiki` serves the web app and the API on one origin
+# (as staging does), and `mcp.livingbrain.wiki` is the MCP endpoint
+# docs/mcp.md names. `api.livingbrain.wiki` is NOT claimed here: it belongs
+# to the separate `livingbrain-waitlist` Worker (Livingbrain-wiki/
+# waitlist-backend) and its D1, which the site's waitlist form posts to.
+# Moving that host onto this Worker would orphan the list, so it is a
+# cutover of its own, with the waitlist rows migrated first.
 [env.production]
 name = "livingbrain"
 compatibility_date = "2026-09-01"
+routes = [
+  { pattern = "app.livingbrain.wiki", custom_domain = true },
+  { pattern = "mcp.livingbrain.wiki", custom_domain = true },
+]
+
+[env.production.assets]
+directory = "../../app"
+
+[[env.production.ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "4001"
+
+[env.production.ratelimits.simple]
+limit = 30
+period = 60
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -203,5 +226,6 @@ id = "placeholder-run-wrangler-kv-namespace-create"
 [env.production.vars]
 ENV = "production"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
-WORKSPACES_REDIRECT_BASE = "https://api.livingbrain.wiki"
-MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
+WORKSPACES_REDIRECT_BASE = "https://app.livingbrain.wiki"
+MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
+WORKSPACES_MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
