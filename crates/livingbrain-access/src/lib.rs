@@ -140,6 +140,14 @@ impl ScopeSet {
     pub fn scope_strings(&self) -> impl Iterator<Item = String> + '_ {
         self.scopes.iter().map(Scope::to_string)
     }
+
+    /// The scopes themselves, for a caller that maps each one to a
+    /// store-specific scope rather than to a string. Round-tripping through
+    /// [`scope_strings`](Self::scope_strings) would re-parse what this set
+    /// already holds, and a re-parse of an id the set accepts can fail.
+    pub fn scopes(&self) -> impl Iterator<Item = &Scope> + '_ {
+        self.scopes.iter()
+    }
 }
 
 /// Where the asker asked.

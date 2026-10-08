@@ -1596,6 +1596,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cratefield-core",
+ "cratefield-kms",
+ "cratefield-testing",
+ "livingbrain-access",
+ "livingbrain-pages",
+ "livingbrain-redact",
+ "pollster",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "livingbrain-models"
 version = "0.1.0"
 dependencies = [
@@ -1648,9 +1664,11 @@ dependencies = [
 name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cratefield-adapter-owlpost",
  "cratefield-adapter-turnstile",
  "cratefield-core",
+ "cratefield-kms",
  "cratefield-mail-templates",
  "cratefield-module-waitlist",
  "cratefield-runtime-cloudflare",
@@ -1658,6 +1676,7 @@ dependencies = [
  "getrandom 0.4.3",
  "insta",
  "livingbrain-canary",
+ "livingbrain-mcp",
  "livingbrain-models",
  "livingbrain-pages",
  "livingbrain-workspaces",
