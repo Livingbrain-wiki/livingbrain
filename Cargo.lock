@@ -1686,6 +1686,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-radar"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cratefield-core",
+ "cratefield-testing",
+ "livingbrain-judge",
+ "livingbrain-pages",
+ "livingbrain-redact",
+ "percent-encoding",
+ "pollster",
+ "serde_json",
+]
+
+[[package]]
 name = "livingbrain-redact"
 version = "0.1.0"
 dependencies = [
