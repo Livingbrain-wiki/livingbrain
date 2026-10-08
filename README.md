@@ -118,7 +118,7 @@ deliberately not in this repository (wrangler reads secrets before vars):
 ```
 HARNESS_SECRET="at-least-32-bytes-of-random-text"
 WORKSPACES_SLACK_CLIENT_SECRET="the-secret-from-the-Slack-app"
-WORKSPACES_SLACK_SIGNING_SECRET="the-signing-secret-from-the-Slack-app"
+WORKSPACES_SLACK_SIGNING_SECRET="<your-signing-secret>"
 ```
 
 `HARNESS_SECRET` signs the flow and session cookies, so a request that carries

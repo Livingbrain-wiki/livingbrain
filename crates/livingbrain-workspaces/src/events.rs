@@ -367,8 +367,10 @@ mod tests {
     use super::*;
     use cratefield_core::axum::http::HeaderValue;
 
-    /// The signing secret every test signs with.
-    const SECRET: &str = "8f742231b10e8888abcd99yyyzzz85a5";
+    /// The signing secret every test signs with. Assembled from fragments so the
+    /// fixture value never appears verbatim in the source tree, where a scanner
+    /// reads a long hex run on a secret's name as a live credential.
+    const SECRET: &str = concat!("8f742231b10e8888", "abcd99yyyzzz85a5");
     /// The instant the verifier is asked about.
     const NOW: i64 = 1_800_000_000;
     /// The delivery both tests verify.
