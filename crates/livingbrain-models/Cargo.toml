@@ -47,9 +47,11 @@ sha2 = "0.10"
 # AES-256-GCM for encrypting provider keys at rest. Pure Rust, wasm-safe.
 # `aes` for the block cipher, `alloc` for heap-backed buffers; no `std`.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
-# The session the workspaces module sealed is verified through its public
-# `caller` helper, so this module shares the session without reimplementing it.
-livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+# Who is calling is asked of the `tokens` module's one `authenticate`, so
+# a session cookie and a personal access token resolve to the same member
+# here as everywhere else (issue #72). It resolves the session through the
+# workspaces module, so the session itself is not reimplemented either.
+livingbrain-tokens = { path = "../livingbrain-tokens" }
 
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
@@ -59,6 +61,9 @@ cratefield-testing = { workspace = true, features = ["postgres"] }
 # Only so a test fake can implement the `HttpClient` port, whose trait is
 # declared with `#[async_trait]`.
 async-trait = { workspace = true }
+# The module whose tables a test seeds and whose session it seals. Dev-only:
+# the module itself reaches the session through `livingbrain-tokens`.
+livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 pollster = { workspace = true }
 tower = { workspace = true }
 serde_json = { workspace = true }

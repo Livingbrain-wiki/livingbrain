@@ -42,6 +42,9 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/workspaces/slack/start` | `index.html` | **yes** |
 | `GET /v1/models` | `settings.html` | **yes** |
 | `PUT /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, …)` |
+| `GET /v1/tokens` | `settings.html` | **yes** |
+| `POST /v1/tokens` | `settings.html` | **yes** — the only call that returns a token value |
+| `DELETE /v1/tokens/{prefix}` | `settings.html` | **yes** |
 | `GET /v1/pages/{slug}` | `wiki.html` | **no route yet** |
 | `PUT /v1/pages/{slug}` | `wiki.html` | **no route yet** |
 

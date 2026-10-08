@@ -53,6 +53,7 @@ fn world() -> Fixture {
                 Asker {
                     workspace_id: workspace.to_owned(),
                     user_id: user.to_owned(),
+                    token_scopes: None,
                 },
             )
         })

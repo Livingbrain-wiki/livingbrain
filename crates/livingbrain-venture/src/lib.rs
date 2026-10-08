@@ -10,7 +10,10 @@
 //! Markdown bodies in R2 and metadata, links and history in D1 (issue #15);
 //! and the harness `waitlist` module —
 //! the early-access list behind issue #23: joins from livingbrain.wiki, double
-//! opt-in mail through Owlpost, and the CSV export behind the admin token.
+//! opt-in mail through Owlpost, and the CSV export behind the admin token;
+//! and `tokens` with the harness `device-auth` grant beside it — the personal
+//! access tokens behind issue #72, minted by a device that has no browser to
+//! sign in with, which are also what the MCP endpoint now accepts.
 //! `wrangler.toml` and the D1 migrations are beside this crate.
 //!
 //! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
@@ -25,9 +28,10 @@
 use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
 use cratefield_core::axum::http::{HeaderMap, HeaderValue, header};
-use cratefield_core::{Harness, Ports, Template, Venture};
+use cratefield_core::{Harness, Ports, RandomBytes, RandomError, Template, Venture};
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::MailTheme;
+use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
 use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, FetchClient, WorkersClock, serve, serve_scheduled,
@@ -36,12 +40,24 @@ use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
-use livingbrain_workspaces::{SESSION_COOKIE, Workspaces};
+use livingbrain_tokens::{DevicePorts, Tokens};
+use livingbrain_workspaces::Workspaces;
 use std::sync::{Arc, OnceLock};
 use worker::{Context, Env, Request, Response, event};
 
 /// The product slug the site's waitlist form joins (issue #23).
 pub const WAITLIST_PRODUCT: &str = "livingbrain";
+
+/// The API's own origin, for `Venture::public_url` alone. The OAuth discovery
+/// documents deliberately do **not** use it: they name the origin each
+/// request reached, so one binary serves `api.`, `staging-api.`, `mcp.` and
+/// a `wrangler dev` on `localhost:8787` correctly (issue #72).
+const API_BASE: &str = "https://api.livingbrain.wiki";
+
+/// The client the device grant issues to (issue #72). The grant refuses a
+/// `client_id` it has not been told about, so a name here is the whole of
+/// the allow-list.
+const DEVICE_CLIENT: &str = "livingbrain-cli";
 
 /// The venture as this Worker serves it, and as a native test mounts it.
 ///
@@ -58,7 +74,7 @@ pub const WAITLIST_PRODUCT: &str = "livingbrain";
 #[must_use]
 pub fn venture() -> Venture {
     Venture::new("livingbrain", "livingbrain.wiki")
-        .public_url("https://api.livingbrain.wiki")
+        .public_url(API_BASE)
         .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"])
 }
 
@@ -211,6 +227,10 @@ fn build(
     // The Slack agent's answer seam (issue #123), filled by the pages
     // module's own closure and read per event. See [`AnswersCell`].
     let answers = AnswersCell::default();
+    // Issue #72: one handle shared by the device grant's hooks and the tokens
+    // module, built before the harness because the grant takes its hooks at
+    // composition time and the ports only exist per request.
+    let device_ports = DevicePorts::new();
     let harness = Harness::builder()
         .venture(venture())
         // The waitlist module's confirm mails in this venture's theme.
@@ -218,12 +238,54 @@ fn build(
         .module(Canary::new())
         .module(Workspaces::new().answering(Arc::new(answers.clone())))
         .module(Models::new())
+        .module(device_auth_module(&device_ports))
+        .module(tokens_module(device_ports))
         .module(pages_module(kms, &answers))
         .module(waitlist_module())
         .runtime(runtime.clone())
         .build()
         .expect("the livingbrain harness is valid");
     (harness, runtime)
+}
+
+/// The device grant (issue #72) for a client with no browser to sign in
+/// with: the CLI. Its hooks are the ones the `tokens` module supplies — a
+/// signed-in person approves, and an approved device gets a PAT.
+fn device_auth_module(ports: &DevicePorts) -> DeviceAuth {
+    DeviceAuth::builder()
+        .client(DeviceClient::new(DEVICE_CLIENT))
+        .random(WorkersRandom)
+        .approver(ports.approver())
+        .issuer(ports.issuer())
+        .build()
+}
+
+/// The tokens module (issue #72): the routes a settings page drives, and
+/// the two `/.well-known` documents.
+///
+/// No `api_base`: both documents are written under the origin each request
+/// reached, so staging, `wrangler dev` and `mcp.` are each named correctly
+/// without this composition knowing which one it is serving.
+fn tokens_module(ports: DevicePorts) -> Tokens {
+    Tokens::new().device_ports(ports)
+}
+
+/// The entropy source the device grant draws its code pair from — the
+/// isolate's own CSPRNG, the same call the tokens module makes.
+///
+/// A failed draw panics rather than returning an error, and that is the
+/// only honest answer available: [`RandomError`]'s field is private, so
+/// nothing outside `cratefield-core` can construct one to return.
+#[derive(Clone, Copy, Debug)]
+struct WorkersRandom;
+
+impl RandomBytes for WorkersRandom {
+    fn fill(&self, dest: &mut [u8]) -> Result<(), RandomError> {
+        match getrandom::fill(dest) {
+            Ok(()) => Ok(()),
+            Err(err) => panic!("the isolate's entropy source failed: {err}"),
+        }
+    }
 }
 
 /// The pages module as this venture composes it, with the MCP server and the
@@ -250,7 +312,7 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     // Each surface gets its own handle to the same custodian and the same
     // credential resolver: one key, so a body either of them seals is a body
     // the other can open.
-    let auth: Arc<dyn BearerAuth> = Arc::new(SessionBearer);
+    let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
     let mcp_kms = Arc::clone(&kms);
     let mcp_auth = Arc::clone(&auth);
     let cell = answers.clone();
@@ -343,17 +405,13 @@ fn build_kms(env: &Env) -> Option<Arc<dyn Kms>> {
     Some(Arc::new(kms))
 }
 
-/// The interim [`BearerAuth`] for the MCP endpoint (issue #24): the bearer
-/// value **is** the session cookie value the web app already issues, and it
-/// is verified through the `workspaces` module's own `caller` — the same check
-/// that module's routes make, so there is one implementation of "who is
-/// signed in" rather than two that can drift.
-///
-/// The MCP endpoint is not the web app and a browser cookie jar is not an MCP
-/// client, so a user pastes their cookie value into their agent's config. That
-/// is a stand-in, and docs/mcp.md says so; issue #72 replaces this
-/// implementation with a real OAuth token and leaves the trait alone.
-struct SessionBearer;
+/// The [`BearerAuth`] for the MCP endpoint (issue #24), now resolving a real
+/// credential (issue #72): a personal access token from `livingbrain login`,
+/// handed to the tokens module's one `authenticate` — the same entry point
+/// every route in this venture uses — so a cookie and a token resolve to the
+/// same member here as everywhere else, and the scope subset travels with
+/// the answer instead of being re-derived per request.
+struct TokenBearer;
 
 /// RFC 6265 §4.1.1 `cookie-octet`: US-ASCII except the separators and the
 /// controls. A session token is base64url, so it never needs one of these.
@@ -364,29 +422,25 @@ fn is_cookie_octet(byte: u8) -> bool {
 }
 
 #[async_trait::async_trait]
-impl BearerAuth for SessionBearer {
+impl BearerAuth for TokenBearer {
     async fn authenticate(&self, ports: &Ports, token: &str) -> Result<Asker, AuthError> {
-        let (Some(signer), Some(clock), Some(db)) =
-            (ports.signer.clone(), ports.clock.clone(), ports.db.clone())
-        else {
-            return Err(AuthError::Rejected);
-        };
-        // The token is spliced into a `Cookie` header, so anything outside
-        // RFC 6265's cookie-octet set is refused here rather than splitting
-        // the cookie, or smuggling a second one, on the way in.
+        // The value is spliced into a request, so anything outside RFC 6265's
+        // cookie-octet set is refused here rather than splitting the header,
+        // or smuggling a second credential in, on the way in.
         if !token.bytes().all(is_cookie_octet) {
             return Err(AuthError::Rejected);
         }
-        let Ok(value) = HeaderValue::from_str(&format!("{SESSION_COOKIE}={token}")) else {
+        let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
             return Err(AuthError::Rejected);
         };
         let mut headers = HeaderMap::new();
-        headers.insert(header::COOKIE, value);
-        livingbrain_workspaces::caller(&*signer, &*clock, &*db, &headers)
+        headers.insert(header::AUTHORIZATION, value);
+        livingbrain_tokens::authenticate(ports, &headers)
             .await
-            .map(|caller| Asker {
-                workspace_id: caller.workspace_id,
-                user_id: caller.user_id,
+            .map(|member| Asker {
+                workspace_id: member.workspace_id,
+                user_id: member.user_id,
+                token_scopes: member.scopes,
             })
             .map_err(|_| AuthError::Rejected)
     }
@@ -461,6 +515,9 @@ mod tests {
         assert!(names.contains(&"models"), "{names:?}");
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"waitlist"), "{names:?}");
+        // Issue #72: the grant a CLI logs in through, and its credential.
+        assert!(names.contains(&"device-auth"), "{names:?}");
+        assert!(names.contains(&"tokens"), "{names:?}");
     }
 
     /// A token carrying a cookie delimiter is refused before it is spliced

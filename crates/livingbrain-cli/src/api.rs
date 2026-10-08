@@ -7,8 +7,8 @@
 //!
 //! | Request | Body | Success response |
 //! | :--- | :--- | :--- |
-//! | `POST /v1/auth/device` | `{"client_id":"livingbrain-cli"}` | `{device_code, user_code, verification_uri, verification_uri_complete?, interval, expires_in}` |
-//! | `POST /v1/auth/token` | form `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…` | `{access_token}` |
+//! | `POST /v1/device-auth/code` | `{"client_id":"livingbrain-cli"}` | `{device_code, user_code, verification_uri, verification_uri_complete?, interval, expires_in}` |
+//! | `POST /v1/device-auth/token` | form `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…&client_id=livingbrain-cli` | `{access_token}` |
 //! | `POST /v1/ask` | `{question, project?}` | `{answer, citations:[{title, url, quote?}]}` |
 //! | `GET /v1/search` | `?q=&project=&limit=` | `{results:[{title, url, snippet}]}` |
 //! | `POST /v1/notes` | `{body, project?}` | `{id, url}` |
@@ -16,7 +16,7 @@
 //! | `GET /v1/export` | `?format=obsidian` | a zip response body |
 //! | `POST /v1/pages/sources` | `{kind:"import", path, body, scope}` | `{id, kind, scope, path, sha256, wikilinks:[], redacted, created, created_at}` (issue #81) |
 //!
-//! `POST /v1/auth/token` answers `400 {error}` with one of
+//! `POST /v1/device-auth/token` answers `400 {error}` with one of
 //! `authorization_pending`, `slow_down`, `expired_token`, `access_denied`
 //! (RFC 8628 §3.5). Any other non-2xx is read as `{error}` or `{message}`, or as
 //! the RFC 9457 problem document the modules answer with (`title`, `detail`).
@@ -107,23 +107,25 @@ impl Client {
         }
     }
 
-    /// `POST /v1/auth/device` — the device authorization request (RFC 8628 §3.1).
+    /// `POST /v1/device-auth/code` — the device authorization request (RFC 8628 §3.1).
     pub fn device_authorize(&self) -> CliResult<Value> {
         let response = self
-            .post("/v1/auth/device")
+            .post("/v1/device-auth/code")
             .send_json(json!({ "client_id": "livingbrain-cli" }))
             .map_err(transport)?;
         read_json(response)
     }
 
-    /// `POST /v1/auth/token` — one poll of the device token endpoint.
+    /// `POST /v1/device-auth/token` — one poll of the device token endpoint.
     pub fn device_token(&self, device_code: &str) -> CliResult<Poll> {
         let form = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", device_code),
+            // A device code is issued for one client, so the poll names it.
+            ("client_id", "livingbrain-cli"),
         ];
         let response = self
-            .post("/v1/auth/token")
+            .post("/v1/device-auth/token")
             .send_form(form)
             .map_err(transport)?;
         let status = response.status().as_u16();

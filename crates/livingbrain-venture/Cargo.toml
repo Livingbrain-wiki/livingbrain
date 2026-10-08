@@ -29,20 +29,26 @@ cratefield-mail-templates = { workspace = true }
 # adapter on its join form. The venture, not a module, names them.
 cratefield-module-waitlist = { workspace = true }
 cratefield-adapter-turnstile = { workspace = true }
+# The device authorization grant (issue #72): the codes, the approval page
+# and the polling state machine, for a client with no browser. The venture
+# supplies its two hooks — who may approve, and what a credential is.
+cratefield-module-device-auth = { workspace = true }
 # The MCP server (issue #24) seals and opens page bodies through the same key
 # custodian `cratefield-kms` serves the page store; the harness has no `Kms`
 # port, so the composition builds it and hands it to the module.
 cratefield-kms = { workspace = true }
-# `SessionBearer` below implements the module's `BearerAuth` seam.
+# `TokenBearer` below implements the module's `BearerAuth` seam.
 async-trait = { workspace = true }
 livingbrain-canary = { path = "../livingbrain-canary" }
 livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }
+livingbrain-tokens = { path = "../livingbrain-tokens" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 worker = { workspace = true }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The entropy source the device grant draws its codes from (issue #72).
+# `wasm_js` is what makes it work in a Workers isolate; on a native build it
+# is the operating system's.
 getrandom = { workspace = true }
 
 [dev-dependencies]

@@ -3,13 +3,28 @@
 // tests need lives in `markdown.js` and `settings.js`, which the tests import
 // directly, so the tests exercise the code the pages actually run.
 //
-// There are no tokens in this file, and none may be added. The session is an
-// HttpOnly cookie the browser attaches on its own; every request below asks
-// the fetch wrapper to send credentials same-origin (or to include them when
-// the API is cross-origin, which CORS allows only for the origins
-// `livingbrain-venture` lists).
+// No request below ever carries an Authorization header, and none may: the
+// session is an HttpOnly cookie the browser attaches on its own; every request
+// asks the fetch wrapper to send credentials same-origin (or to include them
+// when the API is cross-origin, which CORS allows only for the origins
+// `livingbrain-venture` lists). The one token value the app ever holds — the
+// one `POST /v1/tokens` returns — is written into a single element by
+// `revealToken` for the member to copy, and never stored. See `tokens.js`.
 
 import { settingRequest, describeOutcome } from "./settings.js";
+import {
+  tokenListRequest,
+  tokenCreateRequest,
+  tokenRevokeRequest,
+  tokenViews,
+  createdTokenView,
+  tokenErrorMessage,
+  renderTokenRows,
+  revealToken,
+  clearToken,
+  safeReturnTo,
+  RETURN_TO_PARAM,
+} from "./tokens.js";
 import { renderMarkdown, renderCitations, renderBacklinks } from "./markdown.js";
 
 /**
@@ -281,7 +296,63 @@ function boot() {
 
 /* --- sign-in -------------------------------------------------------- */
 
+/**
+ * Where a pending sign-in return target waits out the round trip.
+ *
+ * The device-approval hook bounces an anonymous visitor here as
+ * `/index.html?return_to=<the approval page>`, but both ways in leave this
+ * page — the magic link is opened from a mail client, Slack finishes on its
+ * own callback — and both land back on this page at `/` with an empty query,
+ * so the target cannot ride in the URL. The session itself is cookie-only and
+ * `tokens.js` is checked by a static test that forbids storage there, so the
+ * target — not a secret, and gone when the tab closes — waits in
+ * `sessionStorage` in this file.
+ */
+const RETURN_TO_KEY = "lb-return-to";
+
+/**
+ * Remembers a fresh `return_to` and answers where to go now.
+ *
+ * Called once per sign-in page load with the page's query string and the
+ * session store. A `return_to` in the query means the person has just been
+ * bounced here by the approval hook: only a path `safeReturnTo` accepts is
+ * stored, and it replaces any older one — it is the most recent bounce; an
+ * unsafe value is dropped rather than stored. No `return_to` means the person
+ * is back from a completed sign-in: the stored target is taken out,
+ * re-validated, and returned for the caller to navigate to. Any storage
+ * failure degrades to "no round trip to resume", never to a throw.
+ */
+export function resumeReturnTo(search, store) {
+  const params = new URLSearchParams(search);
+  if (params.has(RETURN_TO_PARAM)) {
+    const requested = safeReturnTo(params.get(RETURN_TO_PARAM));
+    try {
+      if (requested) store.setItem(RETURN_TO_KEY, requested);
+      else store.removeItem(RETURN_TO_KEY);
+    } catch {
+      /* storage can be refused; the person signs in without the bounce back */
+    }
+    return null;
+  }
+  let stored = null;
+  try {
+    stored = store.getItem(RETURN_TO_KEY);
+    store.removeItem(RETURN_TO_KEY);
+  } catch {
+    return null;
+  }
+  return safeReturnTo(stored);
+}
+
 pages.signin = async function signin() {
+  // A returned target means this load is the landing after a completed
+  // sign-in: go straight back to where the person was headed — the
+  // device-approval page, usually — instead of showing the form again.
+  const resume = resumeReturnTo(location.search, sessionStorage);
+  if (resume) {
+    location.assign(resume);
+    return;
+  }
   const form = $("#email-form");
   const status = $("#email-status");
   const email = $("#email");
@@ -385,7 +456,100 @@ pages.settings = async function settings() {
   });
 
   await load();
+  await wireTokens();
 };
+
+/* --- api tokens ------------------------------------------------------ */
+
+/**
+ * The token section. Three rules, all about where a secret may live: the list
+ * is rendered from `tokenViews`, which cannot carry a value; the value a create
+ * returns is written once into `#token-value`, beside "not shown again"; and
+ * dismissing it — or leaving the page — takes it back out.
+ */
+function wireTokens() {
+  const status = $("#tokens-status");
+  const rows = $("#token-rows");
+  const reveal = $("#token-reveal");
+  const value = $("#token-value");
+
+  const forget = () => {
+    clearToken(value);
+    reveal.hidden = true;
+  };
+
+  const load = async () => {
+    try {
+      renderTokenRows(rows, tokenViews(await api(tokenListRequest().path)));
+      notice(status, "");
+    } catch (error) {
+      renderTokenRows(rows, []);
+      notice(status, tokenErrorMessage(error, "read your tokens"), "warn");
+    }
+  };
+
+  $("#create-token").addEventListener("click", async () => {
+    let request;
+    try {
+      request = tokenCreateRequest($("#token-name").value, $("#token-scopes").value);
+    } catch (error) {
+      return notice(status, error.message, "warn");
+    }
+    try {
+      const created = await api(request.path, {
+        method: request.method,
+        body: request.body,
+      });
+      revealToken(value, createdTokenView(created));
+      reveal.hidden = false;
+      notice(status, "Token created. Copy it now — it is not shown again.", "ok");
+      $("#token-name").value = "";
+      $("#token-scopes").value = "";
+      await load();
+    } catch (error) {
+      notice(status, tokenErrorMessage(error, "create the token"), "bad");
+    }
+  });
+
+  // One handler for the table: each row's button carries its own prefix, so the
+  // list can be re-rendered without re-attaching anything.
+  rows.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-prefix]");
+    if (!button) return;
+    const name = button.dataset.name;
+    // A revoke is immediate and cannot be undone, so it is confirmed.
+    if (!window.confirm(`Revoke "${name}"? Anything using it stops working at once.`)) return;
+    try {
+      const request = tokenRevokeRequest(button.dataset.prefix);
+      await api(request.path, { method: request.method });
+      notice(status, `Revoked ${name}.`, "ok");
+      await load();
+    } catch (error) {
+      notice(status, tokenErrorMessage(error, "revoke the token"), "bad");
+    }
+  });
+
+  $("#copy-token").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(value.textContent);
+      notice(status, "Token copied to the clipboard.", "ok");
+    } catch {
+      // Clipboard access can be refused; say where the value is rather than
+      // pretending the copy worked.
+      notice(status, "Select the token above and copy it by hand.", "warn");
+    }
+  });
+
+  $("#dismiss-token").addEventListener("click", () => {
+    forget();
+    notice(status, "The token is gone from this page.", "ok");
+  });
+
+  // Leaving the page is a dismissal too.
+  window.addEventListener("pagehide", forget);
+
+  return load();
+}
 
 /* --- wiki ----------------------------------------------------------- */
 

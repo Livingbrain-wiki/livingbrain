@@ -674,6 +674,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "cratefield-module-device-auth"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f9218a5f55a7ca979eab27845b2b5fe040b4a0e4d289b67fb5b37c85035e397"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "cratefield-core",
+ "hex",
+ "http",
+ "schemars",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2 0.11.0",
+ "thiserror",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "cratefield-module-waitlist"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1714,9 +1737,11 @@ dependencies = [
  "livingbrain-access",
  "livingbrain-pages",
  "livingbrain-redact",
+ "livingbrain-tokens",
  "pollster",
  "serde_json",
  "sha2 0.10.9",
+ "tower",
 ]
 
 [[package]]
@@ -1737,6 +1762,7 @@ dependencies = [
  "bytes",
  "cratefield-core",
  "cratefield-testing",
+ "livingbrain-tokens",
  "livingbrain-workspaces",
  "percent-encoding",
  "pollster",
@@ -1814,6 +1840,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-tokens"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cratefield-core",
+ "cratefield-module-device-auth",
+ "cratefield-testing",
+ "getrandom 0.4.3",
+ "livingbrain-access",
+ "livingbrain-workspaces",
+ "pollster",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "tower",
+]
+
+[[package]]
 name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
@@ -1823,6 +1869,7 @@ dependencies = [
  "cratefield-core",
  "cratefield-kms",
  "cratefield-mail-templates",
+ "cratefield-module-device-auth",
  "cratefield-module-waitlist",
  "cratefield-runtime-cloudflare",
  "cratefield-testing",
@@ -1832,6 +1879,7 @@ dependencies = [
  "livingbrain-mcp",
  "livingbrain-models",
  "livingbrain-pages",
+ "livingbrain-tokens",
  "livingbrain-workspaces",
  "pollster",
  "serde_json",
