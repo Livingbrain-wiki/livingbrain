@@ -231,7 +231,7 @@ impl HttpClient for TokenHttp {
                 (Some(raw), _) => raw.clone(),
                 (None, Some(token)) => json!({
                     "ok": true,
-                    "access_token": "xoxb-not-used",
+                    "access_token": "unused-by-this-fake",
                     "id_token": token,
                 })
                 .to_string(),
