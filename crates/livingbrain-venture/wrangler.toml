@@ -126,14 +126,34 @@ MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
 # reads. ---------------------------------------------------------------------------
 
 # Staging: every merge to `main`. A failed smoke test rolls this back.
+#
+# One host serves both halves: the Worker API (`/v1/*`, `/__health`) and the
+# static web app in `app/` as Workers static assets. A request that matches a
+# file in `app/` is answered from the assets; everything else reaches the
+# Worker. Same origin, so the app's empty `lb-api` meta, its CSP
+# `connect-src 'self'` and the session cookie all work without CORS.
 [env.staging]
 name = "livingbrain-staging"
 compatibility_date = "2026-09-01"
+routes = [{ pattern = "staging-api.livingbrain.wiki", custom_domain = true }]
+
+[env.staging.assets]
+directory = "../../app"
+
+# Not inherited from the top level, so repeated here. Its own namespace, so
+# staging traffic never spends production's budget.
+[[env.staging.ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "4002"
+
+[env.staging.ratelimits.simple]
+limit = 30
+period = 60
 
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "livingbrain-staging"
-database_id = "placeholder-run-wrangler-d1-create-livingbrain-staging"
+database_id = "f3a32632-ca97-4038-b094-2a9e1d7f413d"
 migrations_dir = "migrations"
 
 [[env.staging.r2_buckets]]
@@ -142,7 +162,7 @@ bucket_name = "livingbrain-blobs-staging"
 
 [[env.staging.kv_namespaces]]
 binding = "KV"
-id = "placeholder-run-wrangler-kv-namespace-create-staging"
+id = "333ff8d934b04e87a0c6cb85f9daa572"
 
 # `ENV` is what the harness reads: it names the deployment environment to the
 # production readiness gate and binds every cookie this Worker signs, so a
@@ -153,7 +173,11 @@ id = "placeholder-run-wrangler-kv-namespace-create-staging"
 ENV = "staging"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 WORKSPACES_REDIRECT_BASE = "https://staging-api.livingbrain.wiki"
-MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
+# The sending domain verified in Owlpost is `send.livingbrain.wiki` (the same
+# one the waitlist mails from), so both senders live there: `MAIL_FROM` for
+# the venture's own mail, `WORKSPACES_MAIL_FROM` for the sign-in magic link.
+MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
+WORKSPACES_MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
 
 # Production: tags only, and only through the `production` GitHub
 # environment's required reviewers (the owner). Same placeholder rule; the

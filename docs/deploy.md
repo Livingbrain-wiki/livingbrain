@@ -20,12 +20,28 @@ deployed.
 | R2 bucket | simulated by `--local` | `livingbrain-blobs-staging` | `livingbrain-blobs` |
 | KV namespace | simulated by `--local` | a per-environment namespace | a per-environment namespace |
 | Deployed by | nothing — `wrangler dev` | every push, `main` or `v*` tag | a `v*` tag, after approval |
+| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | not set yet |
 
 `ENV` is not decoration. The harness reads it twice: it names the
 environment to the production readiness gate at boot, and it binds every
 cookie the Worker signs as `{HARNESS_VENTURE}|{ENV}`, so a session minted in
 staging never verifies in production. It must match the `ENV` the minting
 side uses, which is why the smoke test passes it explicitly.
+
+## Staging resources (created 2026-10-08)
+
+D1 `livingbrain-staging` (`f3a32632-ca97-4038-b094-2a9e1d7f413d`), R2
+`livingbrain-blobs-staging`, KV `KV-staging`
+(`333ff8d934b04e87a0c6cb85f9daa572`) and the rate-limit namespace `4002`. The
+staging Worker serves the static app from `app/` (minus `app/.assetsignore`)
+on the same custom domain as the API. Mail leaves from
+`no-reply@send.livingbrain.wiki`, the domain verified in Owlpost.
+
+Staging secrets: `HARNESS_SECRET`, `HARNESS_KEK_CURRENT` + `HARNESS_KEK_V1`
+(the page and Slack-token key ring; without it `/v1/pages/mcp` is not mounted
+and the Slack install answers 503), `MODEL_KEYS_SECRET`, `OWLPOST_API_KEY`,
+`ADMIN_TOKEN`, and for Slack `WORKSPACES_SLACK_CLIENT_SECRET` and
+`WORKSPACES_SLACK_SIGNING_SECRET`.
 
 ## One-time setup
 
