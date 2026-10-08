@@ -24,16 +24,19 @@
 
 use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
-use cratefield_core::{Harness, Template, Venture};
+use cratefield_core::axum::http::{HeaderMap, HeaderValue, header};
+use cratefield_core::{Harness, Ports, Template, Venture};
+use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::MailTheme;
 use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, FetchClient, WorkersClock, serve, serve_scheduled,
 };
 use livingbrain_canary::Canary;
+use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_pages::Pages;
-use livingbrain_workspaces::Workspaces;
+use livingbrain_workspaces::{SESSION_COOKIE, Workspaces};
 use std::sync::{Arc, OnceLock};
 use worker::{Context, Env, Request, Response, event};
 
@@ -158,10 +161,14 @@ fn non_blank(value: Option<String>) -> Option<String> {
 /// separately-built instance would validate something other than what serves.
 /// The same instance is cloned into the harness and handed to `serve`.
 ///
-/// Takes the already-resolved [`MailSettings`] and captcha rather than an
-/// `Env` so the test below can compose it natively; [`instance`] reads the
-/// `Env` and calls this.
-fn build(mail: MailSettings, captcha: Option<Turnstile>) -> (Harness, Cloudflare) {
+/// Takes the already-resolved [`MailSettings`], captcha and key custodian
+/// rather than an `Env` so the test below can compose it natively;
+/// [`instance`] reads the `Env` and calls this.
+fn build(
+    mail: MailSettings,
+    captcha: Option<Turnstile>,
+    kms: Option<Arc<dyn Kms>>,
+) -> (Harness, Cloudflare) {
     let runtime = Cloudflare::new()
         // The bindings `wrangler.toml` declares. `workspaces` and `waitlist`
         // read their tables through the D1 binding, `pages` its bodies through
@@ -191,7 +198,7 @@ fn build(mail: MailSettings, captcha: Option<Turnstile>) -> (Harness, Cloudflare
         .module(Canary::new())
         .module(Workspaces::new())
         .module(Models::new())
-        .module(Pages::new())
+        .module(pages_module(kms))
         .module(waitlist_module())
         .runtime(runtime.clone())
         .build()
@@ -199,12 +206,101 @@ fn build(mail: MailSettings, captcha: Option<Turnstile>) -> (Harness, Cloudflare
     (harness, runtime)
 }
 
+/// The pages module as this venture composes it, with the MCP server nested
+/// in it (issue #24): the harness scopes `Blob` per module name, so only a
+/// surface built from the pages module's own context can open a body those
+/// pages write.
+///
+/// With no key custodian there is no body anyone may open, so the surface is
+/// not mounted at all and every other route keeps working — a deployment
+/// missing a secret gets a working venture, not a Worker that panics on its
+/// first request.
+fn pages_module(kms: Option<Arc<dyn Kms>>) -> Pages {
+    let Some(kms) = kms else {
+        return Pages::new();
+    };
+    let auth: Arc<dyn BearerAuth> = Arc::new(SessionBearer);
+    Pages::new().nest("/mcp", move |ctx| {
+        livingbrain_mcp::router(ctx, Arc::clone(&kms), Arc::clone(&auth))
+    })
+}
+
+/// The key custodian page bodies are sealed and opened with (issue #43), over
+/// the `HARNESS_KEK_CURRENT` / `HARNESS_KEK_V<n>` secret ring — the same
+/// names and the same shape the page store's own tests use. `None` when the
+/// ring is absent or malformed.
+fn build_kms(env: &Env) -> Option<Arc<dyn Kms>> {
+    let kms = WorkerSecretKms::from_lookup(|name| {
+        env.secret(name)
+            .ok()
+            .map(|value| value.to_string())
+            .filter(|value| !value.is_empty())
+    })
+    .ok()?;
+    Some(Arc::new(kms))
+}
+
+/// The interim [`BearerAuth`] for the MCP endpoint (issue #24): the bearer
+/// value **is** the session cookie value the web app already issues, and it
+/// is verified through the `workspaces` module's own `caller` — the same check
+/// that module's routes make, so there is one implementation of "who is
+/// signed in" rather than two that can drift.
+///
+/// The MCP endpoint is not the web app and a browser cookie jar is not an MCP
+/// client, so a user pastes their cookie value into their agent's config. That
+/// is a stand-in, and docs/mcp.md says so; issue #72 replaces this
+/// implementation with a real OAuth token and leaves the trait alone.
+struct SessionBearer;
+
+/// RFC 6265 §4.1.1 `cookie-octet`: US-ASCII except the separators and the
+/// controls. A session token is base64url, so it never needs one of these.
+fn is_cookie_octet(byte: u8) -> bool {
+    matches!(byte,
+        b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+        | b'!' | b'#'..=b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+}
+
+#[async_trait::async_trait]
+impl BearerAuth for SessionBearer {
+    async fn authenticate(&self, ports: &Ports, token: &str) -> Result<Asker, AuthError> {
+        let (Some(signer), Some(clock), Some(db)) =
+            (ports.signer.clone(), ports.clock.clone(), ports.db.clone())
+        else {
+            return Err(AuthError::Rejected);
+        };
+        // The token is spliced into a `Cookie` header, so anything outside
+        // RFC 6265's cookie-octet set is refused here rather than splitting
+        // the cookie, or smuggling a second one, on the way in.
+        if !token.bytes().all(is_cookie_octet) {
+            return Err(AuthError::Rejected);
+        }
+        let Ok(value) = HeaderValue::from_str(&format!("{SESSION_COOKIE}={token}")) else {
+            return Err(AuthError::Rejected);
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, value);
+        livingbrain_workspaces::caller(&*signer, &*clock, &*db, &headers)
+            .await
+            .map(|caller| Asker {
+                workspace_id: caller.workspace_id,
+                user_id: caller.user_id,
+            })
+            .map_err(|_| AuthError::Rejected)
+    }
+}
+
 /// The process-wide instance, built on the first request from that request's
 /// `Env`. Worker bindings are static for a deployment, so the first `Env` is
 /// every `Env`; secrets are read from it because `std::env` is empty on
 /// Workers.
 fn instance(env: &Env) -> &'static (Harness, Cloudflare) {
-    INSTANCE.get_or_init(|| build(MailSettings::from_env(env), build_captcha(env)))
+    INSTANCE.get_or_init(|| {
+        build(
+            MailSettings::from_env(env),
+            build_captcha(env),
+            build_kms(env),
+        )
+    })
 }
 
 #[event(fetch)]
@@ -231,6 +327,7 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cratefield_kms::{Dek, LocalFileKms};
 
     /// The mail settings of a deployment with no Owlpost key: the adapter is
     /// wired but degrades to `NotConfigured`.
@@ -248,7 +345,9 @@ mod tests {
     /// not provide one of them.
     #[test]
     fn the_composition_mounts_every_module() {
-        let (harness, _) = build(unconfigured_mail(), None);
+        let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
+            .expect("a well-formed key");
+        let (harness, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
         let names: Vec<&str> = harness
             .modules()
             .iter()
@@ -259,6 +358,26 @@ mod tests {
         assert!(names.contains(&"models"), "{names:?}");
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"waitlist"), "{names:?}");
+    }
+
+    /// A token carrying a cookie delimiter is refused before it is spliced
+    /// into a `Cookie` header, so it cannot smuggle a second cookie in.
+    #[test]
+    fn a_token_carrying_a_cookie_delimiter_is_not_a_cookie() {
+        assert!(is_cookie_octet(b'a') && is_cookie_octet(b'9') && is_cookie_octet(b'-'));
+        for byte in [b';', b',', b' ', b'"', b'\\', 0x7f, b'\n'] {
+            assert!(!is_cookie_octet(byte), "{byte}");
+        }
+    }
+
+    /// A deployment with no page key ring still composes: the MCP surface is
+    /// not mounted and every other route keeps working.
+    #[test]
+    fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
+        let (harness, _) = build(unconfigured_mail(), None, None);
+        let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
+        assert!(names.contains(&"pages"), "{names:?}");
+        assert!(names.contains(&"workspaces"), "{names:?}");
     }
 
     /// A blank or whitespace-only binding is unset, and a value keeps no

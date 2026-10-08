@@ -98,3 +98,8 @@ proptest = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Debug builds keep line tables (enough for backtraces) but not full debuginfo:
+# a full-debuginfo `cargo test --workspace` outgrows a 4 GB disk.
+[profile.dev]
+debug = "line-tables-only"
