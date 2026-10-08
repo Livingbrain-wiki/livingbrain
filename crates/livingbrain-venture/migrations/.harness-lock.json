@@ -46,5 +46,9 @@
   "workspaces/0003": {
     "file": "0012_workspaces_0003_slack_app.sql",
     "sha256": "b6ad4a673b3ca4c04ee8853add253ee19036aa6ad33b61c5139cc9cc262825fb"
+  },
+  "pages/0003": {
+    "file": "0013_pages_0003_sources.sql",
+    "sha256": "88c9b9a47025b9403f13cae3cc7209913392a9653630d8d0e0ccbb2477119d8f"
   }
 }

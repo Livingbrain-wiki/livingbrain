@@ -26,6 +26,10 @@ cratefield-kms = { workspace = true }
 # checked by CI's worker-build job and the conformance suite).
 sea-query = { version = "0.32", default-features = false, features = ["backend-sqlite", "thread-safe"] }
 time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
+# The `wikilinks` column of the source ledger (issue #81) is a JSON array, so
+# the store both writes it and reads it back with the same crate every other
+# module already depends on. Pure Rust, no `std::fs`, wasm-safe as above.
+serde_json = { workspace = true }
 
 # Envelope encryption for page bodies and the blind index (issue #43), all
 # pinned to the versions the harness already resolves.

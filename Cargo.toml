@@ -85,6 +85,11 @@ sha2 = "0.10.9"
 # Wipes the derived blind-index key when the call that needed it is over, the
 # way `cratefield-kms` wipes a DEK.
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+# The `import markdown` walk (issue #81): `.gitignore`-aware, hidden-skipping
+# directory traversal with `--exclude` globs. Native-only, and named here for
+# the resolution it already needs: only the CLI depends on it, never a module,
+# so it stays out of the Worker's wasm graph.
+ignore = "0.4.23"
 # The URL-encoding `axum` and `url` already resolve.
 percent-encoding = "2.3"
 pollster = { version = "0.4", features = ["macro"] }

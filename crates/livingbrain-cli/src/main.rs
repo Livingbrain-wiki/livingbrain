@@ -17,6 +17,7 @@ use api::Client;
 
 mod api;
 mod auth;
+mod import;
 mod mcp;
 mod telemetry;
 
@@ -152,6 +153,11 @@ enum Command {
     },
     /// Run a stdio MCP server (its output is always JSON; `--json` is a no-op)
     Mcp,
+    /// Import notes from elsewhere into the brain
+    Import {
+        #[command(subcommand)]
+        format: import::Format,
+    },
     /// Turn anonymous usage data on or off, and show what would be sent
     Telemetry {
         #[command(subcommand)]
@@ -224,6 +230,10 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             out.json_or(&value, || println!("Wrote {path} ({} bytes)", bytes.len()));
             Ok(())
         }
+        // The walk, the preview and the confirmation all happen before the
+        // client is built, so a declined import touches neither the keychain
+        // nor the network (see `import`).
+        Command::Import { format } => import::run(format, &cli.api_url, out),
         // The only command that neither needs a token nor opens a socket: it
         // reads and writes the stored preference and prints the local view.
         Command::Telemetry { action } => telemetry::run(

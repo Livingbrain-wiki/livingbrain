@@ -22,7 +22,7 @@ use cratefield_core::{
 use cratefield_testing::{FixedClock, MemoryBlob, TestHarness};
 use livingbrain_pages::{
     Author, EntityType, PageError, PageStore, PageWrite, Pages, ReencryptReport, SearchHit,
-    envelope_version,
+    SourceKind, SourceStore, SourceWrite, envelope_version,
 };
 use sea_query::Value as SeaValue;
 
@@ -886,6 +886,67 @@ fn a_key_a_body_still_names_is_not_retired() {
         // what the guard bought is that the key outlived the row that named
         // it, not that anything stayed readable.
         assert!(at40.read("team", "alpha").await.unwrap().is_none());
+    });
+}
+
+/// The same guard for the other body a rotation does not re-seal. A re-encryption
+/// pass rewrites page bodies (issue #43); an imported source body (issue #81)
+/// stays under the key it arrived with, so without a `sources` check the pass
+/// would retire a version a source row still names and leave that body
+/// readable by nobody and lost to everybody.
+#[test]
+fn a_key_a_source_body_still_names_is_not_retired() {
+    pollster::block_on(async {
+        let (kit, blob, _log, store) = RecordingDatabase::bench();
+        let db = &kit.db;
+        let sources = SourceStore::new(
+            db.clone(),
+            blob.clone(),
+            common::kms(),
+            Arc::new(kit.clock.clone()),
+            Arc::new(UlidIdGen),
+        );
+        let (source, created) = sources
+            .put(
+                "team",
+                SourceWrite {
+                    kind: SourceKind::Import,
+                    rel_path: "notes/one.md".to_owned(),
+                    markdown: "# One\n\nA note.\n".to_owned(),
+                    imported_by: "u1".to_owned(),
+                },
+            )
+            .await
+            .expect("an import");
+        assert!(created, "the import created the row");
+
+        assert_eq!(store.rotate_scope_key("team").await.unwrap(), 2);
+        // The page pass has no page body to rewrite and still leaves version 1
+        // pending, because the source row still names it.
+        report(&store.reencrypt_scope("team").await.unwrap(), 0, &[], &[1]);
+        assert!(
+            keys(db, "team")[0].1,
+            "a source body is still sealed under version 1"
+        );
+
+        // The source still reads, which is the whole point of keeping the key.
+        let opened = sources
+            .open("team", &source.body_sha256)
+            .await
+            .expect("the source body opens");
+        assert!(opened.contains("A note."), "{opened}");
+
+        // Once nothing names it, a pass past the grace window retires it. The
+        // window runs from when version 2 was created, so 40 minutes is late
+        // enough.
+        run(
+            db,
+            "DELETE FROM sources WHERE scope = ? AND body_sha256 = ?",
+            vec![bind("team"), bind(&source.body_sha256)],
+        );
+        let later = after(&kit, &blob, 40);
+        report(&later.reencrypt_scope("team").await.unwrap(), 0, &[1], &[]);
+        assert!(!keys(db, "team")[0].1);
     });
 }
 

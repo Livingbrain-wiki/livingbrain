@@ -85,7 +85,7 @@ pub(crate) fn tokenize(markdown: &str) -> Vec<String> {
 
 /// Hex, the shape the blind index stores a MAC in. Hand-rolled rather than
 /// pulled in as a dependency for one loop.
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
@@ -340,19 +340,29 @@ impl ScopeKeys {
 
     /// Retires one version, if and only if nothing refers to it. The
     /// `NOT EXISTS` is the whole point and it is in the same statement as the
-    /// destroy, so a version a `page_versions` row still names — one a
-    /// re-encryption pass has not reached, or a write that fetched the old key
-    /// moments before the rotation and is committing right now — cannot be
-    /// retired between the check and the write.
+    /// destroy, so a version a `page_versions` or `sources` row still names —
+    /// one a re-encryption pass has not reached, or a write that fetched the
+    /// old key moments before the rotation and is committing right now —
+    /// cannot be retired between the check and the write.
+    ///
+    /// Both tables are checked because a re-encryption pass re-seals page
+    /// bodies only (issue #43): a source body (issue #81) stays under the key
+    /// it was imported with, so a version any source names is one that key is
+    /// still needed for. Retiring it would leave that body readable by nobody
+    /// and lost to everybody.
     pub(crate) async fn retire(&self, scope: &str, version: u32) -> Result<u64, PageError> {
         self.db
             .execute(&Statement::with_values(
                 "UPDATE scope_keys SET wrapped_dek = NULL, retired_at = ? \
                  WHERE scope = ? AND key_version = ? \
                  AND NOT EXISTS (SELECT 1 FROM page_versions \
+                                 WHERE scope = ? AND key_version = ?) \
+                 AND NOT EXISTS (SELECT 1 FROM sources \
                                  WHERE scope = ? AND key_version = ?)",
                 vec![
                     text(&self.now()),
+                    text(scope),
+                    int(version),
                     text(scope),
                     int(version),
                     text(scope),

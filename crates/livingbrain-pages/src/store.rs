@@ -754,14 +754,21 @@ impl PageStore {
     }
 
     /// Forgets a scope: every version of its key is destroyed, and its blind
-    /// index rows and its link rows go, in one batch. The `pages` and
-    /// `page_versions` metadata stays, and the bodies stay in the blob store —
-    /// readable by nobody, because the key that opened them is gone, and
-    /// destroying it is immediate everywhere because no key is ever cached.
+    /// index rows, its link rows and its source rows go, in one batch. The
+    /// `pages` and `page_versions` metadata stays, and the bodies stay in the
+    /// blob store — readable by nobody, because the key that opened them is
+    /// gone, and destroying it is immediate everywhere because no key is ever
+    /// cached.
     ///
     /// The link rows go because a `[[wiki-link]]` target is a word chosen out of
     /// a body. The slugs stay: a page's own name is how the rest of the wiki
     /// refers to it.
+    ///
+    /// The source rows go for the same reason and more (issue #81): an imported
+    /// file's path is somebody's own filing and, unlike a page slug, it names
+    /// nothing that outlives the scope. Their sealed bodies need no delete —
+    /// the `UPDATE` above nulls the key that opens them in the same batch, so
+    /// they are unreadable the moment this commits.
     ///
     /// # Errors
     ///
@@ -779,6 +786,7 @@ impl PageStore {
                 ),
                 Statement::with_values("DELETE FROM page_terms WHERE scope = ?", vec![text(scope)]),
                 Statement::with_values("DELETE FROM page_links WHERE scope = ?", vec![text(scope)]),
+                Statement::with_values("DELETE FROM sources WHERE scope = ?", vec![text(scope)]),
             ])
             .await
             .map_err(PageError::Store)

@@ -206,23 +206,32 @@ fn build(
     (harness, runtime)
 }
 
-/// The pages module as this venture composes it, with the MCP server nested
-/// in it (issue #24): the harness scopes `Blob` per module name, so only a
-/// surface built from the pages module's own context can open a body those
-/// pages write.
+/// The pages module as this venture composes it, with the MCP server and the
+/// source importer nested in it (issues #24 and #81): the harness scopes
+/// `Blob` per module name, so only a surface built from the pages module's own
+/// context can open a body those pages write.
 ///
-/// With no key custodian there is no body anyone may open, so the surface is
-/// not mounted at all and every other route keeps working — a deployment
+/// With no key custodian there is no body anyone may open, so neither surface
+/// is mounted at all and every other route keeps working — a deployment
 /// missing a secret gets a working venture, not a Worker that panics on its
 /// first request.
 fn pages_module(kms: Option<Arc<dyn Kms>>) -> Pages {
     let Some(kms) = kms else {
         return Pages::new();
     };
+    // Each surface gets its own handle to the same custodian and the same
+    // credential resolver: one key, so a body either of them seals is a body
+    // the other can open.
     let auth: Arc<dyn BearerAuth> = Arc::new(SessionBearer);
-    Pages::new().nest("/mcp", move |ctx| {
-        livingbrain_mcp::router(ctx, Arc::clone(&kms), Arc::clone(&auth))
-    })
+    let mcp_kms = Arc::clone(&kms);
+    let mcp_auth = Arc::clone(&auth);
+    Pages::new()
+        .nest("/mcp", move |ctx| {
+            livingbrain_mcp::router(ctx, Arc::clone(&mcp_kms), Arc::clone(&mcp_auth))
+        })
+        .nest("/sources", move |ctx| {
+            livingbrain_mcp::sources_router(ctx, Arc::clone(&kms), Arc::clone(&auth))
+        })
 }
 
 /// The key custodian page bodies are sealed and opened with (issue #43), over
