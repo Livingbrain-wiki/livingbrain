@@ -1,0 +1,4 @@
+# Files in app/ that are not served when the Worker uploads app/ as static
+# assets (crates/livingbrain-venture/wrangler.toml, [env.staging.assets]).
+tests
+README.md
