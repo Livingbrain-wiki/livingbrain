@@ -20,6 +20,16 @@ cratefield-core = { workspace = true }
 # above, and it names no `cratefield-core` — so it cannot split the ports in
 # two.
 cratefield-kms = { workspace = true }
+# The access model: this module owns which page scope a scope maps to and
+# which scopes an asker may read (issue #123), so it asks the model rather
+# than reimplementing the rule. Pure Rust, wasm-safe.
+livingbrain-access = { path = "../livingbrain-access" }
+# Redaction, so a question carrying a secret is cleaned before it becomes a
+# search query (issue #108).
+livingbrain-redact = { path = "../livingbrain-redact" }
+# `Answers` is an `async` trait a sibling module holds as `dyn`, which needs
+# the attribute macro to be object-safe. Already in the tree.
+async-trait = { workspace = true }
 # `sea_query::Value` is what a `Statement` binds, and `time` formats the
 # version timestamps — neither is re-exported by `cratefield-core`. Both are
 # pure Rust, already in the tree and wasm-safe (a module's wasm build is

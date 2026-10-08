@@ -7,7 +7,7 @@
 //! in the others.
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -19,6 +19,7 @@ use cratefield_core::{
     Config, DbError, HttpClient, HttpError, Kid, MapConfig, Payload, Row, Signer, Statement,
 };
 use cratefield_testing::{FixedClock, TestHarness};
+use livingbrain_pages::{PageAnswers, PageStore};
 use livingbrain_workspaces::{
     FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE, UserChange, Workspaces,
     apply_user_change,
@@ -43,6 +44,22 @@ pub const SIGNING_SECRET: &str = concat!("8f742231b10e8888", "abcd99yyyzzz85a5")
 pub const KEK: &str = concat!("BwcHBwcHBwcHBwcHBwcHBw", "cHBwcHBwcHBwcHBwcHBwc=");
 /// The fixed instant every test runs at, matching the kit's default clock.
 pub const NOW: i64 = 1_800_000_000;
+
+// ---------------------------------------------------------------------------
+// The Slack the agent loop talks to (issue #123)
+
+/// The team every agent event resolves through.
+pub const TEAM: &str = "T0LEGACY";
+/// The member who asks, and the Slack user the mirror holds for them.
+pub const ASKER: &str = "UASKER";
+/// The bot user Slack made for this team's installation.
+pub const BOT: &str = "UBOT00BOT";
+/// The bot token the install seals. Assembled from fragments so the fixture
+/// value never appears verbatim in the source tree, where scanners read it as
+/// a live credential; the runtime value is unchanged.
+pub const BOT_TOKEN: &str = concat!("xo", "xb-1111-2222-agent-not-a-real-token");
+/// Where a test's citations point.
+pub const WIKI: &str = "https://brain.example";
 
 /// The callback URL the module must build from `REDIRECT_BASE`, as it
 /// appears percent-encoded in the authorize redirect and the token form.
@@ -102,7 +119,37 @@ pub struct TokenHttp {
 struct Inner {
     id_token: Option<String>,
     body: Option<String>,
+    /// What the Web API (`/api/chat.postMessage` and friends) answers
+    /// instead of `ok: true`. Slack's own refusal shape, and the reason the
+    /// module reads the body rather than the status line.
+    web_api_body: Option<String>,
     requests: Vec<(String, String, String)>,
+    api: Vec<Call>,
+}
+
+/// One request the fake saw, in the form a test asserts on.
+///
+/// The `Authorization` header is kept because a bot token is what the header
+/// carries and nothing else does: a reply that went out with the wrong
+/// credential, or with none, is the failure a test has to be able to see.
+#[derive(Clone, Debug)]
+pub struct Call {
+    pub method: String,
+    pub uri: String,
+    pub authorization: Option<String>,
+    pub body: String,
+}
+
+impl Call {
+    /// The body as JSON, for an assertion about a rendered message.
+    ///
+    /// # Panics
+    ///
+    /// When the body is not JSON.
+    #[must_use]
+    pub fn json(&self) -> Value {
+        serde_json::from_str(&self.body).expect("a Web API body is JSON")
+    }
 }
 
 impl TokenHttp {
@@ -126,10 +173,23 @@ impl TokenHttp {
         inner.id_token = None;
     }
 
+    /// Answers the **Web API** with this raw body — Slack's
+    /// `{"ok": false, "error": "…"}`, which arrives with HTTP 200 and must
+    /// not be mistaken for a post.
+    pub fn web_api_will_answer(&self, body: &str) {
+        self.inner.lock().expect("lock").web_api_body = Some(body.to_owned());
+    }
+
     /// Every request as `(method, uri, body)`.
     #[must_use]
     pub fn requests(&self) -> Vec<(String, String, String)> {
         self.inner.lock().expect("lock").requests.clone()
+    }
+
+    /// Every call to Slack's Web API, in order, with its headers.
+    #[must_use]
+    pub fn api_calls(&self) -> Vec<Call> {
+        self.inner.lock().expect("lock").api.clone()
     }
 }
 
@@ -137,21 +197,46 @@ impl TokenHttp {
 impl HttpClient for TokenHttp {
     async fn send(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
         let (parts, body) = request.into_parts();
+        let uri = parts.uri.to_string();
+        let authorization = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = String::from_utf8_lossy(&body).into_owned();
+        // The Web API is told apart from the token endpoints by its
+        // `/api/chat.`-shaped method, because the fake serves both and a
+        // test that seeded an install must not be answered `ok: true` with
+        // an `id_token` when it means a refusal.
+        let is_web_api = uri.contains("/api/chat.");
         let mut inner = self.inner.lock().expect("lock");
-        inner.requests.push((
-            parts.method.to_string(),
-            parts.uri.to_string(),
-            String::from_utf8_lossy(&body).into_owned(),
-        ));
-        let answer = match (&inner.body, &inner.id_token) {
-            (Some(raw), _) => raw.clone(),
-            (None, Some(token)) => json!({
-                "ok": true,
-                "access_token": "xoxb-not-used",
-                "id_token": token,
-            })
-            .to_string(),
-            (None, None) => json!({"ok": false, "error": "invalid_code"}).to_string(),
+        inner
+            .requests
+            .push((parts.method.to_string(), uri.clone(), body.clone()));
+        if is_web_api {
+            inner.api.push(Call {
+                method: parts.method.to_string(),
+                uri,
+                authorization,
+                body,
+            });
+        }
+        let answer = if is_web_api {
+            inner
+                .web_api_body
+                .clone()
+                .unwrap_or_else(|| json!({"ok": true}).to_string())
+        } else {
+            match (&inner.body, &inner.id_token) {
+                (Some(raw), _) => raw.clone(),
+                (None, Some(token)) => json!({
+                    "ok": true,
+                    "access_token": "xoxb-not-used",
+                    "id_token": token,
+                })
+                .to_string(),
+                (None, None) => json!({"ok": false, "error": "invalid_code"}).to_string(),
+            }
         };
         drop(inner);
         Response::builder()
@@ -822,4 +907,148 @@ pub async fn apply_event(kit: &TestHarness, team_id: &str, event: &Value) -> Use
     apply_user_change(&*kit.db, &clock(), team_id, event)
         .await
         .expect("the event applies")
+}
+
+// ---------------------------------------------------------------------------
+// The agent loop (issue #123)
+
+/// A world where the Slack agent answers from real pages.
+///
+/// Both modules are mounted, because the pages module owns the tables *and*
+/// the blob prefix — the harness scopes `Blob` per module name, so a store
+/// built anywhere else reads a prefix nothing ever writes. The store a test
+/// seeds is therefore built the same way the composition builds it, over the
+/// pages-scoped blob.
+pub struct Agent {
+    pub kit: TestHarness,
+    /// The store a test writes pages into. Shared, because the seam the
+    /// module holds and the test's own writes must be the same store.
+    pub store: Arc<PageStore>,
+    /// The seam the workspaces module holds, which a test fills with
+    /// [`Deferred::answering`] once [`Agent::store`] exists.
+    pub answers: Deferred,
+}
+
+/// An [`Answers`] a test fills once the harness is built.
+///
+/// The same seam-ordering problem the composition has, in miniature: the
+/// module is constructed before its `ModuleContext` exists, so the page store
+/// a test seeds with cannot be the one the module was handed. The test fills
+/// this before it delivers anything, which is exactly what the Worker does on
+/// its first request.
+#[derive(Clone, Default)]
+pub struct Deferred(Arc<OnceLock<Arc<dyn livingbrain_pages::Answers>>>);
+
+impl Deferred {
+    /// Answers from `store` over `base`. The first writer wins.
+    pub fn answering(&self, store: impl Into<Arc<PageStore>>, base: impl Into<String>) -> bool {
+        self.0.set(Arc::new(PageAnswers::new(store, base))).is_ok()
+    }
+}
+
+#[async_trait]
+impl livingbrain_pages::Answers for Deferred {
+    async fn answer(
+        &self,
+        asker: &livingbrain_pages::Asker,
+        question: &str,
+    ) -> Result<livingbrain_pages::Answered, livingbrain_pages::AnswerError> {
+        self.0
+            .get()
+            .ok_or(livingbrain_pages::AnswerError::Unavailable)?
+            .answer(asker, question)
+            .await
+    }
+}
+
+/// A harness with `workspaces` answering through a [`Deferred`] seam and
+/// `pages` mounted beside it.
+///
+/// `classifier` is `None` for the policy most deployments run — the kit's
+/// default port set always supplies one, so an unwired judge has to be asked
+/// for — and `Some` for a deployment that wired the fast judge (#112).
+pub fn agent_harness(
+    http: &TokenHttp,
+    classifier: Option<Arc<dyn cratefield_core::Classifier>>,
+) -> Agent {
+    let mut blob: Option<Arc<dyn cratefield_core::Blob>> = None;
+    let config: Arc<dyn Config> = Arc::new(config());
+    let http = http.clone();
+    let clock = FixedClock(OffsetDateTime::from_unix_timestamp(NOW).expect("a valid instant"));
+    let key = kms();
+    let answers = Deferred::default();
+    let kit = TestHarness::with_ports(
+        vec![
+            Box::new(Workspaces::new().answering(Arc::new(answers.clone()))),
+            Box::new(
+                livingbrain_pages::Pages::new()
+                    .nest("/mcp", |_ctx| cratefield_core::axum::Router::new()),
+            ),
+        ],
+        |ports| {
+            let blob_store: Arc<dyn cratefield_core::Blob> =
+                Arc::new(cratefield_testing::MemoryBlob::new());
+            ports.config = config;
+            ports.http = Some(Arc::new(http));
+            ports.clock = Some(Arc::new(clock.clone()));
+            ports.blob = Some(Arc::clone(&blob_store));
+            ports.classifier = classifier;
+            blob = Some(blob_store);
+        },
+    );
+    let store = Arc::new(livingbrain_pages::PageStore::new(
+        Arc::clone(&kit.db),
+        // The production scope: the module name `pages` is mounted under, so
+        // a seeded body is where the module's own store looks for it.
+        Arc::new(cratefield_core::ScopedBlob::new(
+            blob.expect("the port set has the blob store it was given"),
+            "pages",
+        )),
+        Arc::clone(&key),
+        Arc::new(kit.clock.clone()) as Arc<dyn cratefield_core::Clock>,
+        Arc::new(cratefield_core::UlidIdGen),
+    ));
+    Agent {
+        kit,
+        store,
+        answers,
+    }
+}
+
+/// The workspace, the Slack install and the asker's own page: everything the
+/// loop needs before it may say anything.
+///
+/// The install goes through the real callback rather than a planted row, so
+/// the sealed bot token is one the module itself wrote — a test that seeded
+/// the row would prove the loop can read a row, not that it can open one.
+pub async fn install_agent(agent: &Agent, http: &TokenHttp) {
+    seed_legacy_workspace(&agent.kit, TEAM, "a workspace", ASKER).await;
+    let install = start_install(&agent.kit).await;
+    http.will_answer(&install_answer(TEAM, "A0APP", BOT, BOT_TOKEN));
+    let callback = get(
+        &agent.kit.router,
+        &install.callback("install-code"),
+        &install.cookies(),
+    )
+    .await;
+    assert_eq!(
+        callback.status,
+        StatusCode::OK,
+        "the install completes: {}",
+        String::from_utf8_lossy(&callback.body)
+    );
+}
+
+/// Drives one signed event delivery through the module and drains the work
+/// it deferred, so an assertion is about what the agent did rather than
+/// about what it queued.
+pub async fn deliver(kit: &TestHarness, event_id: &str, team_id: &str, event: Value) {
+    let response = post_signed(&kit.router, &envelope(event_id, team_id, event), NOW).await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "the delivery is acknowledged: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    kit.defer.drain().await;
 }

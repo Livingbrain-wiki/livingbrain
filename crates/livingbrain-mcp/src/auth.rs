@@ -4,11 +4,16 @@
 //! [`Asker`], and [`page_scopes`] is the only way this crate names a page
 //! scope. Every tool reads through it and **no tool accepts a scope
 //! argument**, so an agent cannot ask for a scope it was not granted.
+//!
+//! The naming rule itself lives in `livingbrain-pages` (issue #123), because
+//! the Slack agent answers from the same pages and two copies of the rule
+//! would be two answer keys. These two functions are the MCP server's own
+//! access model — a direct message, no channel memberships — and they say so
+//! by delegating.
 
 use async_trait::async_trait;
 use cratefield_core::Ports;
-use livingbrain_access::{ChannelMemberships, Location, Scope, UserId, scopes_for};
-use sha2::{Digest, Sha256};
+use livingbrain_access::{Location, Scope};
 
 /// The person a credential speaks for, and the workspace they are in. The
 /// ids are opaque and are only ever combined, never concatenated into
@@ -55,48 +60,15 @@ pub trait BearerAuth: Send + Sync {
 /// The grant is `scopes_for(asker, Location::Dm, …)`: the same rule Slack
 /// asks with, so a person's private memory is the same set here as there.
 pub fn page_scopes(asker: &Asker) -> Vec<String> {
-    let granted = scopes_for(
-        &UserId::new(asker.user_id.clone()),
+    livingbrain_pages::page_scopes_for(
+        &asker.workspace_id,
+        &asker.user_id,
         Location::Dm,
-        &ChannelMemberships::new(),
-    );
-    let mut ranked: Vec<(u8, String)> = granted
-        .scopes()
-        .map(|scope| (specificity(scope), page_scope(&asker.workspace_id, scope)))
-        .collect();
-    ranked.sort();
-    ranked.dedup();
-    ranked.into_iter().map(|(_, scope)| scope).collect()
+        &livingbrain_access::ChannelMemberships::new(),
+    )
 }
 
 /// The page-store scope one access scope maps to, inside `workspace_id`.
-///
-/// **The workspace is folded in on purpose.** A page is `(scope, slug)` with
-/// no tenant column, so two workspaces sharing a scope name would share every
-/// page in it, and two stores cannot be relied on to disagree about that.
-/// A SHA-256 over the workspace and the scope, hex-truncated to 64 bits: the
-/// ids behind them are Slack user ids and ULIDs, which are neither slug-safe
-/// nor worth putting in a citation.
 pub fn page_scope(workspace_id: &str, scope: &Scope) -> String {
-    let (prefix, id) = match scope {
-        Scope::Shared => ("shared", String::new()),
-        Scope::Channel(id) => ("channel", id.to_string()),
-        Scope::User(id) => ("user", id.to_string()),
-    };
-    let key = format!("{workspace_id}\u{1f}{prefix}\u{1f}{id}");
-    let digest = Sha256::digest(key.as_bytes());
-    let mut hex = String::with_capacity(16);
-    for byte in digest.iter().take(8) {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    format!("{prefix}-{hex}")
-}
-
-/// Most specific first: the asker's own memory, then shared, then a channel.
-fn specificity(scope: &Scope) -> u8 {
-    match scope {
-        Scope::User(_) => 0,
-        Scope::Shared => 1,
-        Scope::Channel(_) => 2,
-    }
+    livingbrain_pages::page_scope(workspace_id, scope)
 }

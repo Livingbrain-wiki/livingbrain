@@ -35,7 +35,7 @@ use cratefield_runtime_cloudflare::{
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
-use livingbrain_pages::Pages;
+use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_workspaces::{SESSION_COOKIE, Workspaces};
 use std::sync::{Arc, OnceLock};
 use worker::{Context, Env, Request, Response, event};
@@ -186,19 +186,39 @@ fn build(
             mail.api_key,
             mail.from,
             mail.reply_to,
-        ));
+        ))
+        // **No `Classifier`, and that is a known gap, not an oversight**
+        // (issue #123). `Cloudflare::classifier_arc` would take one, but both
+        // adapters `cratefield-core` names for it need something this Worker
+        // has no binding for: `ClassifierLlm` is a `Classifier` over a
+        // `TextModel`, and this venture wires no `text_model` either — there
+        // is no `AI` binding in `wrangler.toml` and no `models`-module
+        // connection is a `TextModel`. `TypeSafe` wants a `TYPESAFE_API_KEY`
+        // secret this deployment does not declare. Wiring either means a new
+        // secret or a new binding and the `docs/deploy.md` entry that goes
+        // with it, which is a decision for the issue that owns the model
+        // wiring, not one to guess at here.
+        //
+        // Until then the Slack agent runs the unwired-judge policy: it
+        // answers an @mention and stays silent in a DM. That is the correct
+        // behaviour for a deployment with no judge, and the DM half of
+        // issue #123 does not work in this deployment until one is wired.
+        ;
     let runtime = match captcha {
         Some(captcha) => runtime.captcha(captcha),
         None => runtime,
     };
+    // The Slack agent's answer seam (issue #123), filled by the pages
+    // module's own closure and read per event. See [`AnswersCell`].
+    let answers = AnswersCell::default();
     let harness = Harness::builder()
         .venture(venture())
         // The waitlist module's confirm mails in this venture's theme.
         .templates(templates())
         .module(Canary::new())
-        .module(Workspaces::new())
+        .module(Workspaces::new().answering(Arc::new(answers.clone())))
         .module(Models::new())
-        .module(pages_module(kms))
+        .module(pages_module(kms, &answers))
         .module(waitlist_module())
         .runtime(runtime.clone())
         .build()
@@ -215,7 +235,15 @@ fn build(
 /// is mounted at all and every other route keeps working — a deployment
 /// missing a secret gets a working venture, not a Worker that panics on its
 /// first request.
-fn pages_module(kms: Option<Arc<dyn Kms>>) -> Pages {
+///
+/// The same closure also builds the [`Answers`] the Slack agent answers
+/// through (issue #123), for the same reason and from the same ports. It
+/// cannot be handed to `workspaces` directly — the two modules are composed
+/// before any context exists — so it goes in through [`AnswersCell`], which
+/// is filled here and read per event. With no key custodian this closure
+/// never runs and the cell stays empty for the isolate's life; the agent
+/// reports that rather than answering nobody in silence.
+fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     let Some(kms) = kms else {
         return Pages::new();
     };
@@ -225,13 +253,79 @@ fn pages_module(kms: Option<Arc<dyn Kms>>) -> Pages {
     let auth: Arc<dyn BearerAuth> = Arc::new(SessionBearer);
     let mcp_kms = Arc::clone(&kms);
     let mcp_auth = Arc::clone(&auth);
+    let cell = answers.clone();
     Pages::new()
         .nest("/mcp", move |ctx| {
+            // Read apart from `ctx`, which the MCP router below takes whole.
+            if let (Some(db), Some(blob), Some(clock), Some(id_gen)) = (
+                ctx.ports.db.clone(),
+                ctx.ports.blob.clone(),
+                ctx.ports.clock.clone(),
+                ctx.ports.id_gen.clone(),
+            ) {
+                cell.publish(Arc::new(PageAnswers::new(
+                    PageStore::new(db, blob, Arc::clone(&mcp_kms), clock, id_gen),
+                    WIKI_BASE,
+                )));
+            }
             livingbrain_mcp::router(ctx, Arc::clone(&mcp_kms), Arc::clone(&mcp_auth))
         })
         .nest("/sources", move |ctx| {
             livingbrain_mcp::sources_router(ctx, Arc::clone(&kms), Arc::clone(&auth))
         })
+}
+
+/// Where the pages are published. A citation is an absolute link, so this is
+/// the site's own origin rather than the API's.
+const WIKI_BASE: &str = "https://livingbrain.wiki";
+
+/// The [`Answers`] the composition could not build yet.
+///
+/// **Why a cell at all.** A [`PageStore`] needs the pages module's `Blob`,
+/// and the harness hands each module a blob scoped to *its own name*: a
+/// `ScopedBlob` the `workspaces` module built itself would live under
+/// `workspaces/`, where no page body is ever written, and the workspaces
+/// module does not even declare `Port::Blob`. So the store cannot be built
+/// there at all. It is built inside the pages module's own closure, which is
+/// handed a `ModuleContext` no earlier than the request that runs it, and
+/// published here — the one seam that reaches `workspaces` without either
+/// module reaching into the other.
+///
+/// Publishing replaces rather than first-wins because a Worker holds a
+/// request's D1 and R2 handles and has no business holding the first one's
+/// for the isolate's life. Every rebuild is equivalent — the same bindings
+/// behind it — so a concurrent reader sees a store that answers the same.
+///
+/// The slot is empty until some request runs the closure, which the Slack
+/// agent reads as [`AnswerError::Unavailable`] and reports rather than
+/// answering from nothing.
+#[derive(Clone, Default)]
+struct AnswersCell(Arc<std::sync::RwLock<Option<Arc<dyn Answers>>>>);
+
+impl AnswersCell {
+    fn publish(&self, answers: Arc<dyn Answers>) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = Some(answers);
+        }
+    }
+
+    fn get(&self) -> Option<Arc<dyn Answers>> {
+        self.0.read().ok().and_then(|slot| slot.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Answers for AnswersCell {
+    async fn answer(
+        &self,
+        asker: &livingbrain_pages::Asker,
+        question: &str,
+    ) -> Result<Answered, livingbrain_pages::AnswerError> {
+        self.get()
+            .ok_or(livingbrain_pages::AnswerError::Unavailable)?
+            .answer(asker, question)
+            .await
+    }
 }
 
 /// The key custodian page bodies are sealed and opened with (issue #43), over
