@@ -26,7 +26,7 @@ use std::sync::Arc;
 use cratefield_core::axum::body::Bytes;
 use cratefield_core::axum::extract::State;
 use cratefield_core::axum::extract::rejection::BytesRejection;
-use cratefield_core::axum::http::{HeaderMap, StatusCode};
+use cratefield_core::axum::http::{HeaderMap, StatusCode, Uri};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::post;
 use cratefield_core::axum::{self, Json, Router};
@@ -143,6 +143,7 @@ pub fn sources_router(
 async fn create(
     State(state): State<Arc<McpState>>,
     headers: HeaderMap,
+    uri: Uri,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Problem> {
     let asker = match asker(&state, &headers).await {
@@ -150,7 +151,7 @@ async fn create(
         // The 401 the MCP endpoint answers with, challenge and all — one
         // definition, so both surfaces say the same thing to a client that
         // arrives at the wrong one.
-        Err(()) => return Ok(unauthorized()),
+        Err(()) => return Ok(unauthorized(&headers, &uri)),
     };
     let body = body.map_err(|_| Problem::new(&TOO_LARGE))?;
     let request = parse(&body)?;

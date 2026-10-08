@@ -48,7 +48,7 @@ mod store;
 pub use config::Settings;
 pub use events::bot_scopes;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
-pub use handlers::{Caller, caller};
+pub use handlers::{Caller, caller, caller_for};
 pub use install::{BotTokenError, bot_token};
 pub use livingbrain_pages::Answers;
 pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};

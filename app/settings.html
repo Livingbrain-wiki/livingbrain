@@ -127,6 +127,97 @@
             </fieldset>
           </section>
 
+          <!-- api tokens: the second section with a server route. The token
+               value lives in exactly one element (#token-value) and is shown
+               once; `assets/tokens.js` is where that rule is enforced. -->
+          <section class="card" id="tokens">
+            <h2>API tokens</h2>
+            <p class="muted">
+              A token lets the CLI or an MCP client read what you can read,
+              without a browser session. A token with no scopes has your full
+              read access.
+            </p>
+            <div id="tokens-status" class="notice" role="status" aria-live="polite"></div>
+
+            <fieldset>
+              <legend>Your tokens</legend>
+              <table class="table">
+                <caption>
+                  Read from <code>GET /v1/tokens</code>. Revoking is
+                  <code>DELETE /v1/tokens/{prefix}</code> and takes effect at
+                  once.
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Prefix</th>
+                    <th scope="col">Scopes</th>
+                    <th scope="col">Created</th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="token-rows"></tbody>
+              </table>
+            </fieldset>
+
+            <fieldset>
+              <legend>Create a token</legend>
+              <p class="row">
+                <label for="token-name">Name</label>
+                <input
+                  id="token-name"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="laptop"
+                  aria-describedby="token-created-note"
+                />
+              </p>
+              <p class="row">
+                <label for="token-scopes">Scopes</label>
+                <input
+                  id="token-scopes"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="shared"
+                  aria-describedby="token-scopes-note"
+                />
+              </p>
+              <p id="token-scopes-note" class="tiny">
+                Optional, comma separated. Leave it empty for your own full read
+                access; narrow it to <code>shared</code> to hand out less.
+              </p>
+              <p class="row">
+                <button type="button" data-variant="primary" id="create-token">
+                  Create token
+                </button>
+              </p>
+
+              <div id="token-reveal" class="notice" data-tone="ok" hidden>
+                <p id="token-created-note">
+                  <strong>Copy this now.</strong> It is shown once and cannot be
+                  shown again — only the prefix is kept, so if you lose it you
+                  create a new one.
+                </p>
+                <p class="row">
+                  <code id="token-value"></code>
+                  <button type="button" id="copy-token">Copy</button>
+                  <button type="button" id="dismiss-token">Done</button>
+                </p>
+              </div>
+            </fieldset>
+
+            <p class="tiny">
+              From a terminal, <code>livingbrain login</code> uses the device
+              flow and needs no token here. For MCP:
+              <code
+                >claude mcp add --transport http livingbrain
+                https://mcp.livingbrain.wiki/v1/pages/mcp --header
+                "Authorization: Bearer &lt;token&gt;"</code
+              >.
+            </p>
+          </section>
+
           <!-- the rest: visible, honestly marked, not wired to a backend -->
           <section class="card" id="proactivity">
             <h2>Proactivity</h2>

@@ -38,11 +38,27 @@ this" is itself an answer about somebody else's page. A page scope is
 `{shared|channel|user}-{hash of the workspace and the scope}`: a page has no
 tenant column, so two workspaces' pages are kept apart by the scope string.
 
-## Until issue #72 lands
+## Logging in
 
-There is no authorization server yet. The bearer value **is** your session
-cookie value, verified through `workspaces`' own `caller`, so a user pastes the
-cookie into their agent's config. The 401 carries an RFC 9728 challenge
-naming `/.well-known/oauth-protected-resource`, which 404s until the OAuth
-server lands. #72 replaces that one implementation of `BearerAuth`; the
-endpoint and the tools do not change.
+Pass a personal access token from Settings → API tokens:
+
+```
+claude mcp add --transport http livingbrain https://mcp.livingbrain.wiki/v1/pages/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Or run `livingbrain login`, which uses the device authorization grant
+(RFC 8628): it prints a short code, and you approve it in a browser where the
+session cookie you are already signed in with is the proof. The token is
+returned once; the API stores only a SHA-256 hash, and a page outside the
+token's scope subset reads as *not found*.
+
+A client that reads the metadata finds both halves itself:
+`/.well-known/oauth-protected-resource` names this endpoint and the
+authorization server, and `/.well-known/oauth-authorization-server` names the
+device and token endpoints. The 401's RFC 9728 challenge points at the first.
+
+**Not implemented yet:** the browser authorization-code + PKCE flow, with
+dynamic client registration, that `claude mcp add` uses for zero-config OAuth.
+The metadata advertises the `device_code` grant only, so a client that only
+speaks the redirect flow will not complete a login on its own.

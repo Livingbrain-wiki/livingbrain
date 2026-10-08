@@ -39,6 +39,10 @@ cratefield-testing = "=0.5.0"
 cratefield-adapter-owlpost = "=0.2.0"
 cratefield-mail-templates = "=0.1.0"
 cratefield-module-waitlist = "=0.4.0"
+# The device authorization grant (issue #72): the codes, the approval page
+# and the polling state machine for a client with no browser. This venture
+# supplies the two hooks — who may approve, and what a credential is.
+cratefield-module-device-auth = "=0.3.0"
 # The two classifiers the judge thresholds for (issue #53): the
 # purpose-trained one (`Calibration::Classifier`) and the language-model
 # fallback over a `TextModel` (`Calibration::LanguageModel`). Dev-only here,

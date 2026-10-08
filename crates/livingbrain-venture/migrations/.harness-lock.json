@@ -50,5 +50,13 @@
   "pages/0003": {
     "file": "0013_pages_0003_sources.sql",
     "sha256": "88c9b9a47025b9403f13cae3cc7209913392a9653630d8d0e0ccbb2477119d8f"
+  },
+  "device-auth/0001": {
+    "file": "0014_device-auth_0001_init.sql",
+    "sha256": "e91aedf2fb661c50e9db080ad48e6daf5736fd02f3bfe32ae7a34d5ab1395c94"
+  },
+  "tokens/0001": {
+    "file": "0015_tokens_0001_init.sql",
+    "sha256": "0ea8243b2b7ab242454c815e5a6a4d9c114db8c997fbca96613b7115feef26e0"
   }
 }

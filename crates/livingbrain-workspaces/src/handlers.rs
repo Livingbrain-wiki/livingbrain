@@ -992,6 +992,35 @@ pub async fn caller(
     })
 }
 
+/// Resolves a caller from a **verified pair of ids** rather than from a
+/// cookie — a personal access token (issue #72) stores `workspace_id` and
+/// `user_id` as columns. `Ok(None)` is the same refusal a missing session
+/// gets, which is the property a token needs: one minted for somebody who
+/// has since left the workspace stops working rather than outliving the
+/// membership it was minted for. These are row reads against this module's
+/// own tables, so a sibling module never has to know their shape.
+///
+/// # Errors
+///
+/// [`DbError`] when either lookup fails.
+pub async fn caller_for(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Option<Caller>, DbError> {
+    let Some(workspace) = store::workspace(db, workspace_id).await? else {
+        return Ok(None);
+    };
+    let Some(member) = store::member(db, workspace_id, user_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(Caller {
+        workspace_id: workspace.id,
+        user_id: member.user_id,
+        is_admin: workspace.owner_id == user_id || member.is_admin,
+    }))
+}
+
 /// The one place the session's workspace field is read: a verified
 /// [`Session`] resolved to its workspace and member, or refused exactly
 /// like no session at all. Both the module's routes and [`caller`] go

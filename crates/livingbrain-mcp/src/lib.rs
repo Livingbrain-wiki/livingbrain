@@ -25,20 +25,33 @@ use std::sync::Arc;
 
 use cratefield_core::axum::body::Bytes;
 use cratefield_core::axum::extract::State;
-use cratefield_core::axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use cratefield_core::axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::post;
 use cratefield_core::axum::{self, Json, Router};
 use cratefield_core::{ModuleContext, Problem, ProblemDef};
 use cratefield_kms::Kms;
 use livingbrain_pages::PageStore;
+use livingbrain_tokens::origin_of_request;
 use serde_json::Value;
 
-/// The RFC 9728 §5.1 challenge, naming the protected-resource metadata of the
-/// authorization server — issue #72, which has not landed, so a client that
-/// follows it today gets a 404. Both surfaces here answer with it, so one
-/// definition covers both.
-pub(crate) const CHALLENGE: &str = "Bearer resource_metadata=\"https://mcp.livingbrain.wiki/.well-known/oauth-protected-resource\"";
+/// The origin the discovery documents sit behind in production, and the
+/// challenge's fallback for a request that names no host at all — neither a
+/// `Host` header nor a URI authority, which an internal probe can produce.
+const MCP_ORIGIN: &str = "https://mcp.livingbrain.wiki";
+
+/// The RFC 9728 §5.1 challenge, naming the protected-resource metadata on the
+/// origin the request itself reached — the same per-request resolution the
+/// discovery documents use (issue #72), so one Worker fronts `api.`,
+/// `staging-api.`, `mcp.` and a `wrangler dev` on `localhost:8787`, and every
+/// challenge points the client at the host it was talking to.
+fn challenge(headers: &HeaderMap, uri: &Uri) -> HeaderValue {
+    let base = origin_of_request(headers, uri).unwrap_or_else(|| MCP_ORIGIN.to_owned());
+    HeaderValue::from_str(&format!(
+        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
+    ))
+    .expect("an origin serializes to ASCII, so it is a valid header value")
+}
 
 /// No credential, or one that speaks for nobody — one definition for both, so
 /// the body says the same thing either way.
@@ -100,7 +113,12 @@ pub fn router(ctx: Arc<ModuleContext>, kms: Arc<dyn Kms>, auth: Arc<dyn BearerAu
 
 /// `POST /` — one JSON-RPC message in, one response out. Nothing streams and
 /// nothing is remembered, so a request needs no session id.
-async fn call(State(state): State<Arc<McpState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn call(
+    State(state): State<Arc<McpState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return jsonrpc(protocol::error(
             &Value::Null,
@@ -132,19 +150,20 @@ async fn call(State(state): State<Arc<McpState>>, headers: HeaderMap, body: Byte
     // the handshake and read the 401 that says how to authenticate.
     let asker = if protocol::needs_asker(method) {
         let Some(token) = protocol::bearer(&headers) else {
-            return unauthorized();
+            return unauthorized(&headers, &uri);
         };
         match state.auth.authenticate(&state.ctx.ports, token).await {
             // An asker with no workspace or no user id names nobody: it is
             // the credential that is wrong, and a 401 says so without saying
             // which part was.
             Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => asker,
-            _ => return unauthorized(),
+            _ => return unauthorized(&headers, &uri),
         }
     } else {
         Asker {
             workspace_id: String::new(),
             user_id: String::new(),
+            token_scopes: None,
         }
     };
     jsonrpc(protocol::dispatch(&state, &asker, &id, &request).await)
@@ -152,12 +171,11 @@ async fn call(State(state): State<Arc<McpState>>, headers: HeaderMap, body: Byte
 
 /// The 401, with the challenge that says where to authenticate. Shared with
 /// the source importer, which answers a missing credential the same way.
-pub(crate) fn unauthorized() -> Response {
+pub(crate) fn unauthorized(headers: &HeaderMap, uri: &Uri) -> Response {
     let mut response = Problem::new(&UNAUTHORIZED).into_response();
-    response.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(CHALLENGE),
-    );
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, challenge(headers, uri));
     response
 }
 

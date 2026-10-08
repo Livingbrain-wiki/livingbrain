@@ -200,10 +200,10 @@ fn login_never_persists_the_token_in_plaintext() {
     let handler = {
         let calls = Arc::clone(&calls);
         move |request: &common::Request| match request.path.as_str() {
-            "/v1/auth/device" => Reply::ok_json(
+            "/v1/device-auth/code" => Reply::ok_json(
                 r#"{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://example.test/device","interval":0,"expires_in":60}"#,
             ),
-            "/v1/auth/token" => {
+            "/v1/device-auth/token" => {
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     Reply::json(400, r#"{"error":"authorization_pending"}"#)
                 } else {

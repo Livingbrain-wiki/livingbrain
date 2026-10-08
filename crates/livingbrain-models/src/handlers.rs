@@ -17,7 +17,9 @@ use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::{get, put};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{DbError, ModuleContext, Problem, ProblemDef};
-use livingbrain_workspaces::caller;
+// The one "who is calling" every route in this venture answers with: a
+// session cookie or a personal access token (issue #72).
+use livingbrain_tokens::authenticate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
@@ -100,10 +102,8 @@ async fn list(
     State(state): State<Arc<ModuleState>>,
     headers: HeaderMap,
 ) -> Result<Response, Problem> {
-    let signer = port(state.ctx.ports.signer.clone())?;
-    let clock = port(state.ctx.ports.clock.clone())?;
     let db = port(state.ctx.ports.db.clone())?;
-    let c = caller(&*signer, &*clock, &*db, &headers).await?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
     let rows = store::list(&*db, &c.workspace_id).await.map_err(database)?;
     Ok(Json(rows.into_iter().map(view).collect::<Vec<_>>()).into_response())
 }
@@ -116,13 +116,12 @@ async fn connect(
     headers: HeaderMap,
     Json(body): Json<ConnectRequest>,
 ) -> Result<Response, Problem> {
-    let signer = port(state.ctx.ports.signer.clone())?;
     let clock = port(state.ctx.ports.clock.clone())?;
     let db = port(state.ctx.ports.db.clone())?;
     let http = port(state.ctx.ports.http.clone())?;
     let id_gen = port(state.ctx.ports.id_gen.clone())?;
 
-    let c = caller(&*signer, &*clock, &*db, &headers).await?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
     if !c.is_admin {
         return Err(Problem::new(&FORBIDDEN));
     }
@@ -203,11 +202,9 @@ async fn remove(
     Path(role): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Problem> {
-    let signer = port(state.ctx.ports.signer.clone())?;
-    let clock = port(state.ctx.ports.clock.clone())?;
     let db = port(state.ctx.ports.db.clone())?;
 
-    let c = caller(&*signer, &*clock, &*db, &headers).await?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
     if !c.is_admin {
         return Err(Problem::new(&FORBIDDEN));
     }

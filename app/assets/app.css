@@ -299,6 +299,13 @@ hr {
   margin: var(--space-2) 0;
 }
 
+/* a personal access token is one unbroken string: break it rather than let it
+   widen the column or overflow the card. */
+#token-value {
+  overflow-wrap: anywhere;
+  flex: 2 1 14rem;
+}
+
 /*   controls
    ---------------------------------------------------------------- */
 
