@@ -33,3 +33,6 @@ keyring = { version = "3.6", default-features = false, features = [
 # has (std's `RandomState`) — both named in `src/telemetry.rs`. A path dep
 # because this crate is native-only and is never in the Worker's graph.
 livingbrain-telemetry = { path = "../livingbrain-telemetry" }
+# The vendored "Built with" list (issue #61): pure data and two renderers, so
+# `livingbrain about` works before anyone has logged in.
+livingbrain-stack = { path = "../livingbrain-stack" }

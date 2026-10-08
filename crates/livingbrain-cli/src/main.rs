@@ -157,6 +157,8 @@ enum Command {
         #[command(subcommand)]
         action: telemetry::Action,
     },
+    /// What Living Brain is built with, from the vendored Factory Zero stack registry
+    About,
 }
 
 fn main() {
@@ -174,6 +176,15 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         Command::Login => auth::login(&cli.api_url, out),
         Command::Logout => auth::logout(&cli.api_url, out),
         Command::Mcp => mcp::serve(&client(cli)?),
+        // The stack is vendored into the binary (issue #61), so this is the
+        // one command that needs neither a token nor the API — a reader who
+        // asks what the brain is made of should get an answer before signing in.
+        Command::About => {
+            let value = serde_json::to_value(livingbrain_stack::stack())
+                .map_err(|e| err(format!("could not render the stack: {e}")))?;
+            out.json_or(&value, || print!("{}", livingbrain_stack::stack().text()));
+            Ok(())
+        }
         Command::Ask { project, question } => {
             let value = client(cli)?.ask(&question.join(" "), project.as_deref())?;
             out.json_or(&value, || render_ask(&value));
