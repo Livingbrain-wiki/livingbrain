@@ -1,7 +1,7 @@
 //! `livingbrain-pages`: the page store — entities, Markdown, links, history.
 //!
-//! A page is an **entity** (a person, project, decision, customer, system or
-//! glossary term) whose Markdown body lives in the blob store and whose
+//! A page is an **entity** (a person, project, decision, customer, system,
+//! glossary term or radar item) whose Markdown body lives in the blob store and whose
 //! metadata lives in D1: a slug, an entity type, a scope, `[[backlinks]]` and
 //! a version history. Two properties are the point of the module:
 //!

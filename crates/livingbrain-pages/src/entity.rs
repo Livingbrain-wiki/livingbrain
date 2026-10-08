@@ -19,17 +19,23 @@ pub enum EntityType {
     Customer,
     System,
     Glossary,
+    /// Something published elsewhere that this workspace watches: a paper,
+    /// a release note, a security advisory (issue #58). Its own type
+    /// rather than a glossary term, because a radar page is not a
+    /// definition and its frontmatter is a different shape.
+    Radar,
 }
 
 impl EntityType {
     /// Every variant, so a caller can enumerate them without a `match`.
-    pub const ALL: [EntityType; 6] = [
+    pub const ALL: [EntityType; 7] = [
         EntityType::Person,
         EntityType::Project,
         EntityType::Decision,
         EntityType::Customer,
         EntityType::System,
         EntityType::Glossary,
+        EntityType::Radar,
     ];
 
     /// The stable wire name, also what a `type:` frontmatter key holds.
@@ -42,6 +48,7 @@ impl EntityType {
             Self::Customer => "customer",
             Self::System => "system",
             Self::Glossary => "glossary",
+            Self::Radar => "radar",
         }
     }
 
@@ -55,6 +62,7 @@ impl EntityType {
             "customer" => Some(Self::Customer),
             "system" => Some(Self::System),
             "glossary" => Some(Self::Glossary),
+            "radar" => Some(Self::Radar),
             _ => None,
         }
     }
@@ -128,6 +136,15 @@ fn schema(entity: EntityType) -> Schema {
             required: &["term"],
             optional: &["aliases"],
             enums: &[],
+        },
+        // A radar page names what was published and where it came from
+        // (issue #58). `score` is the judge's number and `urgent` says the
+        // item matched a locked dependency, so a page can be triaged by
+        // reading its frontmatter.
+        EntityType::Radar => Schema {
+            required: &["title"],
+            optional: &["source", "url", "topic", "score", "urgent"],
+            enums: &[("urgent", &["yes", "no"])],
         },
     }
 }
