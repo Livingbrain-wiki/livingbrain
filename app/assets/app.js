@@ -326,7 +326,7 @@ pages.settings = async function settings() {
   const load = async () => {
     modelBody.replaceChildren();
     try {
-      const rows = await api("/v1/models/");
+      const rows = await api("/v1/models");
       const list = Array.isArray(rows) ? rows : [];
       for (const row of list) {
         const tr = document.createElement("tr");
