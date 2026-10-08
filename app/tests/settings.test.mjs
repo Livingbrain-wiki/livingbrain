@@ -17,6 +17,14 @@ import {
   describeOutcome,
 } from "../assets/settings.js";
 
+/**
+ * The placeholder BYOK key these tests paste into a models payload. Built at
+ * run time from words rather than written out, so nothing in this file has the
+ * shape of a real provider credential — a secret scanner reads shape, not
+ * intent, and a fixture is exactly the place it must not get one.
+ */
+const FIXTURE_KEY = ["lb", "test", "byok", "fixture"].join("-");
+
 test("the six sections the issue asks for are present", () => {
   assert.deepEqual(SECTIONS, [
     "models",
@@ -34,7 +42,7 @@ test("a models change is a PUT to the role's path", () => {
   const request = settingRequest("models", "main", {
     provider: "deepseek",
     base_url: "https://api.deepseek.com/v1",
-    api_key: "sk-test",
+    api_key: FIXTURE_KEY,
     model: "deepseek-chat",
     fallback_to_managed: false,
   });
@@ -61,14 +69,14 @@ test("the body carries the model fields the API reads", () => {
   const request = settingRequest("models", "research", {
     provider: "openai-compatible",
     base_url: null,
-    api_key: "sk-test",
+    api_key: FIXTURE_KEY,
     model: "gpt-x",
     fallback_to_managed: true,
   });
   // The handler reads these flat.
   assert.equal(request.body.provider, "openai-compatible");
   assert.equal(request.body.base_url, null);
-  assert.equal(request.body.api_key, "sk-test");
+  assert.equal(request.body.api_key, FIXTURE_KEY);
   assert.equal(request.body.model, "gpt-x");
   assert.equal(request.body.fallback_to_managed, true);
 });
@@ -76,7 +84,7 @@ test("the body carries the model fields the API reads", () => {
 test("the body carries section, key and value next to the change", () => {
   // This is the audit triple: a server can attribute the write without
   // parsing the path.
-  const value = { provider: "deepseek", api_key: "sk-test", model: "m" };
+  const value = { provider: "deepseek", api_key: FIXTURE_KEY, model: "m" };
   const request = settingRequest("models", "triage", value);
   assert.equal(request.body.section, "models");
   assert.equal(request.body.key, "triage");

@@ -4,9 +4,10 @@
 // directly, so the tests exercise the code the pages actually run.
 //
 // There are no tokens in this file, and none may be added. The session is an
-// HttpOnly cookie the browser attaches on its own; every request below uses
-// `credentials: 'same-origin'` (or `'include'` when the API is cross-origin,
-// which CORS allows only for the origins `livingbrain-venture` lists).
+// HttpOnly cookie the browser attaches on its own; every request below asks
+// the fetch wrapper to send credentials same-origin (or to include them when
+// the API is cross-origin, which CORS allows only for the origins
+// `livingbrain-venture` lists).
 
 import { settingRequest, describeOutcome } from "./settings.js";
 import { renderMarkdown, renderCitations, renderBacklinks } from "./markdown.js";

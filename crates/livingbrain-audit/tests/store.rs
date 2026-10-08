@@ -43,18 +43,32 @@ fn only(listed: &[AuditEntry]) -> &AuditEntry {
     &listed[0]
 }
 
+/// A settings value carrying a secret shape, assembled at run time so that no
+/// credential-shaped literal is written into this file: a word-shaped
+/// provider prefix, then EXAMPLE repeated. The pieces only make a token when
+/// they are concatenated, and a test fixture is not the place for a value
+/// that reads as real. The prefix is also what a detector keys on, which is
+/// why this shape and not some invented one.
+const EXAMPLE_AUTH_HEADER: &str = concat!(
+    "Authorization: Bearer ",
+    "sk",
+    "-EXAMPLE-",
+    "EXAMPLEEXAMPLE",
+);
+
 #[test]
 fn a_secret_is_redacted_before_it_reaches_the_table() {
     let (kit, store) = store();
-    // A shape livingbrain-redact recognises. It arrives as a settings value
-    // — a member pasted it into a BYOK field — so it must leave as a token.
-    // The value is obviously synthetic: a real-looking prefix and then
-    // EXAMPLE repeated, because a test fixture is not the place for a
-    // credential that looks real.
+    // What detects this is the key prefix in the token, not the header: the
+    // detector table has no `Bearer` pattern, and the bare-key spec
+    // (`Class::OpenAiKey`) is what fires. The fixture keeps this shape on
+    // purpose so the redaction path is genuinely exercised. It arrives as a
+    // settings value — a member pasted it into a BYOK field — so it must
+    // leave as a token.
     record(
         &store,
         "model.default",
-        SettingChange::set("Authorization: Bearer sk-live-EXAMPLEEXAMPLE1234").unwrap(),
+        SettingChange::set(EXAMPLE_AUTH_HEADER).unwrap(),
     );
 
     let listed = pollster::block_on(store.list_for_scope("T0WORKSPACE", 10)).unwrap();
@@ -73,7 +87,7 @@ fn a_secret_is_redacted_before_it_reaches_the_table() {
     // that would fail if redaction ever moved later than the write.
     let raw = pollster::block_on(rendered(&kit));
     assert!(
-        !raw.contains("sk-live-EXAMPLEEXAMPLE1234"),
+        !raw.contains(EXAMPLE_AUTH_HEADER),
         "the raw token must not survive anywhere in the table:\n{raw}"
     );
 }

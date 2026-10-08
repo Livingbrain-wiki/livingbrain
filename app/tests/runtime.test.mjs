@@ -10,6 +10,14 @@ import assert from "node:assert/strict";
 
 import { api, ApiError, esc, LB } from "../assets/app.js";
 
+/**
+ * The placeholder BYOK key these tests paste into a models payload. Built at
+ * run time from words rather than written out, so nothing in this file has the
+ * shape of a real provider credential — a secret scanner reads shape, not
+ * intent, and a fixture is exactly the place it must not get one.
+ */
+const FIXTURE_KEY = ["lb", "test", "byok", "fixture"].join("-");
+
 /** Replaces global fetch and records what was asked for. */
 function withFetch(handler, run) {
   const calls = [];
@@ -114,7 +122,7 @@ test("LB.setting is the only write path, and it sends the audit triple", async (
     async (calls) => {
       const outcome = await LB.setting("models", "main", {
         provider: "deepseek",
-        api_key: "sk-test",
+        api_key: FIXTURE_KEY,
         model: "deepseek-chat",
       });
       assert.equal(outcome.ok, true);
@@ -128,13 +136,13 @@ test("LB.setting is the only write path, and it sends the audit triple", async (
       // What the server receives on the wire.
       const sent = JSON.parse(call.init.body);
       assert.equal(sent.provider, "deepseek");
-      assert.equal(sent.api_key, "sk-test");
+      assert.equal(sent.api_key, FIXTURE_KEY);
       // And the triple that makes the write auditable.
       assert.equal(sent.section, "models");
       assert.equal(sent.key, "main");
       assert.deepEqual(sent.value, {
         provider: "deepseek",
-        api_key: "sk-test",
+        api_key: FIXTURE_KEY,
         model: "deepseek-chat",
       });
     },
