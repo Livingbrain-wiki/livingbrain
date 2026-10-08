@@ -36,3 +36,16 @@ livingbrain-telemetry = { path = "../livingbrain-telemetry" }
 # The vendored "Built with" list (issue #61): pure data and two renderers, so
 # `livingbrain about` works before anyone has logged in.
 livingbrain-stack = { path = "../livingbrain-stack" }
+# The directory walk behind `import markdown` (issue #81): `.gitignore` and
+# hidden files respected, `--exclude` globs applied as ignore overrides.
+ignore = { workspace = true }
+# What leaves a machine. Run here, on the file, before the body is built, so a
+# secret in a vault never crosses the socket — the server runs the same library
+# on every ingest path, so the thing that decides what is stored stays one
+# piece of code.
+livingbrain-redact = { path = "../livingbrain-redact" }
+
+[dev-dependencies]
+# The import test's mock keys "already imported?" on the body's SHA-256, the
+# same idempotency key the server uses. The lockfile already resolves `sha2`.
+sha2 = { workspace = true }

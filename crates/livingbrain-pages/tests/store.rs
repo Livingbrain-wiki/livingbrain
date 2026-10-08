@@ -8,7 +8,7 @@ mod common;
 
 use std::sync::Arc;
 
-use cratefield_core::{Blob, Clock, Database, Statement, UlidIdGen};
+use cratefield_core::{Blob, Clock, Database, EmptyConfig, Module, Statement, UlidIdGen};
 use cratefield_testing::{MemoryBlob, TestHarness};
 use livingbrain_pages::{
     Author, AuthorKind, EntityType, PageError, PageStore, PageWrite, Pages, extract_links,
@@ -417,4 +417,18 @@ fn backlinks_follow_a_pages_links() {
             vec!["alpha"]
         );
     });
+}
+
+/// The import ceiling a runtime reads before it buffers anything (issue #81).
+///
+/// The harness caps every module body at 64 KiB, which a vault file is over,
+/// so the pages module raises its coarse ceiling to the ledger's own — and
+/// declares the very number the import route enforces, so the two cannot drift
+/// apart and let the door refuse a body the route would have taken.
+#[test]
+fn the_import_ceiling_is_raised_and_is_the_routes_own() {
+    assert_eq!(
+        Pages::new().max_body_bytes(&EmptyConfig),
+        livingbrain_pages::MAX_SOURCE_BODY_BYTES
+    );
 }
