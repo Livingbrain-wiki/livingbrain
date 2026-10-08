@@ -42,5 +42,9 @@
   "models/0001": {
     "file": "0011_models_0001_init.sql",
     "sha256": "f32f60c7db7c85c6cbf46f1fd69d6ba1ca9d57f832fc7d1bd8053de6282f23be"
+  },
+  "workspaces/0003": {
+    "file": "0012_workspaces_0003_slack_app.sql",
+    "sha256": "b6ad4a673b3ca4c04ee8853add253ee19036aa6ad33b61c5139cc9cc262825fb"
   }
 }

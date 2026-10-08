@@ -13,9 +13,12 @@ include = ["src/**/*", "migrations/**/*"]
 workspace = true
 
 [dependencies]
-# The only Cratefield dependency a module is allowed. `axum` and `http`
+# The only Cratefield dependencies a module is allowed: the ports, and the
+# KMS port beside them (issue #6 — `cratefield-kms` names no
+# `cratefield-core`, so it cannot split the ports in two). `axum` and `http`
 # arrive through `cratefield_core::axum`, so neither is named directly.
 cratefield-core = { workspace = true }
+cratefield-kms = { workspace = true }
 
 # The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
 bytes = { workspace = true }
@@ -23,6 +26,14 @@ bytes = { workspace = true }
 # call and the token form. Pure Rust, wasm-safe, already in the lockfile.
 base64 = { workspace = true }
 percent-encoding = { workspace = true }
+# The bot-token envelope (issue #6): XChaCha20-Poly1305 under a KMS-wrapped
+# data key, the same cipher `livingbrain-pages` seals a page body with. Pure
+# Rust, wasm-safe, already in the lockfile.
+chacha20poly1305 = { workspace = true }
+# The 24-byte nonce for that envelope, from the OS random source.
+getrandom = { workspace = true }
+# `HMAC-SHA256`, so the tests can sign a delivery the way Slack does.
+hmac = { workspace = true }
 # Portable SQL built as parameterized statements over the `Database` port
 # (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
 sea-query = { workspace = true }

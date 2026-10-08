@@ -31,14 +31,18 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod events;
 mod flow;
 mod handlers;
+mod install;
 mod slack;
 mod store;
 
 pub use config::Settings;
+pub use events::bot_scopes;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
 pub use handlers::{Caller, caller};
+pub use install::{BotTokenError, bot_token};
 pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};
 
 use cratefield_core::{
@@ -81,6 +85,23 @@ const MIGRATION_0002_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0002_identities.sql"),
 );
 
+/// The third migration: `workspaces_slack_inbox` and `slack_installs`
+/// (issue #6). The inbox is the dedup ledger Slack's retries are claimed in;
+/// the installs table holds one sealed bot token per team. Both are additive,
+/// so a deployment with no Slack app never writes either.
+const MIGRATION_0003: SqlMigration = SqlMigration::new(
+    "0003",
+    "slack_app",
+    include_str!("../migrations/sqlite/0003_slack_app.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_0003`], the same file byte for byte.
+const MIGRATION_0003_POSTGRES: SqlMigration = SqlMigration::new(
+    "0003",
+    "slack_app",
+    include_str!("../migrations/postgres/0003_slack_app.sql"),
+);
+
 /// Workspaces, Slack sign-in and the member mirror.
 #[derive(Debug, Default)]
 pub struct Workspaces;
@@ -106,8 +127,9 @@ impl Module for Workspaces {
     /// The ports the handlers reach. `Signer` seals the flow and session
     /// cookies, `HttpClient` talks to Slack's token endpoint, `Clock`
     /// decides expiry, `IdGen` mints the CSRF state, the nonce, the
-    /// workspace and member ids and the sign-in token, and the database
-    /// holds the five tables.
+    /// workspace and member ids and the sign-in token, `Defer` carries an
+    /// events delivery's work past Slack's three-second acknowledgement, and
+    /// the database holds the tables.
     fn requires(&self) -> &'static [Port] {
         &[
             Port::Db,
@@ -115,6 +137,7 @@ impl Module for Workspaces {
             Port::HttpClient,
             Port::Clock,
             Port::IdGen,
+            Port::Defer,
         ]
     }
 
@@ -134,6 +157,8 @@ impl Module for Workspaces {
             "workspace_connections",
             "member_identities",
             "sign_in_links",
+            "workspaces_slack_inbox",
+            "slack_installs",
         ]
     }
 
@@ -202,17 +227,36 @@ impl Module for Workspaces {
                 redacted: &[],
                 subject_via: None,
             },
+            // The two tables issue #6 added. Neither names a person: the
+            // inbox is a dedup ledger of Slack's own event ids, and
+            // `slack_installs` is one row per *workspace* holding a bot
+            // credential sealed under a KMS-wrapped key whose AAD binds it to
+            // the team, so no column here can yield anybody's Slack session.
+            PersonalDataSet::none(
+                "workspaces_slack_inbox",
+                "the key is Slack's own `event_id` and the row holds nothing \
+                 else but when it was seen",
+            ),
+            PersonalDataSet::none(
+                "slack_installs",
+                "the row is one workspace's bot installation: a team id, the \
+                 app and bot user ids, and a bot token sealed under a \
+                 KMS-wrapped key with the team as its AAD",
+            ),
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_0002];
+        const MIGRATIONS: [SqlMigration; 3] = [MIGRATION_INIT, MIGRATION_0002, MIGRATION_0003];
         // The array is the apply order; this refuses a gap, a duplicate or
         // an entry out of order at build time.
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
-            [MIGRATION_INIT_POSTGRES, MIGRATION_0002_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+            MIGRATION_INIT_POSTGRES,
+            MIGRATION_0002_POSTGRES,
+            MIGRATION_0003_POSTGRES,
+        ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,
