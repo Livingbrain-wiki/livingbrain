@@ -1,0 +1,1 @@
+{"schema_version":1,"trace_id":"01JABC.123-6","kind":"mcp_call","at_unix":1767225600,"outcome":"failure","duration_ms":3000,"subject":{"kind":"tool","id":"01JTOOL.300-9"},"error_kind":"timeout","tool":"brain_search","colonizer_colony":null}

@@ -27,3 +27,9 @@ keyring = { version = "3.6", default-features = false, features = [
     "windows-native",
     "linux-native",
 ] }
+# What leaves a machine, and the switch that decides whether it does. A plain
+# library with no HTTP client, no clock and no RNG of its own, so the CLI keeps
+# the only network client it has (`ureq`) and the only source of randomness it
+# has (std's `RandomState`) — both named in `src/telemetry.rs`. A path dep
+# because this crate is native-only and is never in the Worker's graph.
+livingbrain-telemetry = { path = "../livingbrain-telemetry" }

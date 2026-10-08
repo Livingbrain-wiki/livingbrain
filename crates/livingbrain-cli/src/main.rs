@@ -18,6 +18,7 @@ use api::Client;
 mod api;
 mod auth;
 mod mcp;
+mod telemetry;
 
 const DEFAULT_API_URL: &str = "https://api.livingbrain.wiki";
 
@@ -151,6 +152,11 @@ enum Command {
     },
     /// Run a stdio MCP server (its output is always JSON; `--json` is a no-op)
     Mcp,
+    /// Turn anonymous usage data on or off, and show what would be sent
+    Telemetry {
+        #[command(subcommand)]
+        action: telemetry::Action,
+    },
 }
 
 fn main() {
@@ -207,6 +213,14 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             out.json_or(&value, || println!("Wrote {path} ({} bytes)", bytes.len()));
             Ok(())
         }
+        // The only command that neither needs a token nor opens a socket: it
+        // reads and writes the stored preference and prints the local view.
+        Command::Telemetry { action } => telemetry::run(
+            *action,
+            out,
+            &telemetry::KeychainPreference,
+            &telemetry::Env::from_process(),
+        ),
     }
 }
 
