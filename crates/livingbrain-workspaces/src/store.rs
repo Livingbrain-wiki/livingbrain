@@ -309,6 +309,28 @@ pub(crate) async fn member_for_identity(
     Ok(db.query(&statement).await?.first().map(member_from))
 }
 
+/// The bot user id Slack made for this team's installation, or `None` when
+/// the team never installed the app.
+///
+/// Read beside [`crate::install::bot_token`] rather than with it: the token
+/// has to be opened, which needs a key custodian, and refusing to recognise
+/// one's own messages needs nothing but the id. A deployment with no key
+/// ring can still drop the app's own echoes this way.
+pub(crate) async fn bot_user_id(
+    db: &dyn Database,
+    team_id: &str,
+) -> Result<Option<String>, DbError> {
+    Ok(db
+        .query(&Statement::with_values(
+            "SELECT bot_user_id FROM slack_installs WHERE team_id = ?",
+            vec![text(team_id)],
+        ))
+        .await?
+        .first()
+        .and_then(|row| row.get::<String>("bot_user_id"))
+        .filter(|id| !id.is_empty()))
+}
+
 /// One unspent sign-in link, read by [`take_sign_in_link`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SignInLinkRow {

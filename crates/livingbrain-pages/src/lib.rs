@@ -27,15 +27,19 @@
 
 #![forbid(unsafe_code)]
 
+mod answers;
 mod entity;
 mod keys;
+mod scope;
 mod sources;
 mod store;
 
+pub use answers::{AnswerError, Answered, Answers, Asker, Citation, PageAnswers};
 pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
 pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
+pub use scope::{page_scope, page_scopes_for};
 pub use sources::{
     MAX_SOURCE_BODY_BYTES, Source, SourceError, SourceKind, SourceStore, SourceWrite,
     extract_wikilinks,

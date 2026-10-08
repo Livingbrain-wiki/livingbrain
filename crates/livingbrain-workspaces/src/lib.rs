@@ -27,14 +27,21 @@
 //! [`link_connection`] and [`link_identity`] are the same kind of seam for
 //! issue #56: a caller that has verified a Discord guild or user id binds it
 //! to a workspace and a member. Discord's OAuth route is not here yet.
+//!
+//! [`Answers`] is the same kind of seam for issue #123, in the other
+//! direction: this module owns the Slack conversation and cannot read a page,
+//! so a composition injects something that can, and the agent loop answers
+//! through it.
 
 #![forbid(unsafe_code)]
 
+mod agent;
 mod config;
 mod events;
 mod flow;
 mod handlers;
 mod install;
+mod reply;
 mod slack;
 mod store;
 
@@ -43,7 +50,10 @@ pub use events::bot_scopes;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
 pub use handlers::{Caller, caller};
 pub use install::{BotTokenError, bot_token};
+pub use livingbrain_pages::Answers;
 pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};
+
+use std::sync::Arc;
 
 use cratefield_core::{
     Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,
@@ -103,15 +113,41 @@ const MIGRATION_0003_POSTGRES: SqlMigration = SqlMigration::new(
 );
 
 /// Workspaces, Slack sign-in and the member mirror.
-#[derive(Debug, Default)]
-pub struct Workspaces;
+#[derive(Default)]
+pub struct Workspaces {
+    /// The seam the Slack agent answers through (issue #123). A composition
+    /// that leaves it `None` has a workspaces module and no agent.
+    answers: Option<Arc<dyn Answers>>,
+}
+
+// The answer seam is a `dyn` and not a `Debug`; the module itself is still
+// one, so a composition that prints its modules keeps working.
+impl std::fmt::Debug for Workspaces {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspaces")
+            .field("answers", &self.answers.is_some())
+            .finish()
+    }
+}
 
 impl Workspaces {
     /// A new workspaces module. There is nothing to configure in the
     /// builder; the Slack app settings come from config at router build.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Answer @mentions and DMs from `answers` (issue #123).
+    ///
+    /// The seam is injected rather than built here because a `PageStore` is a
+    /// tenant-wide capability and this module may not hold one: what it may
+    /// hold is "a way to answer somebody, given their workspace and their
+    /// member id", which is exactly what [`Answers`] is.
+    #[must_use]
+    pub fn answering(mut self, answers: Arc<dyn Answers>) -> Self {
+        self.answers = Some(answers);
+        self
     }
 }
 
@@ -146,8 +182,14 @@ impl Module for Workspaces {
     /// whatever sign-in methods it has, and the email routes answer `503`
     /// per request when no mailer is wired, exactly as the Slack routes
     /// answer `503` when the app keys are absent.
+    ///
+    /// `Classifier` is optional for the same reason, and for one more
+    /// (issue #123): the Slack agent triages a DM with the fast judge
+    /// (issue #112) and a deployment with no classifier has no judge — so it
+    /// answers an @mention, which is a request, and stays out of a DM, which
+    /// is a conversation. A deployment that wires one gets both gated by it.
     fn optional(&self) -> &'static [Port] {
-        &[Port::Mailer]
+        &[Port::Mailer, Port::Classifier]
     }
 
     fn tables(&self) -> &'static [&'static str] {
@@ -292,6 +334,6 @@ impl Module for Workspaces {
     }
 
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        handlers::router(ctx)
+        handlers::router(ctx, self.answers.clone())
     }
 }

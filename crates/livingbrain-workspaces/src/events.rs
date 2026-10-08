@@ -15,7 +15,7 @@ use cratefield_core::axum::extract::State;
 use cratefield_core::axum::http::{HeaderMap, StatusCode};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::{
-    Clock, Database, Inbox, Problem, ProblemDef, SignatureScheme, SignedDelivery, WebhookVerifier,
+    Inbox, Problem, ProblemDef, SignatureScheme, SignedDelivery, WebhookVerifier,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -197,12 +197,7 @@ pub(crate) async fn events(
         return Ok(StatusCode::OK.into_response());
     }
 
-    defer.wait_until(Box::pin(dispatch(
-        Arc::clone(&db),
-        Arc::clone(&clock),
-        team_id,
-        event,
-    )));
+    defer.wait_until(Box::pin(dispatch(Arc::clone(&state), team_id, event)));
     Ok(StatusCode::OK.into_response())
 }
 
@@ -264,13 +259,24 @@ fn recognised(event: &Value) -> Option<Event> {
 /// Errors are swallowed deliberately: nothing awaits this future, so a `?`
 /// here would drop the rest of the batch, and Slack has already been told
 /// `200`. The inbox claim is what keeps the next delivery from doing it twice.
-async fn dispatch(db: Arc<dyn Database>, clock: Arc<dyn Clock>, team_id: String, event: Value) {
-    // Everything else is the attachment point for issue #7's agent loop, and
-    // deliberately nothing yet: the conversation events are recognised,
-    // claimed, deduplicated and deferred, and there is no agent to answer a
-    // mention and no queue to enqueue on until it lands.
-    if let Some(Event::UserChange) = recognised(&event) {
-        let _ = store::apply_user_change(&*db, &*clock, &team_id, &event).await;
+async fn dispatch(state: Arc<ModuleState>, team_id: String, event: Value) {
+    match recognised(&event) {
+        Some(Event::UserChange) => {
+            if let (Some(db), Some(clock)) =
+                (state.ctx.ports.db.clone(), state.ctx.ports.clock.clone())
+            {
+                let _ = store::apply_user_change(&*db, &*clock, &team_id, &event).await;
+            }
+        }
+        // A mention and a DM are the agent loop's two doors in (issue #123).
+        // `member_joined_channel` is still recognised, claimed and
+        // deduplicated, and still nothing else: a roster sync has nowhere to
+        // land until `Channel::viewers` has a producer.
+        Some(Event::AppMention | Event::Message) => {
+            crate::agent::consider(&state, &team_id, &event).await;
+        }
+        Some(Event::MemberJoinedChannel) => {}
+        None => {}
     }
 }
 

@@ -25,6 +25,7 @@ use cratefield_core::{
     SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email,
 };
 use cratefield_kms::Kms;
+use livingbrain_pages::Answers;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
@@ -181,7 +182,11 @@ pub(crate) struct ModuleState {
     signing_secret: Option<String>,
     /// The key custodian the bot token is sealed under; `None` is a
     /// deployment with no key ring, which still serves sign-in and email.
-    kms: Option<Arc<dyn Kms>>,
+    pub(crate) kms: Option<Arc<dyn Kms>>,
+    /// The seam the Slack agent answers through (issue #123). `None` is a
+    /// composition that wired no agent: the events still arrive, are
+    /// deduplicated and are answered by nobody.
+    pub(crate) answers: Option<Arc<dyn Answers>>,
 }
 
 impl ModuleState {
@@ -218,7 +223,7 @@ impl ModuleState {
 }
 
 /// The module's routes.
-pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
+pub(crate) fn router(ctx: ModuleContext, answers: Option<Arc<dyn Answers>>) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
     let mail_from = config::mail_from(&*ctx.config);
@@ -231,6 +236,7 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
         mail_from,
         signing_secret,
         kms,
+        answers,
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))

@@ -47,6 +47,24 @@ serde_json = { workspace = true }
 # wasm32, so it never enters a host `cargo tree`.
 time = { workspace = true }
 
+# The agent loop (issue #123). Four siblings, and why each is here rather
+# than folded into this crate: the access model decides which pages a member
+# may read, the channel adapters normalise Slack's events and render the
+# reply body, the judge decides whether to answer at all, and the pages
+# module owns both the scope naming and the answer seam. All four are
+# `livingbrain-*` modules, not vendors, so none splits the ports or reaches
+# a runtime.
+livingbrain-access = { path = "../livingbrain-access" }
+livingbrain-channel = { path = "../livingbrain-channel" }
+livingbrain-judge = { path = "../livingbrain-judge" }
+livingbrain-pages = { path = "../livingbrain-pages" }
+# Redaction (issue #108), and the reason it is here rather than only in
+# `livingbrain-pages`: a question reaches the **classifier** before it ever
+# reaches the page index, so redacting only downstream leaves the one copy
+# that leaves the machine first unredacted. Pure Rust, wasm-safe, already in
+# the tree.
+livingbrain-redact = { path = "../livingbrain-redact" }
+
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
 # (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so

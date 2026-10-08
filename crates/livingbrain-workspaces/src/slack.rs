@@ -61,7 +61,7 @@ pub(crate) struct SlackError(pub Option<String>);
 
 impl SlackError {
     /// Nothing worth telling the caller.
-    fn opaque() -> Self {
+    pub(crate) fn opaque() -> Self {
         Self(None)
     }
 
@@ -75,7 +75,7 @@ impl SlackError {
     /// A Slack refusal, keeping its `error` code only when it is a plain
     /// snake_case token — which is what Slack's own codes are, and is not
     /// true of anything else that might reach this field.
-    fn refused(code: &str) -> Self {
+    pub(crate) fn refused(code: &str) -> Self {
         let plain = !code.is_empty()
             && code.len() <= 64
             && code
