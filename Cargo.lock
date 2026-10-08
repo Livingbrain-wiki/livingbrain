@@ -495,6 +495,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cratefield-adapter-classifier-llm"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31e2cbaf7ba4f9779175be66eb556e143b0cfb3b6b5a67e1b722d15f20302eaf"
+dependencies = [
+ "async-trait",
+ "cratefield-core",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "cratefield-adapter-owlpost"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -549,6 +563,22 @@ dependencies = [
  "async-trait",
  "bytes",
  "cratefield-core",
+ "http",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "cratefield-adapter-typesafe"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f71f6146394b5a245b62dc097a907567e2ce95713879c0f5499475a263efb53"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cratefield-core",
+ "getrandom 0.4.3",
  "http",
  "serde",
  "serde_json",
@@ -1581,6 +1611,21 @@ dependencies = [
  "keyring",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "livingbrain-judge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cratefield-adapter-classifier-llm",
+ "cratefield-adapter-typesafe",
+ "cratefield-core",
+ "cratefield-testing",
+ "pollster",
+ "serde",
+ "serde_json",
+ "time",
 ]
 
 [[package]]
