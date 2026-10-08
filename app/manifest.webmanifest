@@ -1,0 +1,19 @@
+{
+  "name": "Living Brain",
+  "short_name": "Brain",
+  "description": "The wiki your team can read, edit and export.",
+  "start_url": "./wiki.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#16191c",
+  "theme_color": "#16191c",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

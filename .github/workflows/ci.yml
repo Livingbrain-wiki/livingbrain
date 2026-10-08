@@ -93,6 +93,43 @@ jobs:
             echo "::endgroup::"
           done
 
+  app:
+    # The app is a static, no-build front end with no npm dependencies, so its
+    # tests are Node's built-in runner and nothing else. The pages load the
+    # same ES modules under `app/assets/` that the tests import, and `app.js`
+    # guards its DOM boot so Node can load it too: these are the functions the
+    # browser runs, not copies of them.
+    #
+    # The glob form of the path is what works on this Node; `node --test
+    # app/tests/` (the bare directory) does not.
+    name: app tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test "app/tests/**/*.test.mjs"
+      - name: Every app script parses
+        run: |
+          # sw.js is a classic worker script.
+          node --check app/sw.js
+          # The three modules, each imported the way a page or a test loads
+          # it, so an import-time error fails here and not only in a browser.
+          for file in app/assets/markdown.js app/assets/settings.js app/assets/app.js; do
+            node --input-type=module -e "import('./$file').then(() => process.exit(0))"
+          done
+      - name: No HTML is ever assigned from content
+        # The wiki body is user content and reaches the DOM only as text nodes,
+        # so any *assignment* of HTML is a bug. Prose mentions in comments and
+        # in the README are matched by the `-n` search too, hence the pattern
+        # looks for the call, not the word.
+        run: |
+          if grep -rnE "\.(inner|outer)HTML *=|insertAdjacentHTML *\(|document\.write *\(" app/; then
+            echo "::error::user content must never be assigned as HTML"
+            exit 1
+          fi
+
   redact-wasm:
     # The redaction library runs in the Worker, so its tests run in one. The
     # wasm-bindgen CLI version is read from the lockfile rather than pinned

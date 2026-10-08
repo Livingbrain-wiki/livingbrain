@@ -98,3 +98,17 @@ proptest = "1.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Test binaries are enormous — the largest are 120-147 MB, almost all of it DWARF.
+# `line-tables-only` keeps the file and line for a panic and a backtrace while
+# dropping ~1.7 GB from a cold `cargo test --workspace` (4.1 GB -> 2.4 GB here),
+# which is what makes the full suite fit on a small CI runner. `debug = 0` would
+# save a little more and cost every test failure its line number, which is not a
+# trade worth making.
+[profile.dev]
+debug = "line-tables-only"
+
+# The test profile inherits from `dev`; setting it here as well so the setting
+# survives anything that changes the dev profile above it.
+[profile.test]
+debug = "line-tables-only"
