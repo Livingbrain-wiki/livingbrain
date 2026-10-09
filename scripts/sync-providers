@@ -1,0 +1,4 @@
+#!/bin/sh
+# Regenerates app/assets/providers.json from Colonizer's provider catalog.
+# See scripts/sync-providers.mjs for the options and what is checked.
+exec node "$(dirname "$0")/sync-providers.mjs" "$@"

@@ -15,6 +15,8 @@ pub(crate) struct ModelConnection {
     pub(crate) role: String,
     pub(crate) provider: String,
     pub(crate) base_url: String,
+    pub(crate) auth: String,
+    pub(crate) wire: String,
     pub(crate) model: String,
     pub(crate) key_last4: String,
     pub(crate) fallback_to_managed: bool,
@@ -28,6 +30,8 @@ pub(crate) struct ModelConnection {
 pub(crate) struct ConnectionFields<'a> {
     pub(crate) provider: &'a str,
     pub(crate) base_url: &'a str,
+    pub(crate) auth: &'a str,
+    pub(crate) wire: &'a str,
     pub(crate) model: &'a str,
     pub(crate) key_ciphertext: &'a [u8],
     pub(crate) key_last4: &'a str,
@@ -48,13 +52,15 @@ pub(crate) async fn upsert(
 ) -> Result<(), DbError> {
     let statement = Statement::with_values(
         "INSERT INTO model_connections \
-            (workspace_id, role, provider, base_url, model, key_ciphertext, \
-             key_last4, fallback_to_managed, status, missing, context_size, \
-             checked_at, updated_by) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            (workspace_id, role, provider, base_url, auth, wire, model, \
+             key_ciphertext, key_last4, fallback_to_managed, status, missing, \
+             context_size, checked_at, updated_by) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT (workspace_id, role) DO UPDATE SET \
             provider = excluded.provider, \
             base_url = excluded.base_url, \
+            auth = excluded.auth, \
+            wire = excluded.wire, \
             model = excluded.model, \
             key_ciphertext = excluded.key_ciphertext, \
             key_last4 = excluded.key_last4, \
@@ -69,6 +75,8 @@ pub(crate) async fn upsert(
             text(role),
             text(fields.provider),
             text(fields.base_url),
+            text(fields.auth),
+            text(fields.wire),
             text(fields.model),
             blob(fields.key_ciphertext),
             text(fields.key_last4),
@@ -89,7 +97,7 @@ pub(crate) async fn list(
     workspace_id: &str,
 ) -> Result<Vec<ModelConnection>, DbError> {
     let statement = Statement::with_values(
-        "SELECT role, provider, base_url, model, key_last4, \
+        "SELECT role, provider, base_url, auth, wire, model, key_last4, \
                 fallback_to_managed, status, missing, context_size, checked_at \
          FROM model_connections WHERE workspace_id = ? ORDER BY role",
         vec![text(workspace_id)],
@@ -110,7 +118,7 @@ pub(crate) async fn get(
     role: &str,
 ) -> Result<Option<ModelConnection>, DbError> {
     let statement = Statement::with_values(
-        "SELECT role, provider, base_url, model, key_last4, \
+        "SELECT role, provider, base_url, auth, wire, model, key_last4, \
                 fallback_to_managed, status, missing, context_size, checked_at \
          FROM model_connections WHERE workspace_id = ? AND role = ?",
         vec![text(workspace_id), text(role)],
@@ -136,6 +144,8 @@ fn from_row(row: &Row) -> ModelConnection {
         role: row.get::<String>("role").unwrap_or_default(),
         provider: row.get::<String>("provider").unwrap_or_default(),
         base_url: row.get::<String>("base_url").unwrap_or_default(),
+        auth: row.get::<String>("auth").unwrap_or_default(),
+        wire: row.get::<String>("wire").unwrap_or_default(),
         model: row.get::<String>("model").unwrap_or_default(),
         key_last4: row.get::<String>("key_last4").unwrap_or_default(),
         fallback_to_managed: row.get::<i64>("fallback_to_managed").unwrap_or_default() != 0,

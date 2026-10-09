@@ -1,7 +1,9 @@
 //! `livingbrain-models`: bring your own model, with a capability check.
 //!
 //! Per workspace and per role, a member with admin or owner rights can
-//! connect a provider key or a custom OpenAI-compatible endpoint. On
+//! connect any provider in the vendored catalog — the providers Colonizer
+//! supports, over the Anthropic Messages or the OpenAI chat wire, with a
+//! bearer or `x-api-key` key — or a custom endpoint that names its own. On
 //! connect, the module probes the model for tool calling, JSON output and
 //! context size, and stores the connection with the provider key encrypted
 //! (AES-256-GCM, AAD = workspace_id + role). No silent fallback to the
@@ -25,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+mod catalog;
 mod crypto;
 mod handlers;
 mod probe;
@@ -52,6 +55,20 @@ const MIGRATION_INIT_POSTGRES: SqlMigration = SqlMigration::new(
     "0001",
     "init",
     include_str!("../migrations/postgres/0001_init.sql"),
+);
+
+/// The second migration: how each connection talks to its provider.
+const MIGRATION_PROVIDER_WIRE: SqlMigration = SqlMigration::new(
+    "0002",
+    "provider_wire",
+    include_str!("../migrations/sqlite/0002_provider_wire.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_PROVIDER_WIRE`]; the SQL is the same.
+const MIGRATION_PROVIDER_WIRE_POSTGRES: SqlMigration = SqlMigration::new(
+    "0002",
+    "provider_wire",
+    include_str!("../migrations/postgres/0002_provider_wire.sql"),
 );
 
 /// Bring your own model, with a capability check.
@@ -112,9 +129,10 @@ impl Module for Models {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_PROVIDER_WIRE];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 1] = [MIGRATION_INIT_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
+            [MIGRATION_INIT_POSTGRES, MIGRATION_PROVIDER_WIRE_POSTGRES];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,

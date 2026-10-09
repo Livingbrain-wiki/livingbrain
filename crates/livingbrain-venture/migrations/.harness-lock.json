@@ -58,5 +58,9 @@
   "tokens/0001": {
     "file": "0015_tokens_0001_init.sql",
     "sha256": "0ea8243b2b7ab242454c815e5a6a4d9c114db8c997fbca96613b7115feef26e0"
+  },
+  "models/0002": {
+    "file": "0016_models_0002_provider_wire.sql",
+    "sha256": "0027f24324aa342d22e31df8ab965de17f566fb0665f91592a4fdd3e9ef43563"
   }
 }

@@ -1,5 +1,9 @@
 //! The kit the `models` tests share: a harness with both modules mounted, a
 //! signed-in admin, and a fake model endpoint the test scripts per case.
+//
+// Each test file declares `mod support;` and Cargo compiles each one as its
+// own binary, so a helper only one of them uses is dead code in the others.
+#![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
@@ -132,6 +136,21 @@ struct Script {
     tools: bool,
     context: Option<String>,
     requests: Vec<(String, String)>,
+    /// What each request to the model host carried: `(uri, authorization,
+    /// x-api-key, anthropic-version)`, so a test can see how the key went.
+    sent: Vec<Sent>,
+    /// The status `GET …/models` (the list) answers with.
+    list_status: u16,
+}
+
+/// How one request to the model host was signed.
+#[derive(Debug, Clone)]
+pub struct Sent {
+    pub uri: String,
+    pub authorization: Option<String>,
+    pub x_api_key: Option<String>,
+    pub anthropic_version: Option<String>,
+    pub body: String,
 }
 
 impl Default for Script {
@@ -142,6 +161,8 @@ impl Default for Script {
             tools: true,
             context: Some("200000".to_owned()),
             requests: Vec::new(),
+            sent: Vec::new(),
+            list_status: 200,
         }
     }
 }
@@ -180,6 +201,18 @@ impl FakeHttp {
         self
     }
 
+    /// The status the model list answers with.
+    pub fn listing_with(&self, status: u16) -> &Self {
+        self.inner.lock().expect("lock").list_status = status;
+        self
+    }
+
+    /// Every request to the model host, with the headers that carry the key.
+    #[must_use]
+    pub fn sent(&self) -> Vec<Sent> {
+        self.inner.lock().expect("lock").sent.clone()
+    }
+
     /// Every request as `(method, uri)`.
     #[must_use]
     pub fn requests(&self) -> Vec<(String, String)> {
@@ -196,6 +229,23 @@ impl HttpClient for FakeHttp {
         let wants_tools = String::from_utf8_lossy(&body).contains("\"tools\"");
         let mut inner = self.inner.lock().expect("lock");
         inner.requests.push((method.to_string(), uri.clone()));
+        let header = |name: &str| {
+            parts
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        if !uri.starts_with("https://cloudflare-dns.com/") {
+            inner.sent.push(Sent {
+                uri: uri.clone(),
+                authorization: header("authorization"),
+                x_api_key: header("x-api-key"),
+                anthropic_version: header("anthropic-version"),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
+        }
+        let mut status = 200;
 
         let answer = if uri.starts_with("https://cloudflare-dns.com/dns-query") {
             // Only the A query is answered; an AAAA with no answers leaves
@@ -218,6 +268,11 @@ impl HttpClient for FakeHttp {
             }
         } else if uri.ends_with("/chat/completions") {
             chat_completion(inner.tools && wants_tools)
+        } else if uri.ends_with("/messages") {
+            messages_reply(inner.tools && wants_tools)
+        } else if uri.ends_with("/models") {
+            status = inner.list_status;
+            json!({"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-a"}]}).to_string()
         } else if uri.contains("/models/") {
             match &inner.context {
                 Some(size) => {
@@ -232,7 +287,7 @@ impl HttpClient for FakeHttp {
         drop(inner);
 
         Response::builder()
-            .status(200)
+            .status(status)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Bytes::from(answer))
             .map_err(|err| HttpError::Transport(err.to_string()))
@@ -250,6 +305,17 @@ fn chat_completion(calls_tool: bool) -> String {
         json!({"content": "{\"ok\":true}"})
     };
     json!({"choices": [{"message": message}]}).to_string()
+}
+
+/// An Anthropic Messages reply: a `tool_use` block, or a text block holding
+/// a JSON object.
+fn messages_reply(calls_tool: bool) -> String {
+    let block = if calls_tool {
+        json!({"type": "tool_use", "id": "t1", "name": "calculate", "input": {}})
+    } else {
+        json!({"type": "text", "text": "{\"ok\":true}"})
+    };
+    json!({"type": "message", "role": "assistant", "content": [block]}).to_string()
 }
 
 /// One query parameter out of a URL, or the empty string.
