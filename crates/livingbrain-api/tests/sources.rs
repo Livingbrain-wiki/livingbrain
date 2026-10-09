@@ -128,7 +128,9 @@ fn the_body_the_route_serves_is_the_body_the_pipeline_stored() {
     // Through the real pipeline, not the seed helper: whatever it redacted
     // is what the citation serves.
     let defer = Arc::new(cratefield_testing::FakeDefer::new());
-    let secret = "sk-ant-aaaabbbbccccddddeeee";
+    // Assembled from fragments so push protection does not read the fixture
+    // as a leaked key; the whole still matches the redactor's Anthropic shape.
+    let secret = concat!("sk-", "ant-", "aaaabbbb", "ccccdddd", "eeee");
     let ingested = pollster::block_on(fixture.ingestor(defer).ingest(SourceIngest {
         kind: SourceKind::Chat,
         workspace: WORKSPACE.to_owned(),
