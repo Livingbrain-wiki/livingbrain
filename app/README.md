@@ -134,16 +134,26 @@ quietly.
 | `index.html` | Sign-in: email magic link, Slack, and the two options with no route yet |
 | `settings.html` | Six settings sections; models is live, the rest are marked |
 | `wiki.html` | Reader and editor: Markdown, backlinks, citations, `base_version` saves |
-| `assets/app.css` | Tokens (`--bg`, `--ink`, `--accent`, oklch) and components |
+| `assets/app.css` | The website's tokens (`--bg`, `--bg2`, `--ink`, `--line`, `--accent`, oklch), fonts and components |
 | `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting` |
 | `assets/markdown.js` | Pure Markdown / citation / backlink renderers |
 | `assets/settings.js` | Pure settings request builder |
-| `assets/icon.svg` | The PWA icon |
+| `assets/favicon.svg`, `assets/*.png` | The mark and the PWA icons, copied from the website |
+| `assets/fonts/` | Bricolage Grotesque, Hanken Grotesk, JetBrains Mono: the website's self-hosted fonts (OFL, latin, variable) |
 | `sw.js` | App-shell cache; minimal and defensive, never caches `/v1/*` |
 | `manifest.webmanifest` | The white-label PWA manifest |
 | `_headers` | CSP and security headers for Cloudflare Pages |
 
 ## Theming
+
+The look is the livingbrain.wiki website's (Livingbrain-wiki/website,
+`assets/livingbrain.css`): the same oklch tokens in both themes, the same
+self-hosted fonts (Bricolage Grotesque for headings, Hanken Grotesk for text,
+JetBrains Mono for labels), the same ring-and-node mark, header, cards, buttons
+and fields. The fonts are served from `assets/fonts/`, so the CSP's
+`font-src 'self'` covers them and nothing is fetched from a font CDN. When the
+website's tokens change, copy them into the token block at the top of
+`assets/app.css`; the pages use the shared classes only, never per-page styles.
 
 Dark by default, light follows the system, and a choice is remembered in
 `localStorage` under `lb-theme`. Changing it dispatches an `lb-theme` event on

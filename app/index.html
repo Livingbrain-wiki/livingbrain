@@ -9,7 +9,13 @@
     <!-- Empty means "same origin", which is the hosted deployment. A local
          preview or a white-label deployment sets the API's origin here. -->
     <meta name="lb-api" content="" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#070f11" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f8f8" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
     <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="preload" href="assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="assets/fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="assets/app.css" />
     <!-- The theme bootstrap. It runs before paint so the page never flashes
          the wrong theme; `_headers` carries this exact script's SHA-256 in the
@@ -32,28 +38,36 @@
   </head>
   <body data-page="signin">
     <a class="skip" href="#main">Skip to sign-in</a>
-    <div class="wrap signin">
-      <div class="topbar">
-        <a class="brand" href="index.html">Living Brain</a>
-        <button id="theme-toggle" type="button" class="btn">Theme</button>
+    <header class="hd">
+      <div class="wrap hd__in">
+        <a class="brand" href="index.html"
+          ><span class="mark" aria-hidden="true"><span></span></span
+          ><span class="brand__word">livingbrain<span>.wiki</span></span></a
+        >
+        <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
       </div>
+    </header>
 
-      <main id="main">
+    <main id="main" class="wrap signin">
+      <div class="page-head">
+        <p class="eyebrow">Your workspace</p>
         <h1>Sign in</h1>
-        <p class="muted">
+        <p class="lede">
           Four ways in, all equal. Slack is one option here, not a requirement:
           a workspace without Slack is a first-class workspace.
         </p>
+      </div>
 
-        <div class="card">
-          <h2>Email magic link</h2>
-          <p class="muted">
-            We mail a single-use link. We never say whether an address belongs
-            to anyone — every address gets the same answer, so this form cannot
-            be used to find out who is in a workspace.
-          </p>
-          <form id="email-form" novalidate>
-            <label for="email">Email address</label>
+      <div class="card">
+        <h2>Email magic link</h2>
+        <p class="muted">
+          We mail a single-use link. We never say whether an address belongs
+          to anyone — every address gets the same answer, so this form cannot
+          be used to find out who is in a workspace.
+        </p>
+        <form id="email-form" novalidate>
+          <label for="email">Email address</label>
+          <div class="join">
             <input
               id="email"
               name="email"
@@ -61,74 +75,86 @@
               autocomplete="email"
               required
               inputmode="email"
+              spellcheck="false"
+              placeholder="you@company.com"
             />
-            <p class="row">
-              <button type="submit" data-variant="primary">Mail me a link</button>
-            </p>
-          </form>
-          <div id="email-status" class="notice" role="status" aria-live="polite"></div>
-        </div>
+            <button type="submit" data-variant="primary">Mail me a link</button>
+          </div>
+        </form>
+        <div id="email-status" class="notice" role="status" aria-live="polite"></div>
+      </div>
 
-        <h2>Other ways in</h2>
-        <ul class="methods">
-          <li>
-            <strong>Slack</strong>
-            <span class="muted">
-              Connect a Slack team. Your workspace is ours, not Slack's, so you
-              can leave Slack later without losing the brain.
-            </span>
-            <a id="signin-slack" class="btn" href="#">Continue with Slack</a>
-          </li>
+      <h2 class="section-h">Other ways in</h2>
+      <ul class="methods">
+        <li>
+          <strong>Slack</strong>
+          <span class="muted">
+            Connect a Slack team. Your workspace is ours, not Slack's, so you
+            can leave Slack later without losing the brain.
+          </span>
+          <a id="signin-slack" class="btn" href="#">Continue with Slack</a>
+        </li>
 
-          <li>
-            <strong>Passkey</strong>
-            <span class="muted">
-              Deferred: passkeys move with the follow-up identity work
-              (ADR 0002), so there is no server route to sign in with yet.
-            </span>
-            <button type="button" disabled aria-describedby="passkey-note">
-              Continue with a passkey
-            </button>
-            <span id="passkey-note" class="pill" data-state="disabled"
-              >Not available yet</span
-            >
-          </li>
+        <li>
+          <strong>Passkey</strong>
+          <span class="muted">
+            Deferred: passkeys move with the follow-up identity work
+            (ADR 0002), so there is no server route to sign in with yet.
+          </span>
+          <span id="passkey-note" class="pill" data-state="disabled"
+            >Not available yet</span
+          >
+          <button type="button" disabled aria-describedby="passkey-note">
+            Continue with a passkey
+          </button>
+        </li>
 
-          <li>
-            <strong>Discord</strong>
-            <span class="muted">
-              Discord is planned as an equal team chat alongside Slack (#56).
-              There is no OAuth route yet, so this button does nothing.
-            </span>
-            <button type="button" disabled aria-describedby="discord-note">
-              Continue with Discord
-            </button>
-            <span id="discord-note" class="pill" data-state="disabled"
-              >Not available yet</span
-            >
-          </li>
+        <li>
+          <strong>Discord</strong>
+          <span class="muted">
+            Discord is planned as an equal team chat alongside Slack (#56).
+            There is no OAuth route yet, so this button does nothing.
+          </span>
+          <span id="discord-note" class="pill" data-state="disabled"
+            >Not available yet</span
+          >
+          <button type="button" disabled aria-describedby="discord-note">
+            Continue with Discord
+          </button>
+        </li>
 
-          <li>
-            <strong>Ask, or connect an agent</strong>
-            <span class="muted">
-              The CLI and coding harnesses sign in over MCP and the device flow,
-              then share the same session.
-            </span>
-            <button type="button" disabled aria-describedby="agent-note">
-              Set up the CLI
-            </button>
-            <span id="agent-note" class="pill" data-state="disabled"
-              >Not in this app yet</span
-            >
-          </li>
-        </ul>
+        <li>
+          <strong>Ask, or connect an agent</strong>
+          <span class="muted">
+            The CLI and coding harnesses sign in over MCP and the device flow,
+            then share the same session.
+          </span>
+          <span id="agent-note" class="pill" data-state="disabled"
+            >Not in this app yet</span
+          >
+          <button type="button" disabled aria-describedby="agent-note">
+            Set up the CLI
+          </button>
+        </li>
+      </ul>
 
-        <p class="tiny">
-          The session is an HttpOnly cookie set by the API. Nothing on this page
-          ever sees a token.
-        </p>
-      </main>
-    </div>
+      <p class="tiny">
+        The session is an HttpOnly cookie set by the API. Nothing on this page
+        ever sees a token.
+      </p>
+    </main>
+
+    <footer class="ft">
+      <div class="wrap ft__in">
+        <span class="brand__word brand__word--sm">livingbrain<span>.wiki</span></span>
+        <nav class="ft__nav" aria-label="Elsewhere">
+          <a href="https://livingbrain.wiki/">Website</a>
+          <a href="https://livingbrain.wiki/docs/">Docs</a>
+          <a href="https://livingbrain.wiki/privacy/">Privacy</a>
+          <a href="https://livingbrain.wiki/terms/">Terms</a>
+        </nav>
+      </div>
+    </footer>
     <script type="module" src="assets/app.js"></script>
   </body>
 </html>

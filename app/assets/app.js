@@ -607,6 +607,10 @@ pages.wiki = async function wiki() {
     renderInto(preview, renderMarkdown(source.value));
   });
 
+  // Declared before `setMode` runs: it reads `save`, and reading a `const`
+  // before its declaration throws, which stopped the page before it loaded.
+  const save = $("#save");
+
   const setMode = (mode) => {
     const editing = mode === "edit";
     editorWrap.hidden = !editing;
@@ -621,7 +625,6 @@ pages.wiki = async function wiki() {
   });
   setMode("view");
 
-  const save = $("#save");
   save.addEventListener("click", async () => {
     if (!current) return;
     // Optimistic concurrency: the store refuses a write whose base_version is

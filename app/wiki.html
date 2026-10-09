@@ -6,7 +6,13 @@
     <title>Wiki — Living Brain</title>
     <meta name="color-scheme" content="dark light" />
     <meta name="lb-api" content="" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#070f11" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f8f8" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
     <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="preload" href="assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="assets/fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="assets/app.css" />
     <script>
       (function () {
@@ -26,17 +32,23 @@
   </head>
   <body data-page="wiki">
     <a class="skip" href="#main">Skip to the page</a>
-    <div class="wrap">
-      <div class="topbar">
-        <a class="brand" href="wiki.html">Living Brain</a>
-        <nav>
+    <header class="hd">
+      <div class="wrap hd__in">
+        <a class="brand" href="wiki.html"
+          ><span class="mark" aria-hidden="true"><span></span></span
+          ><span class="brand__word">livingbrain<span>.wiki</span></span></a
+        >
+        <nav class="nav" aria-label="App">
+          <a href="wiki.html" aria-current="page">Wiki</a>
           <a href="settings.html">Settings</a>
           <a href="index.html">Sign in</a>
-          <button id="theme-toggle" type="button" class="btn">Theme</button>
         </nav>
+        <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
       </div>
+    </header>
 
-      <main id="main">
+      <main id="main" class="wrap">
+        <p class="eyebrow">Company wiki</p>
         <h1 id="page-title">Wiki</h1>
         <div class="wiki-toolbar">
           <button id="mode-toggle" type="button" aria-pressed="false">Edit</button>
@@ -86,14 +98,24 @@
             <div id="preview" class="card prose" aria-live="polite"></div>
           </div>
         </div>
-      </main>
 
-      <p class="tiny">
-        Page bodies are rendered without <code>innerHTML</code>: the Markdown
-        renderer produces a node tree and the page builds elements from it, so a
-        page can never inject markup or script.
-      </p>
-    </div>
+        <p class="tiny">
+          Page bodies are rendered without <code>innerHTML</code>: the Markdown
+          renderer produces a node tree and the page builds elements from it, so
+          a page can never inject markup or script.
+        </p>
+      </main>
+    <footer class="ft">
+      <div class="wrap ft__in">
+        <span class="brand__word brand__word--sm">livingbrain<span>.wiki</span></span>
+        <nav class="ft__nav" aria-label="Elsewhere">
+          <a href="https://livingbrain.wiki/">Website</a>
+          <a href="https://livingbrain.wiki/docs/">Docs</a>
+          <a href="https://livingbrain.wiki/privacy/">Privacy</a>
+          <a href="https://livingbrain.wiki/terms/">Terms</a>
+        </nav>
+      </div>
+    </footer>
     <script type="module" src="assets/app.js"></script>
   </body>
 </html>

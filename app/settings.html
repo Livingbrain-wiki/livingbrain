@@ -6,7 +6,13 @@
     <title>Settings — Living Brain</title>
     <meta name="color-scheme" content="dark light" />
     <meta name="lb-api" content="" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#070f11" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f8f8" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
     <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="preload" href="assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="assets/fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="assets/app.css" />
     <script>
       (function () {
@@ -26,17 +32,23 @@
   </head>
   <body data-page="settings">
     <a class="skip" href="#main">Skip to settings</a>
-    <div class="wrap">
-      <div class="topbar">
-        <a class="brand" href="wiki.html">Living Brain</a>
-        <nav>
+    <header class="hd">
+      <div class="wrap hd__in">
+        <a class="brand" href="wiki.html"
+          ><span class="mark" aria-hidden="true"><span></span></span
+          ><span class="brand__word">livingbrain<span>.wiki</span></span></a
+        >
+        <nav class="nav" aria-label="App">
           <a href="wiki.html">Wiki</a>
+          <a href="settings.html" aria-current="page">Settings</a>
           <a href="index.html">Sign in</a>
-          <button id="theme-toggle" type="button" class="btn">Theme</button>
         </nav>
+        <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
       </div>
+    </header>
 
-      <main id="main">
+      <main id="main" class="wrap">
+        <p class="eyebrow">Your workspace</p>
         <h1>Settings</h1>
         <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
 
@@ -53,6 +65,7 @@
             <fieldset>
               <legend>Connected models</legend>
               <div id="models-status" class="notice" role="status"></div>
+              <div class="table-scroll" role="region" aria-label="Connected models" tabindex="0">
               <table class="table">
                 <caption>
                   Read from <code>GET /v1/models</code>. Connecting a key is
@@ -69,6 +82,7 @@
                 </thead>
                 <tbody id="model-rows"></tbody>
               </table>
+              </div>
             </fieldset>
 
             <fieldset>
@@ -141,6 +155,7 @@
 
             <fieldset>
               <legend>Your tokens</legend>
+              <div class="table-scroll" role="region" aria-label="Your tokens" tabindex="0">
               <table class="table">
                 <caption>
                   Read from <code>GET /v1/tokens</code>. Revoking is
@@ -158,6 +173,7 @@
                 </thead>
                 <tbody id="token-rows"></tbody>
               </table>
+              </div>
             </fieldset>
 
             <fieldset>
@@ -355,7 +371,17 @@
           with the change so the server can audit it. There is no second path.
         </p>
       </main>
-    </div>
+    <footer class="ft">
+      <div class="wrap ft__in">
+        <span class="brand__word brand__word--sm">livingbrain<span>.wiki</span></span>
+        <nav class="ft__nav" aria-label="Elsewhere">
+          <a href="https://livingbrain.wiki/">Website</a>
+          <a href="https://livingbrain.wiki/docs/">Docs</a>
+          <a href="https://livingbrain.wiki/privacy/">Privacy</a>
+          <a href="https://livingbrain.wiki/terms/">Terms</a>
+        </nav>
+      </div>
+    </footer>
     <script type="module" src="assets/app.js"></script>
   </body>
 </html>
