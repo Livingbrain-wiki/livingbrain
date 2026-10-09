@@ -13,6 +13,17 @@
 
 import { settingRequest, describeOutcome } from "./settings.js";
 import {
+  ROLES,
+  PROVIDERS,
+  roleInfo,
+  providerInfo,
+  providerForConnection,
+  validateConnect,
+  connectionViews,
+  renderModelCards,
+} from "./models.js";
+import {
+  TOKEN_SCOPES,
   tokenListRequest,
   tokenCreateRequest,
   tokenRevokeRequest,
@@ -32,6 +43,7 @@ import {
   applyHeader,
   signOutRequest,
   SLOTS,
+  MCP_PATH,
 } from "./session.js";
 
 /**
@@ -475,88 +487,362 @@ pages.signin = async function signin() {
 /* --- settings ------------------------------------------------------- */
 
 pages.settings = async function settings() {
-  const status = $("#settings-notice");
-  const modelBody = $("#model-rows");
-  const modelsCard = $("#models-status");
+  wireSectionNav();
+  wireCopyButtons();
+  fillConnectPanel();
+  await Promise.all([wireModels(), wireTokens()]);
+};
+
+/* --- small shared pieces ------------------------------------------- */
+
+/** A short-lived message at the bottom of the screen. */
+let toastTimer = null;
+export function toast(message, tone = "ok") {
+  const box = $("#toast");
+  if (!box) return;
+  box.textContent = message;
+  box.dataset.tone = tone;
+  box.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    box.hidden = true;
+  }, tone === "bad" ? 8000 : 4000);
+}
+
+/**
+ * Asks before something that cannot be undone. Resolves `true` only when the
+ * person picks the confirm button; Escape and Cancel are `false`. Falls back
+ * to `window.confirm` where `<dialog>` is missing.
+ */
+export function confirmAction({ title, body, confirm }) {
+  const dialog = $("#confirm");
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return Promise.resolve(window.confirm(`${title}\n\n${body}`));
+  }
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").textContent = body;
+  $("#confirm-ok").textContent = confirm;
+  dialog.returnValue = "";
+  dialog.showModal();
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), {
+      once: true,
+    });
+  });
+}
+
+/** Every `[data-copy="<id>"]` button copies that element's text. */
+function wireCopyButtons() {
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    const source = document.getElementById(button.dataset.copy);
+    if (!source) return;
+    try {
+      await navigator.clipboard.writeText(source.textContent);
+      const label = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = label;
+      }, 1500);
+    } catch {
+      toast("Copying was blocked. Select the text and copy it by hand.", "warn");
+    }
+  });
+}
+
+/** Marks the section in view in the section nav. */
+function wireSectionNav() {
+  const links = $$(".snav a");
+  if (!links.length || typeof IntersectionObserver === "undefined") return;
+  const mark = (id) => {
+    for (const link of links) {
+      if (link.getAttribute("href") === `#${id}`) link.setAttribute("aria-current", "true");
+      else link.removeAttribute("aria-current");
+    }
+  };
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const visible = entries.filter((e) => e.isIntersecting);
+      if (visible.length) mark(visible[0].target.id);
+    },
+    { rootMargin: "-30% 0px -60% 0px" },
+  );
+  for (const link of links) {
+    const target = document.querySelector(link.getAttribute("href"));
+    if (target) observer.observe(target);
+  }
+}
+
+/** Builds a group of radio "cards" from a list of options. */
+function choiceCards(container, name, options, selected) {
+  container.replaceChildren();
+  for (const option of options) {
+    const label = document.createElement("label");
+    label.className = "choice__card";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = name;
+    input.value = option.value;
+    if (option.value === selected) input.checked = true;
+    label.appendChild(input);
+    const text = document.createElement("span");
+    text.className = "choice__text";
+    const title = document.createElement("strong");
+    title.textContent = option.label;
+    text.appendChild(title);
+    if (option.detail) {
+      const detail = document.createElement("span");
+      detail.textContent = option.detail;
+      text.appendChild(detail);
+    }
+    label.appendChild(text);
+    container.appendChild(label);
+  }
+}
+
+/** The checked value of a radio group, or "" when none is. */
+const checked = (form, name) => {
+  const input = form.querySelector(`input[name="${name}"]:checked`);
+  return input ? input.value : "";
+};
+
+/** Shows (or clears) one field's error under it. */
+function fieldError(id, message, input) {
+  const slot = $(`#err-${id}`);
+  if (slot) slot.textContent = message || "";
+  if (input) {
+    if (message) input.setAttribute("aria-invalid", "true");
+    else input.removeAttribute("aria-invalid");
+  }
+}
+
+/* --- connect your coding agent -------------------------------------- */
+
+/** Writes this origin's endpoint and commands into the Connect panel. */
+function fillConnectPanel() {
+  const origin = apiOrigin();
+  const mcp = `${origin}${MCP_PATH}`;
+  const set = (id, text) => {
+    const el = $(`#${id}`);
+    if (el) el.textContent = text;
+  };
+  set("mcp-url", mcp);
+  set(
+    "cmd-claude",
+    `claude mcp add --transport http livingbrain ${mcp} --header "Authorization: Bearer <token>"`,
+  );
+  set("cmd-cli", `LIVINGBRAIN_API_URL=${origin} livingbrain login`);
+}
+
+/* --- models ---------------------------------------------------------- */
+
+async function wireModels() {
+  const form = $("#model-form");
+  const cards = $("#model-rows");
+  const modelsStatus = $("#models-status");
+  const baseUrl = $("#base-url");
+  const apiKey = $("#api-key");
+  const model = $("#model-name");
+  const submit = $("#connect-model");
+  const cancel = $("#cancel-replace");
+  let rows = [];
+
+  choiceCards(
+    $("#role-choices"),
+    "role",
+    ROLES.map((r) => ({ value: r.id, label: r.label, detail: r.detail })),
+    "main",
+  );
+  choiceCards(
+    $("#provider-choices"),
+    "provider",
+    PROVIDERS.map((p) => ({ value: p.id, label: p.label })),
+    "openai",
+  );
+
+  // Choosing a provider fills in what it implies: the endpoint (shown, not
+  // asked for, when the server fixes it), the key's shape, model suggestions.
+  const applyProvider = (id, keepModel = false) => {
+    const provider = providerInfo(id) || providerInfo("custom");
+    $("#base-url-field").hidden = provider.fixed;
+    $("#fixed-endpoint").hidden = !provider.fixed;
+    $("#fixed-endpoint-url").textContent = provider.baseUrl;
+    if (!provider.fixed) baseUrl.value = provider.baseUrl;
+    $("#api-key-kind").textContent = `${provider.keyHint}.`;
+    const list = $("#model-suggestions");
+    const chips = $("#model-chips");
+    list.replaceChildren();
+    chips.replaceChildren();
+    for (const name of provider.models) {
+      const option = document.createElement("option");
+      option.value = name;
+      list.appendChild(option);
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = name;
+      chip.setAttribute("aria-label", `Use ${name}`);
+      chip.addEventListener("click", () => {
+        model.value = name;
+        fieldError("model", "", model);
+      });
+      chips.appendChild(chip);
+    }
+    chips.hidden = !provider.models.length;
+    if (!keepModel) model.value = "";
+    fieldError("baseUrl", "", baseUrl);
+  };
+  form.addEventListener("change", (event) => {
+    if (event.target.name === "provider") applyProvider(event.target.value);
+    if (event.target.name === "role") fieldError("role", "");
+  });
+  applyProvider("openai");
+
+  $("#toggle-key").addEventListener("click", (event) => {
+    const show = apiKey.type === "password";
+    apiKey.type = show ? "text" : "password";
+    event.currentTarget.textContent = show ? "Hide" : "Show";
+    event.currentTarget.setAttribute("aria-pressed", String(show));
+  });
+  for (const [input, id] of [
+    [baseUrl, "baseUrl"],
+    [apiKey, "apiKey"],
+    [model, "model"],
+  ]) {
+    input.addEventListener("input", () => fieldError(id, "", input));
+  }
+
+  const resetForm = () => {
+    form.reset();
+    apiKey.type = "password";
+    $("#toggle-key").textContent = "Show";
+    $("#connect-title").textContent = "Connect a model";
+    submit.textContent = "Connect model";
+    cancel.hidden = true;
+    applyProvider(checked(form, "provider") || "openai");
+  };
+  cancel.addEventListener("click", resetForm);
 
   const load = async () => {
-    modelBody.replaceChildren();
     try {
-      const rows = await api("/v1/models");
-      const list = Array.isArray(rows) ? rows : [];
-      for (const row of list) {
-        const tr = document.createElement("tr");
-        const cells = [
-          row.role,
-          row.provider,
-          row.model,
-          row.key, // `…abcd`: the server never returns the full key.
-          row.status,
-        ];
-        for (const value of cells) {
-          const td = document.createElement("td");
-          td.textContent = value == null ? "—" : String(value);
-          tr.appendChild(td);
-        }
-        modelBody.appendChild(tr);
-      }
-      if (!list.length) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 5;
-        td.className = "muted";
-        td.textContent =
-          "No model connections yet. The managed model is used until one is connected.";
-        tr.appendChild(td);
-        modelBody.appendChild(tr);
-      }
-      notice(modelsCard, "", "ok");
+      rows = await api("/v1/models");
+      renderModelCards(cards, connectionViews(rows));
+      notice(modelsStatus, "");
     } catch (error) {
-      notice(
-        modelsCard,
-        `Could not read the model connections: ${error.message}`,
-        "warn",
-      );
+      rows = [];
+      cards.replaceChildren();
+      notice(modelsStatus, `Could not load your models: ${error.message}`, "warn");
     }
   };
 
-  // Connect a model. The role is the key in the URL, so it is also the key in
-  // the audit record; the value is the whole connection the server reads.
-  $("#connect-model").addEventListener("click", async () => {
-    const role = $("#role").value;
-    const value = {
-      provider: $("#provider").value,
-      base_url: $("#base-url").value.trim() || null,
-      api_key: $("#api-key").value,
-      model: $("#model-name").value.trim(),
-      fallback_to_managed: false,
-    };
-    const outcome = await setSetting("models", role, value);
-    notice(status, outcome.message, outcome.ok ? "ok" : "warn");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const check = validateConnect({
+      role: checked(form, "role"),
+      provider: checked(form, "provider"),
+      baseUrl: baseUrl.value,
+      apiKey: apiKey.value,
+      model: model.value,
+    });
+    fieldError("role", check.errors.role);
+    fieldError("provider", check.errors.provider);
+    fieldError("baseUrl", check.errors.baseUrl, baseUrl);
+    fieldError("apiKey", check.errors.apiKey, apiKey);
+    fieldError("model", check.errors.model, model);
+    if (!check.ok) {
+      const first = form.querySelector('[aria-invalid="true"]');
+      if (first) first.focus();
+      return;
+    }
+    const label = submit.textContent;
+    submit.disabled = true;
+    submit.textContent = "Testing the connection…";
+    try {
+      const outcome = await setSetting("models", check.role, check.value);
+      if (outcome.ok) {
+        toast(`${roleInfo(check.role).label} model connected.`, "ok");
+        resetForm();
+        await load();
+      } else {
+        toast(`Not connected: ${outcome.message}`, "bad");
+      }
+    } finally {
+      submit.disabled = false;
+      if (submit.textContent === "Testing the connection…") submit.textContent = label;
+    }
+  });
+
+  // Replace and Disconnect, one listener for every card.
+  cards.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const role = button.dataset.role;
+    const info = roleInfo(role);
+    const name = info ? info.label : role;
+    if (button.dataset.action === "replace") {
+      const row = rows.find((r) => r.role === role) || {};
+      const provider = providerForConnection(row);
+      const roleInput = form.querySelector(`input[name="role"][value="${role}"]`);
+      const providerInput = form.querySelector(
+        `input[name="provider"][value="${provider.id}"]`,
+      );
+      if (roleInput) roleInput.checked = true;
+      if (providerInput) providerInput.checked = true;
+      applyProvider(provider.id, true);
+      if (!provider.fixed && row.base_url) baseUrl.value = row.base_url;
+      model.value = row.model || "";
+      apiKey.value = "";
+      $("#connect-title").textContent = `Replace the ${name} model`;
+      submit.textContent = "Save and test";
+      cancel.hidden = false;
+      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      apiKey.focus({ preventScroll: true });
+      return;
+    }
+    const ok = await confirmAction({
+      title: `Disconnect the ${name} model?`,
+      body: "Its key is deleted. The brain uses the managed model for this job until you connect another.",
+      confirm: "Disconnect",
+    });
+    if (!ok) return;
+    button.disabled = true;
+    const outcome = await setSetting("models", role, null);
     if (outcome.ok) {
-      // The key is never echoed back by the API, so it is dropped here too.
-      $("#api-key").value = "";
+      toast(`${name} model disconnected.`, "ok");
       await load();
+    } else {
+      button.disabled = false;
+      toast(`Not disconnected: ${outcome.message}`, "bad");
     }
   });
 
   await load();
-  await wireTokens();
-};
+}
 
 /* --- api tokens ------------------------------------------------------ */
 
 /**
  * The token section. Three rules, all about where a secret may live: the list
  * is rendered from `tokenViews`, which cannot carry a value; the value a create
- * returns is written once into `#token-value`, beside "not shown again"; and
- * dismissing it — or leaving the page — takes it back out.
+ * returns is written once into `#token-value`, beside "you won't see it
+ * again"; and dismissing it — or leaving the page — takes it back out.
  */
 function wireTokens() {
   const status = $("#tokens-status");
   const rows = $("#token-rows");
   const reveal = $("#token-reveal");
   const value = $("#token-value");
+  const form = $("#token-form");
+  const name = $("#token-name");
+  const submit = $("#create-token");
+
+  choiceCards(
+    $("#scope-choices"),
+    "token-scope",
+    TOKEN_SCOPES.map((s) => ({ value: s.value, label: s.label, detail: s.detail })),
+    "",
+  );
 
   const forget = () => {
     clearToken(value);
@@ -569,17 +855,23 @@ function wireTokens() {
       notice(status, "");
     } catch (error) {
       renderTokenRows(rows, []);
-      notice(status, tokenErrorMessage(error, "read your tokens"), "warn");
+      notice(status, tokenErrorMessage(error, "load your tokens"), "warn");
     }
   };
 
-  $("#create-token").addEventListener("click", async () => {
+  name.addEventListener("input", () => fieldError("tokenName", "", name));
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
     let request;
     try {
-      request = tokenCreateRequest($("#token-name").value, $("#token-scopes").value);
-    } catch (error) {
-      return notice(status, error.message, "warn");
+      request = tokenCreateRequest(name.value, checked(form, "token-scope"));
+    } catch {
+      fieldError("tokenName", "Give the token a name.", name);
+      name.focus();
+      return;
     }
+    submit.disabled = true;
     try {
       const created = await api(request.path, {
         method: request.method,
@@ -587,12 +879,14 @@ function wireTokens() {
       });
       revealToken(value, createdTokenView(created));
       reveal.hidden = false;
-      notice(status, "Token created. Copy it now — it is not shown again.", "ok");
-      $("#token-name").value = "";
-      $("#token-scopes").value = "";
+      reveal.scrollIntoView({ behavior: "smooth", block: "center" });
+      toast("Token created. Copy it now.", "ok");
+      form.reset();
       await load();
     } catch (error) {
-      notice(status, tokenErrorMessage(error, "create the token"), "bad");
+      toast(tokenErrorMessage(error, "create the token"), "bad");
+    } finally {
+      submit.disabled = false;
     }
   });
 
@@ -601,33 +895,41 @@ function wireTokens() {
   rows.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-prefix]");
     if (!button) return;
-    const name = button.dataset.name;
-    // A revoke is immediate and cannot be undone, so it is confirmed.
-    if (!window.confirm(`Revoke "${name}"? Anything using it stops working at once.`)) return;
+    const label = button.dataset.name;
+    const ok = await confirmAction({
+      title: `Revoke "${label}"?`,
+      body: "Anything using this token stops working at once. This cannot be undone.",
+      confirm: "Revoke token",
+    });
+    if (!ok) return;
     try {
       const request = tokenRevokeRequest(button.dataset.prefix);
       await api(request.path, { method: request.method });
-      notice(status, `Revoked ${name}.`, "ok");
+      toast(`Revoked ${label}.`, "ok");
       await load();
     } catch (error) {
-      notice(status, tokenErrorMessage(error, "revoke the token"), "bad");
+      toast(tokenErrorMessage(error, "revoke the token"), "bad");
     }
   });
 
-  $("#copy-token").addEventListener("click", async () => {
+  $("#copy-token").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
     try {
       await navigator.clipboard.writeText(value.textContent);
-      notice(status, "Token copied to the clipboard.", "ok");
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy";
+      }, 1500);
     } catch {
       // Clipboard access can be refused; say where the value is rather than
       // pretending the copy worked.
-      notice(status, "Select the token above and copy it by hand.", "warn");
+      toast("Copying was blocked. Select the token and copy it by hand.", "warn");
     }
   });
 
   $("#dismiss-token").addEventListener("click", () => {
     forget();
-    notice(status, "The token is gone from this page.", "ok");
+    toast("The token is gone from this page.", "ok");
   });
 
   // Leaving the page is a dismissal too.
