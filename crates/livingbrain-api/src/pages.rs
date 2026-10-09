@@ -48,10 +48,11 @@ const MAX_PAGE_LIMIT: usize = 200;
 
 /// The page routes, built from the pages module's own context.
 ///
-/// `ctx` is that module's `ModuleContext`, shared with the module's nested
-/// surfaces, which is the point: its `Blob` is scoped to `pages`, so a body
-/// the page store writes is a body these routes can open. The venture merges this at the module's mount root via
-/// `Pages::surface`, so the routes are served at `/v1/pages`.
+/// `ctx` is that module's `ModuleContext` — handed over `Arc`, the way
+/// `Pages::surface` hands a surface its context — which is the point: its
+/// `Blob` is scoped to `pages`, so a body the page store writes is a body
+/// these routes can open. The venture merges this at the module's mount root
+/// via `Pages::surface`, so the routes are served at `/v1/pages`.
 pub fn pages_routes(
     ctx: Arc<ModuleContext>,
     kms: Arc<dyn Kms>,
