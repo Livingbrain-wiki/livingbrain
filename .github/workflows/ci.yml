@@ -146,6 +146,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: scripts/check-vendored-stack.sh
+      # The provider catalog is vendored the same way, from Colonizer. This
+      # re-derives app/assets/providers.json from the upstream commit it
+      # records, so a hand edit or a half-applied sync fails here. Moving to a
+      # newer upstream is a deliberate `scripts/sync-providers` run in a PR.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: scripts/sync-providers --check --pinned
 
   redact-wasm:
     # The redaction library runs in the Worker, so its tests run in one. The

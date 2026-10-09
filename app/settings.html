@@ -97,29 +97,72 @@
 
                 <fieldset class="choice" aria-describedby="err-provider">
                   <legend>Provider</legend>
-                  <div class="choice__grid" id="provider-choices"></div>
+                  <div class="choice__grid choice__grid--providers" id="provider-popular"></div>
+                  <details class="picker" id="provider-all">
+                    <summary>
+                      <span>All providers</span>
+                      <span class="picker__count" id="provider-count"></span>
+                    </summary>
+                    <div class="picker__body">
+                      <label class="sr" for="provider-search">Search providers</label>
+                      <input
+                        id="provider-search"
+                        type="search"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="Search by name or host"
+                        aria-controls="provider-list"
+                      />
+                      <ul class="picker__list" id="provider-list"></ul>
+                      <p class="hint" id="provider-empty" hidden>
+                        Nothing matches. Choose Custom endpoint for anything not
+                        listed.
+                      </p>
+                      <p class="hint picker__source">
+                        The list Colonizer supports, from
+                        <a id="provider-source" rel="noopener noreferrer">its provider catalog</a>.
+                        Listing a service is not an endorsement.
+                      </p>
+                    </div>
+                  </details>
                   <p class="field-error" id="err-provider"></p>
                 </fieldset>
 
+                <p class="picked" id="provider-picked" aria-live="polite"></p>
+
+                <div id="provider-vars" class="vars"></div>
+
                 <div class="field" id="base-url-field">
                   <label for="base-url">Endpoint</label>
-                  <input
-                    id="base-url"
-                    type="url"
-                    inputmode="url"
-                    autocomplete="off"
-                    spellcheck="false"
-                    placeholder="https://api.example.com/v1"
-                    aria-describedby="base-url-hint err-baseUrl"
-                  />
-                  <p class="hint" id="base-url-hint">
-                    Any OpenAI-compatible API over https.
-                  </p>
+                  <div class="secret">
+                    <input
+                      id="base-url"
+                      type="url"
+                      inputmode="url"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="https://api.example.com"
+                      aria-describedby="base-url-hint err-baseUrl"
+                    />
+                    <button type="button" id="edit-endpoint" class="btn-sm" aria-pressed="false"
+                      aria-controls="base-url">Edit</button>
+                  </div>
+                  <p class="hint" id="base-url-hint"></p>
                   <p class="field-error" id="err-baseUrl"></p>
                 </div>
-                <p class="fixed-endpoint" id="fixed-endpoint" hidden>
-                  Endpoint <code id="fixed-endpoint-url"></code>
-                </p>
+
+                <div id="custom-fields" class="custom-fields" hidden>
+                  <fieldset class="choice" aria-describedby="err-wire">
+                    <legend>API it speaks</legend>
+                    <div class="choice__grid choice__grid--two" id="wire-choices"></div>
+                    <p class="field-error" id="err-wire"></p>
+                  </fieldset>
+                  <fieldset class="choice" aria-describedby="err-auth">
+                    <legend>How the key is sent</legend>
+                    <div class="choice__grid choice__grid--two" id="auth-choices"></div>
+                    <p class="field-error" id="err-auth"></p>
+                  </fieldset>
+                </div>
 
                 <div class="field">
                   <label for="api-key">API key</label>
@@ -135,8 +178,8 @@
                       aria-controls="api-key">Show</button>
                   </div>
                   <p class="hint" id="api-key-hint">
-                    <span id="api-key-kind"></span> Only the last 4 characters
-                    are ever shown again.
+                    <span id="api-key-kind"></span> Stored encrypted; only the
+                    last 4 characters are ever shown again.
                   </p>
                   <p class="field-error" id="err-apiKey"></p>
                 </div>
@@ -152,10 +195,15 @@
                     aria-describedby="model-hint err-model"
                   />
                   <datalist id="model-suggestions"></datalist>
-                  <div class="chips" id="model-chips" aria-label="Suggested models"></div>
-                  <p class="hint" id="model-hint">
-                    The exact model name your provider uses.
-                  </p>
+                  <div class="chips" id="model-chips" aria-label="Models this provider offers"></div>
+                  <div class="model-tools">
+                    <p class="hint" id="model-hint">
+                      The exact model name your provider uses.
+                    </p>
+                    <button type="button" id="discover-models" class="btn-sm" hidden>
+                      List models
+                    </button>
+                  </div>
                   <p class="field-error" id="err-model"></p>
                 </div>
 

@@ -15,10 +15,21 @@ import { settingRequest, describeOutcome } from "./settings.js";
 import {
   ROLES,
   PROVIDERS,
+  POPULAR,
+  POPULAR_LABELS,
+  CATALOG_SOURCE,
+  WIRES,
+  AUTHS,
+  CHIP_LIMIT,
   roleInfo,
   providerInfo,
+  providerHost,
   providerForConnection,
+  searchProviders,
+  fillTemplate,
+  keyHint,
   validateConnect,
+  discoverRequest,
   connectionViews,
   renderModelCards,
 } from "./models.js";
@@ -36,7 +47,7 @@ import {
   safeReturnTo,
   RETURN_TO_PARAM,
 } from "./tokens.js";
-import { renderMarkdown, renderCitations, renderBacklinks } from "./markdown.js";
+import { renderMarkdown, renderCitations, renderBacklinks, isSafeHref } from "./markdown.js";
 import {
   checkSession,
   applySignInPage,
@@ -642,11 +653,23 @@ async function wireModels() {
   const cards = $("#model-rows");
   const modelsStatus = $("#models-status");
   const baseUrl = $("#base-url");
+  const editEndpoint = $("#edit-endpoint");
   const apiKey = $("#api-key");
   const model = $("#model-name");
   const submit = $("#connect-model");
   const cancel = $("#cancel-replace");
+  const discover = $("#discover-models");
+  const search = $("#provider-search");
+  const list = $("#provider-list");
   let rows = [];
+  // The endpoint is the catalog's, read-only, until the member unlocks it.
+  let editing = false;
+  // The model list the server last fetched, by the provider it was for.
+  let listed = { provider: null, models: [] };
+  // The chosen provider. The popular cards and the full list are two radio
+  // groups (a provider can appear in both), so the choice lives here and
+  // both groups are painted from it.
+  let selectedId = "anthropic";
 
   choiceCards(
     $("#role-choices"),
@@ -655,29 +678,122 @@ async function wireModels() {
     "main",
   );
   choiceCards(
-    $("#provider-choices"),
+    $("#provider-popular"),
     "provider",
-    PROVIDERS.map((p) => ({ value: p.id, label: p.label })),
-    "openai",
+    [
+      ...POPULAR.map((id) => {
+        const p = providerInfo(id);
+        return { value: id, label: POPULAR_LABELS[id] || p.name, detail: providerHost(p) };
+      }),
+      { value: "custom", label: "Custom endpoint", detail: "Any other API" },
+    ],
+    "anthropic",
   );
+  choiceCards($("#wire-choices"), "wire", WIRES, "openai");
+  choiceCards($("#auth-choices"), "auth", AUTHS, "bearer");
+  $("#provider-count").textContent = `${PROVIDERS.length}`;
+  const source = $("#provider-source");
+  if (CATALOG_SOURCE && CATALOG_SOURCE.commit) {
+    const href = `https://github.com/${CATALOG_SOURCE.repo}/blob/${CATALOG_SOURCE.commit}/${CATALOG_SOURCE.path}`;
+    if (isSafeHref(href)) source.setAttribute("href", href);
+  }
 
-  // Choosing a provider fills in what it implies: the endpoint (shown, not
-  // asked for, when the server fixes it), the key's shape, model suggestions.
-  const applyProvider = (id, keepModel = false) => {
-    const provider = providerInfo(id) || providerInfo("custom");
-    $("#base-url-field").hidden = provider.fixed;
-    $("#fixed-endpoint").hidden = !provider.fixed;
-    $("#fixed-endpoint-url").textContent = provider.baseUrl;
-    if (!provider.fixed) baseUrl.value = provider.baseUrl;
-    $("#api-key-kind").textContent = `${provider.keyHint}.`;
-    const list = $("#model-suggestions");
-    const chips = $("#model-chips");
+  // The full list: one radio per provider, in the same group as the cards,
+  // with its host and a link to its site. Filtered by the search box.
+  const renderList = () => {
+    const matches = searchProviders(search.value);
     list.replaceChildren();
+    for (const provider of matches) {
+      const li = document.createElement("li");
+      const label = document.createElement("label");
+      label.className = "picker__item";
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "provider-pick";
+      input.value = provider.id;
+      if (provider.id === selectedId) input.checked = true;
+      label.appendChild(input);
+      const text = document.createElement("span");
+      text.className = "picker__text";
+      const name = document.createElement("strong");
+      name.textContent = provider.name;
+      text.appendChild(name);
+      const host = document.createElement("span");
+      host.textContent = `${providerHost(provider)} · ${
+        provider.wire === "anthropic" ? "Anthropic API" : "OpenAI API"
+      }`;
+      text.appendChild(host);
+      label.appendChild(text);
+      li.appendChild(label);
+      if (provider.site && isSafeHref(provider.site)) {
+        const site = document.createElement("a");
+        site.className = "picker__site";
+        site.href = provider.site;
+        site.target = "_blank";
+        site.rel = "noopener noreferrer";
+        site.textContent = "Site";
+        site.setAttribute("aria-label", `${provider.name} website`);
+        li.appendChild(site);
+      }
+      list.appendChild(li);
+    }
+    $("#provider-empty").hidden = matches.length > 0;
+  };
+  search.addEventListener("input", renderList);
+  renderList();
+
+  /** Records the choice and checks its card and its list row, if shown. */
+  const select = (id) => {
+    selectedId = id;
+    for (const input of form.querySelectorAll('input[name="provider"], input[name="provider-pick"]')) {
+      input.checked = input.value === id;
+    }
+  };
+
+  const currentProvider = () => providerInfo(selectedId) || providerInfo("anthropic");
+
+  const variableValues = () => {
+    const values = {};
+    for (const input of $$("#provider-vars input")) values[input.dataset.var] = input.value;
+    return values;
+  };
+
+  /** The endpoint field follows the provider and its variables. */
+  const paintEndpoint = () => {
+    const provider = currentProvider();
+    const custom = provider.id === "custom";
+    const unlocked = custom || editing;
+    if (!unlocked) baseUrl.value = fillTemplate(provider.base_url, variableValues());
+    baseUrl.readOnly = !unlocked;
+    editEndpoint.hidden = custom;
+    editEndpoint.textContent = editing ? "Reset" : "Edit";
+    editEndpoint.setAttribute("aria-pressed", String(editing));
+    $("#base-url-hint").textContent = custom
+      ? "The API root, for example https://api.example.com. Paths are added for you."
+      : editing
+        ? "Your own host for this provider, such as a regional endpoint."
+        : "From the provider catalog.";
+  };
+
+  /** Model chips: the catalog's list, else what the server listed. */
+  const paintModels = () => {
+    const provider = currentProvider();
+    const names =
+      provider.models && provider.models.length
+        ? provider.models
+        : listed.provider === provider.id
+          ? listed.models
+          : [];
+    const datalist = $("#model-suggestions");
+    const chips = $("#model-chips");
+    datalist.replaceChildren();
     chips.replaceChildren();
-    for (const name of provider.models) {
+    for (const name of names) {
       const option = document.createElement("option");
       option.value = name;
-      list.appendChild(option);
+      datalist.appendChild(option);
+    }
+    for (const name of names.slice(0, CHIP_LIMIT)) {
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = "chip";
@@ -689,15 +805,92 @@ async function wireModels() {
       });
       chips.appendChild(chip);
     }
-    chips.hidden = !provider.models.length;
+    chips.hidden = !names.length;
+    discover.hidden = Boolean(provider.models && provider.models.length);
+    $("#model-hint").textContent =
+      names.length > CHIP_LIMIT
+        ? `${names.length} models; type to search them all.`
+        : names.length
+          ? "Pick one, or type the exact name."
+          : "Type the exact model name, or list what your key can use.";
+  };
+
+  const applyProvider = (id, { keepModel = false } = {}) => {
+    const provider = providerInfo(id) || providerInfo("anthropic");
+    select(provider.id);
+    editing = false;
+    const custom = provider.id === "custom";
+    $("#custom-fields").hidden = !custom;
+    if (custom) baseUrl.value = "";
+    // One field per URL variable, built from the catalog entry.
+    const vars = $("#provider-vars");
+    vars.replaceChildren();
+    for (const variable of provider.variables || []) {
+      const field = document.createElement("div");
+      field.className = "field";
+      const label = document.createElement("label");
+      label.htmlFor = `var-${variable.name}`;
+      label.textContent = variable.label;
+      const input = document.createElement("input");
+      input.id = `var-${variable.name}`;
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = variable.placeholder || "";
+      input.dataset.var = variable.name;
+      if (variable.default) input.value = variable.default;
+      input.setAttribute("aria-describedby", `err-var-${variable.name}`);
+      input.addEventListener("input", () => {
+        fieldError(`var-${variable.name}`, "", input);
+        paintEndpoint();
+      });
+      const error = document.createElement("p");
+      error.className = "field-error";
+      error.id = `err-var-${variable.name}`;
+      field.append(label, input, error);
+      vars.appendChild(field);
+    }
+    const picked = $("#provider-picked");
+    picked.replaceChildren();
+    if (!custom) {
+      picked.append("Selected: ");
+      const strong = document.createElement("strong");
+      strong.textContent = provider.name;
+      picked.appendChild(strong);
+      if (provider.site && isSafeHref(provider.site)) {
+        picked.append(" · ");
+        const site = document.createElement("a");
+        site.href = provider.site;
+        site.target = "_blank";
+        site.rel = "noopener noreferrer";
+        site.textContent = "get a key";
+        picked.appendChild(site);
+      }
+    }
+    $("#api-key-kind").textContent = custom ? "" : keyHint(provider);
     if (!keepModel) model.value = "";
     fieldError("baseUrl", "", baseUrl);
+    fieldError("provider", "");
+    paintEndpoint();
+    paintModels();
   };
+
   form.addEventListener("change", (event) => {
-    if (event.target.name === "provider") applyProvider(event.target.value);
+    if (event.target.name === "provider" || event.target.name === "provider-pick") {
+      applyProvider(event.target.value);
+    }
     if (event.target.name === "role") fieldError("role", "");
+    if (event.target.name === "wire") fieldError("wire", "");
+    if (event.target.name === "auth") {
+      fieldError("auth", "");
+    }
   });
-  applyProvider("openai");
+  editEndpoint.addEventListener("click", () => {
+    editing = !editing;
+    paintEndpoint();
+    if (editing) baseUrl.focus();
+  });
+  applyProvider("anthropic");
 
   $("#toggle-key").addEventListener("click", (event) => {
     const show = apiKey.type === "password";
@@ -713,6 +906,67 @@ async function wireModels() {
     input.addEventListener("input", () => fieldError(id, "", input));
   }
 
+  /** Reads the form into what `validateConnect` checks. */
+  const readForm = () => ({
+    role: checked(form, "role"),
+    provider: selectedId,
+    variables: variableValues(),
+    baseUrl: baseUrl.value,
+    editUrl: editing,
+    wire: checked(form, "wire"),
+    auth: checked(form, "auth"),
+    apiKey: apiKey.value,
+    model: model.value,
+  });
+
+  /** Puts each error under its field; answers the first field with one. */
+  const showErrors = (errors) => {
+    fieldError("role", errors.role);
+    fieldError("provider", errors.provider);
+    fieldError("baseUrl", errors.baseUrl, baseUrl);
+    fieldError("wire", errors.wire);
+    fieldError("auth", errors.auth);
+    fieldError("apiKey", errors.apiKey, apiKey);
+    fieldError("model", errors.model, model);
+    for (const input of $$("#provider-vars input")) {
+      fieldError(`var-${input.dataset.var}`, errors[`var:${input.dataset.var}`], input);
+    }
+    return form.querySelector('[aria-invalid="true"]');
+  };
+
+  // Listing models: the key goes to Living Brain's own API, which asks the
+  // provider; the page never calls a provider. Only the endpoint and key
+  // fields have to be valid for this, not the model name.
+  const listModels = async ({ quiet = false } = {}) => {
+    const provider = currentProvider();
+    if (provider.models && provider.models.length) return;
+    const check = validateConnect({ ...readForm(), model: "listing" });
+    const blocking = Object.keys(check.errors).filter((k) => k !== "role");
+    if (blocking.length) {
+      if (!quiet) showErrors(check.errors);
+      return;
+    }
+    const request = discoverRequest(check.value);
+    discover.disabled = true;
+    const label = discover.textContent;
+    discover.textContent = "Listing…";
+    try {
+      const answer = await api(request.path, { method: request.method, body: request.body });
+      listed = { provider: provider.id, models: (answer && answer.models) || [] };
+      paintModels();
+      if (!listed.models.length && !quiet) {
+        toast("This provider does not list its models. Type the model name.", "warn");
+      }
+    } catch (error) {
+      if (!quiet) toast(`Could not list models: ${error.message}`, "bad");
+    } finally {
+      discover.disabled = false;
+      discover.textContent = label;
+    }
+  };
+  discover.addEventListener("click", () => listModels());
+  apiKey.addEventListener("change", () => listModels({ quiet: true }));
+
   const resetForm = () => {
     form.reset();
     apiKey.type = "password";
@@ -720,7 +974,10 @@ async function wireModels() {
     $("#connect-title").textContent = "Connect a model";
     submit.textContent = "Connect model";
     cancel.hidden = true;
-    applyProvider(checked(form, "provider") || "openai");
+    search.value = "";
+    renderList();
+    listed = { provider: null, models: [] };
+    applyProvider("anthropic");
   };
   cancel.addEventListener("click", resetForm);
 
@@ -738,20 +995,9 @@ async function wireModels() {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const check = validateConnect({
-      role: checked(form, "role"),
-      provider: checked(form, "provider"),
-      baseUrl: baseUrl.value,
-      apiKey: apiKey.value,
-      model: model.value,
-    });
-    fieldError("role", check.errors.role);
-    fieldError("provider", check.errors.provider);
-    fieldError("baseUrl", check.errors.baseUrl, baseUrl);
-    fieldError("apiKey", check.errors.apiKey, apiKey);
-    fieldError("model", check.errors.model, model);
+    const check = validateConnect(readForm());
+    const first = showErrors(check.errors);
     if (!check.ok) {
-      const first = form.querySelector('[aria-invalid="true"]');
       if (first) first.focus();
       return;
     }
@@ -784,13 +1030,21 @@ async function wireModels() {
       const row = rows.find((r) => r.role === role) || {};
       const provider = providerForConnection(row);
       const roleInput = form.querySelector(`input[name="role"][value="${role}"]`);
-      const providerInput = form.querySelector(
-        `input[name="provider"][value="${provider.id}"]`,
-      );
       if (roleInput) roleInput.checked = true;
-      if (providerInput) providerInput.checked = true;
-      applyProvider(provider.id, true);
-      if (!provider.fixed && row.base_url) baseUrl.value = row.base_url;
+      applyProvider(provider.id, { keepModel: true });
+      const stored = String(row.base_url || "").replace(/\/+$/, "");
+      if (provider.id === "custom") {
+        baseUrl.value = stored;
+        const wire = form.querySelector(`input[name="wire"][value="${row.wire}"]`);
+        const auth = form.querySelector(`input[name="auth"][value="${row.auth}"]`);
+        if (wire) wire.checked = true;
+        if (auth) auth.checked = true;
+      } else if (stored && stored !== provider.base_url.replace(/\/+$/, "")) {
+        // A regional host or a filled-in variable: keep exactly what was used.
+        editing = true;
+        paintEndpoint();
+        baseUrl.value = stored;
+      }
       model.value = row.model || "";
       apiKey.value = "";
       $("#connect-title").textContent = `Replace the ${name} model`;

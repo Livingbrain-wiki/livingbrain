@@ -1,17 +1,26 @@
 //! The capability probe: on connect, send a few small requests to the
-//! model endpoint and report what works.
+//! model endpoint and report what works — over whichever wire the provider
+//! speaks.
 //!
 //! The probe sends at most three requests:
-//! 1. Tool calling — a trivial tool with `tool_choice: "required"`.
-//! 2. JSON output — `response_format: {"type":"json_object"}`.
-//! 3. Context size — `GET {base_url}/models/{model}`.
+//! 1. Tool calling — a trivial tool the model is required to call
+//!    (`tool_choice: "required"` on the OpenAI wire, `{"type":"any"}` on the
+//!    Anthropic one).
+//! 2. JSON output — `response_format: {"type":"json_object"}` on the OpenAI
+//!    wire; the Anthropic wire has no such switch, so it asks for a bare JSON
+//!    object and checks that it got one.
+//! 3. Context size — `GET {base}/v1/models/{model}`, best effort.
 //!
-//! `base_url` is the *checked* [`Url`], not the string a member sent: the
-//! host the guard approved is the host the probe connects to, and the path
-//! segments below are appended to it rather than concatenated onto a raw
-//! string, so neither can disagree about where the request is going. The
-//! model name is pushed as one percent-encoded path segment for the same
-//! reason.
+//! The key travels as the provider's catalog says: `Authorization: Bearer`
+//! or Anthropic's `x-api-key`. The Anthropic wire also sends
+//! `anthropic-version`. Paths are joined the way Colonizer's gateway joins
+//! them ([`catalog::join`]): a base URL that already ends in a version
+//! segment does not get a second `/v1`.
+//!
+//! `base` is the *checked* [`Url`], not the string a member sent: the host
+//! the guard approved is the host the probe connects to, and the path
+//! segments are appended to it rather than concatenated onto a raw string.
+//! The model name is pushed as one percent-encoded path segment.
 //!
 //! If the very first call fails (non-2xx or transport error), the endpoint
 //! is unreachable: the connection is refused with a 422 that names the
@@ -24,8 +33,18 @@ use std::time::Duration;
 use bytes::Bytes;
 use cratefield_core::axum::http;
 use cratefield_core::{HttpClient, HttpPolicy};
-use serde_json::Value;
+use serde_json::{Value, json};
 use url::Url;
+
+use crate::catalog::{self, Auth, Wire};
+
+/// The `anthropic-version` every Messages request names.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The most model ids [`list_models`] hands back, and the longest one.
+const MAX_LISTED: usize = 500;
+const MAX_ID_LEN: usize = 200;
+/// The response ceiling for a model list.
+const LIST_MAX_RESPONSE: usize = 1024 * 1024;
 
 /// The maximum response body for a probe reply (well under the port ceiling).
 const PROBE_MAX_RESPONSE: usize = 64 * 1024;
@@ -52,43 +71,80 @@ pub(crate) struct ProbeResult {
 #[derive(Debug)]
 pub(crate) struct Unreachable(pub(crate) Option<u16>);
 
-/// `base`, with `segments` appended as percent-encoded path segments.
-fn endpoint(base: &Url, segments: &[&str]) -> Option<Url> {
-    let mut url = base.clone();
-    {
-        let mut path = url.path_segments_mut().ok()?;
-        // `https://host` normalises to a path of "/", whose only segment is
-        // empty; dropping it is what makes `https://host` and
-        // `https://host/v1` both append cleanly.
-        path.pop_if_empty();
-        for segment in segments {
-            path.push(segment);
-        }
-    }
-    Some(url)
+/// Where a request goes and how it is signed: the checked base URL, the
+/// wire, and the auth style, all decided by the catalog (or by the member
+/// for `custom`), never by the probe.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Target<'a> {
+    pub(crate) base: &'a Url,
+    pub(crate) wire: Wire,
+    pub(crate) auth: Auth,
+    pub(crate) api_key: &'a str,
 }
 
-/// Probes the model endpoint at `base` with `model` and `api_key`, where
-/// `base` is the URL the SSRF guard approved. Returns a [`ProbeResult`] on
-/// success, or [`Unreachable`] if the first call fails.
+impl Target<'_> {
+    /// A request to `segments` under the base, with the key in the header
+    /// the provider expects and the probe's tight policy.
+    fn request(
+        &self,
+        method: http::Method,
+        segments: &[&str],
+        body: Option<&Value>,
+    ) -> Result<http::Request<Bytes>, Unreachable> {
+        let url = catalog::join(self.base, segments).ok_or(Unreachable(None))?;
+        let mut builder = http::Request::builder()
+            .method(method)
+            .uri(url.as_str())
+            .extension(HttpPolicy {
+                max_response_bytes: PROBE_MAX_RESPONSE,
+                timeout: PROBE_TIMEOUT,
+            });
+        builder = match self.auth {
+            Auth::Bearer => builder.header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key),
+            ),
+            Auth::XApiKey => builder.header("x-api-key", self.api_key),
+        };
+        if self.wire == Wire::Anthropic {
+            builder = builder.header("anthropic-version", ANTHROPIC_VERSION);
+        }
+        let bytes = match body {
+            Some(body) => {
+                builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+                Bytes::from(body.to_string())
+            }
+            None => Bytes::new(),
+        };
+        builder.body(bytes).map_err(|_| Unreachable(None))
+    }
+
+    /// The completion endpoint's path for this wire.
+    fn chat_path(&self) -> &'static [&'static str] {
+        match self.wire {
+            Wire::Anthropic => &["v1", "messages"],
+            Wire::Openai => &["v1", "chat", "completions"],
+        }
+    }
+}
+
+/// Probes the model endpoint `target` with `model`. Returns a
+/// [`ProbeResult`] on success, or [`Unreachable`] if the first call fails.
 ///
 /// # Errors
 ///
 /// [`Unreachable`] when the first basic call fails (non-2xx or transport).
 pub(crate) async fn probe(
     http: &dyn HttpClient,
-    base: &Url,
+    target: Target<'_>,
     model: &str,
-    api_key: &str,
 ) -> Result<ProbeResult, Unreachable> {
-    let completions = endpoint(base, &["chat", "completions"]).ok_or(Unreachable(None))?;
-
     // (a) Tool calling.
-    let tool_ok = tool_calling_probe(http, &completions, model, api_key).await?;
+    let tool_ok = tool_calling_probe(http, target, model).await?;
     // (b) JSON output.
-    let json_ok = json_output_probe(http, &completions, model, api_key).await?;
+    let json_ok = json_output_probe(http, target, model).await?;
     // (c) Context size.
-    let context_size = context_size_probe(http, base, model, api_key).await?;
+    let context_size = context_size_probe(http, target, model).await?;
 
     let mut missing = Vec::new();
     if !tool_ok {
@@ -114,91 +170,123 @@ pub(crate) async fn probe(
     })
 }
 
-/// Sends a trivial tool with `tool_choice: "required"`. Pass if the model
-/// returns at least one tool call.
+/// Sends a trivial tool the model must call. Pass if it calls one.
 async fn tool_calling_probe(
     http: &dyn HttpClient,
-    url: &Url,
+    target: Target<'_>,
     model: &str,
-    api_key: &str,
 ) -> Result<bool, Unreachable> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "What is 2+2?"}],
-        "tools": [{
-            "type": "function",
-            "function": {
+    let body = match target.wire {
+        Wire::Openai => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "What is 2+2?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "calculate",
+                    "description": "Calculate a math expression",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "required",
+            "max_tokens": PROBE_MAX_TOKENS,
+        }),
+        Wire::Anthropic => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "What is 2+2?"}],
+            "tools": [{
                 "name": "calculate",
                 "description": "Calculate a math expression",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        }],
-        "tool_choice": "required",
-        "max_tokens": PROBE_MAX_TOKENS,
-    });
-    let response = send_chat(http, url, api_key, &body).await?;
-    let parsed: Value = serde_json::from_slice(response.body()).map_err(|_| Unreachable(None))?;
-    let tool_calls = parsed
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("tool_calls"))
-        .and_then(Value::as_array);
-    Ok(tool_calls.is_some_and(|calls| !calls.is_empty()))
+                "input_schema": {"type": "object", "properties": {}}
+            }],
+            "tool_choice": {"type": "any"},
+            "max_tokens": PROBE_MAX_TOKENS,
+        }),
+    };
+    let parsed = send_chat(http, target, &body).await?;
+    Ok(match target.wire {
+        Wire::Openai => parsed
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty()),
+        Wire::Anthropic => parsed
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            }),
+    })
 }
 
-/// Sends a request with `response_format: {"type":"json_object"}`. Pass if
-/// the content parses as a JSON object.
+/// Asks for a JSON object. Pass if the answer's text parses as one.
 async fn json_output_probe(
     http: &dyn HttpClient,
-    url: &Url,
+    target: Target<'_>,
     model: &str,
-    api_key: &str,
 ) -> Result<bool, Unreachable> {
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "Return {\"ok\":true}"}],
-        "response_format": {"type": "json_object"},
-        "max_tokens": PROBE_MAX_TOKENS,
-    });
-    let response = send_chat(http, url, api_key, &body).await?;
-    let parsed: Value = serde_json::from_slice(response.body()).map_err(|_| Unreachable(None))?;
-    let content = parsed
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    Ok(serde_json::from_str::<Value>(content).is_ok_and(|v| v.is_object()))
+    let body = match target.wire {
+        Wire::Openai => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Return {\"ok\":true}"}],
+            "response_format": {"type": "json_object"},
+            "max_tokens": PROBE_MAX_TOKENS,
+        }),
+        Wire::Anthropic => json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": "Reply with exactly this JSON object and nothing else: {\"ok\":true}"
+            }],
+            "max_tokens": PROBE_MAX_TOKENS,
+        }),
+    };
+    let parsed = send_chat(http, target, &body).await?;
+    let content = match target.wire {
+        Wire::Openai => parsed
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        Wire::Anthropic => parsed
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+            .unwrap_or_default(),
+    };
+    Ok(serde_json::from_str::<Value>(content.trim()).is_ok_and(|v| v.is_object()))
 }
 
-/// GETs `{base}/models/{model}` and reads the context length. Returns
+/// GETs `{base}/v1/models/{model}` and reads the context length. Returns
 /// `None` if the endpoint does not report one (unknown, not a failure).
 async fn context_size_probe(
     http: &dyn HttpClient,
-    base: &Url,
+    target: Target<'_>,
     model: &str,
-    api_key: &str,
 ) -> Result<Option<String>, Unreachable> {
-    let url = endpoint(base, &["models", model]).ok_or(Unreachable(None))?;
-    let request = http::Request::builder()
-        .method(http::Method::GET)
-        .uri(url.as_str())
-        .header(http::header::AUTHORIZATION, format!("Bearer {api_key}"))
-        .extension(HttpPolicy {
-            max_response_bytes: PROBE_MAX_RESPONSE,
-            timeout: PROBE_TIMEOUT,
-        })
-        .body(Bytes::new())
-        .map_err(|_| Unreachable(None))?;
+    let request = target.request(http::Method::GET, &["v1", "models", model], None)?;
     let response = http.send(request).await.map_err(|_| Unreachable(None))?;
     if !response.status().is_success() {
         // Context size is best-effort: a failure here is "unknown", not
         // unreachable (the chat probes already proved the endpoint works).
         return Ok(None);
     }
-    let body: Value = serde_json::from_slice(response.body()).map_err(|_| Unreachable(None))?;
+    let Ok(body) = serde_json::from_slice::<Value>(response.body()) else {
+        return Ok(None);
+    };
     // Some endpoints nest the model data under "data"; others return it
     // directly. Check both.
     let data = body.get("data").unwrap_or(&body);
@@ -207,9 +295,10 @@ async fn context_size_probe(
         "context_window",
         "max_model_len",
         "max_context_length",
+        "max_input_tokens",
     ] {
-        // A number or a string, both of which name a size; the four keys
-        // are the spellings providers actually use for it.
+        // A number or a string, both of which name a size; the keys are the
+        // spellings providers actually use for it.
         if let Some(value) = data.get(*key)
             && (value.is_i64() || value.is_u64() || value.is_string())
         {
@@ -219,30 +308,63 @@ async fn context_size_probe(
     Ok(None)
 }
 
-/// Sends a chat-completion request. The first call that fails (non-2xx or
-/// transport) makes the endpoint unreachable. The transport error's own
-/// message is dropped rather than reported: it can carry request details,
-/// and the key is in a header of this request.
-async fn send_chat(
+/// `GET {base}/v1/models`: the model ids the provider says the key can use.
+/// Both wires answer `{"data": [{"id": …}, …]}`; anything else is an empty
+/// list rather than an error, because a provider need not serve the route.
+///
+/// # Errors
+///
+/// [`Unreachable`] with the HTTP status when the provider refuses the call
+/// (a wrong key is a 401 here, which is worth saying before a connect).
+pub(crate) async fn list_models(
     http: &dyn HttpClient,
-    url: &Url,
-    api_key: &str,
-    body: &Value,
-) -> Result<http::Response<Bytes>, Unreachable> {
-    let request = http::Request::builder()
-        .method(http::Method::POST)
-        .uri(url.as_str())
-        .header(http::header::AUTHORIZATION, format!("Bearer {api_key}"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .extension(HttpPolicy {
-            max_response_bytes: PROBE_MAX_RESPONSE,
-            timeout: PROBE_TIMEOUT,
-        })
-        .body(Bytes::from(body.to_string()))
-        .map_err(|_| Unreachable(None))?;
+    target: Target<'_>,
+) -> Result<Vec<String>, Unreachable> {
+    let mut request = target.request(http::Method::GET, &["v1", "models"], None)?;
+    // A router's list is long (OpenRouter's runs to hundreds of KiB), so this
+    // one call gets a larger ceiling than the probe's completions.
+    request.extensions_mut().insert(HttpPolicy {
+        max_response_bytes: LIST_MAX_RESPONSE,
+        timeout: PROBE_TIMEOUT,
+    });
     let response = http.send(request).await.map_err(|_| Unreachable(None))?;
     if !response.status().is_success() {
         return Err(Unreachable(Some(response.status().as_u16())));
     }
-    Ok(response)
+    let Ok(body) = serde_json::from_slice::<Value>(response.body()) else {
+        return Ok(Vec::new());
+    };
+    let mut ids: Vec<String> = body
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("id").and_then(Value::as_str))
+                .filter(|id| !id.is_empty() && id.len() <= MAX_ID_LEN)
+                .filter(|id| id.chars().all(|c| !c.is_control()))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    ids.truncate(MAX_LISTED);
+    Ok(ids)
+}
+
+/// Sends a completion request and parses the answer. The first call that
+/// fails (non-2xx or transport) makes the endpoint unreachable. The
+/// transport error's own message is dropped rather than reported: it can
+/// carry request details, and the key is in a header of this request.
+async fn send_chat(
+    http: &dyn HttpClient,
+    target: Target<'_>,
+    body: &Value,
+) -> Result<Value, Unreachable> {
+    let request = target.request(http::Method::POST, target.chat_path(), Some(body))?;
+    let response = http.send(request).await.map_err(|_| Unreachable(None))?;
+    if !response.status().is_success() {
+        return Err(Unreachable(Some(response.status().as_u16())));
+    }
+    serde_json::from_slice(response.body()).map_err(|_| Unreachable(None))
 }
