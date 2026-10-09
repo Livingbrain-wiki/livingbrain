@@ -10,7 +10,7 @@
  * the app's data must never be served from a stale cache.
  */
 
-const CACHE = "lb-app-v5";
+const CACHE = "lb-app-v7";
 
 const SHELL = [
   "./",
@@ -25,6 +25,8 @@ const SHELL = [
   "./assets/models.js",
   // models.js imports the provider catalog statically, like stack.json.
   "./assets/providers.json",
+  // app.js and models.js import the provider marks beside the names.
+  "./assets/marks.js",
   "./assets/tokens.js",
   // settings.js imports this statically, and an ES module import fails
   // atomically, so an offline settings page would not render at all without it.

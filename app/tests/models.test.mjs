@@ -213,7 +213,8 @@ test("connected models render as cards in role order, never with a key", () => {
     return el;
   };
   const container = { children: [], replaceChildren() { this.children = []; }, appendChild(c) { this.children.push(c); } };
-  renderModelCards(container, views, { createElement: node });
+  // createElementNS is for the provider marks; the fake records them like any element.
+  renderModelCards(container, views, { createElement: node, createElementNS: (_ns, tag) => node(tag) });
   assert.equal(container.children.length, 2);
   const buttons = made.filter((el) => el.tag === "button");
   assert.deepEqual(

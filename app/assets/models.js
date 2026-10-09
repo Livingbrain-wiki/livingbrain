@@ -11,6 +11,7 @@
 // elements and text nodes only, as everywhere else in `app/`.
 
 import catalog from "./providers.json" with { type: "json" };
+import { providerMark } from "./marks.js";
 
 /** The roles, in the order the page shows them, with what each one is for. */
 export const ROLES = Object.freeze([
@@ -341,7 +342,10 @@ export function renderModelCards(
     ]) {
       const pair = el("div");
       pair.appendChild(el("dt", null, term));
-      pair.appendChild(el("dd", null, value));
+      const dd = el("dd");
+      if (term === "Provider") dd.appendChild(providerMark(view.provider, value, doc));
+      dd.appendChild(el("span", null, value));
+      pair.appendChild(dd);
       facts.appendChild(pair);
     }
     card.appendChild(facts);

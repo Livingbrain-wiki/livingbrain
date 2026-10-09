@@ -33,6 +33,7 @@ import {
   connectionViews,
   renderModelCards,
 } from "./models.js";
+import { providerMark } from "./marks.js";
 import {
   TOKEN_SCOPES,
   tokenListRequest,
@@ -586,7 +587,7 @@ function wireSectionNav() {
 }
 
 /** Builds a group of radio "cards" from a list of options. */
-function choiceCards(container, name, options, selected) {
+function choiceCards(container, name, options, selected, withMarks) {
   container.replaceChildren();
   for (const option of options) {
     const label = document.createElement("label");
@@ -597,6 +598,7 @@ function choiceCards(container, name, options, selected) {
     input.value = option.value;
     if (option.value === selected) input.checked = true;
     label.appendChild(input);
+    if (withMarks) label.appendChild(providerMark(option.value, option.label));
     const text = document.createElement("span");
     text.className = "choice__text";
     const title = document.createElement("strong");
@@ -688,6 +690,7 @@ async function wireModels() {
       { value: "custom", label: "Custom endpoint", detail: "Any other API" },
     ],
     "anthropic",
+    true,
   );
   choiceCards($("#wire-choices"), "wire", WIRES, "openai");
   choiceCards($("#auth-choices"), "auth", AUTHS, "bearer");
@@ -713,6 +716,7 @@ async function wireModels() {
       input.value = provider.id;
       if (provider.id === selectedId) input.checked = true;
       label.appendChild(input);
+      label.appendChild(providerMark(provider.id, provider.name));
       const text = document.createElement("span");
       text.className = "picker__text";
       const name = document.createElement("strong");
