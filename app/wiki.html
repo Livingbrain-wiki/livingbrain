@@ -14,6 +14,7 @@
     <link rel="preload" href="assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="assets/fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="assets/app.css" />
+    <link rel="stylesheet" href="assets/wiki.css" />
     <script>
       (function () {
         try {
@@ -38,6 +39,21 @@
           ><span class="mark" aria-hidden="true"><span></span></span
           ><span class="brand__word">livingbrain<span>.wiki</span></span></a
         >
+        <form id="wiki-search-form" class="wiki-search" role="search">
+          <input
+            id="wiki-search"
+            type="search"
+            placeholder="Search the wiki…"
+            aria-label="Search the wiki"
+            autocomplete="off"
+            role="combobox"
+            aria-expanded="false"
+            aria-controls="wiki-search-results"
+            aria-describedby="wiki-search-hint"
+          />
+          <span id="wiki-search-hint" class="sr">Press / to search. Results open with Enter.</span>
+          <div id="wiki-search-results" class="wiki-search__panel" role="listbox" aria-label="Search results" hidden></div>
+        </form>
         <nav class="nav" aria-label="App">
           <a href="wiki.html" aria-current="page">Wiki</a>
           <a href="settings.html">Settings</a>
@@ -50,68 +66,198 @@
           <button type="button" id="header-signout" class="hd-btn">Sign out</button>
         </div>
         <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
+        <button
+          id="drawer-toggle"
+          type="button"
+          class="hd-btn wiki-drawer__btn"
+          aria-expanded="false"
+          aria-controls="wiki-drawer"
+        >Menu</button>
       </div>
     </header>
 
-      <main id="main" class="wrap">
-        <p class="eyebrow">Company wiki</p>
-        <h1 id="page-title">Wiki</h1>
-        <div class="wiki-toolbar">
-          <button id="mode-toggle" type="button" aria-pressed="false">Edit</button>
-          <button id="save" type="button" data-variant="primary" hidden>
-            Save page
-          </button>
-          <button id="new-page" type="button">New page</button>
-          <span class="status" id="wiki-status"></span>
-        </div>
-        <div id="wiki-notice" class="notice" role="status" aria-live="polite"></div>
+    <!-- The small-screen menu: mirrors the header nav and carries this page's
+         table of contents. Opened by #drawer-toggle, closed by Esc, a click
+         outside, or following a link. -->
+    <aside id="wiki-drawer" class="wiki-drawer" aria-label="Menu" hidden>
+      <nav class="wiki-drawer__nav" aria-label="App">
+        <a href="wiki.html">Home</a>
+        <a href="settings.html">Settings</a>
+        <a href="index.html" id="drawer-signin">Sign in</a>
+        <button type="button" id="drawer-signout" class="wiki-drawer__signout" hidden>Sign out</button>
+      </nav>
+      <h2 id="toc-drawer-heading" class="wiki-drawer__h" hidden>On this page</h2>
+      <div id="toc-drawer" class="wiki-toc"></div>
+    </aside>
 
-        <!-- view mode -->
-        <div id="view-wrap" class="aside-grid">
-          <article id="page-body" class="card prose" aria-live="polite"></article>
-          <aside class="aside-grid">
-            <section class="card">
-              <h3>Backlinks</h3>
-              <p class="tiny">Pages that link here.</p>
-              <div id="page-backlinks"></div>
-            </section>
-            <section class="card">
-              <h3>Citations</h3>
-              <p class="tiny">
-                Every claim on this page points at the source it came from.
-              </p>
-              <div id="page-citations"></div>
-            </section>
+    <main id="main" class="wrap">
+      <p class="eyebrow">Company wiki</p>
+      <div id="wiki-notice" class="notice" role="status" aria-live="polite"></div>
+
+      <!-- home: every page, pinned first -->
+      <section id="home-view" hidden>
+        <h1>Wiki</h1>
+        <div class="wiki-toolbar">
+          <button id="new-page" type="button" data-new-page>New page</button>
+          <input
+            id="list-filter"
+            class="wiki-filter"
+            type="search"
+            placeholder="Filter pages…"
+            aria-label="Filter pages by slug or type"
+            autocomplete="off"
+            hidden
+          />
+          <span class="status" id="home-status" role="status"></span>
+        </div>
+
+        <section id="pinned-section" hidden>
+          <h2>Pinned</h2>
+          <ul id="pinned-list" class="wiki-list"></ul>
+        </section>
+        <section id="recent-section" hidden>
+          <h2>Recent</h2>
+          <ul id="recent-list" class="wiki-list"></ul>
+        </section>
+        <p id="home-nomatch" class="tiny" hidden>No pages match that filter.</p>
+
+        <div id="home-empty" class="card wiki-empty" hidden>
+          <h2>Nothing here yet</h2>
+          <p>
+            Pages appear as you use the brain: import your history, take a note
+            from your coding agent over MCP (<code>brain_note</code>), or keep
+            something worth keeping said in Slack. Or start one by hand now.
+          </p>
+          <button type="button" data-new-page data-variant="primary">New page</button>
+        </div>
+      </section>
+
+      <!-- page: one page, read -->
+      <section id="page-view" hidden>
+        <div class="wiki-page">
+          <div class="wiki-page__main">
+            <h1 id="page-title"></h1>
+            <p id="page-meta" class="wiki-meta"></p>
+            <div class="wiki-toolbar">
+              <button id="edit" type="button" hidden>Edit</button>
+              <button id="ask-open" type="button">Ask about this page</button>
+              <button id="pin-toggle" type="button" aria-pressed="false">Pin</button>
+              <button type="button" data-new-page>New page</button>
+            </div>
+            <article id="page-body" class="card prose" aria-live="polite"></article>
+            <div class="aside-grid">
+              <section class="card">
+                <h3>Backlinks</h3>
+                <p class="tiny">Pages that link here.</p>
+                <div id="page-backlinks"></div>
+              </section>
+              <section class="card">
+                <h3>Citations</h3>
+                <p class="tiny">
+                  Every claim on this page points at the source it came from.
+                </p>
+                <div id="page-citations"></div>
+              </section>
+            </div>
+          </div>
+          <aside id="toc-desktop" class="wiki-toc wiki-toc--side" hidden>
+            <h2>On this page</h2>
+            <div id="toc-list"></div>
           </aside>
         </div>
+      </section>
 
-        <!-- edit mode -->
-        <div id="editor-wrap" class="editor" hidden>
-          <div>
-            <label for="source">Markdown</label>
-            <textarea
-              id="source"
-              spellcheck="true"
-              aria-describedby="source-help"
-            ></textarea>
-            <p id="source-help" class="tiny">
-              Saving sends the version you opened. If someone else saved first,
-              the store refuses the write and your text is kept — nothing is
-              silently overwritten.
-            </p>
-          </div>
-          <div>
-            <h3>Preview</h3>
-            <div id="preview" class="card prose" aria-live="polite"></div>
-          </div>
+      <!-- editor: one page, written -->
+      <section id="editor-view" hidden>
+        <h1 id="editor-heading" class="wiki-editor__h">Edit page</h1>
+        <div class="wiki-toolbar">
+          <button id="save" type="button" data-variant="primary">Save page</button>
+          <button id="cancel-edit" type="button">Cancel</button>
+          <button id="ask-open-edit" type="button">Ask about this page</button>
+          <span class="status" id="wiki-status"></span>
         </div>
+        <div class="field">
+          <label for="edit-title">Title</label>
+          <input id="edit-title" type="text" autocomplete="off" />
+        </div>
+        <div id="edit-mode" class="wiki-editmode" role="group" aria-label="Editor mode">
+          <button id="edit-write" type="button" aria-pressed="true">Write</button>
+          <button id="edit-preview" type="button" aria-pressed="false">Preview</button>
+        </div>
+        <div>
+          <label for="source">Markdown</label>
+          <textarea
+            id="source"
+            spellcheck="true"
+            aria-describedby="source-help"
+          ></textarea>
+          <p id="source-help" class="tiny">
+            Saving sends the version you opened. If someone else saved first,
+            the store refuses the write and your text is kept — nothing is
+            silently overwritten.
+          </p>
+        </div>
+        <div id="preview" class="card prose" aria-live="polite" aria-label="Preview" hidden></div>
+      </section>
 
-        <p class="tiny">
-          Page bodies are rendered without <code>innerHTML</code>: the Markdown
-          renderer produces a node tree and the page builds elements from it, so
-          a page can never inject markup or script.
-        </p>
-      </main>
+      <!-- new page: slug and title, validated before the server sees it -->
+      <section id="new-page-view" hidden>
+        <h1>New page</h1>
+        <form id="np-form" class="card wiki-np" novalidate>
+          <div class="field">
+            <label for="np-slug">Slug</label>
+            <input
+              id="np-slug"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              aria-describedby="np-slug-error"
+            />
+            <p id="np-slug-error" class="field-error"></p>
+          </div>
+          <div class="field">
+            <label for="np-title">Title</label>
+            <input
+              id="np-title"
+              type="text"
+              autocomplete="off"
+              aria-describedby="np-title-error"
+            />
+            <p id="np-title-error" class="field-error"></p>
+          </div>
+          <div class="form-actions">
+            <button id="np-create" type="submit" data-variant="primary">Create page</button>
+            <button id="np-cancel" type="button">Cancel</button>
+          </div>
+          <p class="hint">
+            The slug is the page's address: lowercase letters, digits and
+            hyphens. The title can be friendlier.
+          </p>
+        </form>
+      </section>
+
+      <p class="tiny">
+        Page bodies are rendered without <code>innerHTML</code>: the Markdown
+        renderer produces a node tree and the page builds elements from it, so
+        a page can never inject markup or script.
+      </p>
+    </main>
+
+    <dialog id="ask-panel" class="dialog wiki-ask" aria-labelledby="ask-title">
+      <h2 id="ask-title">Ask the brain</h2>
+      <div class="field">
+        <label for="ask-question">Question</label>
+        <textarea id="ask-question" rows="3"></textarea>
+      </div>
+      <div class="dialog__actions">
+        <button id="ask-submit" type="button" data-variant="primary">Ask</button>
+        <button id="ask-close" type="button">Close</button>
+      </div>
+      <p id="ask-status" class="status wiki-ask__status" role="status"></p>
+      <div id="ask-answer" class="prose"></div>
+      <div id="ask-citations"></div>
+    </dialog>
+
     <footer class="ft">
       <div class="wrap ft__in">
         <span class="brand__word brand__word--sm">livingbrain<span>.wiki</span></span>
