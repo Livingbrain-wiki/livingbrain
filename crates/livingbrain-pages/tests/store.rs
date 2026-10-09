@@ -7,6 +7,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use cratefield_core::{Blob, Clock, Database, EmptyConfig, Module, Statement, UlidIdGen};
 use cratefield_testing::{MemoryBlob, TestHarness};
@@ -15,6 +16,7 @@ use livingbrain_pages::{
     parse_frontmatter,
 };
 use sea_query::Value as SeaValue;
+use time::OffsetDateTime;
 
 /// A store over a freshly migrated in-memory database and an empty blob store.
 /// The kit also builds and validates the module's harness, so a broken
@@ -109,6 +111,36 @@ fn frontmatter_is_typed_per_entity() {
     assert_eq!(frontmatter.get("name"), Some("Atlas"));
     assert_eq!(frontmatter.get("status"), Some("active"));
     assert_eq!(body, "Body.");
+}
+
+/// `project` is an allowed, optional, Decision-only key (issue #121): notes
+/// recorded by the CLI/API carry the caller's `--project` association, and
+/// the search filter reads it back out of the frontmatter.
+#[test]
+fn project_is_an_optional_decision_only_key() {
+    let (frontmatter, body) = parse_frontmatter(
+        "---\ntitle: Adopt atlas\nstatus: accepted\nproject: atlas\n---\nBody.",
+        EntityType::Decision,
+    )
+    .expect("a Decision page may carry `project`");
+    assert_eq!(frontmatter.get("project"), Some("atlas"));
+    assert_eq!(body, "Body.");
+
+    // The allowlist did not widen: an unknown key other than `project`
+    // still fails for a Decision page.
+    assert!(matches!(
+        parse_frontmatter(
+            "---\ntitle: Adopt atlas\nproject: atlas\ncolour: red\n---\n",
+            EntityType::Decision
+        ),
+        Err(PageError::Frontmatter(_))
+    ));
+
+    // The key is Decision-scoped: a Person page still refuses it.
+    assert!(matches!(
+        parse_frontmatter("---\nname: A\nproject: atlas\n---\n", EntityType::Person),
+        Err(PageError::Frontmatter(_))
+    ));
 }
 
 #[test]
@@ -431,4 +463,215 @@ fn the_import_ceiling_is_raised_and_is_the_routes_own() {
         Pages::new().max_body_bytes(&EmptyConfig),
         livingbrain_pages::MAX_SOURCE_BODY_BYTES
     );
+}
+
+// ---------------------------------------------------------------------------
+// Listing heads
+
+/// A clock that steps forward a second on every read. The harness's
+/// `FixedClock` stands still — right for everything else here, but two
+/// writes would then share one `updated_at` stamp and no ordering over
+/// them would be observable.
+struct SteppingClock(AtomicI64);
+
+impl Clock for SteppingClock {
+    fn now(&self) -> OffsetDateTime {
+        let tick = self.0.fetch_add(1, Ordering::Relaxed);
+        OffsetDateTime::from_unix_timestamp(1_800_000_000 + tick).expect("a valid epoch")
+    }
+}
+
+#[test]
+fn list_with_no_scopes_lists_nothing() {
+    pollster::block_on(async {
+        let store = store();
+        store
+            .write("team", "ada", human("u1", None, person("v1")))
+            .await
+            .unwrap();
+        // An empty scope list asks for nothing, without a query.
+        assert!(store.list(&[], 10).await.unwrap().is_empty());
+    });
+}
+
+/// The access-model boundary: the asker supplies the scopes, and a page in
+/// a scope it did not name never comes back, whatever its slug.
+#[test]
+fn list_returns_only_the_scopes_the_asker_named() {
+    pollster::block_on(async {
+        let store = store();
+        store
+            .write("team", "ada", human("u1", None, person("v1")))
+            .await
+            .unwrap();
+        store
+            .write("team", "grace", human("u1", None, person("v1")))
+            .await
+            .unwrap();
+        store
+            .write("private", "ada", human("u1", None, person("v1")))
+            .await
+            .unwrap();
+
+        let listed = store.list(&["team"], 10).await.unwrap();
+        assert!(
+            listed.iter().all(|page| page.scope == "team"),
+            "no page outside a named scope may come back"
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|page| (page.slug.as_str(), page.entity_type, page.version))
+                .collect::<Vec<_>>(),
+            vec![
+                ("ada", EntityType::Person, 1),
+                ("grace", EntityType::Person, 1)
+            ],
+        );
+        // Every head carries the stamp its write put on it.
+        assert!(listed.iter().all(|page| !page.updated_at.is_empty()));
+    });
+}
+
+#[test]
+fn lists_newest_updated_page_first() {
+    pollster::block_on(async {
+        let kit = TestHarness::new(vec![Box::new(Pages::new())]);
+        let blob: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
+        let store = PageStore::new(
+            kit.db.clone(),
+            blob,
+            common::kms(),
+            Arc::new(SteppingClock(AtomicI64::new(0))),
+            Arc::new(UlidIdGen),
+        );
+        store
+            .write("team", "ada", human("u1", None, person("v1")))
+            .await
+            .unwrap();
+        store
+            .write("team", "grace", human("u1", None, person("v1")))
+            .await
+            .unwrap();
+
+        // Grace was written second, so her head is newer — and it comes
+        // first even though `ada` sorts before `grace`.
+        let listed = store.list(&["team"], 10).await.unwrap();
+        let slugs: Vec<&str> = listed.iter().map(|page| page.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["grace", "ada"]);
+    });
+}
+
+#[test]
+fn list_respects_the_limit() {
+    pollster::block_on(async {
+        let store = store();
+        for slug in ["ada", "grace", "mary"] {
+            store
+                .write("team", slug, human("u1", None, person("v1")))
+                .await
+                .unwrap();
+        }
+        // Two of the three, and under the shared stamp the slug tiebreak
+        // is ascending.
+        let listed = store.list(&["team"], 2).await.unwrap();
+        let slugs: Vec<&str> = listed.iter().map(|page| page.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["ada", "grace"]);
+        // A limit of zero asks for nothing, without a query.
+        assert!(store.list(&["team"], 0).await.unwrap().is_empty());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Surfaces
+
+/// The composition the venture builds once the CLI contract has routes
+/// (issue #121): page routes merged at the module's own mount root and the
+/// MCP server nested at `/mcp` — one module, one shared context, both
+/// reading and writing the same pages. A page written through the nested
+/// surface must be visible to the merged one, which is what says
+/// both read the same wiring and not a lookalike.
+#[test]
+fn a_merged_surface_and_a_nest_are_both_served_over_one_wiring() {
+    pollster::block_on(async {
+        use cratefield_core::axum::http::Method;
+        use cratefield_core::axum::{Json, routing::get};
+        use cratefield_testing::request;
+
+        let kms = common::kms();
+        let kit = TestHarness::with_ports(
+            vec![Box::new(
+                Pages::new()
+                    .surface({
+                        let kms = Arc::clone(&kms);
+                        move |ctx| {
+                            let store = Arc::new(PageStore::new(
+                                ctx.ports.db.clone().expect("pages requires Db"),
+                                ctx.ports.blob.clone().expect("pages requires Blob"),
+                                Arc::clone(&kms),
+                                ctx.ports.clock.clone().expect("pages requires Clock"),
+                                Arc::new(UlidIdGen),
+                            ));
+                            cratefield_core::axum::Router::new().route(
+                                "/list",
+                                get(move || {
+                                    let store = Arc::clone(&store);
+                                    async move {
+                                        let listed = store.list(&["team"], 10).await.unwrap();
+                                        let slugs: Vec<String> =
+                                            listed.into_iter().map(|page| page.slug).collect();
+                                        Json(slugs)
+                                    }
+                                }),
+                            )
+                        }
+                    })
+                    .nest("/mcp", {
+                        let kms = Arc::clone(&kms);
+                        move |ctx| {
+                            let store = Arc::new(PageStore::new(
+                                ctx.ports.db.clone().expect("pages requires Db"),
+                                ctx.ports.blob.clone().expect("pages requires Blob"),
+                                Arc::clone(&kms),
+                                ctx.ports.clock.clone().expect("pages requires Clock"),
+                                Arc::new(UlidIdGen),
+                            ));
+                            cratefield_core::axum::Router::new().route(
+                                "/peek",
+                                get(move || {
+                                    let store = Arc::clone(&store);
+                                    async move {
+                                        if store.read("team", "ada").await.unwrap().is_none() {
+                                            store
+                                                .write(
+                                                    "team",
+                                                    "ada",
+                                                    human("u1", None, person("v1")),
+                                                )
+                                                .await
+                                                .unwrap();
+                                        }
+                                        let page =
+                                            store.read("team", "ada").await.unwrap().unwrap();
+                                        Json(page.markdown)
+                                    }
+                                }),
+                            )
+                        }
+                    }),
+            )],
+            |ports| ports.blob = Some(Arc::new(MemoryBlob::new())),
+        );
+
+        // The nest is where it always was, and its write lands.
+        let peek = request(&kit.router, Method::GET, "/v1/pages/mcp/peek", None).await;
+        assert!(peek.status.is_success(), "{}", peek.status);
+        assert_eq!(peek.json().as_str(), Some(person("v1").as_str()));
+
+        // The merged surface is at the module's own mount root, and it
+        // sees what the nested surface wrote.
+        let list = request(&kit.router, Method::GET, "/v1/pages/list", None).await;
+        assert!(list.status.is_success(), "{}", list.status);
+        assert_eq!(list.json().to_string(), r#"["ada"]"#);
+    });
 }

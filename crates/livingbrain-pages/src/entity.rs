@@ -117,9 +117,12 @@ fn schema(entity: EntityType) -> Schema {
             optional: &["status", "owner"],
             enums: &[("status", &["active", "paused", "done"])],
         },
+        // `project` is optional and Decision-only (issue #121): notes recorded
+        // by the CLI/API carry the caller's `--project` association in their
+        // frontmatter, and GET /v1/search?project= filters on it.
         EntityType::Decision => Schema {
             required: &["title"],
-            optional: &["status", "date"],
+            optional: &["status", "date", "project"],
             enums: &[("status", &["proposed", "accepted", "superseded"])],
         },
         EntityType::Customer => Schema {

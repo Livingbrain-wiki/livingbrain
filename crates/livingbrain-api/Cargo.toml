@@ -1,0 +1,48 @@
+[package]
+name = "livingbrain-api"
+description = "Living Brain: the HTTP surface for first-party clients — pages, notes, search, ask and export, every read and write scoped to the asker"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependencies a module is allowed: the ports, and the
+# KMS port beside them. `axum` arrives through `cratefield_core::axum`, so it
+# is not named directly.
+cratefield-core = { workspace = true }
+# Wrap/unwrap a scope's data key (issue #43). The composition hands one to
+# every surface beside the context, exactly as it does for the MCP server.
+cratefield-kms = { workspace = true }
+# Who is asking: `Asker`, `BearerAuth` and the scope derivation are issue
+# #72's seam, pub in livingbrain-mcp and reused here rather than reimplemented.
+livingbrain-mcp = { path = "../livingbrain-mcp" }
+# The store every route reads and writes, and the shapes it returns.
+livingbrain-pages = { path = "../livingbrain-pages" }
+# The user scope a note lands in (`Scope::User` behind `page_scope`).
+livingbrain-access = { path = "../livingbrain-access" }
+# Secrets and PII leave every write path before it reaches a body (issue #108).
+livingbrain-redact = { path = "../livingbrain-redact" }
+# The `Blob` port is declared with `#[async_trait]`, so implementing it here
+# (`RebindBlob`, the per-request bridge onto the pages key space) needs the
+# same macro. It is already in the tree.
+async-trait = { workspace = true }
+# Request bodies, and the SHA-256 behind a note slug.
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20). Dev-only, so sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# The test's bearer stub implements the `BearerAuth` seam, declared with
+# `#[async_trait]` like every harness port.
+async-trait = { workspace = true }
+# An executor for the async tests, the same one the sibling suites use.
+pollster = { workspace = true }

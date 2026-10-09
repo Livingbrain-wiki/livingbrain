@@ -13,7 +13,11 @@
 //! opt-in mail through Owlpost, and the CSV export behind the admin token;
 //! and `tokens` with the harness `device-auth` grant beside it — the personal
 //! access tokens behind issue #72, minted by a device that has no browser to
-//! sign in with, which are also what the MCP endpoint now accepts.
+//! sign in with, which are also what the MCP endpoint now accepts;
+//! and the CLI surface (issue #121) — `notes`, `search`, `ask` and `export`
+//! from `livingbrain-api`, the four modules behind `livingbrain`'s client
+//! contract, whose paths `fetch` diverts through the harness router itself
+//! (`serve_cli` below).
 //! `wrangler.toml` and the D1 migrations are beside this crate.
 //!
 //! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
@@ -27,15 +31,23 @@
 
 use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
-use cratefield_core::axum::http::{HeaderMap, HeaderValue, header};
-use cratefield_core::{Harness, Ports, RandomBytes, RandomError, Template, Venture};
+use cratefield_core::axum::body::{Body, to_bytes};
+use cratefield_core::axum::http::{
+    HeaderMap, HeaderValue, Method as HttpMethod, Request as HttpRequest, header,
+};
+use cratefield_core::axum::response::Response as AxumResponse;
+use cratefield_core::{
+    Blob, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes, RandomError, Template,
+    Venture,
+};
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::MailTheme;
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
 use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
-    Cloudflare, FetchClient, WorkersClock, serve, serve_scheduled,
+    Cloudflare, ContextDefer, FetchClient, WorkersClock, install_tracing, serve, serve_scheduled,
 };
+use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Wiki};
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
@@ -43,6 +55,7 @@ use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_tokens::{DevicePorts, Tokens};
 use livingbrain_workspaces::Workspaces;
 use std::sync::{Arc, OnceLock};
+use tower::ServiceExt;
 use worker::{Context, Env, Request, Response, event};
 
 /// The product slug the site's waitlist form joins (issue #23).
@@ -231,7 +244,7 @@ fn build(
     // module, built before the harness because the grant takes its hooks at
     // composition time and the ports only exist per request.
     let device_ports = DevicePorts::new();
-    let harness = Harness::builder()
+    let builder = Harness::builder()
         .venture(venture())
         // The waitlist module's confirm mails in this venture's theme.
         .templates(templates())
@@ -240,8 +253,14 @@ fn build(
         .module(Models::new())
         .module(device_auth_module(&device_ports))
         .module(tokens_module(device_ports))
-        .module(pages_module(kms, &answers))
-        .module(waitlist_module())
+        .module(pages_module(kms.clone(), &answers))
+        .module(waitlist_module());
+    // The CLI modules mount with the same key ring the pages surface gates
+    // on, so they join the fold the same way pages does.
+    let builder = cli_modules(kms)
+        .into_iter()
+        .fold(builder, HarnessBuilder::module_arc);
+    let harness = builder
         .runtime(runtime.clone())
         .build()
         .expect("the livingbrain harness is valid");
@@ -288,13 +307,41 @@ impl RandomBytes for WorkersRandom {
     }
 }
 
-/// The pages module as this venture composes it, with the MCP server and the
-/// source importer nested in it (issues #24 and #81): the harness scopes
-/// `Blob` per module name, so only a surface built from the pages module's own
-/// context can open a body those pages write.
+/// The four CLI modules (issue #121): the routes `livingbrain`'s client
+/// speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
+/// `GET /v1/export` — each mounted at its own name under the harness rule,
+/// every one constructed with the same [`Wiki`] over the key custodian and
+/// the [`TokenBearer`].
 ///
-/// With no key custodian there is no body anyone may open, so neither surface
-/// is mounted at all and every other route keeps working — a deployment
+/// The blob a module's store reads is not decided here — the composition
+/// roots the per-request port layer on the pages key space instead, so the
+/// page bodies stay physical `pages/` objects no matter which route wrote
+/// them ([`PagesRebind`], planted in [`serve_cli`]). With no key custodian
+/// there is nothing to seal a page with, so — like [`pages_module`] — none
+/// of the four is mounted and every other route keeps working.
+fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
+    let Some(kms) = kms else {
+        return Vec::new();
+    };
+    let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
+    let wiki = Wiki::new(kms, Arc::clone(&auth));
+    vec![
+        Arc::new(Notes::new(wiki.clone())),
+        Arc::new(Search::new(wiki.clone())),
+        Arc::new(Ask::new(wiki.clone())),
+        Arc::new(Export::new(wiki)),
+    ]
+}
+
+/// The pages module as this venture composes it, with the MCP server and the
+/// source importer nested in it (issues #24 and #81) and the page routes the CLI's `livingbrain page`
+/// speaks merged at the mount root (issue #121): `GET /v1/pages`,
+/// `GET|PUT /v1/pages/{slug}`. The harness scopes `Blob` per module name,
+/// so only a surface built from the pages module's own context can open a
+/// body those pages write.
+///
+/// With no key custodian there is no body anyone may open, so neither
+/// surface is mounted and every other route keeps working — a deployment
 /// missing a secret gets a working venture, not a Worker that panics on its
 /// first request.
 ///
@@ -316,7 +363,12 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     let mcp_kms = Arc::clone(&kms);
     let mcp_auth = Arc::clone(&auth);
     let cell = answers.clone();
+    let surface_kms = Arc::clone(&kms);
+    let surface_auth = Arc::clone(&auth);
     Pages::new()
+        .surface(move |ctx| {
+            livingbrain_api::pages_routes(ctx, Arc::clone(&surface_kms), Arc::clone(&surface_auth))
+        })
         .nest("/mcp", move |ctx| {
             // Read apart from `ctx`, which the MCP router below takes whole.
             if let (Some(db), Some(blob), Some(clock), Some(id_gen)) = (
@@ -460,6 +512,21 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare) {
     })
 }
 
+/// The four CLI paths `fetch` diverts to [`serve_cli`] — the routes the
+/// four [`cli_modules`] mount, minus `/v1/pages`, which the pages module
+/// serves through the ordinary [`serve`] path like every other route.
+const CLI_ROUTES: [&str; 4] = ["/v1/notes", "/v1/search", "/v1/ask", "/v1/export"];
+
+/// Whether this request is one of the four CLI paths the venture diverts,
+/// and the surface is mounted at all. The mount is gated on the key ring
+/// (see [`cli_modules`]), so the presence of the `notes` module is the same
+/// gate — a deployment without the ring takes these paths through the
+/// ordinary `serve`, which answers 404, exactly as a composition without
+/// the modules should.
+fn serves_cli(harness: &Harness, path: &str) -> bool {
+    CLI_ROUTES.contains(&path) && harness.modules().iter().any(|m| m.name() == "notes")
+}
+
 #[event(fetch)]
 /// Worker fetch entry point.
 ///
@@ -468,7 +535,141 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare) {
 /// Propagates `worker::Error` from the harness router.
 pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
     let (harness, runtime) = instance(&env);
+    if serves_cli(harness, req.path().as_str()) {
+        return serve_cli(harness, runtime, req, env, ctx).await;
+    }
     serve(harness, runtime, req, env, ctx).await
+}
+
+/// Serves one of the four CLI paths ([`CLI_ROUTES`]) through the harness
+/// router directly.
+///
+/// Why divert at all: the pinned harness has no seam to re-point one
+/// module's blob view at another module's key space, and workerd ties an
+/// env-derived I/O object to the request that created it, so the composition
+/// cannot hand the four modules a pages-scoped store at build time either
+/// (`Cannot perform I/O on behalf of a different request context`). What the
+/// harness *does* expose is the per-request bundle and the router itself,
+/// both public. So this path re-derives the ports the way [`serve`] does,
+/// plants a [`PagesRebind`] over the raw store — the harness then scopes
+/// each module's view on top, and every `notes/…`, `search/…`, `ask/…`,
+/// `export/…` key lands on `pages/…` — and drives the full router through a
+/// one-shot `tower` call. Every layer `serve` would apply still stands:
+/// CORS, the abuse floor, the per-route body ceilings, problem+json.
+///
+/// The body gate mirrors `serve`'s buffered plan: a declared
+/// `content-length` over the module's ceiling is refused unread, a
+/// declaration at or under it is buffered whole. A body with no usable
+/// declaration is refused too — `serve` would read it capped through the
+/// streaming layer, and rather than re-derive that machinery here (a
+/// `!Send` bridge and a hand-rolled cap), the four CLI routes ask for a
+/// declared length; the CLI and the web app always send one.
+///
+/// # Errors
+///
+/// `worker::Error` on conversion/transport failures; problem+json
+/// responses are ordinary 4xx Worker responses.
+async fn serve_cli(
+    harness: &Harness,
+    runtime: &Cloudflare,
+    mut req: Request,
+    env: Env,
+    ctx: Context,
+) -> worker::Result<Response> {
+    install_tracing();
+    let mut ports = runtime.ports(&env, Arc::new(ContextDefer(ctx)));
+    // The port-layer planting: the four scopes land on the pages key space,
+    // through handles derived this request. Keys outside the four prefixes
+    // — the pages module's own — pass through unchanged.
+    ports.blob = ports
+        .blob
+        .take()
+        .map(|raw| Arc::new(PagesRebind::new(raw)) as Arc<dyn Blob>);
+    // `ports` moves into `router()` below, and the ceiling lookup reads the
+    // same config the module contexts were built with — clone the `Arc`
+    // out first, the way `serve` does.
+    let config = Arc::clone(&ports.config);
+    let router = harness.router(ports);
+    let problem_type_base = harness.venture().problem_type_base();
+
+    let url = req.url()?;
+    let path = url.path().to_owned();
+    let method = HttpMethod::from_bytes(req.method().to_string().as_bytes())
+        .map_err(|err| worker::Error::RustError(err.to_string()))?;
+    let limit = harness.max_body_bytes(&path, config.as_ref());
+
+    // Copied out so the header borrow ends before the body is read mutably.
+    let declared = req.headers().get("content-length").ok().flatten();
+    let bytes = match declared
+        .as_deref()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+    {
+        // A declared length over the ceiling is refused unread.
+        Some(len) if len > limit => {
+            return response_to_worker(
+                Problem::request_too_large().into_response_with_base(&problem_type_base),
+            )
+            .await;
+        }
+        // A declaration at or under the limit is buffered whole.
+        Some(_) => req.bytes().await?,
+        // No usable declaration: an empty body is fine (most GETs); a body
+        // without one is refused, not trusted.
+        None => match req.inner().body() {
+            None => Vec::new(),
+            Some(_) => {
+                return response_to_worker(
+                    Problem::request_too_large()
+                        .with_detail(format!("a body on {path} must declare its content-length"))
+                        .into_response_with_base(&problem_type_base),
+                )
+                .await;
+            }
+        },
+    };
+
+    let mut builder = HttpRequest::builder().method(method).uri(url.to_string());
+    {
+        let headers = req.headers();
+        for (name, value) in headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+    }
+    let buffered = builder
+        .body(Body::from(bytes))
+        .map_err(|err| worker::Error::RustError(err.to_string()))?;
+
+    let response = router
+        .oneshot(buffered)
+        .await
+        .map_err(|err| worker::Error::RustError(err.to_string()))?;
+    response_to_worker(response).await
+}
+
+/// The buffered response bridge, mirroring the runtime's own: 1 MiB is a
+/// generous ceiling for what the four CLI routes answer (JSON, one zip).
+async fn response_to_worker(response: AxumResponse) -> worker::Result<Response> {
+    const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
+    let (parts, body) = response.into_parts();
+    let bytes = to_bytes(body, MAX_RESPONSE_BUFFER)
+        .await
+        .map_err(|err| worker::Error::RustError(err.to_string()))?;
+    let mut out = Response::from_bytes(bytes.as_ref().to_vec())?.with_status(parts.status.as_u16());
+    copy_headers(out.headers_mut(), &parts.headers);
+    Ok(out)
+}
+
+/// Copies every response header onto the Worker response, per name: drop
+/// what the `worker` builder pre-set (a default `content-type` from
+/// `from_bytes`), then `append` every value — the same discipline the
+/// runtime applies, kept for the same reasons (`Vary` plus `Set-Cookie`).
+fn copy_headers(worker_headers: &mut worker::Headers, headers: &HeaderMap) {
+    for name in headers.keys() {
+        let _ = worker_headers.delete(name.as_str());
+        for value in headers.get_all(name) {
+            let _ = worker_headers.append(name.as_str(), value.to_str().unwrap_or_default());
+        }
+    }
 }
 
 #[event(scheduled)]
@@ -518,6 +719,9 @@ mod tests {
         // Issue #72: the grant a CLI logs in through, and its credential.
         assert!(names.contains(&"device-auth"), "{names:?}");
         assert!(names.contains(&"tokens"), "{names:?}");
+        for route in CLI_ROUTES {
+            assert!(serves_cli(&harness, route), "{route}");
+        }
     }
 
     /// A token carrying a cookie delimiter is refused before it is spliced
@@ -530,14 +734,21 @@ mod tests {
         }
     }
 
-    /// A deployment with no page key ring still composes: the MCP surface is
-    /// not mounted and every other route keeps working.
+    /// A deployment with no page key ring still composes: the MCP surface
+    /// and the four CLI modules are not mounted, and every other route keeps
+    /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
         let (harness, _) = build(unconfigured_mail(), None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
+        for module in ["notes", "search", "ask", "export"] {
+            assert!(!names.contains(&module), "{names:?}");
+        }
+        for route in CLI_ROUTES {
+            assert!(!serves_cli(&harness, route), "{route}");
+        }
     }
 
     /// A blank or whitespace-only binding is unset, and a value keeps no

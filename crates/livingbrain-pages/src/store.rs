@@ -124,6 +124,20 @@ pub struct SearchHit {
     pub slug: String,
 }
 
+/// One page's head metadata, without its body: what [`PageStore::list`]
+/// hands back for the pages the asker's scopes hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageSummary {
+    pub scope: String,
+    pub slug: String,
+    pub entity_type: EntityType,
+    /// The page's head version.
+    pub version: u32,
+    /// When the head was written, RFC 3339 — the storage format for every
+    /// timestamp.
+    pub updated_at: String,
+}
+
 /// What a [`PageStore::reencrypt_scope`] pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReencryptReport {
@@ -559,6 +573,63 @@ impl PageStore {
             .iter()
             .filter_map(|row| row.get::<String>("from_slug"))
             .collect())
+    }
+
+    /// The heads of the pages in `scopes`, newest first, each without its
+    /// body — the inventory behind a "list pages" call.
+    ///
+    /// The asker supplies the scopes; this never widens them and never runs
+    /// a query without a scope predicate. An empty scope list or a zero
+    /// limit asks for nothing and gets nothing, without a query.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Store`] if the database fails.
+    pub async fn list(&self, scopes: &[&str], limit: usize) -> Result<Vec<PageSummary>, PageError> {
+        if scopes.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut values = Vec::new();
+        let placeholders = scopes
+            .iter()
+            .map(|scope| {
+                values.push(text(scope));
+                "?"
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        values.push(SeaValue::BigInt(Some(
+            i64::try_from(limit).unwrap_or(i64::MAX),
+        )));
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                format!(
+                    "SELECT scope, slug, entity_type, head_version, updated_at FROM pages \
+                     WHERE scope IN ({placeholders}) \
+                     ORDER BY updated_at DESC, slug ASC LIMIT ?"
+                ),
+                values,
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let raw = row.get::<String>("entity_type").ok_or_else(|| {
+                    PageError::Corrupt("pages.entity_type is not text".to_owned())
+                })?;
+                Ok(PageSummary {
+                    scope: row.get::<String>("scope").unwrap_or_default(),
+                    slug: row.get::<String>("slug").unwrap_or_default(),
+                    entity_type: EntityType::parse(&raw).ok_or_else(|| {
+                        PageError::Corrupt(format!("unknown entity type `{raw}`"))
+                    })?,
+                    version: row.get::<u32>("head_version").unwrap_or_default(),
+                    updated_at: row.get::<String>("updated_at").unwrap_or_default(),
+                })
+            })
+            .collect()
     }
 
     /// The `pages` row for a page, or `None`.

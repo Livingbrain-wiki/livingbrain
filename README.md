@@ -93,6 +93,7 @@ npx wrangler d1 migrations apply livingbrain --local   # creates the tables (see
 npx wrangler dev --local                  # builds the Worker to wasm and serves it locally
 curl -s http://127.0.0.1:8787/__health    # the harness health route
 curl -si http://127.0.0.1:8787/v1/workspaces/slack/start   # 302 to Slack, or 503 without credentials
+scripts/dev/cli-smoke.sh                  # or all of the above, end to end: boots the Worker and drives the CLI (issue #121)
 ```
 
 Nothing here is deployed: `wrangler dev` is local only, and the D1/R2/KV ids in

@@ -39,12 +39,19 @@ cratefield-module-device-auth = { workspace = true }
 cratefield-kms = { workspace = true }
 # `TokenBearer` below implements the module's `BearerAuth` seam.
 async-trait = { workspace = true }
+# The CLI surface (issue #121): the four harness modules behind the client
+# contract — `/v1/notes`, `/v1/pages`, `/v1/search`, `/v1/ask`,
+# `/v1/export`. `fetch` diverts the four non-pages paths through the harness
+# router itself (see `serve_cli` below).
+livingbrain-api = { path = "../livingbrain-api" }
 livingbrain-canary = { path = "../livingbrain-canary" }
 livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }
 livingbrain-tokens = { path = "../livingbrain-tokens" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+# `serve_cli` drives the diverted CLI paths through the harness router.
+tower = { workspace = true }
 worker = { workspace = true }
 # The entropy source the device grant draws its codes from (issue #72).
 # `wasm_js` is what makes it work in a Workers isolate; on a native build it
