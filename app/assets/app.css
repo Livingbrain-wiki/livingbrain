@@ -987,6 +987,148 @@ legend {
   margin-top: auto;
 }
 
+/*   the session: checking, the signed-in home, and the header bar
+   ---------------------------------------------------------------- */
+
+/* "Checking your session…": the dot pulses while nothing else is shown. */
+.checking::before {
+  background: var(--accent);
+  box-shadow: var(--glow);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .checking::before {
+    animation: lb-pulse 1.2s var(--ease) infinite alternate;
+  }
+}
+
+@keyframes lb-pulse {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.home__ws {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  min-width: 0;
+}
+
+.facts > div {
+  min-width: 0;
+}
+
+.facts dt {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.steps {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+}
+
+.steps > .steps__wide {
+  grid-column: 1 / -1;
+}
+
+/* An endpoint or a command: one long string that wraps instead of widening
+   the card. */
+.endpoint {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius);
+  background: var(--bg3);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.howto {
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  display: grid;
+  gap: var(--space-2);
+  color: var(--ink2);
+  font-size: 15px;
+}
+
+.howto .endpoint {
+  margin-top: 6px;
+}
+
+/* The header's "Signed in as …" and Sign out. */
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ink3);
+}
+
+.session-bar[hidden] {
+  display: none;
+}
+
+.session-bar__who {
+  min-width: 0;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-bar__who strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* A header-sized ghost button, the same box as the theme toggle. */
+.hd-btn {
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink2);
+}
+
+/* Narrow screens: brand and theme stay on the first row; who is signed in
+   and Sign out take the second, the nav the third. */
+@media (max-width: 40rem) {
+  .hd__in .session-bar {
+    order: 2;
+    flex: 1 1 100%;
+    justify-content: space-between;
+  }
+  .session-bar__who {
+    max-width: none;
+  }
+}
+
 /*   settings
    ---------------------------------------------------------------- */
 

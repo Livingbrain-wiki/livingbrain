@@ -3,8 +3,9 @@
 //! Two are the Slack sign-in flow (`/slack/start` and `/slack/callback`),
 //! two read the session back (`/me` and `/members`), one links a Slack team
 //! to a workspace the caller is already in (`/connections/slack/start`),
-//! and three are the email magic link (`/email/start`, and `/email/verify`
-//! as a form to render and a form to submit).
+//! three are the email magic link (`/email/start`, and `/email/verify`
+//! as a form to render and a form to submit), and one ends the session
+//! (`/signout`).
 //!
 //! No route takes a workspace id from the request and acts on it. The
 //! workspace is whatever the verified session cookie names, what the sealed
@@ -22,7 +23,7 @@ use cratefield_core::axum::routing::{get, post};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{
     Clock, Database, DbError, IdGen, MailError, Message, ModuleContext, Problem, ProblemDef,
-    SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email,
+    SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email, origin_of,
 };
 use cratefield_kms::Kms;
 use livingbrain_pages::Answers;
@@ -37,6 +38,15 @@ use crate::flow::{self, Flow, Session};
 use crate::install;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
+
+/// A cookie-carrying write a browser reports as coming from another site.
+/// The same refusal `livingbrain-tokens` answers its cookie writes with.
+const CROSS_SITE_REQUEST: ProblemDef = ProblemDef {
+    slug: "workspaces/cross-site-request",
+    status: StatusCode::FORBIDDEN,
+    title: "This request came from another site",
+    description: "Signing out is only accepted from this site's own pages.",
+};
 
 /// The Slack app has not been configured. A 503, not a 500: nothing is
 /// broken, the deployment has not been given the credentials, and the
@@ -248,6 +258,7 @@ pub(crate) fn router(ctx: ModuleContext, answers: Option<Arc<dyn Answers>>) -> a
         .route("/slack/events", post(slack_events))
         .route("/me", get(me))
         .route("/members", get(members))
+        .route("/signout", post(signout))
         .route("/email/start", post(email_start))
         .route("/email/verify", get(email_verify_form).post(email_verify))
         .with_state(state)
@@ -1043,6 +1054,89 @@ async fn session_scope_of(
     };
     let is_owner = workspace.owner_id == session.user_id;
     Ok((workspace, member, is_owner))
+}
+
+/// `POST /signout` — end the session in this browser.
+///
+/// Answers `204` and a `Set-Cookie` that drops `__Host-lb_session` with the
+/// same attributes it was set with (`Path=/`, `Secure`, `HttpOnly`,
+/// `SameSite=Lax`) and `Max-Age=0`. It answers `204` whether or not a session
+/// was presented, so signing out twice — or in a second tab — is not an
+/// error.
+///
+/// It is a cookie write, so it takes the same same-origin check the other
+/// cookie writes in this venture take ([`require_same_origin`]): another site
+/// cannot sign a person out by posting here. `SameSite=Lax` already keeps the
+/// cookie off a cross-site `POST`, but a sibling subdomain is *same-site*, so
+/// the check is what refuses one of those.
+///
+/// There is no session row to revoke: a session is a signed, self-expiring
+/// cookie ([`flow::Session`]) and nothing is stored server-side, so a copy of
+/// the cookie taken before this call still verifies until its `exp`. Closing
+/// that needs a server-side session table or a per-member revocation stamp,
+/// which is a migration and not this route.
+async fn signout(headers: HeaderMap) -> Result<Response, Problem> {
+    require_same_origin(&headers)?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        flow::clear_cookie(flow::SESSION_COOKIE).ok_or_else(Problem::internal)?,
+    );
+    Ok(response)
+}
+
+/// Refuses a write a browser reports as coming from another site.
+///
+/// The rule `livingbrain-tokens` applies to its cookie writes, restated here
+/// because that crate depends on this one and not the other way round.
+/// `sec-fetch-site` is checked first — `same-origin` and `none` pass and
+/// everything else, including `same-site`, is refused — then `Origin`, when
+/// present, must be this request's own origin, compared as an RFC 6454
+/// origin rather than as a string. A request carrying neither header is not
+/// a browser and is accepted.
+fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
+    let refused = |detail: String| Problem::new(&CROSS_SITE_REQUEST).with_detail(detail);
+    if let Some(site) = headers.get("sec-fetch-site") {
+        let site = site.to_str().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(site.as_str(), "same-origin" | "none") {
+            return Err(refused(format!(
+                "sec-fetch-site is {site}; only same-origin or none is accepted"
+            )));
+        }
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let presented = origin
+        .to_str()
+        .map_err(|_| refused("origin was not valid UTF-8".to_owned()))?;
+    let presented = origin_of(presented)
+        .map_err(|err| refused(format!("origin {presented:?} is not an origin: {err}")))?;
+    let own = own_origin(headers)
+        .ok_or_else(|| refused("origin was present but the request named no host".to_owned()))?;
+    if presented != own {
+        return Err(refused(format!(
+            "origin {presented} does not match the host this request reached ({own})"
+        )));
+    }
+    Ok(())
+}
+
+/// The origin this request reached: its `Host`, under `x-forwarded-proto`
+/// when a proxy names one and `https` otherwise — the resolution
+/// `livingbrain-tokens` uses for the same check.
+fn own_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| !host.is_empty())?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|scheme| scheme.split(',').next().unwrap_or(scheme).trim())
+        .filter(|scheme| matches!(*scheme, "http" | "https"))
+        .unwrap_or("https");
+    origin_of(&format!("{scheme}://{host}")).ok()
 }
 
 fn member_view(member: Member) -> MemberView {

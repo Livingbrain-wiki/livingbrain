@@ -40,6 +40,8 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | :--- | :--- | :--- |
 | `POST /v1/workspaces/email/start` | `index.html` | **yes** — always `202 {"status":"accepted"}` |
 | `GET /v1/workspaces/slack/start` | `index.html` | **yes** |
+| `GET /v1/workspaces/me` | every page | **yes** — `200` shows the signed-in home (and the header's "Signed in as …"), `401` the sign-in form |
+| `POST /v1/workspaces/signout` | every page | **yes** — `204`, drops the session cookie; same-origin only |
 | `GET /v1/models` | `settings.html` | **yes** |
 | `PUT /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, …)` |
 | `GET /v1/tokens` | `settings.html` | **yes** |
@@ -111,7 +113,7 @@ node --test "app/tests/**/*.test.mjs"
 (`node --test app/tests/` — the bare-directory form — does not work on the
 Node 24 build used here; the glob form does, and is what CI runs.)
 
-Three test files, 40 tests:
+The test files (`node --test` prints the current count):
 
 - `tests/markdown.test.mjs` — the Markdown pipeline, the citation renderer and
   the backlinks renderer, imported from `assets/markdown.js` directly.
@@ -121,6 +123,9 @@ Three test files, 40 tests:
   itself. It guards its DOM boot, so Node loads the same file the pages load
   and exercises the real `api` wrapper, the real `LB.setting` choke point
   (including the bytes that reach the wire), and the real `mountNodes`.
+- `tests/session.test.mjs` — the `/me` check and sign-out from
+  `assets/session.js`: signed in, signed out and "could not tell", what each
+  one shows, and the hidden-until-checked markup of `index.html`.
 
 `dom.test.mjs` swaps `globalThis.document` for a recorder that offers only
 `createElement`, `createTextNode`, `createDocumentFragment` and
@@ -131,11 +136,12 @@ quietly.
 
 | File | What it is |
 | :--- | :--- |
-| `index.html` | Sign-in: email magic link, Slack, and the two options with no route yet |
+| `index.html` | The signed-in home when there is a session; otherwise sign-in: email magic link, Slack, and the two options with no route yet |
 | `settings.html` | Six settings sections; models is live, the rest are marked |
 | `wiki.html` | Reader and editor: Markdown, backlinks, citations, `base_version` saves |
 | `assets/app.css` | The website's tokens (`--bg`, `--bg2`, `--ink`, `--line`, `--accent`, oklch), fonts and components |
-| `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting` |
+| `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting`, sign-out |
+| `assets/session.js` | Who is signed in: the `/me` check, its three outcomes, and what each page shows for them |
 | `assets/markdown.js` | Pure Markdown / citation / backlink renderers |
 | `assets/settings.js` | Pure settings request builder |
 | `assets/favicon.svg`, `assets/*.png` | The mark and the PWA icons, copied from the website |

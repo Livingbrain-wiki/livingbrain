@@ -26,6 +26,13 @@ import {
   RETURN_TO_PARAM,
 } from "./tokens.js";
 import { renderMarkdown, renderCitations, renderBacklinks } from "./markdown.js";
+import {
+  checkSession,
+  applySignInPage,
+  applyHeader,
+  signOutRequest,
+  SLOTS,
+} from "./session.js";
 
 /**
  * The API base. Same-origin by default, because the app is served from the
@@ -279,9 +286,58 @@ export function notice(element, message, tone = "warn") {
 
 const pages = {};
 
+/* --- session -------------------------------------------------------- */
+
+/**
+ * The origin the API answers on: the `lb-api` meta when a deployment sets
+ * one, this page's own origin otherwise. It is what the MCP endpoint and the
+ * CLI's `LIVINGBRAIN_API_URL` are shown under, so staging shows staging.
+ */
+export function apiOrigin() {
+  return apiBase() || (typeof location !== "undefined" ? location.origin : "");
+}
+
+/**
+ * Asks the API to drop the session cookie. Resolves `true` once it has; on a
+ * refusal the caller says so and leaves the page as it was.
+ */
+export async function signOut() {
+  const request = signOutRequest();
+  await api(request.path, { method: request.method });
+  return true;
+}
+
+/**
+ * The header on every page but sign-in: "Signed in as …" and Sign out when
+ * there is a session, the "Sign in" link otherwise. It never blocks the
+ * page: the check runs beside the page's own setup.
+ */
+async function wireHeaderSession() {
+  const bar = $("#session-bar");
+  if (!bar) return;
+  const els = { bar, who: $("#session-who"), signin: $("#header-signin") };
+  applyHeader(els, await checkSession(api));
+  const button = $("#header-signout");
+  if (button) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await signOut();
+        location.assign("index.html");
+      } catch (error) {
+        button.disabled = false;
+        notice($("#settings-notice") || $("#wiki-notice"), `Not signed out: ${error.message}`, "bad");
+      }
+    });
+  }
+}
+
 /** Runs a page's setup once the DOM is parsed. */
 function boot() {
   wireThemeToggle($("#theme-toggle"));
+  wireHeaderSession().catch(() => {
+    /* the header keeps its plain "Sign in" link */
+  });
   const init = document.body && document.body.dataset.page;
   const page = pages[init];
   if (page) page().catch((error) => {
@@ -353,6 +409,35 @@ pages.signin = async function signin() {
     location.assign(resume);
     return;
   }
+  // Signed in already? The magic link and Slack both land here at `/`, so
+  // this is the page a fresh session arrives on. Neither the form nor the
+  // home shows until the check settles.
+  const els = {
+    checking: $("#session-checking"),
+    signin: $("#signin-view"),
+    home: $("#home-view"),
+    error: $("#session-error"),
+  };
+  for (const key of SLOTS) els[key] = $$(`[data-session="${key}"]`);
+  applySignInPage(els, { kind: "checking" }, apiOrigin());
+  const state = await checkSession(api);
+  applySignInPage(els, state, apiOrigin());
+
+  const signout = $("#signout");
+  signout.addEventListener("click", async () => {
+    signout.disabled = true;
+    try {
+      await signOut();
+      applySignInPage(els, { kind: "signed-out" }, apiOrigin());
+      $("#email").focus();
+    } catch (error) {
+      notice(els.error, `Not signed out: ${error.message}`, "bad");
+      els.error.hidden = false;
+    } finally {
+      signout.disabled = false;
+    }
+  });
+
   const form = $("#email-form");
   const status = $("#email-status");
   const email = $("#email");
@@ -673,6 +758,7 @@ pages.wiki = async function wiki() {
 export const LB = Object.freeze({
   $, $$, esc,
   api, ApiError,
+  signOut,
   setting: setSetting,
   theme: { apply: applyTheme, current: currentTheme },
 });
