@@ -171,6 +171,11 @@ The test files (`node --test` prints the current count):
   itself. It guards its DOM boot, so Node loads the same file the pages load
   and exercises the real `api` wrapper, the real `LB.setting` choke point
   (including the bytes that reach the wire), and the real `mountNodes`.
+- `tests/wiki.test.mjs` — the wiki page, booted for real: the module runs its
+  own `boot()` against stub elements, a `location` and a recorded `fetch`, so
+  the tests drive the actual `pages.wiki` click handlers — the create save
+  (`base_version: null`), the `409` that keeps the editor open, and the boot
+  order that once crashed on `save` before its declaration.
 - `tests/providers.test.mjs` — the vendored catalog is well formed, and the
   sync script's parser and validator refuse what they should.
 - `tests/models.test.mjs` — the Models section against the Rust handler's own
@@ -179,6 +184,7 @@ The test files (`node --test` prints the current count):
 - `tests/session.test.mjs` — the `/me` check and sign-out from
   `assets/session.js`: signed in, signed out and "could not tell", what each
   one shows, and the hidden-until-checked markup of `index.html`.
+<<<<<<< HEAD
 - `tests/wiki.test.mjs` — the wiki page, booted for real: stub elements, a
   `location`, a `localStorage` and a recorded `fetch` are installed before
   `assets/app.js` is imported, so the import runs the same `boot()` the
@@ -186,6 +192,8 @@ The test files (`node --test` prints the current count):
   list with its pins, the signed-out views, the TOC build, the create save
   (`base_version: null`), the redaction notice, the `409` recovery buttons,
   and search and ask, asserted through DOM state.
+=======
+>>>>>>> origin/main
 
 `dom.test.mjs` swaps `globalThis.document` for a recorder that offers only
 `createElement`, `createTextNode`, `createDocumentFragment` and

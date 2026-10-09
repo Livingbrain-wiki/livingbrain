@@ -1195,9 +1195,147 @@ function wireTokens() {
 
 /* --- wiki ----------------------------------------------------------- */
 
+<<<<<<< HEAD
 // The controller itself lives in `wiki.js`, imported above; boot passes no
 // arguments, so the registry entry closes over this module's `api` wrapper.
 pages.wiki = () => wikiPage(api);
+=======
+pages.wiki = async function wiki() {
+  const params = new URLSearchParams(location.search);
+  const slug = params.get("slug") || "";
+  const title = $("#page-title");
+  const body = $("#page-body");
+  const backlinks = $("#page-backlinks");
+  const citations = $("#page-citations");
+  // Two places to say something: a short line in the toolbar, and a notice
+  // below it for anything long enough to need explaining.
+  const status = $("#wiki-status");
+  const banner = $("#wiki-notice");
+  const say = (message, tone) => {
+    status.textContent = message;
+    notice(banner, message, tone);
+  };
+  const editorWrap = $("#editor-wrap");
+  const viewWrap = $("#view-wrap");
+  const source = $("#source");
+  const preview = $("#preview");
+  const toggle = $("#mode-toggle");
+  const save = $("#save");
+  const newPage = $("#new-page");
+
+  let current = null;
+  let version = null;
+
+  const show = (page) => {
+    current = page;
+    version = page.version == null ? null : page.version;
+    title.textContent = page.title || page.slug || "Untitled";
+    renderInto(body, renderMarkdown(page.markdown || ""));
+    renderInto(backlinks, renderBacklinks(page.backlinks || []));
+    renderInto(citations, renderCitations(page.citations || []));
+    if (source.value !== (page.markdown || "")) source.value = page.markdown || "";
+    renderInto(preview, renderMarkdown(source.value));
+  };
+
+  const load = async () => {
+    if (!slug) {
+      say("Open a page with ?slug=<page-slug>.", "warn");
+      return;
+    }
+    try {
+      show(await api(`/v1/pages/${encodeURIComponent(slug)}`));
+      say("", "ok");
+    } catch (error) {
+      const hint =
+        error instanceof ApiError && error.status === 404
+          ? " No page has this slug yet — the New page button above creates it."
+          : "";
+      say(`Could not open ${slug}: ${error.message}.${hint}`, "bad");
+    }
+  };
+
+  // Live preview: the same renderer the view mode uses, so what is previewed
+  // is what will be saved.
+  source.addEventListener("input", () => {
+    renderInto(preview, renderMarkdown(source.value));
+  });
+
+  const setMode = (mode) => {
+    const editing = mode === "edit";
+    editorWrap.hidden = !editing;
+    viewWrap.hidden = editing;
+    // Saving only makes sense while editing, so the button lives in edit mode.
+    save.hidden = !editing;
+    toggle.textContent = editing ? "Done editing" : "Edit";
+    toggle.setAttribute("aria-pressed", editing ? "true" : "false");
+  };
+  toggle.addEventListener("click", () => {
+    setMode(editorWrap.hidden ? "edit" : "view");
+  });
+  setMode("view");
+
+  save.addEventListener("click", async () => {
+    if (!current) return;
+    // Optimistic concurrency: the store refuses a write whose base_version is
+    // stale, so a lost update is a visible conflict, never a silent overwrite.
+    const body = {
+      markdown: source.value,
+      base_version: version,
+      title: current.title,
+    };
+    try {
+      const saved = await api(`/v1/pages/${encodeURIComponent(current.slug || slug)}`, {
+        method: "PUT",
+        body,
+      });
+      show(saved && saved.markdown != null ? saved : { ...current, ...body, version: (version || 0) + 1 });
+      setMode("view");
+      say("Saved.", "ok");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        say(
+          "Someone else saved this page while you were editing. Your text is " +
+            "still here — reload to get their version, then re-apply your " +
+            "changes.",
+          "bad",
+        );
+        return;
+      }
+      say(`Not saved: ${error.message}`, "bad");
+    }
+  });
+
+  // "New page" skips the GET: a stub whose version is null goes straight into
+  // the editor, so the save below puts `base_version: null` — the one value
+  // that tells the server to create the page rather than edit one.
+  newPage.addEventListener("click", () => {
+    const asked = String(window.prompt("New page — type its slug:") || "")
+      .trim()
+      .toLowerCase();
+    if (!asked) return;
+    if (!/^[a-z0-9][a-z0-9\/-]*$/i.test(asked)) {
+      say(
+        "A slug uses letters, digits, hyphens and slashes, and starts with a letter or digit.",
+        "warn",
+      );
+      return;
+    }
+    history.replaceState(null, "", `${location.pathname}?slug=${encodeURIComponent(asked)}`);
+    show({
+      slug: asked,
+      title: "",
+      markdown: "",
+      version: null,
+      backlinks: [],
+      citations: [],
+    });
+    setMode("edit");
+    say(`New page ${asked}: write it, then Save page creates it.`, "warn");
+  });
+
+  await load();
+};
+>>>>>>> origin/main
 
 /**
  * `LB` is the app's whole public surface: the DOM helpers, the fetch wrapper,
