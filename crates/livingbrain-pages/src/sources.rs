@@ -1,12 +1,14 @@
-//! The source ledger: one row per distinct imported file (issue #81).
+//! The source ledger: one row per distinct thing that arrived from outside
+//! (issue #81, widened into the ingest ledger by issue #77).
 //!
-//! A source is a file that came in from outside — an Obsidian vault, a
-//! documentation site, a checkout — as opposed to a [`crate::Page`], which this
-//! brain wrote. What makes it a ledger rather than a second page store is one
-//! decision: **the body is the identity**. The primary key is
-//! `(scope, body_sha256)`, so importing the same bytes twice is one source
-//! whichever path they arrived under, and the second import reads the first
-//! one's row back instead of sealing a second copy of the same text.
+//! A source is anything that came in from outside — an Obsidian vault, a
+//! documentation site, a checkout, a chat message, a mail — as opposed to a
+//! [`crate::Page`], which this brain wrote. What makes it a ledger rather
+//! than a second page store is one decision: **the body is the identity**.
+//! The primary key is `(scope, body_sha256)`, so importing the same bytes
+//! twice is one source whichever path they arrived under, and the second
+//! import reads the first one's row back instead of sealing a second copy of
+//! the same text.
 //!
 //! Everything else follows the page store (issue #43): a source body is sealed
 //! under the scope's active data key, in the blob store, at a key carrying its
@@ -14,9 +16,10 @@
 //! written before a rotation still reads after one, and forgetting a scope
 //! makes every body it sealed unreadable.
 //!
-//! The body is stored as it arrives: the caller redacts it before handing it
-//! over (issue #108), and the hash is of the redacted text, so the same
-//! document redacted the same way twice is still one row.
+//! The body is stored as the pipeline hands it over: [`crate::Ingestor`]
+//! normalises, screens and redacts (issue #108), and the hash is of the
+//! redacted text, so the same document redacted the same way twice is still
+//! one row.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -25,6 +28,8 @@ use cratefield_core::{Blob, BlobError, Clock, Database, DbError, IdGen, Statemen
 use cratefield_kms::{Kms, KmsError};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
+
+use sea_query::Value as SeaValue;
 
 use crate::entity;
 use crate::keys::{self, ScopeKeys};
@@ -59,13 +64,27 @@ const MAX_LINK_LEN: usize = 512;
 /// share a prefix still land on different keys.
 const BODY_KEY_SHA_PREFIX: usize = 12;
 
-/// How a file got into the ledger. The set is closed: a source is an import,
-/// and whatever else arrives later is a schema change, not a string a caller
-/// invents.
+/// How a source arrived. The set is closed: a kind is a schema-level fact
+/// about where the source came from, not a string a caller invents — whatever
+/// else arrives later is a variant here first, exactly as `import` was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
+    /// A message from a conversation the workspace had.
+    Chat,
+    /// A mail the workspace received.
+    Mail,
+    /// A log of what an agent did, kept for its own account.
+    AgentLog,
     /// A file imported from outside the brain, path and body as it arrived.
     Import,
+    /// A commit or diff that reached the brain from a repository.
+    Git,
+    /// A reading from the monitoring the workspace points at itself.
+    Monitoring,
+    /// A radar item: something spotted outside, filed before it is a page.
+    Radar,
+    /// A note the brain or a person wrote about what arrived.
+    Note,
 }
 
 impl SourceKind {
@@ -73,7 +92,14 @@ impl SourceKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Chat => "chat",
+            Self::Mail => "mail",
+            Self::AgentLog => "agent_log",
             Self::Import => "import",
+            Self::Git => "git",
+            Self::Monitoring => "monitoring",
+            Self::Radar => "radar",
+            Self::Note => "note",
         }
     }
 
@@ -81,34 +107,61 @@ impl SourceKind {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "chat" => Some(Self::Chat),
+            "mail" => Some(Self::Mail),
+            "agent_log" => Some(Self::AgentLog),
             "import" => Some(Self::Import),
+            "git" => Some(Self::Git),
+            "monitoring" => Some(Self::Monitoring),
+            "radar" => Some(Self::Radar),
+            "note" => Some(Self::Note),
             _ => None,
         }
     }
 }
 
-/// One import: where the file came from, what it says, and who sent it.
+/// One write: where the source came from, what it says, and who sent it.
 ///
 /// The body is **already redacted**. Nothing here re-checks it: the hash is of
 /// what was handed over, and a caller that stored an unredacted body put a
 /// secret in a blob store, which is the one mistake this table cannot undo.
+/// The pipeline that redacts is [`crate::Ingestor`]; this is the shape it
+/// hands the store once its own checks have run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceWrite {
     pub kind: SourceKind,
+    /// The workspace the scope belongs to, plain — the scope itself only
+    /// names it as a hash, and `GET /v1/sources/:id` needs the id back.
+    pub workspace: String,
+    /// Where the source came from, when it has one name: a permalink, a
+    /// message id. Already redacted.
+    pub origin_ref: Option<String>,
+    /// The authoring member, when one is known; `None` when nobody the
+    /// member table names wrote this (an imported file, for one).
+    pub author: Option<String>,
     pub rel_path: String,
     /// The redacted Markdown body.
     pub markdown: String,
     /// The importer's user id.
     pub imported_by: String,
+    /// Screening's verdict, landed as a flag: a held source is stored but
+    /// never extracted until [`SourceStore::release`] clears it.
+    pub held: bool,
 }
 
 /// One row of the ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub scope: String,
+    /// The workspace the scope belongs to.
+    pub workspace: String,
     pub id: String,
     pub kind: SourceKind,
     pub rel_path: String,
+    /// Where the source came from, when it has one name.
+    pub origin_ref: Option<String>,
+    /// The authoring member, when one is known.
+    pub author: Option<String>,
     /// Hex SHA-256 of the redacted body: the identity, and the key.
     pub body_sha256: String,
     /// The `[[wiki-links]]` the file names, in first-seen order.
@@ -118,6 +171,9 @@ pub struct Source {
     /// The scope key version the body is sealed under.
     pub key_version: u32,
     pub imported_by: String,
+    /// Whether screening held this source: stored, never extracted, until
+    /// [`SourceStore::release`] clears the flag.
+    pub held: bool,
     pub created_at: String,
 }
 
@@ -149,6 +205,26 @@ pub enum SourceError {
     Blob(BlobError),
     /// The database failed.
     Store(DbError),
+}
+
+impl SourceError {
+    /// The variant's name, and nothing else. The one thing a failed route's
+    /// operator log may carry: `Display` renders scopes, hashes and paths,
+    /// and those belong in no log line a 500 produces.
+    #[must_use]
+    pub fn variant(&self) -> &'static str {
+        match self {
+            Self::InvalidScope(_) => "invalid-scope",
+            Self::InvalidPath(_) => "invalid-path",
+            Self::Corrupt(_) => "corrupt",
+            Self::Shredded(_) => "shredded",
+            Self::KeyUnavailable { .. } => "key-unavailable",
+            Self::Crypto(_) => "crypto",
+            Self::Kms(_) => "kms",
+            Self::Blob(_) => "blob",
+            Self::Store(_) => "store",
+        }
+    }
 }
 
 impl From<KmsError> for SourceError {
@@ -231,6 +307,22 @@ impl std::error::Error for SourceError {
     }
 }
 
+/// What [`SourceStore::release`] did about a held source.
+///
+/// Three answers, all of them final: the release that happened, the one that
+/// had happened already, and the id that names nothing in that scope. A
+/// caller that releases twice and counts two extractions is the mistake this
+/// closed set makes unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Released {
+    /// The flag was 1 and is now 0: the source is eligible for extraction.
+    Now,
+    /// The row exists and was already released; nothing changed.
+    Already,
+    /// No row in that scope carries that id.
+    Missing,
+}
+
 /// The source ledger, over the page store's own ports.
 pub struct SourceStore {
     db: Arc<dyn Database>,
@@ -260,7 +352,7 @@ impl SourceStore {
         }
     }
 
-    /// Records one imported file, returning the row and whether this call is
+    /// Records one source, returning the row and whether this call is
     /// what created it.
     ///
     /// The row is looked up **before** the body is sealed, so the ordinary
@@ -289,7 +381,12 @@ impl SourceStore {
         if !entity::is_slug(scope) {
             return Err(SourceError::InvalidScope(scope.to_owned()));
         }
-        check_rel_path(&write.rel_path)?;
+        // The path rule is the vault's rule, so it binds the kinds that
+        // arrive as files. A chat message has no path; the column stays
+        // for the import's filing and the empty string for the rest.
+        if write.kind == SourceKind::Import {
+            check_rel_path(&write.rel_path)?;
+        }
 
         let digest = keys::hex(&Sha256::digest(write.markdown.as_bytes()));
         if let Some(existing) = self.row(scope, &digest).await? {
@@ -326,8 +423,8 @@ impl SourceStore {
             .execute(&Statement::with_values(
                 "INSERT INTO sources \
                  (scope, body_sha256, id, kind, rel_path, wikilinks, body_key, key_version, \
-                  imported_by, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                  imported_by, created_at, workspace, origin_ref, author, held) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (scope, body_sha256) DO NOTHING",
                 vec![
                     text(scope),
@@ -340,6 +437,10 @@ impl SourceStore {
                     int(key_version),
                     text(&write.imported_by),
                     text(&now),
+                    text(&write.workspace),
+                    opt_text(&write.origin_ref),
+                    opt_text(&write.author),
+                    int(u32::from(write.held)),
                 ],
             ))
             .await;
@@ -424,14 +525,74 @@ impl SourceStore {
             .db
             .query(&Statement::with_values(
                 "SELECT scope, body_sha256, id, kind, rel_path, wikilinks, body_key, \
-                        key_version, imported_by, created_at \
+                        key_version, imported_by, created_at, workspace, origin_ref, author, \
+                        held \
                  FROM sources WHERE scope = ? AND body_sha256 = ?",
                 vec![text(scope), text(digest)],
             ))
             .await?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
+        rows.first().map(Self::map_row).transpose()
+    }
+
+    /// The row one id names, whichever scope it landed in, or `None`.
+    ///
+    /// Finding a row says nothing about who may read it — the caller checks
+    /// the workspace and the scope against the asker, and an id outside both
+    /// is answered exactly like an id that is not there.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError::Corrupt`] for a row that does not parse, and whatever
+    /// the database path can fail with.
+    pub async fn by_id(&self, id: &str) -> Result<Option<Source>, SourceError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT scope, body_sha256, id, kind, rel_path, wikilinks, body_key, \
+                        key_version, imported_by, created_at, workspace, origin_ref, author, \
+                        held \
+                 FROM sources WHERE id = ? LIMIT 1",
+                vec![text(id)],
+            ))
+            .await?;
+        rows.first().map(Self::map_row).transpose()
+    }
+
+    /// Clears a held source's flag in `scope`, and says what happened.
+    ///
+    /// The `WHERE held = 1` is what makes the answer honest under a double
+    /// release: exactly one caller sees [`Released::Now`], and the extraction
+    /// that follows a release happens once, whoever calls first.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError::InvalidScope`] for a scope outside the slug rule, and
+    /// whatever the database path can fail with.
+    pub async fn release(&self, scope: &str, id: &str) -> Result<Released, SourceError> {
+        if !entity::is_slug(scope) {
+            return Err(SourceError::InvalidScope(scope.to_owned()));
+        }
+        let updated = self
+            .db
+            .execute(&Statement::with_values(
+                "UPDATE sources SET held = 0 WHERE scope = ? AND id = ? AND held = 1",
+                vec![text(scope), text(id)],
+            ))
+            .await?;
+        if updated > 0 {
+            return Ok(Released::Now);
+        }
+        // Nothing updated: either the id names nothing here, or it names a
+        // source that was never held or was released before this call — the
+        // update only passes over rows still at held = 1.
+        match self.by_id(id).await? {
+            Some(row) if row.scope == scope => Ok(Released::Already),
+            _ => Ok(Released::Missing),
+        }
+    }
+
+    /// One ledger row out of one database row.
+    fn map_row(row: &cratefield_core::Row) -> Result<Source, SourceError> {
         let raw = row
             .get::<String>("kind")
             .ok_or_else(|| SourceError::Corrupt("sources.kind is not text".to_owned()))?;
@@ -443,18 +604,22 @@ impl SourceStore {
         let wikilinks: Vec<String> = serde_json::from_str(&links).map_err(|_| {
             SourceError::Corrupt("sources.wikilinks is not a JSON array".to_owned())
         })?;
-        Ok(Some(Source {
+        Ok(Source {
             scope: row.get::<String>("scope").unwrap_or_default(),
+            workspace: row.get::<String>("workspace").unwrap_or_default(),
             id: row.get::<String>("id").unwrap_or_default(),
             kind,
             rel_path: row.get::<String>("rel_path").unwrap_or_default(),
+            origin_ref: row.get::<String>("origin_ref"),
+            author: row.get::<String>("author"),
             body_sha256: row.get::<String>("body_sha256").unwrap_or_default(),
             wikilinks,
             body_key: row.get::<String>("body_key").unwrap_or_default(),
             key_version: row.get::<u32>("key_version").unwrap_or_default(),
             imported_by: row.get::<String>("imported_by").unwrap_or_default(),
+            held: row.get::<u32>("held").unwrap_or_default() != 0,
             created_at: row.get::<String>("created_at").unwrap_or_default(),
-        }))
+        })
     }
 
     /// The current time as RFC 3339, as everywhere else in the module.
@@ -531,4 +696,9 @@ pub fn extract_wikilinks(markdown: &str) -> Vec<String> {
 /// better record than a half-written one.
 fn links_json(links: &[String]) -> String {
     serde_json::to_string(links).unwrap_or_else(|_| "[]".to_owned())
+}
+
+/// A nullable text column: `NULL` for `None`, the text otherwise.
+fn opt_text(value: &Option<String>) -> SeaValue {
+    SeaValue::String(value.as_ref().map(|value| Box::new(value.clone())))
 }

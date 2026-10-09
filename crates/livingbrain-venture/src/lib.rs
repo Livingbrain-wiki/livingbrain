@@ -14,10 +14,10 @@
 //! and `tokens` with the harness `device-auth` grant beside it — the personal
 //! access tokens behind issue #72, minted by a device that has no browser to
 //! sign in with, which are also what the MCP endpoint now accepts;
-//! and the CLI surface (issue #121) — `notes`, `search`, `ask` and `export`
-//! from `livingbrain-api`, the four modules behind `livingbrain`'s client
-//! contract, whose paths `fetch` diverts through the harness router itself
-//! (`serve_cli` below).
+//! and the CLI surface (issues #121 and #77) — `notes`, `search`, `ask`,
+//! `export` and `sources` from `livingbrain-api`, the five modules behind
+//! `livingbrain`'s client contract, whose paths `fetch` diverts through the
+//! harness router itself (`serve_cli` below).
 //! `wrangler.toml` and the D1 migrations are beside this crate.
 //!
 //! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
@@ -47,7 +47,7 @@ use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, WorkersClock, install_tracing, serve, serve_scheduled,
 };
-use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Wiki};
+use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Sources, Wiki};
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
@@ -307,18 +307,18 @@ impl RandomBytes for WorkersRandom {
     }
 }
 
-/// The four CLI modules (issue #121): the routes `livingbrain`'s client
-/// speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
-/// `GET /v1/export` — each mounted at its own name under the harness rule,
-/// every one constructed with the same [`Wiki`] over the key custodian and
-/// the [`TokenBearer`].
+/// The five CLI modules (issues #121 and #77): the routes `livingbrain`'s
+/// client speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
+/// `GET /v1/export`, `GET /v1/sources/{id}` — each mounted at its own name
+/// under the harness rule, every one constructed with the same [`Wiki`] over
+/// the key custodian and the [`TokenBearer`].
 ///
 /// The blob a module's store reads is not decided here — the composition
 /// roots the per-request port layer on the pages key space instead, so the
 /// page bodies stay physical `pages/` objects no matter which route wrote
 /// them ([`PagesRebind`], planted in [`serve_cli`]). With no key custodian
 /// there is nothing to seal a page with, so — like [`pages_module`] — none
-/// of the four is mounted and every other route keeps working.
+/// of the five is mounted and every other route keeps working.
 fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
     let Some(kms) = kms else {
         return Vec::new();
@@ -329,7 +329,8 @@ fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
         Arc::new(Notes::new(wiki.clone())),
         Arc::new(Search::new(wiki.clone())),
         Arc::new(Ask::new(wiki.clone())),
-        Arc::new(Export::new(wiki)),
+        Arc::new(Export::new(wiki.clone())),
+        Arc::new(Sources::new(wiki)),
     ]
 }
 
@@ -512,19 +513,34 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare) {
     })
 }
 
-/// The four CLI paths `fetch` diverts to [`serve_cli`] — the routes the
-/// four [`cli_modules`] mount, minus `/v1/pages`, which the pages module
+/// The five CLI paths `fetch` diverts to [`serve_cli`] — the routes the
+/// five [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 4] = ["/v1/notes", "/v1/search", "/v1/ask", "/v1/export"];
+const CLI_ROUTES: [&str; 5] = [
+    "/v1/notes",
+    "/v1/search",
+    "/v1/ask",
+    "/v1/export",
+    "/v1/sources",
+];
 
-/// Whether this request is one of the four CLI paths the venture diverts,
+/// Whether this request is one of the five CLI paths the venture diverts,
 /// and the surface is mounted at all. The mount is gated on the key ring
 /// (see [`cli_modules`]), so the presence of the `notes` module is the same
 /// gate — a deployment without the ring takes these paths through the
 /// ordinary `serve`, which answers 404, exactly as a composition without
 /// the modules should.
+///
+/// Four of the five are single endpoints and match exactly — a subroute
+/// under them is nobody's route, and exact matching keeps a future one from
+/// silently changing handler stack. The citation route is the exception: it
+/// carries the source id as its path segment, and matching only the bare
+/// `/v1/sources` would drop every real citation on the floor.
 fn serves_cli(harness: &Harness, path: &str) -> bool {
-    CLI_ROUTES.contains(&path) && harness.modules().iter().any(|m| m.name() == "notes")
+    let diverted = CLI_ROUTES.iter().any(|route| {
+        path == *route || (*route == "/v1/sources" && path.starts_with("/v1/sources/"))
+    });
+    diverted && harness.modules().iter().any(|m| m.name() == "notes")
 }
 
 #[event(fetch)]
@@ -541,7 +557,7 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
     serve(harness, runtime, req, env, ctx).await
 }
 
-/// Serves one of the four CLI paths ([`CLI_ROUTES`]) through the harness
+/// Serves one of the five CLI paths ([`CLI_ROUTES`]) through the harness
 /// router directly.
 ///
 /// Why divert at all: the pinned harness has no seam to re-point one
@@ -553,8 +569,9 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
 /// both public. So this path re-derives the ports the way [`serve`] does,
 /// plants a [`PagesRebind`] over the raw store — the harness then scopes
 /// each module's view on top, and every `notes/…`, `search/…`, `ask/…`,
-/// `export/…` key lands on `pages/…` — and drives the full router through a
-/// one-shot `tower` call. Every layer `serve` would apply still stands:
+/// `export/…`, `sources/…` key lands on `pages/…` — and drives the full
+/// router through a one-shot `tower` call. Every layer `serve` would apply
+/// still stands:
 /// CORS, the abuse floor, the per-route body ceilings, problem+json.
 ///
 /// The body gate mirrors `serve`'s buffered plan: a declared
@@ -562,7 +579,7 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
 /// declaration at or under it is buffered whole. A body with no usable
 /// declaration is refused too — `serve` would read it capped through the
 /// streaming layer, and rather than re-derive that machinery here (a
-/// `!Send` bridge and a hand-rolled cap), the four CLI routes ask for a
+/// `!Send` bridge and a hand-rolled cap), the five CLI routes ask for a
 /// declared length; the CLI and the web app always send one.
 ///
 /// # Errors
@@ -647,7 +664,7 @@ async fn serve_cli(
 }
 
 /// The buffered response bridge, mirroring the runtime's own: 1 MiB is a
-/// generous ceiling for what the four CLI routes answer (JSON, one zip).
+/// generous ceiling for what the five CLI routes answer (JSON, one zip).
 async fn response_to_worker(response: AxumResponse) -> worker::Result<Response> {
     const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
     let (parts, body) = response.into_parts();
@@ -724,6 +741,34 @@ mod tests {
         }
     }
 
+    /// The citation route carries the source id as its path segment, so the
+    /// divert matches the prefix — a real citation (`/v1/sources/<ulid>`) must
+    /// reach the one handler stack that plants the pages-rooted blob view.
+    /// The other four CLI paths stay exact: nothing mounts under them, and a
+    /// subpath there must keep falling through to `serve` unchanged.
+    #[test]
+    fn the_sources_route_diverts_with_its_id_segment() {
+        let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
+            .expect("a well-formed key");
+        let (harness, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        assert!(
+            serves_cli(&harness, "/v1/sources/01HZZZBBBBBBBBBBBBBBBBBBB"),
+            "a citation must divert to serve_cli"
+        );
+        assert!(
+            serves_cli(&harness, "/v1/sources"),
+            "the bare path still diverts"
+        );
+        assert!(
+            !serves_cli(&harness, "/v1/notes/01HZZZBBBBBBBBBBBBBBBBBBB"),
+            "the single-endpoint CLI paths stay exact"
+        );
+        assert!(
+            !serves_cli(&harness, "/v1/sourcesother/01HZZZBBBBBBBBBBBBBBBBBBB"),
+            "a name that merely starts alike is not the citation route"
+        );
+    }
+
     /// A token carrying a cookie delimiter is refused before it is spliced
     /// into a `Cookie` header, so it cannot smuggle a second cookie in.
     #[test]
@@ -735,7 +780,7 @@ mod tests {
     }
 
     /// A deployment with no page key ring still composes: the MCP surface
-    /// and the four CLI modules are not mounted, and every other route keeps
+    /// and the five CLI modules are not mounted, and every other route keeps
     /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
@@ -743,7 +788,7 @@ mod tests {
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
-        for module in ["notes", "search", "ask", "export"] {
+        for module in ["notes", "search", "ask", "export", "sources"] {
             assert!(!names.contains(&module), "{names:?}");
         }
         for route in CLI_ROUTES {
