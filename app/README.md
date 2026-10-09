@@ -45,6 +45,7 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/models` | `settings.html` | **yes** |
 | `PUT /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, connection)` |
 | `DELETE /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, null)` |
+| `POST /v1/models/discover` | `settings.html` | **yes** — the provider's model list, fetched server-side with the key the form holds; nothing stored |
 | `GET /v1/tokens` | `settings.html` | **yes** |
 | `POST /v1/tokens` | `settings.html` | **yes** — the only call that returns a token value |
 | `DELETE /v1/tokens/{prefix}` | `settings.html` | **yes** |
@@ -123,8 +124,10 @@ The test files (`node --test` prints the current count):
   itself. It guards its DOM boot, so Node loads the same file the pages load
   and exercises the real `api` wrapper, the real `LB.setting` choke point
   (including the bytes that reach the wire), and the real `mountNodes`.
+- `tests/providers.test.mjs` — the vendored catalog is well formed, and the
+  sync script's parser and validator refuse what they should.
 - `tests/models.test.mjs` — the Models section against the Rust handler's own
-  role and provider lists, form validation, the cards, disconnect through
+  role list and the catalog the server compiles in, form validation, the cards, disconnect through
   `LB.setting`, and the settings page's copy (no API paths or dead controls).
 - `tests/session.test.mjs` — the `/me` check and sign-out from
   `assets/session.js`: signed in, signed out and "could not tell", what each
@@ -144,7 +147,8 @@ quietly.
 | `wiki.html` | Reader and editor: Markdown, backlinks, citations, `base_version` saves |
 | `assets/app.css` | The website's tokens (`--bg`, `--bg2`, `--ink`, `--line`, `--accent`, oklch), fonts and components |
 | `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting`, sign-out |
-| `assets/models.js` | The roles and provider presets the server accepts, connect-form validation, and the connected-model cards |
+| `assets/models.js` | The roles, the provider catalog as the picker uses it, connect-form validation, and the connected-model cards |
+| `assets/providers.json` | The provider catalog: every provider Colonizer supports, vendored by `scripts/sync-providers`. The server compiles in the same file |
 | `assets/session.js` | Who is signed in: the `/me` check, its three outcomes, and what each page shows for them |
 | `assets/markdown.js` | Pure Markdown / citation / backlink renderers |
 | `assets/settings.js` | Pure settings request builder |
@@ -168,3 +172,26 @@ website's tokens change, copy them into the token block at the top of
 Dark by default, light follows the system, and a choice is remembered in
 `localStorage` under `lb-theme`. Changing it dispatches an `lb-theme` event on
 `document`, which is what the toggle button listens to.
+
+## The provider catalog
+
+`assets/providers.json` lists every LLM provider a model can be connected
+from: Colonizer's catalog (Colonizer-dev/harness `web/src/providerCatalog.ts`,
+pinned to the commit recorded in the file) plus Living Brain's two built-ins,
+Anthropic and OpenAI. Each entry names its base URL (with `${VAR}`
+placeholders where the provider needs an id), its auth style (`bearer` or
+`x-api-key`) and its wire (`anthropic` Messages or `openai` chat completions).
+The server (`crates/livingbrain-models/src/catalog.rs`) reads the same file
+with `include_str!`, so the picker cannot offer a provider the server would
+refuse.
+
+To move to a newer upstream:
+
+```sh
+scripts/sync-providers              # latest main
+scripts/sync-providers --ref <sha>  # a pinned revision
+```
+
+CI runs `scripts/sync-providers --check --pinned`, which re-derives the file
+from the commit it records and fails on any hand edit.
+

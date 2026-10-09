@@ -8,11 +8,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import catalog from "../assets/providers.json" with { type: "json" };
 import {
   ROLES,
   PROVIDERS,
+  POPULAR,
   providerInfo,
+  providerHost,
   providerForConnection,
+  searchProviders,
+  fillTemplate,
+  keyHint,
+  discoverRequest,
   validateConnect,
   connectionViews,
   maskedKey,
@@ -26,6 +33,7 @@ const HANDLERS = readFileSync(
   new URL("../../crates/livingbrain-models/src/handlers.rs", import.meta.url),
   "utf8",
 );
+const CATALOG = catalog;
 const SETTINGS_HTML = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
 
 /** A placeholder key built from words, as in the other test files. */
@@ -50,44 +58,96 @@ test("the roles are exactly the ones the server accepts", () => {
   }
 });
 
-test("every provider card sends a provider value the server accepts", () => {
-  const body = HANDLERS.slice(HANDLERS.indexOf("fn resolve_base_url"));
-  const accepted = [...body.matchAll(/^\s+"([a-z-]+)" =>/gm)].map((m) => m[1]);
-  assert.ok(accepted.includes("custom"));
-  for (const provider of PROVIDERS) {
-    assert.ok(accepted.includes(provider.server), `${provider.id} sends ${provider.server}`);
-  }
-  // A preset's endpoint is the server's own constant, so the page shows the
-  // URL that will really be called.
-  for (const provider of PROVIDERS.filter((p) => p.fixed)) {
-    assert.ok(HANDLERS.includes(`"${provider.baseUrl}"`), provider.baseUrl);
-  }
-  // The cards the redesign asked for are all there.
-  for (const id of ["openai", "anthropic", "deepseek", "google", "groq", "openrouter", "custom"]) {
-    assert.ok(providerInfo(id), id);
-  }
+test("the page and the server read the same catalog", () => {
+  const rust = readFileSync(
+    new URL("../../crates/livingbrain-models/src/catalog.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(rust, /include_str!\("\.\.\/\.\.\/\.\.\/app\/assets\/providers\.json"\)/);
+  assert.equal(PROVIDERS.length, CATALOG.builtin.length + CATALOG.providers.length);
+  // Every popular card is a real entry, and Anthropic and OpenAI are there.
+  for (const id of POPULAR) assert.ok(providerInfo(id), id);
+  assert.deepEqual(POPULAR.slice(0, 2), ["anthropic", "openai"]);
+  // The page hard-codes no model names: suggestions come from the catalog or
+  // from the provider, never from a list in the app that goes stale.
+  const source = readFileSync(new URL("../assets/models.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /gpt-|claude-|gemini-|llama-|deepseek-chat/);
 });
 
-test("a preset sends no base_url; Google and Groq send custom with theirs", () => {
+test("a catalog provider sends its id and lets the server fill the endpoint", () => {
   const preset = validateConnect(good);
-  assert.equal(preset.ok, true);
+  assert.equal(preset.ok, true, JSON.stringify(preset.errors));
   assert.equal(preset.role, "main");
   assert.deepEqual(preset.value, {
     provider: "openai",
-    base_url: null,
     api_key: FIXTURE_KEY,
     model: "gpt-4.1",
     fallback_to_managed: false,
   });
-  const groq = validateConnect({
+  // An unlocked, edited endpoint travels as base_url.
+  const edited = validateConnect({
     ...good,
-    provider: "groq",
-    baseUrl: providerInfo("groq").baseUrl + "/",
-    model: "llama-3.3-70b-versatile",
+    provider: "minimax-en",
+    editUrl: true,
+    baseUrl: "https://api.minimax.io/anthropic/",
   });
-  assert.equal(groq.ok, true);
-  assert.equal(groq.value.provider, "custom");
-  assert.equal(groq.value.base_url, "https://api.groq.com/openai/v1");
+  assert.equal(edited.value.base_url, "https://api.minimax.io/anthropic");
+  // A URL variable is asked for, checked, and sent for the server to fill.
+  const kat = { ...good, provider: "kat-coder" };
+  assert.match(validateConnect(kat).errors["var:ENDPOINT_ID"], /Vanchin endpoint ID/);
+  assert.match(
+    validateConnect({ ...kat, variables: { ENDPOINT_ID: "../x" } }).errors["var:ENDPOINT_ID"],
+    /only/,
+  );
+  const filled = validateConnect({ ...kat, variables: { ENDPOINT_ID: "ep-1" } });
+  assert.deepEqual(filled.value.variables, { ENDPOINT_ID: "ep-1" });
+  assert.equal(filled.value.base_url, undefined);
+  assert.equal(
+    fillTemplate(providerInfo("kat-coder").base_url, { ENDPOINT_ID: "ep-1" }),
+    "https://vanchin.streamlake.ai/api/gateway/v1/endpoints/ep-1/claude-code-proxy",
+  );
+});
+
+test("a custom endpoint names its wire and auth", () => {
+  const base = { ...good, provider: "custom", baseUrl: "https://gw.example.com" };
+  const missing = validateConnect(base).errors;
+  assert.ok(missing.wire && missing.auth, JSON.stringify(missing));
+  const ok = validateConnect({ ...base, wire: "anthropic", auth: "x-api-key" });
+  assert.deepEqual(ok.value, {
+    provider: "custom",
+    api_key: FIXTURE_KEY,
+    model: "gpt-4.1",
+    fallback_to_managed: false,
+    base_url: "https://gw.example.com",
+    wire: "anthropic",
+    auth: "x-api-key",
+  });
+  assert.deepEqual(discoverRequest(ok.value), {
+    method: "POST",
+    path: "/v1/models/discover",
+    body: {
+      provider: "custom",
+      api_key: FIXTURE_KEY,
+      base_url: "https://gw.example.com",
+      wire: "anthropic",
+      auth: "x-api-key",
+    },
+  });
+});
+
+test("the provider search finds by name, id or host, sorted by name", () => {
+  assert.ok(searchProviders("").length === PROVIDERS.length);
+  assert.deepEqual(
+    searchProviders("api.x.ai").map((p) => p.id),
+    ["xai-grok"],
+  );
+  const tencent = searchProviders("tencent intl").map((p) => p.name);
+  assert.ok(tencent.length >= 2 && tencent.every((n) => /Tencent/.test(n) && /Intl/.test(n)));
+  const names = searchProviders("").slice(2).map((p) => p.name);
+  assert.deepEqual(names, [...names].sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" })));
+  assert.equal(providerHost(providerInfo("kat-coder")), "vanchin.streamlake.ai");
+  assert.equal(keyHint(providerInfo("anthropic")), "Sent in an x-api-key header.");
+  assert.equal(keyHint(providerInfo("openai")), "Sent as a Bearer token.");
 });
 
 test("each field's mistake is named under that field", () => {
@@ -96,8 +156,10 @@ test("each field's mistake is named under that field", () => {
   assert.equal(empty.value, null);
   assert.deepEqual(Object.keys(empty.errors).sort(), ["apiKey", "model", "provider", "role"]);
 
-  const custom = (baseUrl) => validateConnect({ ...good, provider: "custom", baseUrl }).errors;
+  const custom = (baseUrl) =>
+    validateConnect({ ...good, provider: "custom", baseUrl, wire: "openai", auth: "bearer" }).errors;
   assert.match(custom("").baseUrl, /base URL/);
+  assert.match(custom("https://h.example/${X}").baseUrl, /placeholder/);
   assert.match(custom("not a url").baseUrl, /not a URL/);
   assert.match(custom("http://api.example.com/v1").baseUrl, /https/);
   assert.match(custom("https://user:pw@api.example.com/v1").baseUrl, /API key field/);
@@ -110,9 +172,9 @@ test("connected models render as cards in role order, never with a key", () => {
   const rows = [
     {
       role: "research",
-      provider: "custom",
-      base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-      model: "gemini-2.5-pro",
+      provider: "kimi",
+      base_url: "https://api.moonshot.cn/anthropic",
+      model: "kimi-k2",
       key: "…wxyz",
       status: "answers only",
       missing: ["context size"],
@@ -126,7 +188,7 @@ test("connected models render as cards in role order, never with a key", () => {
   assert.equal(views[0].providerLabel, "Anthropic");
   assert.equal(views[0].key, "••••a9Q2");
   assert.deepEqual(views[0].status, { state: "live", label: "Works", detail: "" });
-  assert.equal(views[1].providerLabel, "Google Gemini", "a custom row finds its card");
+  assert.equal(views[1].providerLabel, "Kimi", "a row finds its catalog name");
   assert.equal(views[1].status.state, "warn");
   assert.match(views[1].status.detail, /context size/);
   for (const view of views) assert.ok(!JSON.stringify(view).includes(FIXTURE_KEY));
@@ -171,6 +233,7 @@ test("small pieces: masked keys, statuses, and matching a row to its card", () =
   assert.equal(statusView({}).label, "Not checked");
   assert.equal(providerForConnection({ provider: "deepseek" }).id, "deepseek");
   assert.equal(providerForConnection({ provider: "custom", base_url: "https://x.example/v1" }).id, "custom");
+  assert.equal(providerForConnection({ provider: "gone-provider" }).id, "custom");
 });
 
 test("disconnecting goes through LB.setting as a DELETE", () => {

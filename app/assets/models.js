@@ -1,14 +1,16 @@
 // Model connections — the pure half of the settings page's Models section.
 //
-// What the server accepts lives in `crates/livingbrain-models/src/handlers.rs`:
-// three roles (`ROLES`) and five provider values (`resolve_base_url`). Four
-// providers are presets whose base URL the server fixes itself; `custom` is any
-// OpenAI-compatible endpoint, and needs `base_url`. Google and Groq have no
-// server preset, but both serve an OpenAI-compatible API, so the page offers
-// them as shortcuts that send `custom` with their endpoint filled in.
+// The providers are the vendored catalog, `providers.json`: every provider
+// Colonizer supports (synced by `scripts/sync-providers`), plus Living Brain's
+// two built-ins, Anthropic and OpenAI. The server compiles in the same file
+// (`crates/livingbrain-models/src/catalog.rs`), so a provider id means the same
+// base URL, auth style and wire on both sides. `custom` is anything else, and
+// names its own.
 //
-// Nothing here touches the DOM except `renderModelCards`, which builds
+// Nothing here touches the DOM except the render functions, which build
 // elements and text nodes only, as everywhere else in `app/`.
+
+import catalog from "./providers.json" with { type: "json" };
 
 /** The roles, in the order the page shows them, with what each one is for. */
 export const ROLES = Object.freeze([
@@ -29,75 +31,56 @@ export const ROLES = Object.freeze([
   },
 ]);
 
-/**
- * The provider cards. `server` is the value sent as `provider`; `fixed` means
- * the server picks the endpoint and ignores any `base_url`, so the page shows
- * it rather than asking for it.
- */
+/** Every catalog provider, built-ins first, then the synced list by name. */
 export const PROVIDERS = Object.freeze([
-  {
-    id: "openai",
-    label: "OpenAI",
-    server: "openai",
-    fixed: true,
-    baseUrl: "https://api.openai.com/v1",
-    models: ["gpt-4.1", "gpt-4.1-mini", "o4-mini"],
-    keyHint: "Starts with sk-",
-  },
-  {
-    id: "anthropic",
-    label: "Anthropic",
-    server: "anthropic",
-    fixed: true,
-    baseUrl: "https://api.anthropic.com/v1",
-    models: ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1"],
-    keyHint: "Starts with sk-ant-",
-  },
-  {
-    id: "deepseek",
-    label: "DeepSeek",
-    server: "deepseek",
-    fixed: true,
-    baseUrl: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner"],
-    keyHint: "Starts with sk-",
-  },
-  {
-    id: "google",
-    label: "Google Gemini",
-    server: "custom",
-    fixed: false,
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    models: ["gemini-2.5-pro", "gemini-2.5-flash"],
-    keyHint: "A Google AI Studio key",
-  },
-  {
-    id: "groq",
-    label: "Groq",
-    server: "custom",
-    fixed: false,
-    baseUrl: "https://api.groq.com/openai/v1",
-    models: ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"],
-    keyHint: "Starts with gsk_",
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    server: "openrouter",
-    fixed: true,
-    baseUrl: "https://openrouter.ai/api/v1",
-    models: ["anthropic/claude-sonnet-4.5", "openai/gpt-4.1", "deepseek/deepseek-chat"],
-    keyHint: "Starts with sk-or-",
-  },
-  {
-    id: "custom",
-    label: "Custom",
-    server: "custom",
-    fixed: false,
-    baseUrl: "",
-    models: [],
-    keyHint: "The key your endpoint expects",
-  },
+  ...catalog.builtin,
+  ...[...catalog.providers].sort((a, b) =>
+    a.name.localeCompare(b.name, "en", { sensitivity: "base" }),
+  ),
+]);
+
+/** Where the synced list came from, for the page's small print. */
+export const CATALOG_SOURCE = catalog.source;
+
+/** The ones most people want, shown first as cards. */
+export const POPULAR = Object.freeze([
+  "anthropic",
+  "openai",
+  "deepseek",
+  "openrouter",
+  "zhipu-glm-en",
+  "minimax-en",
+  "kimi",
+  "qwencloud",
+]);
+
+/** Shorter names for the popular cards, where the catalog's is a mouthful. */
+export const POPULAR_LABELS = Object.freeze({
+  "zhipu-glm-en": "Z.AI",
+  "minimax-en": "MiniMax",
+  qwencloud: "Qwen",
+});
+
+/** The pseudo-entry for an endpoint that is not in the catalog. */
+export const CUSTOM = Object.freeze({
+  id: "custom",
+  name: "Custom endpoint",
+  base_url: "",
+  auth: "bearer",
+  wire: "openai",
+  site: "",
+});
+
+/** The two wires, as the custom form offers them. */
+export const WIRES = Object.freeze([
+  { value: "anthropic", label: "Anthropic Messages", detail: "POST /v1/messages" },
+  { value: "openai", label: "OpenAI Chat Completions", detail: "POST /v1/chat/completions" },
+]);
+
+/** The two ways a key travels. */
+export const AUTHS = Object.freeze([
+  { value: "bearer", label: "Bearer token", detail: "Authorization: Bearer <key>" },
+  { value: "x-api-key", label: "x-api-key header", detail: "x-api-key: <key>" },
 ]);
 
 /** One role by id, or undefined. */
@@ -105,46 +88,95 @@ export function roleInfo(id) {
   return ROLES.find((role) => role.id === id);
 }
 
-/** One provider card by id, or undefined. */
+/** One provider by id: a catalog entry, `CUSTOM`, or undefined. */
 export function providerInfo(id) {
+  if (id === "custom") return CUSTOM;
   return PROVIDERS.find((provider) => provider.id === id);
 }
 
-/**
- * The card a stored connection belongs to. A `custom` row is matched back to
- * Google or Groq by its base URL, so a Replace opens the card it came from.
- */
-export function providerForConnection(row) {
-  const server = row && row.provider;
-  if (server && server !== "custom") {
-    return providerInfo(server) || providerInfo("custom");
+/** The host a provider's endpoint is on, for the picker's second line. */
+export function providerHost(provider) {
+  try {
+    return new URL(String(provider.base_url).replace(/\$\{\w+\}/g, "x")).host;
+  } catch {
+    return "";
   }
-  const base = String((row && row.base_url) || "").replace(/\/+$/, "");
-  return (
-    PROVIDERS.find((p) => !p.fixed && p.baseUrl && p.baseUrl === base) ||
-    providerInfo("custom")
-  );
 }
 
 /**
- * Checks the connect form. Answers `{ ok, errors, value }`: `errors` maps a
- * field (`role`, `provider`, `baseUrl`, `apiKey`, `model`) to the sentence
- * shown under it, and `value` is the connection `LB.setting("models", role,
- * value)` sends when `ok`.
+ * Providers whose name, id or host contains every word of `query`, by name.
+ * An empty query is the whole list.
+ */
+export function searchProviders(query, list = PROVIDERS) {
+  const words = String(query || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return [...list];
+  return list.filter((provider) => {
+    const hay = `${provider.name} ${provider.id} ${providerHost(provider)}`.toLowerCase();
+    return words.every((word) => hay.includes(word));
+  });
+}
+
+/** `${NAME}` placeholders filled from `values`; an empty one stays as it is. */
+export function fillTemplate(url, values = {}) {
+  return String(url || "").replace(/\$\{(\w+)\}/g, (whole, name) => {
+    const value = values[name] == null ? "" : String(values[name]).trim();
+    return value || whole;
+  });
+}
+
+/** The catalog entry a stored connection belongs to, or `CUSTOM`. */
+export function providerForConnection(row) {
+  return providerInfo(row && row.provider) || CUSTOM;
+}
+
+/** What the key hint says, from how the provider wants the key. */
+export function keyHint(provider) {
+  return provider && provider.auth === "x-api-key"
+    ? "Sent in an x-api-key header."
+    : "Sent as a Bearer token.";
+}
+
+/** A URL variable's value is a path or host fragment, nothing more. */
+const PLAIN_VALUE = /^[A-Za-z0-9._~-]{1,128}$/;
+
+/**
+ * Checks the connect form. Answers `{ ok, errors, role, value }`: `errors`
+ * maps a field (`role`, `provider`, `baseUrl`, `apiKey`, `model`, or
+ * `var:<NAME>`) to the sentence shown under it, and `value` is the connection
+ * `LB.setting("models", role, value)` sends when `ok`.
  *
- * The URL rule is the server's: HTTPS only (its SSRF guard refuses anything
- * else, and a key must never travel in clear text).
+ * The form reads: `role`, `provider`, `variables` ({NAME: value}),
+ * `baseUrl` with `editUrl` (true when the member unlocked the endpoint),
+ * `wire` and `auth` (custom only), `apiKey`, `model`.
+ *
+ * A catalog provider sends its id and variables and lets the server fill the
+ * endpoint; only an edited endpoint, or a custom one, sends `base_url`. The
+ * URL rule is the server's: https only, no credentials in it.
  */
 export function validateConnect(form) {
+  const f = form || {};
   const errors = {};
-  const role = roleInfo(form && form.role);
-  const provider = providerInfo(form && form.provider);
+  const role = roleInfo(f.role);
+  const provider = providerInfo(f.provider);
   if (!role) errors.role = "Choose what this model is for.";
   if (!provider) errors.provider = "Choose a provider.";
 
+  const custom = provider === CUSTOM;
+  const variables = {};
+  for (const variable of (provider && provider.variables) || []) {
+    const value = String((f.variables || {})[variable.name] || "").trim();
+    if (!value) errors[`var:${variable.name}`] = `Enter the ${variable.label}.`;
+    else if (!PLAIN_VALUE.test(value)) {
+      errors[`var:${variable.name}`] = "Letters, digits, '-', '_', '.' or '~' only.";
+    } else variables[variable.name] = value;
+  }
+
   let baseUrl = null;
-  if (provider && !provider.fixed) {
-    const raw = String((form && form.baseUrl) || "").trim();
+  if (provider && (custom || f.editUrl)) {
+    const raw = String(f.baseUrl || "").trim();
     if (!raw) {
       errors.baseUrl = "Enter the endpoint's base URL.";
     } else {
@@ -155,39 +187,57 @@ export function validateConnect(form) {
         parsed = null;
       }
       if (!parsed || !parsed.hostname) {
-        errors.baseUrl = "That is not a URL. It should look like https://api.example.com/v1.";
+        errors.baseUrl = "That is not a URL. It should look like https://api.example.com.";
       } else if (parsed.protocol !== "https:") {
         errors.baseUrl = "Use an https:// URL. Keys are never sent in clear text.";
       } else if (parsed.username || parsed.password) {
         errors.baseUrl = "Put the key in the API key field, not in the URL.";
+      } else if (/\$\{\w+\}/.test(raw)) {
+        errors.baseUrl = "Fill in the placeholder in the URL.";
       } else {
         baseUrl = raw.replace(/\/+$/, "");
       }
     }
   }
 
-  const apiKey = String((form && form.apiKey) || "").trim();
+  const wire = custom ? (WIRES.some((w) => w.value === f.wire) ? f.wire : null) : null;
+  const auth = custom ? (AUTHS.some((a) => a.value === f.auth) ? f.auth : null) : null;
+  if (custom && !wire) errors.wire = "Choose the API this endpoint speaks.";
+  if (custom && !auth) errors.auth = "Choose how the key is sent.";
+
+  const apiKey = String(f.apiKey || "").trim();
   if (!apiKey) errors.apiKey = "Paste the API key for this provider.";
 
-  const model = String((form && form.model) || "").trim();
-  if (!model) errors.model = "Enter the model name, for example one of the suggestions.";
+  const model = String(f.model || "").trim();
+  if (!model) errors.model = "Enter the model name.";
 
   const ok = Object.keys(errors).length === 0;
-  return {
-    ok,
-    errors,
-    role: role ? role.id : null,
-    value: ok
-      ? {
-          provider: provider.server,
-          base_url: baseUrl,
-          api_key: apiKey,
-          model,
-          fallback_to_managed: false,
-        }
-      : null,
-  };
+  if (!ok) return { ok, errors, role: role ? role.id : null, value: null };
+  const value = { provider: provider.id, api_key: apiKey, model, fallback_to_managed: false };
+  if (baseUrl) value.base_url = baseUrl;
+  if (Object.keys(variables).length && !baseUrl) value.variables = variables;
+  if (custom) {
+    value.wire = wire;
+    value.auth = auth;
+  }
+  return { ok, errors, role: role.id, value };
 }
+
+/**
+ * The body for `POST /v1/models/discover`: the same endpoint fields a connect
+ * sends, and the key. The browser sends it to Living Brain's own API, which
+ * asks the provider; the page never calls a provider itself.
+ */
+export function discoverRequest(value) {
+  const body = { provider: value.provider, api_key: value.api_key };
+  for (const key of ["base_url", "variables", "wire", "auth"]) {
+    if (value[key] !== undefined) body[key] = value[key];
+  }
+  return { method: "POST", path: "/v1/models/discover", body };
+}
+
+/** How many model chips to show before the list is left to the search box. */
+export const CHIP_LIMIT = 24;
 
 /** The key as the page shows it: dots and the last four the API sent. */
 export function maskedKey(key) {
@@ -223,7 +273,7 @@ export function connectionView(row) {
     roleLabel: role ? role.label : String((row && row.role) || "Unknown role"),
     roleDetail: role ? role.detail : "",
     provider: provider.id,
-    providerLabel: provider.id === "custom" ? "Custom endpoint" : provider.label,
+    providerLabel: provider.name,
     model: String((row && row.model) || "—"),
     key: maskedKey(row && row.key),
     status: statusView(row),
