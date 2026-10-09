@@ -451,20 +451,6 @@ fn backlinks_follow_a_pages_links() {
     });
 }
 
-/// The import ceiling a runtime reads before it buffers anything (issue #81).
-///
-/// The harness caps every module body at 64 KiB, which a vault file is over,
-/// so the pages module raises its coarse ceiling to the ledger's own — and
-/// declares the very number the import route enforces, so the two cannot drift
-/// apart and let the door refuse a body the route would have taken.
-#[test]
-fn the_import_ceiling_is_raised_and_is_the_routes_own() {
-    assert_eq!(
-        Pages::new().max_body_bytes(&EmptyConfig),
-        livingbrain_pages::MAX_SOURCE_BODY_BYTES
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Listing heads
 
@@ -587,10 +573,10 @@ fn list_respects_the_limit() {
 
 /// The composition the venture builds once the CLI contract has routes
 /// (issue #121): page routes merged at the module's own mount root and the
-/// MCP server nested at `/mcp` — one module, one shared context, both
+/// MCP server nested at `/mcp` — one module, one context per surface, both
 /// reading and writing the same pages. A page written through the nested
-/// surface must be visible to the merged one, which is what says
-/// both read the same wiring and not a lookalike.
+/// surface's context must be visible to the merged one, which is what says
+/// the second context is the same wiring and not a lookalike.
 #[test]
 fn a_merged_surface_and_a_nest_are_both_served_over_one_wiring() {
     pollster::block_on(async {
@@ -674,4 +660,18 @@ fn a_merged_surface_and_a_nest_are_both_served_over_one_wiring() {
         assert!(list.status.is_success(), "{}", list.status);
         assert_eq!(list.json().to_string(), r#"["ada"]"#);
     });
+}
+
+/// The import ceiling a runtime reads before it buffers anything (issue #81).
+///
+/// The harness caps every module body at 64 KiB, which a vault file is over,
+/// so the pages module raises its coarse ceiling to the ledger's own — and
+/// declares the very number the import route enforces, so the two cannot drift
+/// apart and let the door refuse a body the route would have taken.
+#[test]
+fn the_import_ceiling_is_raised_and_is_the_routes_own() {
+    assert_eq!(
+        Pages::new().max_body_bytes(&EmptyConfig),
+        livingbrain_pages::MAX_SOURCE_BODY_BYTES
+    );
 }

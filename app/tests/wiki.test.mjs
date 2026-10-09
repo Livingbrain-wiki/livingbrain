@@ -176,9 +176,8 @@ test("New page: the stub opens the editor and Save creates with base_version nul
   globalThis.window.prompt = () => "  API-Notes  ";
   await element("new-page").click();
 
-  // Straight into the editor, no GET.
-  // The boot also asks `/v1/workspaces/me` who is signed in; only page calls
-  // count here.
+  // Straight into the editor, no GET. (Boot also fires the header's session
+  // check, so count the page calls, not every call.)
   assert.equal(
     calls.filter((call) => call.url.startsWith("/v1/pages/")).length,
     1,

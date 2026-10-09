@@ -2,9 +2,10 @@
 # End-to-end CLI smoke against a LOCAL Worker (issue #121): the local twin of
 # scripts/deploy/smoke.sh. It boots the real Worker with wrangler, seeds the
 # smoke-test workspace into the local D1, mints a session with the real
-# `mint_session` example, then drives the real `livingbrain` binary through
-# its write/read commands against http://127.0.0.1:8787 and asserts the
-# outputs.
+# `mint_session` example, mints a PAT with that cookie (`POST /v1/tokens` —
+# bearer auth is PAT-only since #72), then drives the real `livingbrain`
+# binary through its write/read commands against http://127.0.0.1:8787 and
+# asserts the outputs.
 #
 #   scripts/dev/cli-smoke.sh
 #
@@ -36,6 +37,11 @@ user_id=U0SMOKETEST
 # The cookie `mint_session` mints; `SESSION_COOKIE` in the workspaces module.
 session_cookie_name=__Host-lb_session
 export_out=/tmp/lb-smoke-export.zip
+# The page the PUT contract exercises: unique per run, because the local D1
+# in `.wrangler/` persists across runs and a create (base_version=null) cannot
+# repeat on a slug that already exists.
+run_id="$(date +%s)-$$"
+page_slug="smoke-page-$run_id"
 # First boot compiles the Worker (release wasm); give it five minutes.
 boot_timeout_secs=300
 
@@ -212,9 +218,10 @@ pass "session minted (${#cookie} chars, value not shown)"
 
 # ---------------------------------------------------------------------------
 # 7. The strongest pre-routes proof: an EXISTING authed route answers the
-#    minted session. Cookie first (what the web app sends), then Bearer
-#    (what the CLI sends; SessionBearer splices a bearer into a cookie on
-#    the surfaces that mount it).
+#    minted session with the cookie (what the web app sends). Since #72
+#    bearer auth is PAT-only, so the section also mints the PAT the CLI runs
+#    on: `POST /v1/tokens` with the session cookie answers the `lbp_...`
+#    value exactly once, and every step after this section uses it.
 # ---------------------------------------------------------------------------
 me_url="$api/v1/workspaces/me"
 me_body="$tmp_dir/me.json"
@@ -232,17 +239,32 @@ fi
 
 code=$(curl -sS -o "$me_body" -w '%{http_code}' --max-time 10 \
   -H "Authorization: Bearer $cookie" "$me_url") || code=000
-if [ "$code" = "200" ]; then
-  pass "auth (bearer): GET $me_url -> 200"
+if [ "$code" = "401" ]; then
+  # Bearer auth is PAT-only since #72: a bearer value is handed to the tokens
+  # module's `authenticate`, and a minted session-cookie value is not a PAT —
+  # so this 401 is the documented answer, not a failure.
+  echo "NOTE: auth (bearer): GET $me_url -> 401 (bearer auth is PAT-only since #72; a session cookie is not a PAT; body: $(cat "$me_body"))"
 else
-  # Expected today: the workspaces routes read the session cookie only; the
-  # bearer-splicing SessionBearer is mounted on the pages module's /mcp
-  # surface (venture lib.rs), where the same minted token answers an MCP
-  # tools/call and a bad one is refused 401 mcp/unauthorized — proven during
-  # this script's bring-up. When the CLI routes land they mount the same
-  # bearer auth, and this check should turn 200.
-  echo "NOTE: auth (bearer): GET $me_url -> $code (the workspaces routes read the cookie only; body: $(cat "$me_body"))"
+  soft_fail "auth (bearer with the session cookie): GET $me_url -> $code, expected 401; body: $(cat "$me_body")"
 fi
+
+# The PAT the CLI runs on (issue #72): `POST /v1/tokens` with the session
+# cookie — a browser action, so the route refuses a bearer and a cross-site
+# origin, but curl sends neither header. The response body carries the
+# `lbp_...` value the one time it ever leaves the store.
+say "minting a PAT (POST /v1/tokens with the session cookie)"
+token_body="$tmp_dir/token.json"
+code=$(curl -sS -o "$token_body" -w '%{http_code}' --max-time 10 \
+  --cookie "$session_cookie_name=$cookie" -H 'Content-Type: application/json' \
+  -d '{"name":"cli-smoke"}' "$api/v1/tokens") || code=000
+pat=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' \
+  <"$token_body" 2>/dev/null || echo "")
+if [ "$code" = "201" ] && [ -n "$pat" ]; then
+  pass "PAT minted: POST $api/v1/tokens -> 201 (${#pat} chars, value not shown)"
+else
+  die "PAT mint failed: POST $api/v1/tokens -> $code; body: $(cat "$token_body")"
+fi
+case "$pat" in lbp_*) ;; *) die "the minted token is not an lbp_ PAT: ${#pat} chars, value not shown" ;; esac
 
 # ---------------------------------------------------------------------------
 # 8. Drive the real CLI. Every step is asserted on the shape the CLI's own
@@ -260,7 +282,7 @@ cli_bin="$target_dir/debug/livingbrain"
 [ -x "$cli_bin" ] || die "the CLI binary is missing at $cli_bin"
 cli() { # run the CLI; stdout to cli_out, exit code to cli_code, stderr to cli_err
   cli_err="$tmp_dir/cli.err"
-  if cli_out=$(LIVINGBRAIN_API_URL="$api" LIVINGBRAIN_TOKEN="$cookie" "$cli_bin" "$@" 2>"$cli_err"); then
+  if cli_out=$(LIVINGBRAIN_API_URL="$api" LIVINGBRAIN_TOKEN="$pat" "$cli_bin" "$@" 2>"$cli_err"); then
     cli_code=0
   else
     cli_code=$?
@@ -344,10 +366,12 @@ fi
 put_page() { # put_page JSON -> status in page_code, body in page_body
   page_body="$tmp_dir/page.json"
   page_code=$(curl -sS -o "$page_body" -w '%{http_code}' --max-time 10 \
-    -X PUT "$api/v1/pages/smoke-page" \
-    -H "Authorization: Bearer $cookie" -H 'Content-Type: application/json' \
+    -X PUT "$api/v1/pages/$page_slug" \
+    -H "Authorization: Bearer $pat" -H 'Content-Type: application/json' \
     -d "$1") || page_code=000
 }
+
+say "web contract: PUT /v1/pages/$page_slug (create, update, stale conflict)"
 
 put_page '{"markdown":"# hi","base_version":null,"title":"Smoke"}'
 if [ "$page_code" = "200" ] \
@@ -376,7 +400,7 @@ fi
 # Summary.
 # ---------------------------------------------------------------------------
 if [ "$failures" -eq 0 ]; then
-  say "ok: every step passed"
+  say "ok: every step passed (PUT contract exercised $page_slug to v2)"
 else
   say "$failures step(s) failed"
 fi
