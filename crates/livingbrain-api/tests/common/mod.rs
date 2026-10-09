@@ -76,6 +76,8 @@ pub fn fixture() -> Fixture {
             Asker {
                 workspace_id: workspace.to_owned(),
                 user_id: user.to_owned(),
+                // The fixed table stands for a full member credential: `None`
+                // carries every scope the member holds (issue #72).
                 token_scopes: None,
             },
         )

@@ -1218,8 +1218,6 @@ pages.wiki = async function wiki() {
   const source = $("#source");
   const preview = $("#preview");
   const toggle = $("#mode-toggle");
-  // Declared before `setMode` runs: it reads `save`, and reading a `const`
-  // before its declaration throws, which stopped the page before it loaded.
   const save = $("#save");
   const newPage = $("#new-page");
 
