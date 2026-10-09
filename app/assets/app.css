@@ -1,90 +1,178 @@
 /* Living Brain app — the design-token sheet and the handful of components
- * the three pages need. Same conventions as the sibling venture sites: a flat
- * stylesheet, oklch() tokens, no build step, dark by default with light
+ * the three pages need. The tokens, fonts and component shapes are the
+ * livingbrain.wiki website's (`assets/livingbrain.css` in
+ * Livingbrain-wiki/website), so the app and the site read as one product: a
+ * flat stylesheet, oklch() tokens, no build step, dark by default with light
  * following the system unless the person has chosen.
  *
  * Every length here is fluid (clamp, %, min/max) or auto: nothing has a fixed
  * pixel width, so the layout cannot overflow a 360 px viewport. Anything that
  * could be wider than its column — long slugs, URLs, tokens — sets
  * `overflow-wrap: anywhere`.
+ *
+ *   Colours (oklch)        dark                 light
+ *     --bg       page      0.16  0.014 215      0.975 0.006 190
+ *     --bg2      surface   0.195 0.016 215      0.995 0.003 190
+ *     --bg3      sunken    0.235 0.018 215      0.945 0.009 190
+ *     --ink      text      0.95  0.008 200      0.22  0.02  220
+ *     --ink2     body      0.80  0.014 205      0.40  0.02  215
+ *     --ink3     labels    0.68  0.016 210      0.47  0.02  215
+ *     --accent   alive     0.86  0.16  162      0.48  0.11  165
+ *   As on the site, the accent is kept for the primary action, focus and
+ *   things that are live; everything else is ink on a quiet surface.
 
-   tokens
+   fonts
+   ---------------------------------------------------------------- */
+
+/* Self-hosted, the same files as the website (OFL; latin subsets, variable),
+   so `font-src 'self'` in `_headers` covers them and no third-party font
+   request is ever made. */
+@font-face {
+  font-family: "Bricolage Grotesque";
+  font-style: normal;
+  font-weight: 400 700;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url(fonts/bricolage-grotesque.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Hanken Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(fonts/hanken-grotesk.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url(fonts/jetbrains-mono.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/*   tokens
    ---------------------------------------------------------------- */
 
 :root {
-  color-scheme: dark light;
+  color-scheme: dark;
+
+  --f-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --f-body: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   --bg: oklch(0.16 0.014 215);
-  --bg-raised: oklch(0.2 0.016 215);
-  --bg-sunken: oklch(0.13 0.012 215);
-  --line: oklch(0.32 0.018 215);
+  --bg2: oklch(0.195 0.016 215);
+  --bg3: oklch(0.235 0.018 215);
   --ink: oklch(0.95 0.008 200);
   --ink2: oklch(0.8 0.014 205);
-  --ink3: oklch(0.68 0.016 205);
+  --ink3: oklch(0.68 0.016 210);
+  --line: oklch(0.34 0.018 215);
+  --line2: oklch(0.265 0.016 215);
+  --field-line: oklch(0.5 0.02 215);
   --accent: oklch(0.86 0.16 162);
-  --accent-ink: oklch(0.16 0.03 162);
-  --warn: oklch(0.85 0.13 78);
-  --bad: oklch(0.76 0.16 22);
+  --accent-ink: oklch(0.2 0.05 165);
+  --accent-soft: oklch(0.86 0.16 162 / 0.13);
+  --warn: oklch(0.85 0.085 85);
+  --bad: oklch(0.8 0.08 25);
+  --glow: 0 0 10px var(--accent);
+  --header-bg: oklch(0.16 0.014 215 / 0.84);
 
-  --step-0: clamp(0.95rem, 0.9rem + 0.2vw, 1.05rem);
-  --step-1: clamp(1.1rem, 1rem + 0.5vw, 1.35rem);
-  --step-2: clamp(1.4rem, 1.2rem + 1vw, 1.9rem);
-  --step-3: clamp(1.75rem, 1.4rem + 2vw, 2.75rem);
+  /* The older names, kept so nothing that reads them goes blank. */
+  --bg-raised: var(--bg2);
+  --bg-sunken: var(--bg3);
 
-  --space-1: clamp(0.35rem, 0.3rem + 0.25vw, 0.5rem);
-  --space-2: clamp(0.6rem, 0.5rem + 0.4vw, 0.9rem);
-  --space-3: clamp(0.9rem, 0.7rem + 0.8vw, 1.4rem);
-  --space-4: clamp(1.4rem, 1rem + 1.6vw, 2.4rem);
-  --space-5: clamp(2.2rem, 1.5rem + 3vw, 4rem);
+  /* type: the site's scale, display headings in Bricolage */
+  --step-0: 1rem;
+  --step-1: clamp(1.2rem, 1.1rem + 0.5vw, 1.35rem);
+  --step-2: clamp(1.45rem, 1.2rem + 1.2vw, 2rem);
+  --step-3: clamp(2.1rem, 1.5rem + 3vw, 3.6rem);
+
+  --space-1: 0.4rem;
+  --space-2: 0.75rem;
+  --space-3: clamp(1rem, 0.85rem + 0.6vw, 1.25rem);
+  --space-4: clamp(1.5rem, 1.1rem + 1.6vw, 2.5rem);
+  --space-5: clamp(2.5rem, 1.6rem + 4vw, 5rem);
 
   --radius: 10px;
+  --radius-card: 16px;
   --measure: 68ch;
+  --gutter: 20px;
 }
 
 /* Light follows the system only while the person has not chosen. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --bg: oklch(0.985 0.004 200);
-    --bg-raised: oklch(1 0 0);
-    --bg-sunken: oklch(0.955 0.006 205);
-    --line: oklch(0.86 0.012 210);
+    color-scheme: light;
+    --bg: oklch(0.975 0.006 190);
+    --bg2: oklch(0.995 0.003 190);
+    --bg3: oklch(0.945 0.009 190);
     --ink: oklch(0.22 0.02 220);
-    --ink2: oklch(0.38 0.02 218);
-    --ink3: oklch(0.5 0.018 216);
-    --accent: oklch(0.52 0.13 162);
-    --accent-ink: oklch(0.99 0.005 160);
-    --warn: oklch(0.5 0.12 66);
-    --bad: oklch(0.5 0.17 25);
+    --ink2: oklch(0.4 0.02 215);
+    --ink3: oklch(0.47 0.02 215);
+    --line: oklch(0.84 0.012 200);
+    --line2: oklch(0.9 0.01 200);
+    --field-line: oklch(0.62 0.015 210);
+    --accent: oklch(0.48 0.11 165);
+    --accent-ink: oklch(0.99 0.01 165);
+    --accent-soft: oklch(0.48 0.11 165 / 0.1);
+    --warn: oklch(0.5 0.11 70);
+    --bad: oklch(0.5 0.13 30);
+    --glow: none;
+    --header-bg: oklch(0.975 0.006 190 / 0.86);
   }
 }
 
 /* An explicit choice beats the system, in both directions. */
 :root[data-theme="light"] {
-  --bg: oklch(0.985 0.004 200);
-  --bg-raised: oklch(1 0 0);
-  --bg-sunken: oklch(0.955 0.006 205);
-  --line: oklch(0.86 0.012 210);
+  color-scheme: light;
+  --bg: oklch(0.975 0.006 190);
+  --bg2: oklch(0.995 0.003 190);
+  --bg3: oklch(0.945 0.009 190);
   --ink: oklch(0.22 0.02 220);
-  --ink2: oklch(0.38 0.02 218);
-  --ink3: oklch(0.5 0.018 216);
-  --accent: oklch(0.52 0.13 162);
-  --accent-ink: oklch(0.99 0.005 160);
-  --warn: oklch(0.5 0.12 66);
-  --bad: oklch(0.5 0.17 25);
+  --ink2: oklch(0.4 0.02 215);
+  --ink3: oklch(0.47 0.02 215);
+  --line: oklch(0.84 0.012 200);
+  --line2: oklch(0.9 0.01 200);
+  --field-line: oklch(0.62 0.015 210);
+  --accent: oklch(0.48 0.11 165);
+  --accent-ink: oklch(0.99 0.01 165);
+  --accent-soft: oklch(0.48 0.11 165 / 0.1);
+  --warn: oklch(0.5 0.11 70);
+  --bad: oklch(0.5 0.13 30);
+  --glow: none;
+  --header-bg: oklch(0.975 0.006 190 / 0.86);
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: oklch(0.16 0.014 215);
-  --bg-raised: oklch(0.2 0.016 215);
-  --bg-sunken: oklch(0.13 0.012 215);
-  --line: oklch(0.32 0.018 215);
+  --bg2: oklch(0.195 0.016 215);
+  --bg3: oklch(0.235 0.018 215);
   --ink: oklch(0.95 0.008 200);
   --ink2: oklch(0.8 0.014 205);
-  --ink3: oklch(0.68 0.016 205);
+  --ink3: oklch(0.68 0.016 210);
+  --line: oklch(0.34 0.018 215);
+  --line2: oklch(0.265 0.016 215);
+  --field-line: oklch(0.5 0.02 215);
   --accent: oklch(0.86 0.16 162);
-  --accent-ink: oklch(0.16 0.03 162);
-  --warn: oklch(0.85 0.13 78);
-  --bad: oklch(0.76 0.16 22);
+  --accent-ink: oklch(0.2 0.05 165);
+  --accent-soft: oklch(0.86 0.16 162 / 0.13);
+  --warn: oklch(0.85 0.085 85);
+  --bad: oklch(0.8 0.08 25);
+  --glow: 0 0 10px var(--accent);
+  --header-bg: oklch(0.16 0.014 215 / 0.84);
 }
 
 /*   base
@@ -103,29 +191,40 @@ html {
 body {
   margin: 0;
   min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--ink);
-  font: var(--step-0) / 1.6 system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", sans-serif;
+  font-family: var(--f-body);
+  font-size: var(--step-0);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
   overflow-wrap: anywhere;
 }
 
 h1,
 h2,
 h3 {
-  line-height: 1.2;
+  font-family: var(--f-display);
+  font-weight: 600;
   text-wrap: balance;
   margin: 0 0 var(--space-2);
 }
 
 h1 {
   font-size: var(--step-3);
+  line-height: 1;
+  letter-spacing: -0.04em;
 }
 h2 {
   font-size: var(--step-2);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
 }
 h3 {
   font-size: var(--step-1);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
 }
 
 p {
@@ -134,29 +233,41 @@ p {
 }
 
 a {
+  color: var(--ink);
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+
+a:hover {
   color: var(--accent);
-  text-underline-offset: 0.15em;
+  text-decoration-color: var(--accent);
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 code,
 kbd,
 pre {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.92em;
+  font-family: var(--f-mono);
+  font-size: 0.875em;
 }
 
 code {
-  background: var(--bg-sunken);
+  background: var(--bg3);
   border-radius: 5px;
   padding: 0.1em 0.35em;
 }
 
 pre {
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
+  background: var(--bg3);
+  border: 1px solid var(--line2);
   border-radius: var(--radius);
-  padding: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   overflow-x: auto;
+  line-height: 1.7;
 }
 
 pre code {
@@ -166,21 +277,33 @@ pre code {
 
 hr {
   border: 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--line2);
   margin: var(--space-4) 0;
 }
 
 /* A visible focus ring everywhere, never removed. */
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: 3px;
   border-radius: 4px;
 }
 
+/* `hidden` always wins: the pages toggle the editor, the save button and the
+   token reveal with it, and a component's own `display` must not undo that. */
+[hidden] {
+  display: none !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ink3);
+  opacity: 1;
+}
+
 @media (prefers-reduced-motion: no-preference) {
-  :where(a, button, input, select, textarea) {
-    transition: color 120ms ease, background-color 120ms ease,
-      border-color 120ms ease;
+  :where(a, button, input, select, textarea, .btn) {
+    transition: color 150ms, background-color 150ms, border-color 150ms,
+      box-shadow 200ms, filter 150ms, transform 150ms var(--ease);
   }
 }
 
@@ -200,102 +323,355 @@ hr {
 
 .wrap {
   width: 100%;
-  max-width: 72rem;
+  max-width: 1180px;
   margin-inline: auto;
-  padding: var(--space-3) var(--space-2) var(--space-5);
+  padding-inline: var(--gutter);
+}
+
+main.wrap {
+  flex: 1 0 auto;
+  padding-block: var(--space-4) var(--space-5);
 }
 
 .skip {
   position: absolute;
   left: -9999px;
+  top: 8px;
+  z-index: 100;
+  padding: 10px 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-radius: 8px;
+  font-weight: 600;
+  text-decoration: none;
 }
 .skip:focus {
-  position: static;
-  display: inline-block;
-  margin: var(--space-2);
+  left: 8px;
+  color: var(--accent-ink);
 }
 
-.topbar {
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*   header: the website's sticky, blurred bar
+   ---------------------------------------------------------------- */
+
+.hd {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--header-bg);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line2);
+}
+
+.hd__in {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
-  border-bottom: 1px solid var(--line);
-  padding-block: var(--space-2);
+  gap: 10px 18px;
+  padding-block: 12px;
 }
 
-.topbar .brand {
-  font-weight: 650;
-  letter-spacing: -0.01em;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-inline-end: auto;
   text-decoration: none;
   color: var(--ink);
+  border-radius: 6px;
 }
 
-.topbar nav {
+.brand:hover {
+  color: var(--ink);
+}
+
+/* The mark: a ring with the live node at its centre, as on the site. */
+.mark {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: grid;
+  place-items: center;
+}
+
+.mark span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: var(--glow);
+}
+
+.brand__word {
+  font-family: var(--f-display);
+  font-weight: 650;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.brand__word span {
+  font-family: var(--f-mono);
+  font-weight: 400;
+  font-size: 13px;
+  letter-spacing: 0;
+  color: var(--ink3);
+}
+
+.brand__word--sm {
+  font-size: 17px;
+}
+.brand__word--sm span {
+  font-size: 12px;
+}
+
+.nav {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 4px;
+  font-size: 14px;
 }
 
-.card {
-  background: var(--bg-raised);
+.nav a {
+  padding: 6px 9px;
+  border-radius: 7px;
+  text-decoration: none;
+  color: var(--ink2);
+}
+
+.nav a:hover {
+  color: var(--ink);
+  background: var(--bg2);
+}
+
+.nav a[aria-current="page"] {
+  color: var(--ink);
+  background: var(--bg2);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* The theme toggle. `app.js` writes its label with `textContent`, so the
+   half-filled disc is drawn by `::before` and survives the relabel. */
+.theme-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: var(--space-3);
+  background: transparent;
+  color: var(--ink2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.theme-btn::before {
+  content: "";
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  background: linear-gradient(90deg, currentColor 50%, transparent 50%);
+}
+
+.theme-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink3);
+  background: transparent;
+}
+
+/* Phones: the toggle shows only its disc, as on the site. `app.js` sets an
+   aria-label on it, so the accessible name does not depend on the text. */
+@media (max-width: 420px) {
+  .theme-btn {
+    font-size: 0;
+    gap: 0;
+    padding: 0 10px;
+  }
+}
+
+/* Narrow screens: brand and theme on the first row, the nav on its own. */
+@media (max-width: 40rem) {
+  .hd__in .nav {
+    order: 3;
+    flex: 1 1 100%;
+    margin-inline: -9px;
+  }
+}
+
+/*   footer
+   ---------------------------------------------------------------- */
+
+.ft {
+  border-top: 1px solid var(--line2);
+}
+
+.ft__in {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px 28px;
+  padding-block: 24px 32px;
+  font-size: 14px;
+  color: var(--ink3);
+}
+
+.ft__brand {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.ft__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+}
+
+.ft__nav a {
+  color: var(--ink2);
+}
+
+.ft__nav a:hover {
+  color: var(--accent);
+}
+
+/*   type helpers
+   ---------------------------------------------------------------- */
+
+/* The site's mono, uppercase kicker above a heading. */
+.eyebrow {
+  margin: 0 0 14px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+.lede {
+  max-width: 36em;
+  font-size: clamp(17px, 1.6vw, 19px);
+  line-height: 1.6;
+  color: var(--ink2);
+  text-wrap: pretty;
 }
 
 .muted {
   color: var(--ink2);
-  font-size: 0.92em;
 }
 
 .tiny {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  line-height: 1.6;
   color: var(--ink3);
-  font-size: 0.85em;
 }
 
+.tiny code {
+  font-size: 1em;
+}
+
+.page-head {
+  margin-bottom: var(--space-4);
+}
+
+.page-head h1 {
+  margin-bottom: var(--space-3);
+}
+
+.section-h {
+  margin-top: var(--space-5);
+}
+
+/*   surfaces
+   ---------------------------------------------------------------- */
+
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  padding: clamp(18px, 3vw, 24px);
+  min-width: 0;
+}
+
+.card > :last-child {
+  margin-bottom: 0;
+}
+
+/* The site's `.tag`: a dashed, mono, uppercase status chip. */
 .pill {
-  display: inline-block;
-  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px dashed var(--line);
   border-radius: 999px;
-  padding: 0.1em 0.6em;
-  font-size: 0.78rem;
-  color: var(--ink2);
+  font-family: var(--f-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink3);
   white-space: nowrap;
 }
 
-.pill[data-state="disabled"] {
-  opacity: 0.85;
+p.pill {
+  margin-bottom: 0;
 }
 
-.pill[data-state="off"] {
+.pill[data-state="off"],
+.pill[data-state="disabled"] {
   color: var(--ink3);
 }
 
-.pill[data-state="on"] {
+.pill[data-state="on"],
+.pill[data-state="live"] {
   color: var(--accent);
-  border-color: var(--accent);
+  border: 1px solid var(--accent);
 }
 
 .pill[data-state="warn"] {
   color: var(--warn);
-  border-color: var(--warn);
+  border: 1px solid var(--warn);
 }
 
 /* the registry's two statuses. `live` is the only green; `planned` stays in
-   the muted ink so nothing merely decided can read as running today. */
-.pill[data-state="live"] {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
+   the muted ink, dashed, so nothing merely decided can read as running. */
 .pill[data-state="planned"] {
   color: var(--ink3);
   border-style: dashed;
 }
 
 .stack-rows > p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
   margin: var(--space-2) 0;
 }
 
@@ -309,47 +685,85 @@ hr {
 /*   controls
    ---------------------------------------------------------------- */
 
+/* Default buttons are the site's ghost button; `data-variant="primary"` and
+   `.btn--primary` are its accent button. */
 button,
 .btn {
-  font: inherit;
-  font-weight: 550;
-  color: var(--ink);
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0.5rem 16px;
   border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
-  cursor: pointer;
-  text-decoration: none;
-  display: inline-block;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
   text-align: center;
+  text-decoration: none;
+  cursor: pointer;
 }
 
 button:hover:not(:disabled),
 .btn:hover {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--ink);
+  background: var(--accent-soft);
 }
 
 button:disabled,
 [aria-disabled="true"] {
   cursor: not-allowed;
-  opacity: 0.6;
+  color: var(--ink3);
+  border-style: dashed;
+  background: transparent;
 }
 
-button[data-variant="primary"] {
+button[data-variant="primary"],
+.btn--primary {
+  min-height: 50px;
+  padding-inline: 20px;
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
+  font-size: 16px;
+  font-weight: 650;
 }
 
-button[data-variant="primary"]:hover:not(:disabled) {
+button[data-variant="primary"]:hover:not(:disabled),
+.btn--primary:hover {
+  background: var(--accent);
   color: var(--accent-ink);
   filter: brightness(1.08);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+button[data-variant="primary"]:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+button[data-variant="primary"]:disabled {
+  cursor: progress;
+  border-style: solid;
+  color: var(--accent-ink);
+  filter: saturate(0.6);
+}
+
+/* compact buttons inside table rows */
+.table button {
+  min-height: 34px;
+  padding: 0.25rem 12px;
+  font-size: 14px;
 }
 
 label {
   display: block;
-  font-weight: 550;
+  font-weight: 600;
+  font-size: 15px;
   margin-bottom: var(--space-1);
 }
 
@@ -357,62 +771,167 @@ input,
 select,
 textarea {
   font: inherit;
+  font-size: 16px;
   color: var(--ink);
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
+  background: var(--bg2);
+  border: 1px solid var(--field-line);
   border-radius: var(--radius);
-  padding: var(--space-2);
+  min-height: 50px;
+  padding: 0 16px;
   width: 100%;
   max-width: 100%;
 }
 
+.card :where(input, select, textarea) {
+  background: var(--bg);
+}
+
+select {
+  padding-inline-end: 12px;
+}
+
 textarea {
   min-height: 12rem;
+  padding: 14px 16px;
   resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  line-height: 1.5;
+  font-family: var(--f-mono);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+:where(input, select, textarea):hover:not(:disabled) {
+  border-color: var(--ink3);
+}
+
+/* The site's field focus: accent border and a soft halo, on top of the
+   global outline so keyboard focus stays unmistakable. */
+:where(input, select, textarea):focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+:where(input, select, textarea):disabled {
+  cursor: not-allowed;
+  color: var(--ink3);
+  border-style: dashed;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--bad);
 }
 
 input[type="checkbox"] {
-  width: auto;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  flex: 0 0 auto;
   accent-color: var(--accent);
 }
 
 fieldset {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border: 1px solid var(--line2);
+  border-radius: 12px;
   padding: var(--space-3);
   margin: 0 0 var(--space-3);
   min-width: 0;
 }
 
 legend {
-  padding-inline: var(--space-1);
-  font-weight: 600;
+  padding-inline: 6px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink3);
 }
 
-/*   notices
+/* the email form: the website's join row, input and button side by side */
+.join {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+  max-width: none;
+}
+
+.join > input {
+  flex: 1 1 220px;
+  min-width: 0;
+  width: auto;
+}
+
+.join > button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 480px) {
+  .join > button {
+    flex: 1 1 100%;
+  }
+}
+
+/*   notices: errors, confirmations and empty states
    ---------------------------------------------------------------- */
 
 .notice {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
   border: 1px solid var(--line);
-  border-left-width: 3px;
   border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
+  padding: 12px 16px;
   margin-block: var(--space-2);
-  background: var(--bg-sunken);
+  background: var(--bg3);
+  color: var(--ink);
+  font-size: 15px;
+}
+
+/* the site's status dot, in the notice's tone */
+.notice::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--ink3);
+  transform: translateY(-1px);
+}
+
+.notice[hidden] {
+  display: none;
+}
+
+/* A notice that holds a block of content (the token reveal) stacks it. */
+.notice:has(> p) {
+  display: block;
+}
+.notice:has(> p)::before {
+  display: none;
 }
 
 .notice[data-tone="ok"] {
-  border-left-color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.notice[data-tone="ok"]::before {
+  background: var(--accent);
+  box-shadow: var(--glow);
 }
 
 .notice[data-tone="warn"] {
-  border-left-color: var(--warn);
+  border-color: var(--warn);
+}
+.notice[data-tone="warn"]::before {
+  background: var(--warn);
 }
 
 .notice[data-tone="bad"] {
-  border-left-color: var(--bad);
+  border-color: var(--bad);
+}
+.notice[data-tone="bad"]::before {
+  background: var(--bad);
 }
 
 .notice:empty {
@@ -423,30 +942,47 @@ legend {
    ---------------------------------------------------------------- */
 
 .signin {
-  max-width: 34rem;
-  margin-inline: auto;
+  max-width: 880px;
+}
+
+.signin .card + .section-h {
+  margin-top: var(--space-5);
 }
 
 .methods {
   list-style: none;
-  margin: var(--space-3) 0 0;
+  margin: var(--space-3) 0 var(--space-4);
   padding: 0;
   display: grid;
-  gap: var(--space-2);
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
 }
 
 .methods > li {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: var(--space-3);
+  gap: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  padding: 20px;
+  min-width: 0;
 }
 
-.methods > li > .btn {
+.methods > li > strong {
+  font-family: var(--f-display);
+  font-weight: 600;
+  font-size: 21px;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.methods > li > .muted {
+  font-size: 15px;
+}
+
+.methods > li > .btn,
+.methods > li > button {
   width: 100%;
   margin-top: auto;
 }
@@ -456,8 +992,8 @@ legend {
 
 .settings {
   display: grid;
-  gap: var(--space-3);
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
   align-items: start;
 }
 
@@ -471,37 +1007,72 @@ legend {
   gap: var(--space-2);
   align-items: center;
   margin-bottom: var(--space-2);
+  max-width: none;
 }
 
 .row > label {
-  flex: 1 1 12rem;
+  flex: 1 1 10rem;
   margin-bottom: 0;
 }
 
 .row > select,
-.row > input {
+.row > input:not([type="checkbox"]) {
   flex: 2 1 12rem;
   width: auto;
+  min-width: 0;
+}
+
+/* the table scrolls inside its own box rather than widen the page */
+.table-scroll {
+  overflow-x: auto;
+  margin-inline: -4px;
+  padding-inline: 4px;
 }
 
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.92em;
+  font-size: 15px;
+}
+
+/* Cells keep their words whole; a narrow screen scrolls the table inside
+   `.table-scroll` instead of breaking "openrouter" into four lines. */
+.table-scroll .table {
+  min-width: 30rem;
+}
+
+.table-scroll .table :where(th, td) {
+  overflow-wrap: normal;
 }
 
 .table caption {
   text-align: left;
-  color: var(--ink2);
   padding-bottom: var(--space-2);
+  font-size: 13px;
+  color: var(--ink3);
+}
+
+.table th {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink3);
 }
 
 .table th,
 .table td {
   text-align: left;
-  border-bottom: 1px solid var(--line);
-  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+  border-bottom: 1px solid var(--line2);
+  padding: 10px 12px 10px 0;
   vertical-align: top;
+}
+
+.table td.muted,
+.table td[colspan] {
+  color: var(--ink2);
+  font-style: normal;
 }
 
 /*   wiki
@@ -517,13 +1088,14 @@ legend {
 
 .wiki-toolbar .status {
   margin-inline-start: auto;
-  color: var(--ink2);
-  font-size: 0.9em;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink3);
 }
 
 .editor {
   display: grid;
-  gap: var(--space-3);
+  gap: 16px;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
   align-items: start;
 }
@@ -534,18 +1106,30 @@ legend {
 
 .prose {
   max-width: var(--measure);
+  color: var(--ink2);
+  line-height: 1.65;
+}
+
+.prose :where(h1, h2, h3, strong) {
+  color: var(--ink);
 }
 
 .prose h1 {
-  font-size: var(--step-3);
+  font-size: var(--step-2);
 }
 .prose h2 {
-  font-size: var(--step-2);
+  font-size: var(--step-1);
   margin-top: var(--space-4);
 }
 .prose h3 {
-  font-size: var(--step-1);
+  font-size: 1.1rem;
   margin-top: var(--space-3);
+}
+
+.prose a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
 }
 
 .prose ul,
@@ -556,14 +1140,24 @@ legend {
 
 .prose blockquote {
   margin: 0 0 var(--space-3);
-  padding-inline-start: var(--space-2);
-  border-inline-start: 3px solid var(--line);
+  padding-inline-start: var(--space-3);
+  border-inline-start: 2px solid var(--accent);
   color: var(--ink2);
+}
+
+/* an article with nothing in it yet (no page loaded) draws no empty box */
+article.prose:empty {
+  display: none;
+}
+
+/* the closing note under a page */
+main > p.tiny:last-child {
+  margin-top: var(--space-4);
 }
 
 .aside-grid {
   display: grid;
-  gap: var(--space-3);
+  gap: 16px;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
   align-items: start;
 }
@@ -572,13 +1166,39 @@ legend {
   min-width: 0;
 }
 
+.aside-grid h3 {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+/* the site's wiki chips */
 .backlinks {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
+  gap: 8px;
+}
+
+.backlinks a {
+  display: inline-flex;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink2);
+  text-decoration: none;
+}
+
+.backlinks a:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .citations {
@@ -590,7 +1210,7 @@ legend {
 }
 
 .citations li {
-  border-inline-start: 2px solid var(--line);
+  border-inline-start: 2px solid var(--accent);
   padding-inline-start: var(--space-2);
 }
 
@@ -600,18 +1220,24 @@ legend {
   font-size: 0.92em;
 }
 
-@media (max-width: 30rem) {
-  .topbar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .topbar nav {
-    justify-content: space-between;
-  }
+/*   a standalone message page (the magic-link verify form)
+   ---------------------------------------------------------------- */
+
+.solo {
+  max-width: 34rem;
+}
+
+.solo form {
+  margin-block: var(--space-3);
+}
+
+.solo form button {
+  width: 100%;
 }
 
 @media print {
-  .topbar,
+  .hd,
+  .ft,
   .wiki-toolbar,
   .skip {
     display: none;

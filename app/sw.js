@@ -10,7 +10,7 @@
  * the app's data must never be served from a stale cache.
  */
 
-const CACHE = "lb-app-v1";
+const CACHE = "lb-app-v2";
 
 const SHELL = [
   "./",
@@ -25,6 +25,11 @@ const SHELL = [
   // atomically, so an offline settings page would not render at all without it.
   "./assets/stack.json",
   "./manifest.webmanifest",
+  // The website's look: its self-hosted fonts and its mark.
+  "./assets/fonts/bricolage-grotesque.woff2",
+  "./assets/fonts/hanken-grotesk.woff2",
+  "./assets/fonts/jetbrains-mono.woff2",
+  "./assets/favicon.svg",
 ];
 
 self.addEventListener("install", (event) => {

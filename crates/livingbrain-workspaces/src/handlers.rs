@@ -1241,29 +1241,60 @@ async fn email_verify_form(
         .map(str::trim)
         .filter(|t| !t.is_empty())
     else {
-        return Ok(verify_page(
-            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-             <title>Sign in</title>\n</head>\n<body>\n<h1>This sign-in link is not usable</h1>\n\
-             <p>Ask for a new one and open the newest message.</p>\n</body>\n</html>\n",
-        ));
+        return Ok(verify_page(&verify_shell(
+            "Sign in",
+            "<p class=\"eyebrow\">Sign-in link</p>\n\
+             <h1>This sign-in link is not usable</h1>\n\
+             <div class=\"notice\" data-tone=\"warn\">Ask for a new one and open the newest \
+             message.</div>\n\
+             <p><a class=\"btn\" href=\"/index.html\">Back to sign-in</a></p>\n",
+        )));
     };
     // The token is the caller's own, from their own URL, and it is rendered
     // into a hidden field of a form that posts it straight back. It is
     // still escaped, because a token is still a value from a request.
     let escaped = html_escape(token);
     let action = format!("{}/v1/workspaces/email/verify", state.public_base()?);
-    Ok(verify_page(&format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <title>Sign in to Living Brain</title>\n</head>\n<body>\n\
-         <h1>Sign in to Living Brain</h1>\n\
-         <p>This link works once, and for the next {} minutes.</p>\n\
-         <form method=\"post\" action=\"{action}\">\n\
-         <input type=\"hidden\" name=\"token\" value=\"{escaped}\">\n\
-         <button type=\"submit\">Sign in</button>\n</form>\n\
-         <p>If you did not ask for it, close this page and ignore the message.</p>\n\
-         </body>\n</html>\n",
-        flow::SIGN_IN_TTL_SECS / 60
+    Ok(verify_page(&verify_shell(
+        "Sign in to Living Brain",
+        &format!(
+            "<p class=\"eyebrow\">Sign-in link</p>\n\
+             <h1>Sign in to Living Brain</h1>\n\
+             <p class=\"lede\">This link works once, and for the next {} minutes.</p>\n\
+             <form method=\"post\" action=\"{action}\">\n\
+             <input type=\"hidden\" name=\"token\" value=\"{escaped}\">\n\
+             <button type=\"submit\" data-variant=\"primary\">Sign in</button>\n</form>\n\
+             <p class=\"tiny\">If you did not ask for it, close this page and ignore the \
+             message.</p>\n",
+            flow::SIGN_IN_TTL_SECS / 60
+        ),
     )))
+}
+
+/// The page around a verify body: the web app's stylesheet, mark and header,
+/// so the one page the API renders itself looks like the rest of the app.
+///
+/// The app is served from the same host as static assets, so the stylesheet
+/// and icon are root-relative. Both are same-origin and the page sends no
+/// referrer, so loading them cannot carry the token in the URL anywhere; on a
+/// host without the app's assets they 404 and the page still works unstyled.
+/// No script is added: this page needs none, and the theme simply follows the
+/// system here.
+fn verify_shell(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <meta name=\"color-scheme\" content=\"dark light\">\n\
+         <title>{title}</title>\n\
+         <link rel=\"icon\" href=\"/assets/favicon.svg\" type=\"image/svg+xml\">\n\
+         <link rel=\"stylesheet\" href=\"/assets/app.css\">\n</head>\n<body>\n\
+         <header class=\"hd\"><div class=\"wrap hd__in\">\
+         <a class=\"brand\" href=\"/index.html\"><span class=\"mark\" aria-hidden=\"true\">\
+         <span></span></span><span class=\"brand__word\">livingbrain<span>.wiki</span>\
+         </span></a></div></header>\n\
+         <main id=\"main\" class=\"wrap solo\">\n<div class=\"card\">\n{body}</div>\n</main>\n\
+         </body>\n</html>\n"
+    )
 }
 
 /// A page the verify route serves, with the headers a page carrying a live
