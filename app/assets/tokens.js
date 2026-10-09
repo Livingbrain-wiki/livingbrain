@@ -54,6 +54,35 @@ export function parseScopes(input) {
   return [...new Set(text.split(",").map((part) => part.trim()).filter(Boolean))];
 }
 
+/**
+ * The two scope choices the create form offers. The server takes any scope the
+ * caller holds (`shared`, `channel:<id>`, `user:<id>`), but a channel or user
+ * scope is an id nobody types by hand, so the page offers the two that mean
+ * something to a person: everything you can read (no scopes sent), or only
+ * what is shared with the whole workspace.
+ */
+export const TOKEN_SCOPES = Object.freeze([
+  {
+    value: "",
+    label: "Full read access",
+    detail: "Everything you can read, including your private notes.",
+  },
+  {
+    value: "shared",
+    label: "Shared only",
+    detail: "Only pages shared with the whole workspace. Safer for bots and CI.",
+  },
+]);
+
+/** A scope list in words: no scopes is full access, `shared` is "Shared only". */
+export function scopeSummary(scopes) {
+  const list = Array.isArray(scopes) ? scopes : [];
+  if (!list.length) return "Full read access";
+  return list
+    .map((scope) => (scope === "shared" ? "Shared only" : scope))
+    .join(", ");
+}
+
 /** The list read: `GET /v1/tokens`. */
 export function tokenListRequest() {
   return { method: "GET", path: TOKENS_PATH };
@@ -93,7 +122,7 @@ export function formatCreated(value) {
  * One list entry, as the page shows it. Deliberately not a spread of the entry:
  * only four fields are read, so the view model cannot carry a secret even if the
  * response did. No scopes means the member's own full read access, and
- * "Full access" says that where an empty cell would read as "nothing".
+ * "Full read access" says that where an empty cell would read as "nothing".
  */
 export function tokenView(entry) {
   const scopes = Array.isArray(entry && entry.scopes)
@@ -103,7 +132,7 @@ export function tokenView(entry) {
     prefix: String((entry && entry.prefix) || ""),
     name: String((entry && entry.name) || ""),
     scopes,
-    scopeSummary: scopes.length ? scopes.join(", ") : "Full access",
+    scopeSummary: scopeSummary(scopes),
     created: formatCreated(entry && entry.created_at),
   };
 }
@@ -141,19 +170,26 @@ export function renderTokenRows(container, views, doc = typeof document === "und
   container.replaceChildren();
 
   const row = list.length ? list : [null];
+  // Each cell names its column in `data-label`, which is what the narrow-screen
+  // layout prints beside the value when a row becomes a card.
+  const LABELS = ["Name", "Prefix", "Access", "Created"];
   for (const view of row) {
     const tr = doc.createElement("tr");
-    for (const value of view
+    const values = view
       ? [view.name, view.prefix, view.scopeSummary, view.created]
-      : ["No API tokens yet."]) {
+      : ["No API tokens yet. Create one below to connect a coding agent or the CLI."];
+    values.forEach((value, index) => {
       const td = doc.createElement("td");
       td.textContent = value;
+      if (view) td.setAttribute("data-label", LABELS[index]);
       tr.appendChild(td);
-    }
+    });
     if (view) {
       const actions = doc.createElement("td");
+      actions.className = "cell-actions";
       const revoke = doc.createElement("button");
       revoke.type = "button";
+      revoke.className = "btn-sm btn-danger";
       revoke.textContent = "Revoke";
       revoke.setAttribute("data-prefix", view.prefix);
       revoke.setAttribute("data-name", view.name);

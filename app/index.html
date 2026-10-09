@@ -49,6 +49,90 @@
     </header>
 
     <main id="main" class="wrap signin">
+      <!-- The session check. Until it settles neither the form nor the home
+           is shown, so a signed-in visitor never sees a flash of "Sign in". -->
+      <div id="session-checking" class="notice checking" role="status" aria-live="polite">
+        Checking your session…
+      </div>
+      <div id="session-error" class="notice" data-tone="bad" role="alert" hidden></div>
+
+      <!-- Signed in: the workspace and where to go next. -->
+      <section id="home-view" class="home" aria-labelledby="home-title" hidden>
+        <div class="page-head">
+          <p class="eyebrow">Signed in as <span data-session="who"></span></p>
+          <h1 id="home-title"><span data-session="workspaceName"></span></h1>
+          <p class="lede">Your workspace is ready. Pick up where you left off.</p>
+        </div>
+
+        <div class="card home__ws">
+          <dl class="facts">
+            <div>
+              <dt>Workspace</dt>
+              <dd data-session="workspaceName"></dd>
+            </div>
+            <div>
+              <dt>Workspace id</dt>
+              <dd><code data-session="workspaceId"></code></dd>
+            </div>
+            <div>
+              <dt>Your role</dt>
+              <dd data-session="role"></dd>
+            </div>
+          </dl>
+          <button type="button" id="signout">Sign out</button>
+        </div>
+
+        <h2 class="section-h">Next steps</h2>
+        <ul class="methods steps">
+          <li>
+            <strong>Open the wiki</strong>
+            <span class="muted">
+              Read and edit your team's pages. Every answer the brain gives
+              cites the page it came from.
+            </span>
+            <a class="btn btn--primary" href="wiki.html">Open the wiki</a>
+          </li>
+          <li>
+            <strong>Connect a model</strong>
+            <span class="muted">
+              Bring your own model key in Settings. Until you do, the managed
+              model answers.
+            </span>
+            <a class="btn" href="settings.html#models">Open Settings</a>
+          </li>
+          <li class="steps__wide">
+            <strong>Connect your coding agent (MCP)</strong>
+            <span class="muted">
+              Your agent reaches the brain at this endpoint:
+            </span>
+            <code class="endpoint" data-session="mcpUrl"></code>
+            <ol class="howto">
+              <li>
+                Create a personal access token in
+                <a href="settings.html#tokens">Settings → API tokens</a>.
+                It is shown once.
+              </li>
+              <li>
+                Add the server to your agent with the token as a bearer
+                header, for example:
+                <code class="endpoint"
+                  >claude mcp add --transport http livingbrain
+                  <span data-session="mcpUrl"></span> --header
+                  "Authorization: Bearer &lt;token&gt;"</code
+                >
+              </li>
+              <li>
+                In a terminal, <code>livingbrain login</code> signs the CLI in
+                with the OAuth device flow instead — no token to copy. Point
+                it here with
+                <code>LIVINGBRAIN_API_URL=<span data-session="apiBase"></span></code>.
+              </li>
+            </ol>
+          </li>
+        </ul>
+      </section>
+
+      <div id="signin-view" hidden>
       <div class="page-head">
         <p class="eyebrow">Your workspace</p>
         <h1>Sign in</h1>
@@ -142,6 +226,7 @@
         The session is an HttpOnly cookie set by the API. Nothing on this page
         ever sees a token.
       </p>
+      </div>
     </main>
 
     <footer class="ft">

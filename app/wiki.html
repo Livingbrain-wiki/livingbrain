@@ -41,8 +41,14 @@
         <nav class="nav" aria-label="App">
           <a href="wiki.html" aria-current="page">Wiki</a>
           <a href="settings.html">Settings</a>
-          <a href="index.html">Sign in</a>
+          <a href="index.html" id="header-signin">Sign in</a>
         </nav>
+        <div id="session-bar" class="session-bar" hidden>
+          <span class="session-bar__who"
+            >Signed in as <strong id="session-who"></strong></span
+          >
+          <button type="button" id="header-signout" class="hd-btn">Sign out</button>
+        </div>
         <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
       </div>
     </header>

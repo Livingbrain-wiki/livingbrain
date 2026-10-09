@@ -132,8 +132,8 @@ test("the list view model cannot carry a token value, whatever the server sent",
     "scopes",
   ]);
   // `scopes: null` is the API's way of saying "the member's own access".
-  assert.equal(views[0].scopeSummary, "Full access");
-  assert.equal(views[1].scopeSummary, "shared");
+  assert.equal(views[0].scopeSummary, "Full read access");
+  assert.equal(views[1].scopeSummary, "Shared only");
 });
 
 test("the rendered list never shows a token value", () => {
@@ -146,7 +146,7 @@ test("the rendered list never shows a token value", () => {
   // button that knows which prefix it revokes.
   assert.ok(strings.includes("laptop"));
   assert.ok(strings.includes("lb_a1b2"));
-  assert.ok(strings.includes("Full access"));
+  assert.ok(strings.includes("Full read access"));
   assert.ok(strings.includes("2026-03-04"));
   assert.ok(strings.includes("Revoke the token laptop"));
 });

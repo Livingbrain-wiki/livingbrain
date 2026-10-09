@@ -10,7 +10,7 @@
  * the app's data must never be served from a stale cache.
  */
 
-const CACHE = "lb-app-v2";
+const CACHE = "lb-app-v4";
 
 const SHELL = [
   "./",
@@ -21,6 +21,9 @@ const SHELL = [
   "./assets/app.js",
   "./assets/markdown.js",
   "./assets/settings.js",
+  "./assets/session.js",
+  "./assets/models.js",
+  "./assets/tokens.js",
   // settings.js imports this statically, and an ES module import fails
   // atomically, so an offline settings page would not render at all without it.
   "./assets/stack.json",

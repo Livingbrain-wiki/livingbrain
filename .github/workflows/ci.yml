@@ -116,7 +116,7 @@ jobs:
           node --check app/sw.js
           # The three modules, each imported the way a page or a test loads
           # it, so an import-time error fails here and not only in a browser.
-          for file in app/assets/markdown.js app/assets/settings.js app/assets/app.js; do
+          for file in app/assets/markdown.js app/assets/settings.js app/assets/session.js app/assets/models.js app/assets/tokens.js app/assets/app.js; do
             node --input-type=module -e "import('./$file').then(() => process.exit(0))"
           done
       - name: No HTML is ever assigned from content
