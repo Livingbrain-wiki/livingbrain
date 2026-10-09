@@ -1129,6 +1129,23 @@ legend {
   }
 }
 
+/* Phones: no room for the name, so Sign out joins the brand's row and the
+   name stays readable to a screen reader only. */
+@media (max-width: 30rem) {
+  .hd__in .session-bar {
+    order: 0;
+    flex: 0 0 auto;
+  }
+  .session-bar__who {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
 /*   settings
    ---------------------------------------------------------------- */
 
@@ -1215,6 +1232,759 @@ legend {
 .table td[colspan] {
   color: var(--ink2);
   font-style: normal;
+}
+
+/*   the settings page: a section nav beside the sections
+   ---------------------------------------------------------------- */
+
+.settings-page {
+  max-width: 1120px;
+}
+
+.settings-layout {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+
+@media (min-width: 60rem) {
+  .settings-layout {
+    grid-template-columns: 12rem minmax(0, 1fr);
+  }
+}
+
+.settings-main {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+/* Desktop: a sticky list on the left. */
+.snav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 15px;
+}
+
+.snav a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 8px;
+  color: var(--ink2);
+  text-decoration: none;
+  border-inline-start: 2px solid transparent;
+}
+
+.snav a:hover {
+  color: var(--ink);
+  background: var(--bg2);
+}
+
+.snav a[aria-current="true"] {
+  color: var(--ink);
+  background: var(--bg2);
+  border-inline-start-color: var(--accent);
+}
+
+@media (min-width: 60rem) {
+  .snav {
+    position: sticky;
+    top: 88px;
+  }
+}
+
+/* Phones and tablets: a segmented control pinned under the header. */
+@media (max-width: 59.99rem) {
+  .snav {
+    flex-direction: row;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--line2);
+    border-radius: 12px;
+    background: var(--header-bg);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+  }
+  .snav a {
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 0;
+    padding: 0 6px;
+    border-inline-start: 0;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  .snav a[aria-current="true"] {
+    background: var(--bg3);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+}
+
+@media (max-width: 400px) {
+  .snav a {
+    font-size: 13px;
+    padding: 0 2px;
+  }
+}
+
+/* Sections land below the sticky header when a nav link is followed. */
+.sect {
+  scroll-margin-top: 140px;
+}
+
+.sect__head {
+  margin-bottom: var(--space-3);
+}
+
+.sect__head h2 {
+  margin-bottom: 6px;
+}
+
+.sect__head p {
+  margin: 0;
+}
+
+.sect__head--row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+
+.sect__head--row h2 {
+  margin: 0;
+}
+
+.sect h3 {
+  font-family: var(--f-display);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--space-2);
+}
+
+/* small ghost buttons: card actions, copy, show/hide. 44px tall on touch. */
+.btn-sm {
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+@media (pointer: coarse) {
+  .btn-sm {
+    min-height: 44px;
+  }
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--bad);
+  background: transparent;
+  color: var(--bad);
+}
+
+/*   forms: one rhythm for every field
+   ---------------------------------------------------------------- */
+
+.connect {
+  border-top: 1px solid var(--line2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  display: grid;
+  gap: 22px;
+}
+
+/* a field focused by validation lands below the sticky header */
+.connect :where(input, fieldset) {
+  scroll-margin-top: 140px;
+}
+
+.connect > h3 {
+  margin: 0;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field > label,
+.field > .label {
+  margin: 0;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ink3);
+}
+
+.field-error {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bad);
+}
+
+.field-error:empty {
+  display: none;
+}
+
+/* the API key: the field with its Show/Hide button inside the same row */
+.secret {
+  display: flex;
+  gap: 8px;
+}
+
+.secret > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--f-mono);
+  font-size: 15px;
+}
+
+.secret > button {
+  flex: 0 0 auto;
+  min-height: 50px;
+  min-width: 4.5rem;
+}
+
+.fixed-endpoint {
+  margin: -8px 0 0;
+  font-size: 14px;
+  color: var(--ink3);
+}
+
+.fixed-endpoint code {
+  overflow-wrap: anywhere;
+}
+
+/* radio cards: role, provider and token access */
+.choice {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.choice > legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-family: var(--f-body);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+}
+
+.choice__grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 9.5rem), 1fr));
+}
+
+.choice__grid--roles {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+}
+
+.choice__grid--two {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+}
+
+.choice__card {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 48px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  cursor: pointer;
+  font-weight: 400;
+}
+
+.choice__card:hover {
+  border-color: var(--ink3);
+}
+
+.choice__card input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.choice__card input:focus {
+  box-shadow: none;
+}
+
+.choice__text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.choice__text strong {
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.choice__text span {
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ink3);
+}
+
+.choice__card:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.choice__card:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* model name suggestions */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border-style: dashed;
+  font-family: var(--f-mono);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink2);
+}
+
+@media (pointer: coarse) {
+  .chip {
+    min-height: 44px;
+  }
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.form-actions .hint {
+  flex: 1 1 16rem;
+}
+
+@media (max-width: 480px) {
+  .form-actions > button {
+    flex: 1 1 100%;
+  }
+}
+
+/*   connected models: one card per role
+   ---------------------------------------------------------------- */
+
+.conn-list {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+}
+
+.conn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+.conn__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.conn__title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.conn__role {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+.conn__model {
+  font-family: var(--f-display);
+  font-size: 18px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.conn__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  margin: 0;
+}
+
+.conn__facts dt {
+  font-size: 12px;
+  color: var(--ink3);
+}
+
+.conn__facts dd {
+  margin: 0;
+  font-size: 15px;
+}
+
+.conn__facts div:last-child dd {
+  font-family: var(--f-mono);
+  font-size: 14px;
+}
+
+.conn .tiny {
+  margin: 0;
+}
+
+.conn__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.conn__actions .btn-sm {
+  flex: 1 1 0;
+}
+
+.empty {
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  grid-column: 1 / -1;
+}
+
+.empty p {
+  margin: 4px 0 0;
+}
+
+/*   tokens: a table on wide screens, cards on narrow ones
+   ---------------------------------------------------------------- */
+
+.table-cards .table td.cell-actions {
+  text-align: right;
+  padding-right: 0;
+  vertical-align: middle;
+}
+
+.table-cards .table td {
+  vertical-align: middle;
+}
+
+.table-cards .table td:nth-child(2) {
+  font-family: var(--f-mono);
+  font-size: 14px;
+}
+
+@media (max-width: 40rem) {
+  .table-cards {
+    overflow: visible;
+    margin: 0;
+    padding: 0;
+  }
+  .table-cards .table {
+    min-width: 0;
+  }
+  .table-cards thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  .table-cards tbody {
+    display: grid;
+    gap: 10px;
+  }
+  .table-cards tr {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--bg);
+  }
+  .table-cards .table td {
+    display: contents;
+    border: 0;
+    padding: 0;
+  }
+  .table-cards .table td[data-label]::before {
+    content: attr(data-label);
+    font-size: 13px;
+    color: var(--ink3);
+  }
+  .table-cards .table td[colspan] {
+    display: block;
+    grid-column: 1 / -1;
+  }
+  .table-cards td.cell-actions .btn-sm {
+    grid-column: 1 / -1;
+    margin-top: 8px;
+    width: 100%;
+  }
+}
+
+/* the one-time token reveal */
+.reveal {
+  display: grid;
+  gap: 12px;
+  margin-top: var(--space-3);
+  padding: 16px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+
+.reveal__note {
+  margin: 0;
+}
+
+.reveal > button {
+  justify-self: start;
+}
+
+/* a value and its Copy button */
+.copybox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  min-width: 0;
+}
+
+.copybox > code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 0;
+  background: none;
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.copybox > button {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+/* Phones: the value gets the full width and Copy sits under it. */
+@media (max-width: 30rem) {
+  .copybox {
+    flex-wrap: wrap;
+    padding: 10px 10px 10px 14px;
+  }
+  .copybox > code {
+    flex-basis: 100%;
+    padding: 0;
+  }
+  .copybox > button {
+    margin-inline-start: auto;
+  }
+}
+
+#token-value {
+  flex: 1 1 auto;
+}
+
+/* the Connect panel's three recipes */
+.recipes {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 18px;
+}
+
+.recipes > li {
+  display: grid;
+  gap: 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line2);
+}
+
+.recipes h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+/* coming soon: names and one line each, nothing that looks like a control */
+.soon {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0;
+}
+
+.soon > li {
+  display: grid;
+  grid-template-columns: minmax(7rem, 9rem) 1fr;
+  gap: 4px 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line2);
+}
+
+.soon > li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.soon strong {
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+.soon span {
+  color: var(--ink3);
+  font-size: 15px;
+}
+
+@media (max-width: 30rem) {
+  .soon > li {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* "Built with": collapsed at the bottom */
+.disclosure {
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  padding: 0 clamp(18px, 3vw, 24px);
+}
+
+.disclosure > summary {
+  display: flex;
+  align-items: center;
+  min-height: 52px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink2);
+  list-style: none;
+}
+
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure > summary::after {
+  content: "+";
+  margin-inline-start: auto;
+  font-family: var(--f-mono);
+  color: var(--ink3);
+}
+
+.disclosure[open] > summary::after {
+  content: "−";
+}
+
+.disclosure[open] {
+  padding-bottom: 18px;
+}
+
+/* toasts and the confirm dialog */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 100;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 12px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg3);
+  color: var(--ink);
+  font-size: 15px;
+  box-shadow: 0 10px 30px oklch(0 0 0 / 0.35);
+}
+
+.toast[data-tone="ok"] {
+  border-color: var(--accent);
+}
+
+.toast[data-tone="warn"] {
+  border-color: var(--warn);
+}
+
+.toast[data-tone="bad"] {
+  border-color: var(--bad);
+}
+
+.dialog {
+  width: min(28rem, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg2);
+  color: var(--ink);
+}
+
+.dialog::backdrop {
+  background: oklch(0 0 0 / 0.55);
+}
+
+.dialog h2 {
+  font-size: var(--step-1);
+  margin: 0 0 8px;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: var(--space-3);
+}
+
+.dialog .btn-danger {
+  border-color: var(--bad);
+  color: var(--bad);
 }
 
 /*   wiki

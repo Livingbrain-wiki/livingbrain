@@ -37,8 +37,11 @@ export const SECTIONS = [
  * read-only: it is vendored data shown as it is, and nothing is ever sent.
  */
 const ENDPOINTS = {
-  models: (key) => ({
-    method: "PUT",
+  // A connection object connects (or replaces) the role's model; `null`
+  // disconnects it — `DELETE /v1/models/{role}` — so removing a model is a
+  // settings change like any other and goes through the same choke point.
+  models: (key, value) => ({
+    method: value === null ? "DELETE" : "PUT",
     path: `/v1/models/${encodeURIComponent(key)}`,
   }),
   proactivity: null,
@@ -92,7 +95,7 @@ export function settingRequest(section, key, value) {
     };
   }
 
-  const route = endpoint(name);
+  const route = endpoint(name, value);
   // The models handler reads its fields flat (`provider`, `base_url`,
   // `api_key`, `model`, `fallback_to_managed`), so they are spread at the top
   // level next to the audit triple. Serde ignores the extra keys it does not
@@ -132,6 +135,9 @@ export function describeOutcome(request, ok) {
   const name = `${request.section}.${request.key}`;
   if (!request.wired) {
     return `${name} has no server route yet — nothing was sent.`;
+  }
+  if (request.method === "DELETE") {
+    return ok ? `${name} removed.` : `${name} could not be removed.`;
   }
   return ok ? `${name} saved.` : `${name} could not be saved.`;
 }
