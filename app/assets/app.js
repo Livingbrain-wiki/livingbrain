@@ -1214,6 +1214,10 @@ pages.wiki = async function wiki() {
   const source = $("#source");
   const preview = $("#preview");
   const toggle = $("#mode-toggle");
+  // Declared before `setMode` runs: it reads `save`, and reading a `const`
+  // before its declaration throws, which stopped the page before it loaded.
+  const save = $("#save");
+  const newPage = $("#new-page");
 
   let current = null;
   let version = null;
@@ -1238,7 +1242,11 @@ pages.wiki = async function wiki() {
       show(await api(`/v1/pages/${encodeURIComponent(slug)}`));
       say("", "ok");
     } catch (error) {
-      say(`Could not open ${slug}: ${error.message}`, "bad");
+      const hint =
+        error instanceof ApiError && error.status === 404
+          ? " No page has this slug yet — the New page button above creates it."
+          : "";
+      say(`Could not open ${slug}: ${error.message}.${hint}`, "bad");
     }
   };
 
@@ -1247,10 +1255,6 @@ pages.wiki = async function wiki() {
   source.addEventListener("input", () => {
     renderInto(preview, renderMarkdown(source.value));
   });
-
-  // Declared before `setMode` runs: it reads `save`, and reading a `const`
-  // before its declaration throws, which stopped the page before it loaded.
-  const save = $("#save");
 
   const setMode = (mode) => {
     const editing = mode === "edit";
@@ -1295,6 +1299,34 @@ pages.wiki = async function wiki() {
       }
       say(`Not saved: ${error.message}`, "bad");
     }
+  });
+
+  // "New page" skips the GET: a stub whose version is null goes straight into
+  // the editor, so the save below puts `base_version: null` — the one value
+  // that tells the server to create the page rather than edit one.
+  newPage.addEventListener("click", () => {
+    const asked = String(window.prompt("New page — type its slug:") || "")
+      .trim()
+      .toLowerCase();
+    if (!asked) return;
+    if (!/^[a-z0-9][a-z0-9\/-]*$/i.test(asked)) {
+      say(
+        "A slug uses letters, digits, hyphens and slashes, and starts with a letter or digit.",
+        "warn",
+      );
+      return;
+    }
+    history.replaceState(null, "", `${location.pathname}?slug=${encodeURIComponent(asked)}`);
+    show({
+      slug: asked,
+      title: "",
+      markdown: "",
+      version: null,
+      backlinks: [],
+      citations: [],
+    });
+    setMode("edit");
+    say(`New page ${asked}: write it, then Save page creates it.`, "warn");
   });
 
   await load();

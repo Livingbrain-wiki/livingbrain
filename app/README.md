@@ -49,8 +49,8 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/tokens` | `settings.html` | **yes** |
 | `POST /v1/tokens` | `settings.html` | **yes** — the only call that returns a token value |
 | `DELETE /v1/tokens/{prefix}` | `settings.html` | **yes** |
-| `GET /v1/pages/{slug}` | `wiki.html` | **no route yet** |
-| `PUT /v1/pages/{slug}` | `wiki.html` | **no route yet** |
+| `GET /v1/pages/{slug}` | `wiki.html` | **yes** — `{slug, title, markdown, url, version, entity_type, backlinks, citations}` |
+| `PUT /v1/pages/{slug}` | `wiki.html` | **yes** — body `{markdown, base_version, title}`; `base_version: null` creates |
 
 ## What is NOT wired to a backend yet
 
@@ -60,17 +60,28 @@ These are shown on purpose, marked in the UI, and never sent:
   Rendered as a disabled control labelled "Not available yet".
 - **Discord sign-in.** Issue #56. Also a disabled control; there is no OAuth
   route to link to, so the button is not an anchor to a 404.
-- **Pages read/write.** `GET /v1/pages/{slug}` and `PUT /v1/pages/{slug}` are
-  what `wiki.html` speaks, but no module mounts them. The page therefore shows
-  its error notice; the conflict handling (a `409` on a stale `base_version`)
-  is written and tested against the shape the store will use.
-- **Citations and backlinks on a page.** The wiki page renders both, and the
-  `GET /v1/pages/{slug}` contract includes them, but no route returns them yet.
 - **Settings other than models** — proactivity, tools, automations, skills and
   the Colonizer connection. The page lists them in one "Coming soon" group with
   a line each and no controls at all; `LB.setting` still refuses to send them.
 - **Audit.** The app sends `section`, `key` and `value` with every settings
   write so a server *can* audit it; no server records it yet.
+
+## Pages: wired end to end
+
+`wiki.html` reads and writes real pages. `GET /v1/pages/{slug}` answers
+`{slug, title, markdown, url, version, entity_type, backlinks, citations}`,
+and the page renders the markdown, the backlinks and the citations from it.
+`PUT /v1/pages/{slug}` takes `{markdown, base_version, title}`: a
+`base_version` number edits and must match the stored head version — a stale
+one is refused with `409`, and the editor stays open with the draft — while
+`base_version: null` **creates** a page. That is what the **New page** button
+does: it asks for a slug, opens an empty editor without a `GET`, and the save
+creates the page. An unknown slug on open now says so and points at the
+button instead of leaving a dead end.
+
+The shapes above are pinned by `tests/wiki.test.mjs`, which boots the real
+`pages.wiki` against stub DOM and fetch — including the `base_version: null`
+create save and the `409` path.
 
 ## The settings choke point
 
@@ -132,6 +143,11 @@ The test files (`node --test` prints the current count):
 - `tests/session.test.mjs` — the `/me` check and sign-out from
   `assets/session.js`: signed in, signed out and "could not tell", what each
   one shows, and the hidden-until-checked markup of `index.html`.
+- `tests/wiki.test.mjs` — the wiki page, booted for real: the module runs its
+  own `boot()` against stub elements, a `location` and a recorded `fetch`, so
+  the tests drive the actual `pages.wiki` click handlers — the create save
+  (`base_version: null`), the `409` that keeps the editor open, and the boot
+  order that once crashed on `save` before its declaration.
 
 `dom.test.mjs` swaps `globalThis.document` for a recorder that offers only
 `createElement`, `createTextNode`, `createDocumentFragment` and
@@ -144,7 +160,7 @@ quietly.
 | :--- | :--- |
 | `index.html` | The signed-in home when there is a session; otherwise sign-in: email magic link, Slack, and the two options with no route yet |
 | `settings.html` | Models (guided connect, one card per role), API tokens, Connect your coding agent, Coming soon, and a collapsed "Built with" |
-| `wiki.html` | Reader and editor: Markdown, backlinks, citations, `base_version` saves |
+| `wiki.html` | Reader and editor: Markdown, backlinks, citations, `base_version` saves, and a **New page** button that creates via `base_version: null` |
 | `assets/app.css` | The website's tokens (`--bg`, `--bg2`, `--ink`, `--line`, `--accent`, oklch), fonts and components |
 | `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting`, sign-out |
 | `assets/models.js` | The roles, the provider catalog as the picker uses it, connect-form validation, and the connected-model cards |

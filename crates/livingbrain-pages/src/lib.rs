@@ -21,9 +21,11 @@
 //!
 //! There is no HTTP surface of its own: authentication and workspaces are a
 //! sibling issue, and an unauthenticated write route would be a hole. A
-//! composition that has one mounts it with [`Pages::nest`], which builds it
-//! from this module's own context — the harness scopes `Blob` per module
-//! name, so only a nested surface can open a body this module writes.
+//! composition that has one mounts it with [`Pages::nest`] (routes under a
+//! path inside the module) or [`Pages::surface`] (routes at the module's own
+//! mount root), either of which builds it from this module's own context —
+//! the harness scopes `Blob` per module name, so only a surface built here
+//! can open a body this module writes.
 
 #![forbid(unsafe_code)]
 
@@ -45,8 +47,8 @@ pub use sources::{
     extract_wikilinks,
 };
 pub use store::{
-    Author, AuthorKind, Page, PageError, PageStore, PageWrite, ReencryptReport, SearchHit,
-    VersionMeta,
+    Author, AuthorKind, Page, PageError, PageStore, PageSummary, PageWrite, ReencryptReport,
+    SearchHit, VersionMeta,
 };
 
 use cratefield_core::axum::Router;
@@ -94,10 +96,11 @@ type Nest = Box<dyn Fn(Arc<ModuleContext>) -> Router + Send + Sync>;
 #[derive(Default)]
 pub struct Pages {
     nest: Vec<(&'static str, Nest)>,
+    surface: Option<Nest>,
 }
 
-// A nested surface is a closure, which is not `Debug`; the module itself is
-// still one, so a composition that prints its modules keeps working.
+// A surface is a closure, which is not `Debug`; the module itself is still
+// one, so a composition that prints its modules keeps working.
 impl std::fmt::Debug for Pages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pages")
@@ -105,6 +108,7 @@ impl std::fmt::Debug for Pages {
                 "nested",
                 &self.nest.iter().map(|(path, _)| *path).collect::<Vec<_>>(),
             )
+            .field("surface", &self.surface.is_some())
             .finish()
     }
 }
@@ -133,6 +137,27 @@ impl Pages {
         routes: impl Fn(Arc<ModuleContext>) -> Router + Send + Sync + 'static,
     ) -> Self {
         self.nest.push((path, Box::new(routes)));
+        self
+    }
+
+    /// Merge `routes` at the module's own mount root, beside [`Pages::nest`],
+    /// which puts its routes under a path inside the module.
+    ///
+    /// The routes the closure builds are module-absolute: one registered at
+    /// `/` is served wherever a composition mounted this module, so a
+    /// `GET /:slug` there is `/v1/pages/:slug` at the harness. Like a nest,
+    /// the surface is built from *this* module's context and reads the same
+    /// blob prefix the pages do (issue #24).
+    ///
+    /// One merged surface per module; a second call replaces the first.
+    /// It is handed the same `Arc` every nest is, so it reads the same
+    /// scoped ports rather than a re-viewed copy.
+    #[must_use]
+    pub fn surface(
+        mut self,
+        routes: impl Fn(Arc<ModuleContext>) -> Router + Send + Sync + 'static,
+    ) -> Self {
+        self.surface = Some(Box::new(routes));
         self
     }
 }
@@ -279,8 +304,9 @@ impl Module for Pages {
         MAX_SOURCE_BODY_BYTES
     }
 
-    /// Whatever a composition nested, and nothing otherwise — see the module
-    /// docs. A `PageStore` is built from [`ModuleContext::ports`].
+    /// Whatever a composition surfaced or nested, and nothing otherwise —
+    /// see the module docs. A `PageStore` is built from
+    /// [`ModuleContext::ports`].
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
         // One context, shared: `ModuleContext` is not `Clone`, so a module
         // with more than one surface hands each the same `Arc` rather than a
@@ -292,6 +318,11 @@ impl Module for Pages {
         // [`Ports::view_for`]: cratefield_core::Ports::view_for
         let ctx = Arc::new(ctx);
         let mut api = cratefield_core::axum::Router::new();
+        // The merged surface is applied first, then each nest under it;
+        // all of them share the one context.
+        if let Some(surface) = &self.surface {
+            api = api.merge(surface(Arc::clone(&ctx)));
+        }
         for (path, build) in &self.nest {
             api = api.nest(path, build(Arc::clone(&ctx)));
         }

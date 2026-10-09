@@ -1669,6 +1669,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cratefield-core",
+ "cratefield-kms",
+ "cratefield-testing",
+ "livingbrain-access",
+ "livingbrain-mcp",
+ "livingbrain-pages",
+ "livingbrain-redact",
+ "pollster",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "livingbrain-audit"
 version = "0.1.0"
 dependencies = [
@@ -1875,6 +1893,7 @@ dependencies = [
  "cratefield-testing",
  "getrandom 0.4.3",
  "insta",
+ "livingbrain-api",
  "livingbrain-canary",
  "livingbrain-mcp",
  "livingbrain-models",
@@ -1883,6 +1902,7 @@ dependencies = [
  "livingbrain-workspaces",
  "pollster",
  "serde_json",
+ "tower",
  "worker",
 ]
 
