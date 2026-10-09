@@ -1661,6 +1661,35 @@ input[readonly] {
   font-size: 13px;
 }
 
+/* a provider's mark: the vendor's logo, or its initials when none is licensed.
+   One neutral tile in both themes, like the rows it sits in. Not the header's
+   `.mark` ring, which is a different, older class. */
+.provider-mark {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg3);
+  color: var(--ink);
+}
+
+.provider-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+.provider-mark--letters {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+}
+
 /* radio cards: role, provider and token access */
 .choice {
   border: 0;
