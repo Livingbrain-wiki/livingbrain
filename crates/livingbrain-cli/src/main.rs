@@ -18,6 +18,7 @@ use api::Client;
 mod api;
 mod auth;
 mod import;
+mod logs;
 mod mcp;
 mod telemetry;
 
@@ -158,6 +159,11 @@ enum Command {
         #[command(subcommand)]
         format: import::Format,
     },
+    /// Sync local coding agents' session logs into the brain (opt-in per repo)
+    Logs {
+        #[command(subcommand)]
+        command: logs::Command,
+    },
     /// Turn anonymous usage data on or off, and show what would be sent
     Telemetry {
         #[command(subcommand)]
@@ -234,6 +240,10 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         // client is built, so a declined import touches neither the keychain
         // nor the network (see `import`).
         Command::Import { format } => import::run(format, &cli.api_url, out),
+        // Like `import`, everything before the upload is local: the parse,
+        // the per-repo opt-in decision and the redaction. Nothing opted in,
+        // nothing sent — the auth request included (see `logs`).
+        Command::Logs { command } => logs::run(command, &cli.api_url, out),
         // The only command that neither needs a token nor opens a socket: it
         // reads and writes the stored preference and prints the local view.
         Command::Telemetry { action } => telemetry::run(
