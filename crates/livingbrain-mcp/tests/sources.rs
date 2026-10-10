@@ -549,6 +549,50 @@ fn an_unknown_scope_or_kind_is_a_400_naming_itself() {
     assert_eq!(row_count(&fixture), 0, "nothing was stored");
 }
 
+/// An agent session files in under its own kind: `agent_log`, one normalised
+/// session record per body. The CLI's `logs sync` sends exactly this — kind,
+/// a `<agent> session <id>` filing name instead of a vault path, and the
+/// record itself — and re-syncing the same session reads back as unchanged,
+/// because the body is the identity whatever kind it is.
+#[test]
+fn an_agent_log_is_a_kind_of_its_own_and_dedupes_on_its_body() {
+    let fixture = world();
+    let record = concat!(
+        r#"{"schema_version":1,"agent":"codex","collector_version":1,"#,
+        r#""session_id":"a1b2c3d4","repo":"~/work/demo","branch":null,"models":[],"#,
+        r#""started_at":null,"ended_at":null,"turns":[],"totals":{"input_tokens":0,"#,
+        r#""output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"#,
+        r#""reasoning_tokens":0,"cost_usd":null},"outcome":null,"truncated":false}"#,
+    );
+    let filing = "codex session a1b2c3d4";
+
+    let first = post(
+        &fixture,
+        "token-a",
+        json!({ "kind": "agent_log", "path": filing, "body": record }),
+    );
+    assert_eq!(first.status, StatusCode::CREATED, "{}", body_of(&first));
+    let answer = first.json();
+    assert_eq!(answer["kind"], "agent_log");
+    assert_eq!(answer["scope"], "personal");
+    assert_eq!(
+        answer["path"], filing,
+        "the filing name is what the row holds"
+    );
+    assert_eq!(answer["created"], true);
+
+    // The same session, re-synced: the body is the identity, so the ledger
+    // reads the row back instead of sealing a copy.
+    let second = post(
+        &fixture,
+        "token-a",
+        json!({ "kind": "agent_log", "path": filing, "body": record }),
+    );
+    assert_eq!(second.status, StatusCode::OK, "{}", body_of(&second));
+    assert_eq!(second.json()["created"], false);
+    assert_eq!(row_count(&fixture), 1);
+}
+
 #[test]
 fn a_path_outside_the_vault_is_a_400() {
     let fixture = world();

@@ -5,16 +5,16 @@
 //! Two values, `telemetry.usage` and `telemetry.live-map`, both in the OS
 //! keychain under the same service name `auth` uses. The keychain rather than
 //! a file, and the reason is not that these values are secret — they are not,
-//! they are two words — but that **it is the only place the CLI already knows
-//! how to persist anything**. `auth.rs` makes the case that a token never goes
-//! in a dotfile; the same reasoning is stronger here, because a dotfile is a
-//! *config file*, and this CLI has no config-file mechanism, no XDG lookup, no
-//! precedence rules and no migration story. Inventing one here for a two-word
-//! preference would add all of that, and would add a second thing to forget to
-//! wipe. The keychain gives us a per-user, per-machine store that is wiped
-//! with the token, honours the same `LIVINGBRAIN_TEST_KEYRING=mock` test seam,
-//! and — because `auth::init_backend` installs the mock builder before any
-//! command runs — needs no new test hook at all.
+//! they are two words — but that they are nothing a reader would ever edit or
+//! back up, and the keychain store is wiped with the token, so deauthing
+//! leaves no preference behind. The CLI does keep one file, the `logs`
+//! opt-in (`logs-allow.json`, see `logs.rs`) — a list of paths that exists to
+//! be inspected and hand-edited — but a two-word on/off preference is not
+//! that, and a dotfile here would be a second thing to remember to wipe. The
+//! keychain gives us a per-user, per-machine store that honours the same
+//! `LIVINGBRAIN_TEST_KEYRING=mock` test seam, and — because
+//! `auth::init_backend` installs the mock builder before any command runs —
+//! needs no new test hook at all.
 //!
 //! # Where the send happens
 //!

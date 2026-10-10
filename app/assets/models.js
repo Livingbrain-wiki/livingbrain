@@ -11,23 +11,29 @@
 // elements and text nodes only, as everywhere else in `app/`.
 
 import catalog from "./providers.json" with { type: "json" };
-import { providerMark } from "./marks.js";
 
-/** The roles, in the order the page shows them, with what each one is for. */
+/**
+ * The roles, in the order the page shows them, with what each one is for.
+ * `hint` is the one glance line on the slot card; `detail` is the fuller
+ * description, kept as the card's title text.
+ */
 export const ROLES = Object.freeze([
   {
     id: "main",
     label: "Main",
+    hint: "The strongest model you'll pay for.",
     detail: "Answers questions and writes pages. This is the model people talk to.",
   },
   {
     id: "triage",
     label: "Triage",
+    hint: "Small and fast.",
     detail: "Decides quickly whether a message needs a reply. A small, fast model fits.",
   },
   {
     id: "research",
     label: "Research",
+    hint: "Strong reasoning — can be slow.",
     detail: "Longer, multi-step digging across sources. A strong reasoning model fits.",
   },
 ]);
@@ -263,40 +269,68 @@ export function statusView(row) {
 }
 
 /**
- * One connected model, as its card shows it. Named fields only: the API never
- * returns a key, and this copies nothing it does not name.
+ * One job slot, as its card shows it: the role, its one-glance hint, and the
+ * current state. A connected slot names the provider, the model and the masked
+ * key; an unset one says what answers instead — Main, when Main is connected,
+ * else the managed model. Named fields only: the API never returns a key, and
+ * this copies nothing it does not name.
  */
-export function connectionView(row) {
-  const role = roleInfo(row && row.role);
-  const provider = providerForConnection(row);
+export function slotView(rows, roleId) {
+  const info = roleInfo(roleId) || {
+    id: String(roleId || ""),
+    label: String(roleId || "Unknown role"),
+    hint: "",
+    detail: "",
+  };
+  const list = Array.isArray(rows) ? rows : [];
+  const row = list.find((candidate) => candidate && candidate.role === info.id);
+  if (row) {
+    const provider = providerForConnection(row);
+    const model = String(row.model || "—");
+    const key = maskedKey(row.key);
+    return {
+      role: info.id,
+      roleLabel: info.label,
+      roleHint: info.hint,
+      roleDetail: info.detail,
+      set: true,
+      provider: provider.id,
+      providerLabel: provider.name,
+      model,
+      key,
+      status: statusView(row),
+      line: `${provider.name} · ${model} · key ${key}`,
+    };
+  }
+  const mainSet = info.id !== "main" && list.some((candidate) => candidate && candidate.role === "main");
   return {
-    role: String((row && row.role) || ""),
-    roleLabel: role ? role.label : String((row && row.role) || "Unknown role"),
-    roleDetail: role ? role.detail : "",
-    provider: provider.id,
-    providerLabel: provider.name,
-    model: String((row && row.model) || "—"),
-    key: maskedKey(row && row.key),
-    status: statusView(row),
+    role: info.id,
+    roleLabel: info.label,
+    roleHint: info.hint,
+    roleDetail: info.detail,
+    set: false,
+    provider: "",
+    providerLabel: "",
+    model: "",
+    key: "",
+    status: null,
+    line: mainSet ? "Not set · uses Main" : "Not set · the managed model answers",
   };
 }
 
-/** The list, in role order, whatever order the API answered in. */
-export function connectionViews(rows) {
-  const list = Array.isArray(rows) ? rows : [];
-  const order = (row) => {
-    const at = ROLES.findIndex((role) => role.id === (row && row.role));
-    return at === -1 ? ROLES.length : at;
-  };
-  return [...list].sort((a, b) => order(a) - order(b)).map(connectionView);
+/** The three slots, in role order, whatever order the API answered in. */
+export function slotViews(rows) {
+  return ROLES.map((role) => slotView(rows, role.id));
 }
 
 /**
- * Paints the connected-model cards. Each card's two buttons carry
- * `data-action` and `data-role`, which is how `app.js` handles them with one
- * listener on the container.
+ * Paints the three job slots. Each card's buttons carry `data-action`
+ * (`connect`, `change` or `remove`) and `data-role`, which is how `app.js`
+ * handles them with one listener on the container. A connected slot shows the
+ * status pill only when the probe found something to say; a plain "works"
+ * needs no badge.
  */
-export function renderModelCards(
+export function renderModelSlots(
   container,
   views,
   doc = typeof document === "undefined" ? null : document,
@@ -310,58 +344,44 @@ export function renderModelCards(
     if (text != null) node.textContent = text;
     return node;
   };
-
-  if (!list.length) {
-    const empty = el("div", "empty");
-    empty.appendChild(el("strong", null, "No models connected yet"));
-    empty.appendChild(
-      el("p", "muted", "Until you connect one, Living Brain answers with its managed model."),
-    );
-    container.appendChild(empty);
-    return container;
-  }
+  const button = (action, label, view) => {
+    const node = el("button", "btn-sm", label);
+    node.type = "button";
+    node.setAttribute("data-action", action);
+    node.setAttribute("data-role", view.role);
+    node.setAttribute("aria-label", `${label} the ${view.roleLabel} model`);
+    return node;
+  };
 
   for (const view of list) {
-    const card = el("article", "conn");
+    const card = el("article", "slot");
     card.setAttribute("aria-label", `${view.roleLabel} model`);
 
-    const head = el("div", "conn__head");
-    const title = el("div", "conn__title");
-    title.appendChild(el("span", "conn__role", view.roleLabel));
-    title.appendChild(el("span", "conn__model", view.model));
-    head.appendChild(title);
-    const pill = el("span", "pill", view.status.label);
-    pill.setAttribute("data-state", view.status.state);
-    head.appendChild(pill);
-    card.appendChild(head);
-
-    const facts = el("dl", "conn__facts");
-    for (const [term, value] of [
-      ["Provider", view.providerLabel],
-      ["Key", view.key],
-    ]) {
-      const pair = el("div");
-      pair.appendChild(el("dt", null, term));
-      const dd = el("dd");
-      if (term === "Provider") dd.appendChild(providerMark(view.provider, value, doc));
-      dd.appendChild(el("span", null, value));
-      pair.appendChild(dd);
-      facts.appendChild(pair);
+    const top = el("div", "slot__top");
+    const head = el("div", "slot__head");
+    head.appendChild(el("h3", "slot__role", view.roleLabel));
+    const hint = el("p", "slot__hint", view.roleHint);
+    if (view.roleDetail) hint.setAttribute("title", view.roleDetail);
+    head.appendChild(hint);
+    top.appendChild(head);
+    if (view.set && view.status && view.status.state !== "live") {
+      const pill = el("span", "pill", view.status.label);
+      pill.setAttribute("data-state", view.status.state);
+      top.appendChild(pill);
     }
-    card.appendChild(facts);
-    if (view.status.detail) card.appendChild(el("p", "tiny", view.status.detail));
+    card.appendChild(top);
 
-    const actions = el("div", "conn__actions");
-    for (const [action, label] of [
-      ["replace", "Replace"],
-      ["disconnect", "Disconnect"],
-    ]) {
-      const button = el("button", "btn-sm", label);
-      button.type = "button";
-      button.setAttribute("data-action", action);
-      button.setAttribute("data-role", view.role);
-      button.setAttribute("aria-label", `${label} the ${view.roleLabel} model`);
-      actions.appendChild(button);
+    card.appendChild(el("p", "slot__line", view.line));
+    if (view.set && view.status && view.status.detail) {
+      card.appendChild(el("p", "tiny", view.status.detail));
+    }
+
+    const actions = el("div", "slot__actions");
+    if (view.set) {
+      actions.appendChild(button("change", "Change", view));
+      actions.appendChild(button("remove", "Remove", view));
+    } else {
+      actions.appendChild(button("connect", "Connect", view));
     }
     card.appendChild(actions);
     container.appendChild(card);

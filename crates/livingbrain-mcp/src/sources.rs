@@ -52,13 +52,16 @@ const UNKNOWN_SCOPE: ProblemDef = ProblemDef {
                   workspace's shared memory (`shared`).",
 };
 
-/// A `kind` this endpoint does not have. Every source today is an import; the
-/// word is accepted anyway so a client does not have to know that.
+/// A `kind` this endpoint does not have. Two exist: a file brought in from
+/// outside (`import`), and a coding agent's session log (`agent_log`, the
+/// CLI's `logs sync`); the bare word `import` is still the default, so an
+/// old client does not have to know the second one landed.
 const UNKNOWN_KIND: ProblemDef = ProblemDef {
     slug: "sources/unknown-kind",
     status: StatusCode::BAD_REQUEST,
     title: "Unknown source kind",
-    description: "The only kind is `import`.",
+    description: "The kinds are `import` (a file from outside) and `agent_log` (a coding \
+                  agent's session).",
 };
 
 /// A body that is not the JSON this endpoint reads, or one missing the two
@@ -159,6 +162,9 @@ async fn create(
 
     let kind = match request.kind.as_deref().unwrap_or("import") {
         "import" => SourceKind::Import,
+        // The CLI's `logs sync` files one normalised agent session here; the
+        // record itself, not the tool that wrote it, is the ledger's unit.
+        "agent_log" => SourceKind::AgentLog,
         other => {
             return Err(Problem::new(&UNKNOWN_KIND)
                 .with_detail(format!("`{other}` is not a kind this endpoint has")));

@@ -115,7 +115,7 @@ sees the server's sentence rather than the JSON.
 | `400` | `sources/bad-body` | not JSON, or `path`/`body` missing or not a string |
 | `400` | `sources/invalid-path` | not a relative name inside a vault |
 | `400` | `sources/unknown-scope` | a `scope` that is not `personal` or `shared` |
-| `400` | `sources/unknown-kind` | a `kind` that is not `import` |
+| `400` | `sources/unknown-kind` | a `kind` that is not `import` or `agent_log` |
 | `401` | — | no bearer token, or one that names nobody |
 | `403` | `sources/not-your-scope` | the folded scope is not in the asker's grant |
 | `413` | `sources/too-large` | the body is over redaction's cap |

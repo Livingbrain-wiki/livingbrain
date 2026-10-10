@@ -1511,15 +1511,14 @@ input[readonly] {
 
 /* the provider picker: popular cards, then every provider behind a search */
 .choice__grid--providers {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 10.5rem), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
 }
 
-.choice__grid--providers .choice__text span {
-  font-family: var(--f-mono);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* a provider's name never splits mid-word, whatever the column width does
+   (the body breaks anywhere to keep long URLs tamed; these names are short) */
+.choice__grid--providers .choice__text strong {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .picker {
@@ -1571,90 +1570,11 @@ input[readonly] {
   padding: 0 14px 14px;
 }
 
-.picker__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 22rem;
+/* the full list is the same card grid as the popular one, just scrollable */
+.picker__cards {
+  max-height: 26rem;
   overflow-y: auto;
-  border: 1px solid var(--line2);
-  border-radius: var(--radius);
-}
-
-.picker__list > li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-inline-end: 10px;
-  border-top: 1px solid var(--line2);
-}
-
-.picker__list > li:first-child {
-  border-top: 0;
-}
-
-.picker__item {
-  flex: 1 1 auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-  min-height: 52px;
-  margin: 0;
-  padding: 8px 12px;
-  cursor: pointer;
-  font-weight: 400;
-}
-
-.picker__item:hover {
-  background: var(--bg2);
-}
-
-.picker__item input {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  accent-color: var(--accent);
-}
-
-.picker__item:has(input:checked) {
-  background: var(--accent-soft);
-}
-
-.picker__item:has(input:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.picker__text {
-  display: grid;
-  min-width: 0;
-}
-
-.picker__text strong {
-  font-weight: 600;
-  font-size: 15px;
-}
-
-.picker__text span {
-  font-family: var(--f-mono);
-  font-size: 12px;
-  color: var(--ink3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.picker__site {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 0 6px;
-  font-size: 13px;
+  padding: 2px;
 }
 
 .picker__source {
@@ -1669,22 +1589,22 @@ input[readonly] {
   display: inline-grid;
   place-items: center;
   vertical-align: middle;
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--bg3);
   color: var(--ink);
 }
 
 .provider-mark svg {
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
 }
 
 .provider-mark--letters {
   font-family: var(--f-mono);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.03em;
   line-height: 1;
@@ -1714,10 +1634,6 @@ input[readonly] {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 9.5rem), 1fr));
 }
 
-.choice__grid--roles {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
-}
-
 .choice__grid--two {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
 }
@@ -1741,18 +1657,20 @@ input[readonly] {
   border-color: var(--ink3);
 }
 
+/* The radio itself is not the UI: the card's checked border and background
+   are. The input stays focusable for keyboards; only its box is taken away
+   (the sr pattern, kept local so the card keeps its own grid flow). */
 .choice__card input {
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
   min-height: 0;
-  margin: 2px 0 0;
+  margin: 0;
   padding: 0;
-  accent-color: var(--accent);
-}
-
-.choice__card input:focus {
-  box-shadow: none;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .choice__text {
@@ -1824,19 +1742,23 @@ input[readonly] {
   }
 }
 
-/*   connected models: one card per role
+/*   model slots: three job cards — Main, Triage, Research
    ---------------------------------------------------------------- */
 
-.conn-list {
+.slots {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
 }
 
-.conn {
+.slots__note {
+  margin: 0 0 10px;
+}
+
+.slot {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1844,79 +1766,54 @@ input[readonly] {
   min-width: 0;
 }
 
-.conn__head {
+.slot__top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
 }
 
-.conn__title {
+.slot__head {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-.conn__role {
-  font-family: var(--f-mono);
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink3);
-}
-
-.conn__model {
+.slot__role {
+  margin: 0;
   font-family: var(--f-display);
   font-size: 18px;
   font-weight: 600;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
-.conn__facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 22px;
+.slot__hint {
   margin: 0;
-}
-
-.conn__facts dt {
-  font-size: 12px;
+  font-size: 13.5px;
+  line-height: 1.45;
   color: var(--ink3);
 }
 
-.conn__facts dd {
+.slot__line {
   margin: 0;
-  font-size: 15px;
+  font-size: 14.5px;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
-.conn__facts div:last-child dd {
-  font-family: var(--f-mono);
-  font-size: 14px;
-}
-
-.conn .tiny {
+.slot .tiny {
   margin: 0;
 }
 
-.conn__actions {
+.slot__actions {
   display: flex;
   gap: 8px;
   margin-top: auto;
 }
 
-.conn__actions .btn-sm {
+.slot__actions .btn-sm {
   flex: 1 1 0;
-}
-
-.empty {
-  padding: 18px;
-  border: 1px dashed var(--line);
-  border-radius: 12px;
-  grid-column: 1 / -1;
-}
-
-.empty p {
-  margin: 4px 0 0;
 }
 
 /*   tokens: a table on wide screens, cards on narrow ones

@@ -21,10 +21,11 @@ import {
   keyHint,
   discoverRequest,
   validateConnect,
-  connectionViews,
+  slotView,
+  slotViews,
   maskedKey,
   statusView,
-  renderModelCards,
+  renderModelSlots,
 } from "../assets/models.js";
 import { settingRequest, describeOutcome } from "../assets/settings.js";
 import { TOKEN_SCOPES, tokenCreateRequest } from "../assets/tokens.js";
@@ -54,6 +55,7 @@ test("the roles are exactly the ones the server accepts", () => {
   assert.deepEqual([...ROLES.map((r) => r.id)].sort(), [...rust].sort());
   for (const role of ROLES) {
     assert.ok(role.label && role.detail, `${role.id} has a label and a line`);
+    assert.ok(role.hint, `${role.id} has a one-glance hint for its slot card`);
     assert.notEqual(role.label, role.id, "a human label, not the raw id");
   }
 });
@@ -168,32 +170,61 @@ test("each field's mistake is named under that field", () => {
   assert.equal(validateConnect({ ...good, baseUrl: "junk" }).ok, true);
 });
 
-test("connected models render as cards in role order, never with a key", () => {
-  const rows = [
-    {
-      role: "research",
-      provider: "kimi",
-      base_url: "https://api.moonshot.cn/anthropic",
-      model: "kimi-k2",
-      key: "…wxyz",
-      status: "answers only",
-      missing: ["context size"],
-      api_key: FIXTURE_KEY,
-    },
-    { role: "main", provider: "anthropic", model: "claude-sonnet-4-5", key: "…a9Q2", status: "works" },
-  ];
-  const views = connectionViews(rows);
-  assert.deepEqual(views.map((v) => v.role), ["main", "research"]);
-  assert.equal(views[0].roleLabel, "Main");
-  assert.equal(views[0].providerLabel, "Anthropic");
-  assert.equal(views[0].key, "••••a9Q2");
-  assert.deepEqual(views[0].status, { state: "live", label: "Works", detail: "" });
-  assert.equal(views[1].providerLabel, "Kimi", "a row finds its catalog name");
-  assert.equal(views[1].status.state, "warn");
-  assert.match(views[1].status.detail, /context size/);
-  for (const view of views) assert.ok(!JSON.stringify(view).includes(FIXTURE_KEY));
+const SLOT_ROWS = [
+  {
+    role: "research",
+    provider: "kimi",
+    base_url: "https://api.moonshot.cn/anthropic",
+    model: "kimi-k2",
+    key: "…wxyz",
+    status: "answers only",
+    missing: ["context size"],
+    api_key: FIXTURE_KEY,
+  },
+  { role: "main", provider: "anthropic", model: "claude-sonnet-4-5", key: "…a9Q2", status: "works" },
+];
 
-  // The DOM half: elements and text only, and the two actions per card.
+test("the three slots, in role order, name provider, model and masked key when set", () => {
+  const views = slotViews(SLOT_ROWS);
+  assert.deepEqual(views.map((v) => v.role), ["main", "triage", "research"], "three slots, Main first");
+  const main = views[0];
+  assert.equal(main.roleLabel, "Main");
+  assert.equal(main.set, true);
+  assert.equal(main.providerLabel, "Anthropic");
+  assert.equal(main.key, "••••a9Q2");
+  assert.equal(main.line, "Anthropic · claude-sonnet-4-5 · key ••••a9Q2");
+  assert.deepEqual(main.status, { state: "live", label: "Works", detail: "" });
+
+  const research = views[2];
+  assert.equal(research.providerLabel, "Kimi", "a row finds its catalog name");
+  assert.equal(research.status.state, "warn");
+  assert.match(research.status.detail, /context size/);
+  for (const view of views) assert.ok(!JSON.stringify(view).includes(FIXTURE_KEY));
+});
+
+test("an unset slot says what answers instead: Main, or the managed model", () => {
+  // Triage is unset while Main is connected, so triage borrows Main.
+  const triage = slotView(SLOT_ROWS, "triage");
+  assert.equal(triage.set, false);
+  assert.equal(triage.line, "Not set · uses Main");
+  assert.equal(triage.status, null, "nothing to probe, nothing to badge");
+
+  // Main's own unset state, and triage's when not even Main is set: the
+  // managed model answers.
+  assert.equal(slotView([], "main").line, "Not set · the managed model answers");
+  assert.equal(slotView([], "triage").line, "Not set · the managed model answers");
+  assert.equal(slotViews([]).every((v) => v.line === "Not set · the managed model answers"), true);
+
+  // Only Research is set: Main is still unset, so Triage's fallback chain
+  // (triage → main → managed) ends at the managed model too.
+  assert.equal(
+    slotView([{ role: "research", provider: "kimi", model: "kimi-k2" }], "triage").line,
+    "Not set · the managed model answers",
+  );
+});
+
+test("slots render as cards: Connect when unset, Change and Remove when set", () => {
+  const views = slotViews(SLOT_ROWS);
   const made = [];
   const node = (tag) => {
     const el = {
@@ -213,19 +244,26 @@ test("connected models render as cards in role order, never with a key", () => {
     return el;
   };
   const container = { children: [], replaceChildren() { this.children = []; }, appendChild(c) { this.children.push(c); } };
-  // createElementNS is for the provider marks; the fake records them like any element.
-  renderModelCards(container, views, { createElement: node, createElementNS: (_ns, tag) => node(tag) });
-  assert.equal(container.children.length, 2);
+  renderModelSlots(container, views, { createElement: node, createElementNS: (_ns, tag) => node(tag) });
+  assert.equal(container.children.length, 3, "one card per role, always");
   const buttons = made.filter((el) => el.tag === "button");
   assert.deepEqual(
     buttons.map((b) => `${b.attrs["data-action"]}:${b.attrs["data-role"]}`),
-    ["replace:main", "disconnect:main", "replace:research", "disconnect:research"],
+    [
+      "change:main",
+      "remove:main",
+      "connect:triage",
+      "change:research",
+      "remove:research",
+    ],
   );
   for (const el of made) assert.ok(!el.textContent.includes(FIXTURE_KEY));
 
-  const empty = { children: [], replaceChildren() { this.children = []; }, appendChild(c) { this.children.push(c); } };
-  renderModelCards(empty, [], { createElement: node });
-  assert.equal(empty.children.length, 1, "an empty state, not an empty box");
+  // A plain "works" wears no pill; a probe that found something to say does.
+  const pills = made
+    .filter((el) => el.tag === "span" && el.className === "pill")
+    .map((p) => p.attrs["data-state"]);
+  assert.deepEqual(pills, ["warn"]);
 });
 
 test("small pieces: masked keys, statuses, and matching a row to its card", () => {
@@ -300,6 +338,11 @@ test("the settings page speaks to people, not to developers", () => {
   ]) {
     assert.match(SETTINGS_HTML, new RegExp(`id="${id}"`), id);
   }
+  // The slots are the only role chooser; the form's "What is it for?" radio
+  // is gone, and the heading names the slot the form is for.
+  assert.match(SETTINGS_HTML, /id="connect-title"/);
+  assert.doesNotMatch(SETTINGS_HTML, /id="role-choices"/);
+  assert.doesNotMatch(SETTINGS_HTML, /id="err-role"/);
   // The key field is a password field until the person asks to see it.
   assert.match(SETTINGS_HTML, /id="api-key"\s+type="password"/);
 });
