@@ -44,6 +44,7 @@ mod install;
 mod reply;
 mod slack;
 mod store;
+mod turn;
 
 pub use config::Settings;
 pub use events::bot_scopes;
@@ -52,6 +53,7 @@ pub use handlers::{Caller, caller, caller_for};
 pub use install::{BotTokenError, bot_token};
 pub use livingbrain_pages::Answers;
 pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};
+pub use turn::set_proactivity;
 
 use std::sync::Arc;
 
@@ -110,6 +112,22 @@ const MIGRATION_0003_POSTGRES: SqlMigration = SqlMigration::new(
     "0003",
     "slack_app",
     include_str!("../migrations/postgres/0003_slack_app.sql"),
+);
+
+/// The fourth migration: the speak-up policy (`turn_policies`) and the
+/// triage cost ledger (`turn_triage`) behind it (issue #9). Both are
+/// additive; a deployment where nobody has ever set a policy writes nothing.
+const MIGRATION_0004: SqlMigration = SqlMigration::new(
+    "0004",
+    "turn",
+    include_str!("../migrations/sqlite/0004_turn.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_0004`], the same file byte for byte.
+const MIGRATION_0004_POSTGRES: SqlMigration = SqlMigration::new(
+    "0004",
+    "turn",
+    include_str!("../migrations/postgres/0004_turn.sql"),
 );
 
 /// Workspaces, Slack sign-in and the member mirror.
@@ -201,6 +219,8 @@ impl Module for Workspaces {
             "sign_in_links",
             "workspaces_slack_inbox",
             "slack_installs",
+            "turn_policies",
+            "turn_triage",
         ]
     }
 
@@ -285,19 +305,42 @@ impl Module for Workspaces {
                  app and bot user ids, and a bot token sealed under a \
                  KMS-wrapped key with the team as its AAD",
             ),
+            // The two tables issue #9 added. Neither names a person: the
+            // policy row is a workspace's (or channel's) choice of
+            // proactivity, and the triage row is what one *message* decided
+            // and cost — platform ids and numbers, never text or author.
+            PersonalDataSet::none(
+                "turn_policies",
+                "the row is one channel's (or the workspace's org-wide) \
+                 speak-up setting: how eagerly the brain may answer a \
+                 message that did not name it",
+            ),
+            PersonalDataSet::none(
+                "turn_triage",
+                "the row is one message's triage outcome: the channel and \
+                 message ids, whether it addressed the bot, the proactivity \
+                 in force, the decision and estimated token counts — never \
+                 the message text or its author",
+            ),
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 3] = [MIGRATION_INIT, MIGRATION_0002, MIGRATION_0003];
+        const MIGRATIONS: [SqlMigration; 4] = [
+            MIGRATION_INIT,
+            MIGRATION_0002,
+            MIGRATION_0003,
+            MIGRATION_0004,
+        ];
         // The array is the apply order; this refuses a gap, a duplicate or
         // an entry out of order at build time.
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 4] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_0002_POSTGRES,
             MIGRATION_0003_POSTGRES,
+            MIGRATION_0004_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
