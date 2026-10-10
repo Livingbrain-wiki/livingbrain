@@ -14,7 +14,7 @@
 //! | `POST /v1/notes` | `{body, project?}` | `{id, url}` |
 //! | `GET /v1/pages/{slug}` | — (slug percent-encoded) | `{slug, title, markdown, url}` |
 //! | `GET /v1/export` | `?format=obsidian` | a zip response body |
-//! | `POST /v1/pages/sources` | `{kind:"import", path, body, scope}` | `{id, kind, scope, path, sha256, wikilinks:[], redacted, created, created_at}` (issue #81) |
+//! | `POST /v1/pages/sources` | `{kind:"import"\|"agent_log", path, body, scope}` | `{id, kind, scope, path, sha256, wikilinks:[], redacted, created, created_at}` (issues #81, #45) |
 //!
 //! `POST /v1/device-auth/token` answers `400 {error}` with one of
 //! `authorization_pending`, `slow_down`, `expired_token`, `access_denied`
@@ -182,16 +182,19 @@ impl Client {
         read_bytes(response)
     }
 
-    /// `POST /v1/pages/sources` — add one imported Markdown file as a source.
+    /// `POST /v1/pages/sources` — add one source: an imported file (`kind`
+    /// `import`) or an agent session's normalised log (`kind` `agent_log`).
     ///
-    /// `path` is the vault-relative path with `/` separators and `body` the
-    /// already-redacted text; the server re-redacts and derives the wikilinks
-    /// itself, and answers `201` for a new source or `200` for one it already
-    /// holds (the idempotency key is the scope plus the body's SHA-256).
-    pub fn post_source(&self, path: &str, body: &str, scope: &str) -> CliResult<Value> {
+    /// For `import`, `path` is the vault-relative path with `/` separators;
+    /// for `agent_log`, it is the session's filing name, `<agent> session
+    /// <id>`. `body` is the already-redacted text; the server re-redacts and
+    /// derives the wikilinks itself, and answers `201` for a new source or
+    /// `200` for one it already holds (the idempotency key is the scope plus
+    /// the body's SHA-256).
+    pub fn post_source(&self, kind: &str, path: &str, body: &str, scope: &str) -> CliResult<Value> {
         self.post_json(
             "/v1/pages/sources",
-            json!({ "kind": "import", "path": path, "body": body, "scope": scope }),
+            json!({ "kind": kind, "path": path, "body": body, "scope": scope }),
             None,
         )
     }

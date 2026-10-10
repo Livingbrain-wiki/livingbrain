@@ -31,15 +31,28 @@
 //! that gets an app uninstalled. A DM is the opposite: a message in a stream
 //! nobody is watching, where a reply to "on it" is noise. So the gate goes
 //! wherever it can — both paths with a classifier, the DM alone without one —
-//! and what it refuses, it refuses silently. `outcome == false` says nothing
-//! now: this loop keeps no memory and calls no memory gate, so a message it
-//! turns away is not kept anywhere either.
+//! and what it refuses, it refuses silently.
 //!
-//! **No structured event is written here, deliberately.** `livingbrain_judge`
-//! names its event and `Judgement` is what it would carry, but no
-//! `livingbrain-*` module emits a structured event today; inventing a log
-//! path for one judgement is a bigger change than this issue, and a judgement
-//! that reaches no sink is not worth a new one. Treat this as a known gap.
+//! ## The speak-up policy (issue #9)
+//!
+//! A message that names neither the brain nor a DM is a conversation, and
+//! the brain joins one only where the workspace asked it to: `turn_policies`
+//! holds that ask per channel, over an org-wide default, and no row at all
+//! means [`Proactivity::Off`] — the behaviour this loop had before the
+//! policy existed. An unaddressed message under `Off` returns before the
+//! classifier runs; any other setting is triaged at that proactivity into a
+//! [`turn::Speak`]: reply, a near-miss "eyes" reaction, or silence.
+//!
+//! **Cite, or don't know.** An answer with nothing behind it says so on a
+//! turn somebody asked for, and posts nothing on a proactive one — the
+//! brain does not volunteer its ignorance into a conversation that never
+//! asked it a thing.
+//!
+//! **Every triage leaves a row** in `turn_triage` ([`turn::record`]):
+//! decision, proactivity in force, calibration and the estimated token
+//! cost — no text, no author, no probabilities. It is a cost ledger, not
+//! the structured event `livingbrain_judge` names; no structured event is
+//! written here, still deliberately.
 //!
 //! ## The turn
 //!
@@ -58,7 +71,7 @@ use cratefield_core::{Database, HttpClient};
 use livingbrain_access::{ChannelId, Location as AccessLocation};
 use livingbrain_channel::slack::{Slack, SlackEvent};
 use livingbrain_channel::{Channel, Location, Message, Visibility};
-use livingbrain_judge::{Judge, JudgeSettings};
+use livingbrain_judge::{Judge, JudgeSettings, Proactivity};
 use livingbrain_pages::{Answers, Asker};
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
@@ -67,6 +80,11 @@ use crate::conversation::{Admit, Exchange, Pending, Room, Turn};
 use crate::handlers::ModuleState;
 use crate::reply;
 use crate::store;
+use crate::turn::{self, Speak, Triage};
+
+/// What an answer with no citation behind it is prefixed with; the answer's
+/// own text is kept, lowered, after it.
+const DOES_NOT_KNOW: &str = "I don't know — ";
 
 /// Answers one verified Slack event, or decides not to.
 ///
@@ -99,17 +117,56 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
     let Some(message) = slack.receive(&envelope) else {
         return;
     };
-    if !addresses_us(&message) {
-        return;
-    }
+    let addressed = addresses_us(&message);
+    // The speak-up policy is consulted only for a message that did not name
+    // the bot: a mention or a DM is a request, whatever the workspace thinks
+    // of volunteers. `Off` — the default wherever nobody asked for the
+    // brain — returns before the classifier, so an unopted channel costs
+    // one read and no triage.
+    let proactivity = if addressed {
+        None
+    } else {
+        let found = turn::proactivity_for(db, &workspace_id, &message.location.channel).await;
+        if found == Proactivity::Off {
+            return;
+        }
+        Some(found)
+    };
     // Before the judge: this is the gate that decides whose words may leave
     // the machine at all, and a stranger's must not reach a provider to find
     // out.
     let Some(user_id) = member(db, &workspace_id, &message).await else {
         return;
     };
-    if !worth_answering(state, &message, &slack.bot_user_id).await {
-        return;
+    match triage(
+        state,
+        db,
+        &workspace_id,
+        &message,
+        addressed,
+        proactivity,
+        &slack.bot_user_id,
+    )
+    .await
+    {
+        Speak::Silent => return,
+        Speak::React => {
+            // A near-miss: the reaction says somebody looked, and no answer
+            // is computed for it.
+            let Some(http) = state.ctx.ports.http.clone() else {
+                return;
+            };
+            let http: &dyn HttpClient = &*http;
+            let Some(token) = bot_token(db, &state.kms, team_id).await else {
+                return;
+            };
+            let out = slack.react(&message, turn::REACT_EMOJI);
+            if let Err(err) = reply::post(http, &token, &out).await {
+                report(&format!("agent: could not add the reaction: {err:?}"));
+            }
+            return;
+        }
+        Speak::Reply => {}
     }
     let Some(answers) = state.answers.as_deref() else {
         return;
@@ -125,7 +182,7 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
         .turns
         .arrive(
             &key,
-            pending_for(&message, &user_id, &slack.bot_user_id),
+            pending_for(&message, &user_id, &slack.bot_user_id, addressed),
             clock.now().unix_timestamp(),
         )
         .await
@@ -144,7 +201,12 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
             ));
             Turn {
                 lease: 0,
-                messages: vec![pending_for(&message, &user_id, &slack.bot_user_id)],
+                messages: vec![pending_for(
+                    &message,
+                    &user_id,
+                    &slack.bot_user_id,
+                    addressed,
+                )],
                 context: Vec::new(),
             }
         }
@@ -173,8 +235,10 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
 /// What the coordinator is handed for one gated message: enough to answer
 /// it long after the event that carried it is gone, and enough to reply to
 /// it (see [`Pending::reply_target`]). The question is computed once, here,
-/// because the judge and the answer must read the same words.
-fn pending_for(message: &Message, user_id: &str, bot_user_id: &str) -> Pending {
+/// because the judge and the answer must read the same words; whether the
+/// message asked for the answer rides along, because the speak-up policy
+/// (issue #9) still applies to a turn that was coalesced.
+fn pending_for(message: &Message, user_id: &str, bot_user_id: &str, addressed: bool) -> Pending {
     Pending {
         user: user_id.to_owned(),
         slack_user: message.author.user.clone(),
@@ -183,6 +247,7 @@ fn pending_for(message: &Message, user_id: &str, bot_user_id: &str) -> Pending {
         thread: message.thread.clone().unwrap_or_else(|| message.id.clone()),
         ts: message.id.clone(),
         question: question(&message.text, bot_user_id),
+        addressed,
     }
 }
 
@@ -218,7 +283,7 @@ async fn answer_turn(
         .join("\n");
     // The reply target is every message's: one conversation is one thread.
     let to = lead.reply_target(team_id);
-    let answered = match answers
+    let mut answered = match answers
         .answer(
             &Asker::new(workspace_id, &lead.user).at(access_location(&to.location)),
             &asked,
@@ -235,6 +300,17 @@ async fn answer_turn(
             return None;
         }
     };
+    // **Cite, or don't know**: on a turn somebody asked for, an answer with
+    // nothing behind it says so; on a proactive one it posts nothing at all.
+    // A coalesced turn was asked for when any of its messages was — one
+    // answer covers them all, so silencing the turn would leave a question
+    // somebody asked without even an "I don't know".
+    if answered.citations.is_empty() {
+        if !turn.messages.iter().any(|pending| pending.addressed) {
+            return None;
+        }
+        answered.text = format!("{DOES_NOT_KNOW}{}", lowered(&answered.text));
+    }
     let token = bot_token(db, &state.kms, team_id).await?;
     let out = slack.reply(
         &to,
@@ -264,7 +340,7 @@ async fn answer_turn(
 /// `console_error!`: `tracing` is dropped on `wasm32`, where this loop
 /// actually runs. The line passes the harness's own text scrubber, and none
 /// of these carry message text in any case.
-fn report(line: &str) {
+pub(crate) fn report(line: &str) {
     cratefield_core::forward_control_event(cratefield_core::ControlLevel::Warn, line);
 }
 
@@ -304,13 +380,29 @@ fn addresses_us(message: &Message) -> bool {
     message.mentions_bot || message.location.visibility == Visibility::Direct
 }
 
-/// The judge gate; see the module docs for the policy.
+/// The judge gate; see the module docs for the policy. Returns what the
+/// turn should do.
 ///
-/// With no classifier a mention never asked and is answered, and a DM falls
-/// silent because there is nothing to triage it with.
-async fn worth_answering(state: &ModuleState, message: &Message, bot_user_id: &str) -> bool {
+/// With no classifier a mention never asked and is answered, and everything
+/// else falls silent because there is nothing to triage it with. With one,
+/// an addressed turn is judged at the defaults and a proactive one at the
+/// channel's own proactivity; the ledger row goes down best effort either
+/// way.
+async fn triage(
+    state: &ModuleState,
+    db: &dyn Database,
+    workspace_id: &str,
+    message: &Message,
+    addressed: bool,
+    proactivity: Option<Proactivity>,
+    bot_user_id: &str,
+) -> Speak {
     let Some(classifier) = state.ctx.ports.classifier.clone() else {
-        return message.mentions_bot;
+        return if message.mentions_bot {
+            Speak::Reply
+        } else {
+            Speak::Silent
+        };
     };
     // The app's own name comes off **before** redaction, so what the judge
     // reads is the question a person typed rather than a bot's user id —
@@ -323,13 +415,66 @@ async fn worth_answering(state: &ModuleState, message: &Message, bot_user_id: &s
     // call".
     let question = question(&message.text, bot_user_id);
     let Ok((judged, _)) = redact(&question, Policy::Redact) else {
-        return false;
+        return Speak::Silent;
     };
-    // The judgement is dropped: see the module docs on telemetry.
-    Judge::new(classifier, JudgeSettings::default())
+    let settings = match proactivity {
+        // An addressed turn is a request, and is judged at the defaults.
+        None => JudgeSettings::default(),
+        Some(policy) => JudgeSettings {
+            proactivity: policy,
+            ..JudgeSettings::default()
+        },
+    };
+    let decided = Judge::new(classifier.clone(), settings)
         .triage(&judged)
-        .await
-        .is_ok_and(|decided| decided.outcome)
+        .await;
+    let (speak, tokens) = match &decided {
+        Ok(decided) => (
+            turn::speak(decided),
+            turn::estimated_tokens(&*classifier, &judged, Some(decided)),
+        ),
+        // A failed call spent its input too, and the row says so with no
+        // output tokens — the same treatment `cratefield_core`'s own cost
+        // ledger gives one.
+        Err(err) => {
+            report(&format!("agent: the judge could not decide: {err}"));
+            (
+                Speak::Silent,
+                turn::estimated_tokens(&*classifier, &judged, None),
+            )
+        }
+    };
+    if let (Some(id_gen), Some(clock)) = (
+        state.ctx.ports.id_gen.as_deref(),
+        state.ctx.ports.clock.as_deref(),
+    ) {
+        turn::record(
+            db,
+            id_gen,
+            clock,
+            Triage {
+                workspace_id,
+                message,
+                addressed,
+                proactivity: proactivity.unwrap_or_default(),
+                speak,
+                calibration: classifier.profile().calibration.name(),
+                tokens,
+            },
+        )
+        .await;
+    }
+    speak
+}
+
+/// The answer's text with its first letter lowered, so the
+/// [`DOES_NOT_KNOW`] prefix reads as one sentence.
+fn lowered(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 /// The message text with the app's own name taken off it.

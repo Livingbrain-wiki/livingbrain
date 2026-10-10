@@ -118,6 +118,13 @@ pub struct Pending {
     pub ts: String,
     /// The question, gated and with the bot's own name taken off.
     pub question: String,
+    /// Whether the message named the bot or arrived in a DM — a turn
+    /// somebody asked for, rather than one the loop volunteered into. One
+    /// conversation is one thread, so a coalesced turn may mix the two; the
+    /// speak-up policy reads the turn as asked for when any of its messages
+    /// was.
+    #[serde(default)]
+    pub addressed: bool,
 }
 
 impl Pending {
@@ -438,6 +445,7 @@ mod tests {
             thread: "1700000000.000100".to_owned(),
             ts: "1700000000.000100".to_owned(),
             question: question.to_owned(),
+            addressed: true,
         }
     }
 

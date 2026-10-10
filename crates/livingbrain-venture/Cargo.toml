@@ -49,6 +49,8 @@ livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }
 livingbrain-tokens = { path = "../livingbrain-tokens" }
+# The MCP client (issue #11): remote servers per member, behind the write gate.
+livingbrain-tools = { path = "../livingbrain-tools" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 # `serve_cli` drives the diverted CLI paths through the harness router.
 tower = { workspace = true }

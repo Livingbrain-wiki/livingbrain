@@ -53,6 +53,7 @@ use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_tokens::{DevicePorts, Tokens};
+use livingbrain_tools::Tools;
 use livingbrain_workspaces::{
     Admit, Exchange, LocalTurns, Pending, Turn, TurnError, Turns, Workspaces,
 };
@@ -266,6 +267,7 @@ fn build(
                     .taking_turns(Arc::new(turns.clone())),
             )
             .module(Models::new())
+            .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
             .module(pages_module(kms.clone(), &answers))
@@ -807,6 +809,7 @@ mod tests {
         assert!(names.contains(&"canary"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
         assert!(names.contains(&"models"), "{names:?}");
+        assert!(names.contains(&"tools"), "{names:?}");
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"waitlist"), "{names:?}");
         for route in CLI_ROUTES {
