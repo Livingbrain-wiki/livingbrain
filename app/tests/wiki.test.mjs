@@ -425,33 +425,9 @@ test("pure helpers: slugify, validSlug, parseBrainUrl, highlightTerms", async ()
   assert.deepEqual(highlightTerms("plain", ["zzz"]), [{ type: "text", value: "plain" }]);
 });
 
-<<<<<<< HEAD
 test("pure helper: stripFrontmatter returns the body after a leading fence", () => {
   // Fence present: everything between the fences goes, one leading newline
   // is trimmed, the body starts clean.
-=======
-test("New page: a slug that fails the shape check is stopped with a notice", async () => {
-  const callsBefore = calls.length;
-  const urlsBefore = replacedUrls.length;
-
-  globalThis.window.prompt = () => "Hello World!";
-  await element("new-page").click();
-
-  assert.match(element("wiki-status").textContent, /letters, digits, hyphens/);
-  assert.equal(element("wiki-notice").dataset.tone, "warn");
-  assert.equal(calls.length, callsBefore, "no request for a malformed slug");
-  assert.equal(replacedUrls.length, urlsBefore, "no navigation for a malformed slug");
-  assert.equal(element("editor-wrap").hidden, true, "the editor was not opened");
-});
-
-test("New page: the stub opens the editor and Save creates with base_version null", async () => {
-  // Trimmed and lowercased, as a slug should arrive at the server.
-  globalThis.window.prompt = () => "  API-Notes  ";
-  await element("new-page").click();
-
-  // Straight into the editor, no GET. (Boot also fires the header's session
-  // check, so count the page calls, not every call.)
->>>>>>> origin/main
   assert.equal(
     stripFrontmatter("---\ntitle: Launch checklist\n---\n\n# Launch checklist\n\nBody."),
     "# Launch checklist\n\nBody.",

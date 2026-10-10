@@ -15,8 +15,8 @@
 //!   cannot name a scope that is not theirs, because the string they send is
 //!   not the scope it becomes.
 //! - **The server redacts; the client never gets the choice.** Body *and* path
-//!   go through `livingbrain_redact` here, so a client that skipped it
-//!   (issue #108) lands the same ledger as one that did not.
+//!   go through the ingest pipeline's redaction (issue #77), so a client that
+//!   skipped it (issue #108) lands the same ledger as one that did not.
 //! - **The credential is the MCP endpoint's.** No cookie, no second way in: a
 //!   missing or rejected bearer gets the same 401, with the same
 //!   `WWW-Authenticate` challenge, as [`crate::router`] answers.
@@ -33,8 +33,9 @@ use cratefield_core::axum::{self, Json, Router};
 use cratefield_core::{ModuleContext, Problem, ProblemDef};
 use cratefield_kms::Kms;
 use livingbrain_access::{Scope, UserId};
-use livingbrain_pages::{SourceError, SourceKind, SourceStore, SourceWrite};
-use livingbrain_redact::{Policy, RedactError, redact};
+use livingbrain_pages::{
+    IngestError, IngestOutcome, Ingestor, SourceIngest, SourceKind, SourceStore,
+};
 use serde_json::{Value, json};
 
 use crate::McpState;
@@ -183,12 +184,12 @@ async fn create(
         return Err(Problem::new(&NOT_YOURS));
     }
 
-    // Both the body and the path are redacted here, whatever the client did:
-    // the client does not hold this decision, and a path is a place secrets
-    // end up as readily as a body is.
-    let (markdown, found_body) = redacted(&request.body)?;
-    let (path, found_path) = redacted(&request.path)?;
-
+    // The one ingest pipeline (issue #77): normalise, redact body and path
+    // — the client does not hold that decision, and a path is a place
+    // secrets end up as readily as a body is — dedupe, store, and defer an
+    // extraction on the port this module declares. No extractor exists yet,
+    // so the enqueue is the only thing this route's write carries beyond the
+    // row.
     let store = SourceStore::new(
         port(state.ctx.ports.db.clone())?,
         port(state.ctx.ports.blob.clone())?,
@@ -196,26 +197,36 @@ async fn create(
         port(state.ctx.ports.clock.clone())?,
         port(state.ctx.ports.id_gen.clone())?,
     );
-    let (source, created) = store
-        .put(
-            &folded,
-            SourceWrite {
-                kind,
-                rel_path: path.clone(),
-                markdown,
-                imported_by: asker.user_id.clone(),
-            },
-        )
+    // Defer is a declared port, not a nice-to-have: silently running without
+    // it would store the row and quietly never extract it.
+    let defer = port(state.ctx.ports.defer.clone())?;
+    let ingested = Ingestor::new(store, defer)
+        .ingest(SourceIngest {
+            kind,
+            workspace: asker.workspace_id.clone(),
+            scope: folded,
+            // An import has no permalink or message id to name — the path
+            // is filing, not an origin — and no authoring member: whoever
+            // wrote the file wrote it outside the workspace. The importer
+            // travels as `imported_by`.
+            origin_ref: None,
+            author: None,
+            imported_by: asker.user_id.clone(),
+            rel_path: request.path,
+            body: request.body,
+        })
         .await
-        .map_err(source_failed)?;
+        .map_err(ingest_failed)?;
+    let source = ingested.source;
 
-    // 201 for the import that created the row and 200 for the one that found
-    // it: the same body is one source, and the difference is what the caller
-    // has to know about to keep its own bookkeeping straight.
-    let status = if created {
-        StatusCode::CREATED
-    } else {
+    // 201 for the import that created the row (held or not — it is a new
+    // source either way) and 200 for the one that found it: the same body is
+    // one source, and the difference is what the caller has to know about to
+    // keep its own bookkeeping straight.
+    let status = if matches!(ingested.outcome, IngestOutcome::Duplicate) {
         StatusCode::OK
+    } else {
+        StatusCode::CREATED
     };
     // The path in the answer is the row's, not the request's: a source found
     // rather than created keeps the path it was first imported under, and a
@@ -230,8 +241,8 @@ async fn create(
             "path": source.rel_path,
             "sha256": source.body_sha256,
             "wikilinks": source.wikilinks,
-            "redacted": found_body + found_path,
-            "created": created,
+            "redacted": ingested.redactions,
+            "created": !matches!(ingested.outcome, IngestOutcome::Duplicate),
             "created_at": source.created_at,
         })),
     )
@@ -274,14 +285,25 @@ fn parse(body: &[u8]) -> Result<Request, Problem> {
     })
 }
 
-/// Redacts `text`, mapping redaction's two failures onto this crate's own
-/// problem vocabulary: over the cap is a 413 the caller can act on, anything
-/// else a 422 it cannot.
-fn redacted(text: &str) -> Result<(String, usize), Problem> {
-    match redact(text, Policy::Redact) {
-        Ok((clean, findings)) => Ok((clean, findings.len())),
-        Err(RedactError::TooLarge { .. }) => Err(Problem::new(&TOO_LARGE)),
-        Err(RedactError::Blocked(_)) => Err(Problem::new(&NOT_REDACTABLE)),
+/// Redacts nothing here any more — the ingest pipeline owns that — but the
+/// route still owns the vocabulary: over the cap is a 413 the caller can act
+/// on, a text redaction will not handle a 422 it cannot, and a path outside
+/// the vault rule the 400 that says which rule.
+fn ingest_failed(error: IngestError) -> Problem {
+    match error {
+        IngestError::InvalidPath(path) => {
+            Problem::new(&INVALID_PATH).with_detail(format!("`{path}` is not a path in a vault"))
+        }
+        IngestError::TooLarge => Problem::new(&TOO_LARGE),
+        IngestError::Refused(_) => Problem::new(&NOT_REDACTABLE),
+        // The refusals that were the store's to make travel as their variant
+        // name only (`SourceError::variant`): the store error's own text
+        // names scopes and hashes, and those belong in no answer and no
+        // 500's log line.
+        other => {
+            eprintln!("a source could not be recorded: {}", other.variant());
+            Problem::internal()
+        }
     }
 }
 
@@ -295,39 +317,5 @@ async fn asker(state: &McpState, headers: &HeaderMap) -> Result<Asker, ()> {
     match state.auth.authenticate(&state.ctx.ports, token).await {
         Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => Ok(asker),
         _ => Err(()),
-    }
-}
-
-/// A store error as a 500 with none of it in the body. The detail of a store
-/// failure names a scope, a path or a database message, and none of those
-/// belongs in an answer to a caller who can fix none of them. The one
-/// exception is the path: it is the caller's own string, it came back to them
-/// unchanged, and saying *which* rule it broke is the whole of the 400.
-///
-/// The operator's side gets the variant and nothing else. A `DbError` renders
-/// the values a statement bound, so printing the error prints the caller's
-/// body hash, scope and path into whatever log this lands in.
-fn source_failed(error: SourceError) -> Problem {
-    match error {
-        SourceError::InvalidPath(path) => {
-            Problem::new(&INVALID_PATH).with_detail(format!("`{path}` is not a path in a vault"))
-        }
-        other => {
-            eprintln!(
-                "a source could not be recorded: {}",
-                match other {
-                    SourceError::InvalidScope(_) => "invalid-scope",
-                    SourceError::InvalidPath(_) => "invalid-path",
-                    SourceError::Corrupt(_) => "corrupt",
-                    SourceError::Shredded(_) => "shredded",
-                    SourceError::KeyUnavailable { .. } => "key-unavailable",
-                    SourceError::Crypto(_) => "crypto",
-                    SourceError::Kms(_) => "kms",
-                    SourceError::Blob(_) => "blob",
-                    SourceError::Store(_) => "store",
-                }
-            );
-            Problem::internal()
-        }
     }
 }

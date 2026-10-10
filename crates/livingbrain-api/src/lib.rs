@@ -3,8 +3,9 @@
 //! The routes the livingbrain-cli's client contract already speaks —
 //! `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`, `GET /v1/export` —
 //! plus [`pages_routes`], the page routes the web app reads and writes,
-//! mounted by the venture inside the `pages` module at `/v1/pages`. One
-//! contract, served from one store: every route reads and writes
+//! mounted by the venture inside the `pages` module at `/v1/pages`, and
+//! [`Sources`], the citation resolver at `GET /v1/sources/{id}` (issue #77).
+//! One contract, served from one store: every route reads and writes
 //! `livingbrain-pages` and **only with the asker's own access** — the scopes
 //! come from the credential ([`livingbrain_mcp::page_scopes`]) and no route
 //! accepts one from the client, so a caller can never name a scope it was
@@ -61,6 +62,7 @@ mod rebind;
 mod recipes;
 mod search;
 mod service;
+mod sources;
 mod zip;
 
 pub use ask::Ask;
@@ -69,6 +71,7 @@ pub use notes::Notes;
 pub use pages::pages_routes;
 pub use rebind::{PagesRebind, RebindBlob};
 pub use search::Search;
+pub use sources::Sources;
 
 use cratefield_core::Problem;
 use cratefield_kms::Kms;

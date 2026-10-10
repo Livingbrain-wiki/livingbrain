@@ -121,11 +121,11 @@ impl Blob for RebindBlob {
 }
 
 /// The whole port layer, rooted on the pages key space: every key one of
-/// this crate's four modules writes arrives carrying that module's own scope
-/// (`notes/…`, `search/…`, `ask/…`, `export/…` — the harness's [`ScopedBlob`
-/// keyed it) and is rewritten to `pages/…`; every other key passes through
-/// untouched, so the `pages` module's own `pages/…` keys land exactly as
-/// they always did.
+/// this crate's modules writes arrives carrying that module's own scope
+/// (`notes/…`, `search/…`, `ask/…`, `export/…`, `sources/…` — the harness's
+/// [`ScopedBlob`] keyed it) and is rewritten to `pages/…`; every other key
+/// passes through untouched, so the `pages` module's own `pages/…` keys land
+/// exactly as they always did.
 ///
 /// This is the composition's one port-layer planting, in the shape the
 /// [crate docs](crate) describe: the runtime resolves a bundle per request,
@@ -137,20 +137,20 @@ impl Blob for RebindBlob {
 ///
 /// and [`cratefield_core::Ports::view_for`] then hands each module
 /// `ScopedBlob(PagesRebind(raw), module)` — [`RebindBlob`] under the scope,
-/// per module, derived this request. Keys outside the four prefixes (a
-/// future module that declares `Port::Blob`, or a scope whose first segment
-/// merely starts alike) reach `inner` unchanged: the wrapper speaks only
-/// for the four names this crate mounts.
+/// per module, derived this request. Keys outside these prefixes (a future
+/// module that declares `Port::Blob`, or a scope whose first segment merely
+/// starts alike) reach `inner` unchanged: the wrapper speaks only for the
+/// names this crate mounts.
 pub struct PagesRebind {
     /// The store every non-sibling key hits unchanged — the raw per-request
     /// store the runtime resolved, and the `pages` module's own path.
     inner: Arc<dyn Blob>,
     /// The per-module rebinds, one per name this crate mounts.
-    rebinds: [(&'static str, RebindBlob); 4],
+    rebinds: [(&'static str, RebindBlob); 5],
 }
 
 impl PagesRebind {
-    /// Roots the four sibling modules' scopes on the pages key space, over
+    /// Roots the sibling modules' scopes on the pages key space, over
     /// the raw per-request store.
     #[must_use]
     pub fn new(inner: Arc<dyn Blob>) -> Self {
@@ -168,6 +168,10 @@ impl PagesRebind {
                 (
                     "export",
                     RebindBlob::new(Arc::clone(&inner), "export", "pages"),
+                ),
+                (
+                    "sources",
+                    RebindBlob::new(Arc::clone(&inner), "sources", "pages"),
                 ),
             ],
             inner,
@@ -438,7 +442,7 @@ mod tests {
         let memory = Arc::new(MemoryBlob::new());
         let planted = Arc::new(PagesRebind::new(memory.clone()));
 
-        for module in ["notes", "search", "ask", "export"] {
+        for module in ["notes", "search", "ask", "export", "sources"] {
             let scoped = ScopedBlob::new(Arc::clone(&planted) as Arc<dyn Blob>, module);
             // The key as the page store writes it: relative, because the
             // scope has not crossed it yet.

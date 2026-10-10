@@ -31,6 +31,7 @@
 
 mod answers;
 mod entity;
+mod ingest;
 mod keys;
 mod scope;
 mod sources;
@@ -40,10 +41,14 @@ pub use answers::{AnswerError, Answered, Answers, Asker, Citation, PageAnswers};
 pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
+pub use ingest::{
+    Extract, IngestError, IngestOutcome, Ingested, Ingestor, NoExtract, NoScreen, Screen,
+    SourceIngest, Verdict,
+};
 pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
 pub use scope::{page_scope, page_scopes_for};
 pub use sources::{
-    MAX_SOURCE_BODY_BYTES, Source, SourceError, SourceKind, SourceStore, SourceWrite,
+    MAX_SOURCE_BODY_BYTES, Released, Source, SourceError, SourceKind, SourceStore, SourceWrite,
     extract_wikilinks,
 };
 pub use store::{
@@ -79,6 +84,14 @@ const MIGRATION_SOURCES: SqlMigration = SqlMigration::new(
     "0003",
     "sources",
     include_str!("../migrations/sqlite/0003_sources.sql"),
+);
+
+/// The ledger widened into the ingest ledger (issue #77), same portable
+/// subset — `ALTER TABLE ADD COLUMN` runs unchanged on both engines.
+const MIGRATION_SOURCE_LEDGER: SqlMigration = SqlMigration::new(
+    "0004",
+    "source_ledger",
+    include_str!("../migrations/sqlite/0004_source_ledger.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -202,7 +215,12 @@ impl Module for Pages {
     /// and `PageStore::new` is handed one by whoever composes the store. When
     /// the runtime grows a `Port::Kms` this moves beside it.
     fn requires(&self) -> &'static [Port] {
-        &[Port::Db, Port::Blob, Port::Clock, Port::IdGen]
+        // `Defer` since issue #77: the source ledger's ingest pipeline
+        // enqueues extraction on it. A held source enqueues nothing until it
+        // is released, but the port itself is not optional — a composition
+        // that cannot defer extraction is a ledger that silently never
+        // extracts, and `Harness::build` is where that must be said.
+        &[Port::Db, Port::Blob, Port::Clock, Port::IdGen, Port::Defer]
     }
 
     /// `Signer` is **optional**, and only because a nested surface may need
@@ -273,24 +291,27 @@ impl Module for Pages {
                 "the row holds HMACs of tokens, not tokens, so no erasure query can match a \
                  word; forgetting a scope deletes its rows with its key",
             ),
-            // The source ledger (issue #81). An imported file is somebody's
-            // document and its path is often their own filing, so the row is
-            // declared content with the one column an erasure query can bind
-            // to named as the subject — `imported_by` holds the asker's user
-            // id, the same value the workspaces module matches on. The path
-            // and the link targets are plaintext columns, so erasure reaches
-            // them by deleting the row; only the sealed body outlives it, and
-            // that one is destroyed with the scope key by
+            // The source ledger (issues #81 and #77). A source is somebody's
+            // document or message and its path or origin is often their own
+            // filing, so the row is declared content with the one column an
+            // erasure query can bind to named as the subject — `imported_by`
+            // holds the asker's user id, the same value the workspaces module
+            // matches on (`author`, when set, holds another member's id, and
+            // erasure of either subject deletes the whole row). The path, the
+            // origin ref and the link targets are plaintext columns, so
+            // erasure reaches them by deleting the row; only the sealed body
+            // outlives it, and that one is destroyed with the scope key by
             // `PageStore::forget_scope`.
             PersonalDataSet {
                 table: "sources",
                 subject: "imported_by",
                 kind: DataKind::Content,
                 disposition: Disposition::Erase,
-                description: "For each file you imported: the path it arrived under, the \
-                              `[[wiki-links]]` it names, and the sealed Markdown body. Erasing \
-                              you deletes the row; the sealed body stays in the blob store, \
-                              unreadable to everybody once the scope's key is destroyed.",
+                description: "For each source that arrived from outside: where it came \
+                              from (a path or an origin ref), the `[[wiki-links]]` it \
+                              names, and the sealed body. Erasing you deletes the row; the \
+                              sealed body stays in the blob store, unreadable to everybody \
+                              once the scope's key is destroyed.",
                 redacted: &[],
                 subject_via: None,
             },
@@ -299,8 +320,12 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 3] =
-            [MIGRATION_INIT, MIGRATION_SCOPE_KEYS, MIGRATION_SOURCES];
+        const MIGRATIONS: [SqlMigration; 4] = [
+            MIGRATION_INIT,
+            MIGRATION_SCOPE_KEYS,
+            MIGRATION_SOURCES,
+            MIGRATION_SOURCE_LEDGER,
+        ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);

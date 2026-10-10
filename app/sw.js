@@ -10,7 +10,7 @@
  * the app's data must never be served from a stale cache.
  */
 
-const CACHE = "lb-app-v6";
+const CACHE = "lb-app-v8";
 
 const SHELL = [
   "./",
@@ -25,6 +25,8 @@ const SHELL = [
   "./assets/models.js",
   // models.js imports the provider catalog statically, like stack.json.
   "./assets/providers.json",
+  // app.js and models.js import the provider marks beside the names.
+  "./assets/marks.js",
   "./assets/tokens.js",
   // wiki.js is app.js's import for the wiki page, and wiki.css its sheet;
   // an ES module import fails atomically, so an offline wiki needs both.
