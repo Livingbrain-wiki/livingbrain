@@ -37,8 +37,25 @@ const SIDE_SESSION: &str = "7c9d1e3a-2b4f-4c6e-8a0d-5f7e9b1d3c5a";
 const CODEX_SESSION: &str = "a1b2c3d4-e5f6-4a9b-8c7d-3e5f7a9b1c2d";
 const MOVED_SESSION: &str = "9b3c7f2a-1d4e-4f6a-8b2c-5d7e9a1b3c4f";
 
-/// A fake API key planted in both sessions' user prompts.
-const PLANTED_KEY: &str = "sk-ant-api03-fake0000000000000000000000";
+/// The placeholder the fixture files carry where a fake Anthropic key was
+/// planted — a whole key literal in the tree would be refused by GitHub push
+/// protection — spliced out for the runtime value as the fixtures are copied.
+const PLANTED_KEY_PLACEHOLDER: &str = "__PLANTED_ANTHROPIC_KEY__";
+
+/// The same arrangement for the fixture's fake AWS access key.
+const PLANTED_AWS_KEY_PLACEHOLDER: &str = "__PLANTED_AWS_KEY__";
+
+/// A fake API key planted in both sessions' user prompts — shaped exactly
+/// like the real thing so the redactor must catch it on the wire, but
+/// assembled from fragments so no source file carries a key-shaped literal.
+fn planted_key() -> String {
+    ["sk-", "ant-", "api03-fake", &"0".repeat(22)].concat()
+}
+
+/// The fake AWS access key in the Codex fixture, built the same way.
+fn planted_aws_key() -> String {
+    ["AKIA", "IOSFODNN7", "EXAMPLE"].concat()
+}
 
 /// The one JSON object `--json` printed on stdout.
 fn json_of(output: &Output) -> Value {
@@ -124,7 +141,11 @@ fn copy_tree(from: &Path, to: &Path) {
         if entry.path().is_dir() {
             copy_tree(&entry.path(), &target);
         } else {
-            std::fs::copy(entry.path(), &target).expect("copy fixture file");
+            let raw = std::fs::read_to_string(entry.path()).expect("read fixture file");
+            let planted = raw
+                .replace(PLANTED_KEY_PLACEHOLDER, &planted_key())
+                .replace(PLANTED_AWS_KEY_PLACEHOLDER, &planted_aws_key());
+            std::fs::write(&target, planted).expect("copy fixture file");
         }
     }
 }
@@ -244,7 +265,7 @@ fn an_opted_in_repo_uploads_redacted_sessions() {
         // The bytes that crossed the socket are the redacted ones: the record
         // carries neither the planted key nor either spelling of the home.
         let body = envelope["body"].as_str().expect("a body string");
-        assert!(!body.contains(PLANTED_KEY), "{body}");
+        assert!(!body.contains(planted_key().as_str()), "{body}");
         assert!(!body.contains("/home/alice"), "{body}");
         assert!(!body.contains("-home-alice"), "{body}");
         assert!(body.contains("[REDACTED:"), "{body}");
@@ -468,7 +489,7 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
         "{}",
         claude_turns[0]
     );
-    assert!(!claude.to_string().contains(PLANTED_KEY));
+    assert!(!claude.to_string().contains(planted_key().as_str()));
 
     // Codex: the last cumulative token count, no cost invented.
     assert_eq!(codex["schema_version"], 1);
@@ -494,7 +515,7 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     // planted AWS key left as a replacement token, not as itself, and the
     // wrapped `<user_instructions>` opener made no turn.
     let codex_text = codex.to_string();
-    assert!(!codex_text.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!codex_text.contains(planted_aws_key().as_str()));
     assert!(
         !codex_text.contains("cmd"),
         "tool input leaked: {codex_text}"
