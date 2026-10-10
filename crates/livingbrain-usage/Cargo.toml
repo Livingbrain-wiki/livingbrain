@@ -1,0 +1,48 @@
+# Living Brain module: the usage ledger. Per workspace and per UTC day,
+# one row of usage facts — model requests and tokens, D1 queries, emails
+# sent — with the cost math and budget that turn those facts into the one
+# number a hosted plan's operator watches.
+
+[package]
+name = "livingbrain-usage"
+description = "Living Brain module: the per-workspace per-day usage ledger, its cost math and the admin read endpoint"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed. `axum` arrives through
+# `cratefield_core::axum`, so it is not named directly.
+cratefield-core = { workspace = true }
+
+# Portable SQL built as parameterized statements over the `Database` port
+# (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
+sea-query = { workspace = true }
+serde = { workspace = true }
+# Calendar math for the UTC day keys and the month-to-date window. Pure
+# Rust and wasm-safe.
+time = { workspace = true }
+# Who is calling is asked of the `tokens` module's one `authenticate`, so
+# a session cookie and a personal access token resolve to the same member
+# here as everywhere else (issue #72).
+livingbrain-tokens = { path = "../livingbrain-tokens" }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
+# sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# The module whose tables a test seeds and whose session it seals, and the
+# models module whose `model_connections` row prices the ledger. Dev-only.
+livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+livingbrain-models = { path = "../livingbrain-models" }
+pollster = { workspace = true }
+serde_json = { workspace = true }
+tower = { workspace = true }

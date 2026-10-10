@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
+use crate::EmailLedger;
 use crate::config::{self, Settings};
 use crate::conversation::{LocalTurns, Turns};
 use crate::events;
@@ -203,6 +204,9 @@ pub(crate) struct ModuleState {
     /// itself, which is all a composition without the venture's Durable
     /// Object can promise.
     pub(crate) turns: Arc<dyn Turns>,
+    /// The seam the cost ledger counts an email send through (issue #12).
+    /// `None` is a composition that mounted no usage module.
+    ledger: Option<Arc<dyn EmailLedger>>,
 }
 
 impl ModuleState {
@@ -243,6 +247,7 @@ pub(crate) fn router(
     ctx: ModuleContext,
     answers: Option<Arc<dyn Answers>>,
     turns: Option<Arc<dyn Turns>>,
+    ledger: Option<Arc<dyn EmailLedger>>,
 ) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
@@ -258,6 +263,7 @@ pub(crate) fn router(
         kms,
         answers,
         turns: turns.unwrap_or_else(|| Arc::new(LocalTurns::default())),
+        ledger,
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))
@@ -1252,6 +1258,15 @@ async fn email_start(
             return Err(Problem::new(&MAIL_NOT_CONFIGURED));
         }
         Err(error) => return Err(mail_failed(error)),
+    }
+    // The cost ledger (issue #12): one increment per send. The seam's
+    // contract is best-effort, and a link that named no workspace (the
+    // body's optional field) has nothing to record against. `email_start`
+    // is unauthenticated and workspace-named — safe only while the email
+    // rate is 0 (pilot free tier); a membership check must precede any
+    // non-zero rate.
+    if let (Some(ledger), Some(workspace_id)) = (&state.ledger, workspace_id) {
+        ledger.record_email(&*db, now, workspace_id).await;
     }
     email_ok()
 }

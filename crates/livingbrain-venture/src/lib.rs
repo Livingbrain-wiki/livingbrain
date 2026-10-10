@@ -37,8 +37,8 @@ use cratefield_core::axum::http::{
 };
 use cratefield_core::axum::response::Response as AxumResponse;
 use cratefield_core::{
-    Blob, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes, RandomError, Template,
-    Venture,
+    Blob, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes, RandomError,
+    Template, Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::MailTheme;
@@ -54,10 +54,12 @@ use livingbrain_models::Models;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_tokens::{DevicePorts, Tokens};
 use livingbrain_tools::Tools;
+use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
-    Admit, Exchange, LocalTurns, Pending, Turn, TurnError, Turns, Workspaces,
+    Admit, EmailLedger, Exchange, LocalTurns, Pending, Turn, TurnError, Turns, Workspaces,
 };
 use std::sync::{Arc, OnceLock};
+use time::OffsetDateTime;
 use tower::ServiceExt;
 use worker::{Context, Env, ObjectNamespace, Request, Response, event};
 
@@ -264,14 +266,21 @@ fn build(
             .module(
                 Workspaces::new()
                     .answering(Arc::new(answers.clone()))
-                    .taking_turns(Arc::new(turns.clone())),
+                    .taking_turns(Arc::new(turns.clone()))
+                    .email_ledger(Arc::new(UsageLedger)),
             )
             .module(Models::new())
             .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
             .module(pages_module(kms.clone(), &answers))
-            .module(waitlist_module());
+            .module(waitlist_module())
+            // The cost ledger (issue #12): `GET /v1/usage/daily`, backed by
+            // the records the models and workspaces modules write through
+            // their seams. It needs only what every module here gets — the
+            // `DB` binding, the Workers clock and the `HARNESS_SECRET`
+            // signer — so the boot gate accepts it where the others stand.
+            .module(Usage::new());
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
         let builder = cli_modules(kms)
@@ -332,6 +341,27 @@ fn device_auth_module(ports: &DevicePorts) -> DeviceAuth {
 /// without this composition knowing which one it is serving.
 fn tokens_module(ports: DevicePorts) -> Tokens {
     Tokens::new().device_ports(ports)
+}
+
+/// The cost ledger behind the workspaces module's [`EmailLedger`] seam
+/// (issue #12): one row increment per magic-link mail the module sends.
+///
+/// The seam exists because the dependency graph runs the other way — the
+/// usage module reaches the workspaces module through `tokens`
+/// (`usage` → `tokens` → `workspaces`), so the workspaces module cannot
+/// depend back on `usage` without a cycle Cargo refuses. The composition,
+/// which sees both, implements the seam over `livingbrain_usage` and
+/// injects it, exactly as it does the pages answer seam.
+///
+/// The failure is dropped rather than returned because the seam's contract
+/// is best-effort: a lost count must never fail the mail it counted.
+struct UsageLedger;
+
+#[async_trait::async_trait]
+impl EmailLedger for UsageLedger {
+    async fn record_email(&self, db: &dyn Database, now: OffsetDateTime, workspace_id: &str) {
+        let _ = livingbrain_usage::record_email(db, now, workspace_id).await;
+    }
 }
 
 /// The entropy source the device grant draws its code pair from — the

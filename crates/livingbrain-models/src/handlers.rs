@@ -201,6 +201,20 @@ async fn connect(
         .await
         .map_err(unreachable_error)?;
 
+    // The ledger (issue #12): the probe's tokens are real usage by this
+    // workspace; the failure is ignored on purpose — a lost usage count
+    // must never fail the connect that spent the tokens.
+    if let Some(usage) = probe_result.usage {
+        let _ = livingbrain_usage::record_model(
+            &*db,
+            clock.now(),
+            &c.workspace_id,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
+        .await;
+    }
+
     // Encrypt the key. If the secret is missing, fail with a 500 rather
     // than storing plaintext.
     let enc_key = crypto::derive_key(&*state.ctx.config).ok_or_else(|| Problem::new(&NO_SECRET))?;

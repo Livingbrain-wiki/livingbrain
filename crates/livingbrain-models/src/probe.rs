@@ -64,6 +64,44 @@ pub(crate) struct ProbeResult {
     pub(crate) missing: Vec<&'static str>,
     /// The model's context size, if the endpoint reported one.
     pub(crate) context_size: Option<String>,
+    /// The token usage the two chat calls reported, summed. `None` is a
+    /// provider that named no numbers — unknown, never guessed as zero.
+    pub(crate) usage: Option<TokenUsage>,
+}
+
+/// The token usage one chat call reported, as both wires name it
+/// (`prompt_tokens`/`completion_tokens` on the OpenAI wire,
+/// `input_tokens`/`output_tokens` on Anthropic's).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TokenUsage {
+    pub(crate) prompt_tokens: u64,
+    pub(crate) completion_tokens: u64,
+}
+
+impl TokenUsage {
+    /// The sum of two calls' usage: the probe sends two completions.
+    fn plus(self, other: Self) -> Self {
+        Self {
+            prompt_tokens: self.prompt_tokens.saturating_add(other.prompt_tokens),
+            completion_tokens: self
+                .completion_tokens
+                .saturating_add(other.completion_tokens),
+        }
+    }
+}
+
+/// Reads the `usage` object off a parsed chat response, per wire. `None`
+/// when the provider named no numbers.
+fn parse_usage(parsed: &Value, wire: Wire) -> Option<TokenUsage> {
+    let usage = parsed.get("usage")?;
+    let (prompt, completion) = match wire {
+        Wire::Openai => ("prompt_tokens", "completion_tokens"),
+        Wire::Anthropic => ("input_tokens", "output_tokens"),
+    };
+    Some(TokenUsage {
+        prompt_tokens: usage.get(prompt)?.as_u64()?,
+        completion_tokens: usage.get(completion)?.as_u64()?,
+    })
 }
 
 /// The endpoint was unreachable: the first call returned a non-2xx status
@@ -140,9 +178,9 @@ pub(crate) async fn probe(
     model: &str,
 ) -> Result<ProbeResult, Unreachable> {
     // (a) Tool calling.
-    let tool_ok = tool_calling_probe(http, target, model).await?;
+    let (tool_ok, tool_usage) = tool_calling_probe(http, target, model).await?;
     // (b) JSON output.
-    let json_ok = json_output_probe(http, target, model).await?;
+    let (json_ok, json_usage) = json_output_probe(http, target, model).await?;
     // (c) Context size.
     let context_size = context_size_probe(http, target, model).await?;
 
@@ -167,15 +205,20 @@ pub(crate) async fn probe(
         status,
         missing,
         context_size,
+        usage: [tool_usage, json_usage]
+            .into_iter()
+            .flatten()
+            .reduce(TokenUsage::plus),
     })
 }
 
-/// Sends a trivial tool the model must call. Pass if it calls one.
+/// Sends a trivial tool the model must call. Pass if it calls one; the
+/// call's reported token usage, if any, comes back with the verdict.
 async fn tool_calling_probe(
     http: &dyn HttpClient,
     target: Target<'_>,
     model: &str,
-) -> Result<bool, Unreachable> {
+) -> Result<(bool, Option<TokenUsage>), Unreachable> {
     let body = match target.wire {
         Wire::Openai => json!({
             "model": model,
@@ -204,7 +247,8 @@ async fn tool_calling_probe(
         }),
     };
     let parsed = send_chat(http, target, &body).await?;
-    Ok(match target.wire {
+    let usage = parse_usage(&parsed, target.wire);
+    let called = match target.wire {
         Wire::Openai => parsed
             .get("choices")
             .and_then(|c| c.get(0))
@@ -220,15 +264,17 @@ async fn tool_calling_probe(
                     .iter()
                     .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
             }),
-    })
+    };
+    Ok((called, usage))
 }
 
-/// Asks for a JSON object. Pass if the answer's text parses as one.
+/// Asks for a JSON object. Pass if the answer's text parses as one; the
+/// call's reported token usage, if any, comes back with the verdict.
 async fn json_output_probe(
     http: &dyn HttpClient,
     target: Target<'_>,
     model: &str,
-) -> Result<bool, Unreachable> {
+) -> Result<(bool, Option<TokenUsage>), Unreachable> {
     let body = match target.wire {
         Wire::Openai => json!({
             "model": model,
@@ -246,6 +292,7 @@ async fn json_output_probe(
         }),
     };
     let parsed = send_chat(http, target, &body).await?;
+    let usage = parse_usage(&parsed, target.wire);
     let content = match target.wire {
         Wire::Openai => parsed
             .get("choices")
@@ -267,7 +314,8 @@ async fn json_output_probe(
             })
             .unwrap_or_default(),
     };
-    Ok(serde_json::from_str::<Value>(content.trim()).is_ok_and(|v| v.is_object()))
+    let emitted = serde_json::from_str::<Value>(content.trim()).is_ok_and(|v| v.is_object());
+    Ok((emitted, usage))
 }
 
 /// GETs `{base}/v1/models/{model}` and reads the context length. Returns

@@ -1802,6 +1802,7 @@ dependencies = [
  "cratefield-core",
  "cratefield-testing",
  "livingbrain-tokens",
+ "livingbrain-usage",
  "livingbrain-workspaces",
  "percent-encoding",
  "pollster",
@@ -1920,6 +1921,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-usage"
+version = "0.1.0"
+dependencies = [
+ "cratefield-core",
+ "cratefield-testing",
+ "livingbrain-models",
+ "livingbrain-tokens",
+ "livingbrain-workspaces",
+ "pollster",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "time",
+ "tower",
+]
+
+[[package]]
 name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
@@ -1942,9 +1960,11 @@ dependencies = [
  "livingbrain-pages",
  "livingbrain-tokens",
  "livingbrain-tools",
+ "livingbrain-usage",
  "livingbrain-workspaces",
  "pollster",
  "serde_json",
+ "time",
  "tower",
  "wasm-bindgen",
  "worker",

@@ -20,7 +20,7 @@ deployed.
 | R2 bucket | simulated by `--local` | `livingbrain-blobs-staging` | `livingbrain-blobs` |
 | KV namespace | simulated by `--local` | a per-environment namespace | a per-environment namespace |
 | Deployed by | nothing — `wrangler dev` | every push, `main` or `v*` tag | a `v*` tag, after approval |
-| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | not set yet |
+| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | `api.livingbrain.wiki` (custom domain, `[env.production]`) |
 
 `ENV` is not decoration. The harness reads it twice: it names the
 environment to the production readiness gate at boot, and it binds every
@@ -42,6 +42,91 @@ Staging secrets: `HARNESS_SECRET`, `HARNESS_KEK_CURRENT` + `HARNESS_KEK_V1`
 and the Slack install answers 503), `MODEL_KEYS_SECRET`, `OWLPOST_API_KEY`,
 `ADMIN_TOKEN`, and for Slack `WORKSPACES_SLACK_CLIENT_SECRET` and
 `WORKSPACES_SLACK_SIGNING_SECRET`.
+
+## Production
+
+Public host `api.livingbrain.wiki`, a custom domain routed in
+`[env.production]`; nothing reaches it without a human.
+
+```sh
+# Resources, once each; the ids go into the matching [env.production] lines.
+npx wrangler d1 create livingbrain
+npx wrangler r2 bucket create livingbrain-blobs
+npx wrangler kv namespace create KV-production
+```
+
+Paste the ids into `[env.production.d1_databases]` and
+`[env.production.kv_namespaces]` — both are placeholders in `wrangler.toml`
+until this is done. The route is `api.livingbrain.wiki` with
+`custom_domain = true`, which requires the `livingbrain.wiki` zone on the
+same Cloudflare account.
+
+### Secrets — each set with `wrangler secret put NAME --env production`
+
+```sh
+npx wrangler secret put HARNESS_SECRET --env production                   # signs sessions and confirm links
+npx wrangler secret put HARNESS_KEK_CURRENT --env production              # seals page bodies and Slack tokens; never staging's value
+npx wrangler secret put MODEL_KEYS_SECRET --env production                # wraps the BYOK model-key ciphertext; never staging's value
+npx wrangler secret put WORKSPACES_SLACK_CLIENT_SECRET --env production   # the production Slack app, not the staging one
+npx wrangler secret put WORKSPACES_SLACK_SIGNING_SECRET --env production  # verifies Slack's request signatures
+npx wrangler secret put OWLPOST_API_KEY --env production                  # sends the mail
+npx wrangler secret put TURNSTILE_SECRET --env production                 # captcha gate; absent = joins refused, fail-closed
+npx wrangler secret put ADMIN_TOKEN --env production                      # the waitlist CSV export
+```
+
+Never reuse a staging secret value in production, and never rotate a KEK
+casually: rotating `HARNESS_KEK_CURRENT` or `MODEL_KEYS_SECRET` orphans the
+ciphertext already sealed under it.
+
+### The go-ahead gate
+
+Production deploys run only on `v*` tags and wait for approval from the
+GitHub environment `production`'s required reviewers — that approval is the
+owner's go-ahead. `PRODUCTION_URL` must be set to
+`https://api.livingbrain.wiki` for the health smoke. The smoke is
+health-only here — production is never seeded, and its signing key never
+reaches a runner, unlike staging's authenticated read — and a deploy that
+fails it is rolled back with `scripts/deploy/rollback.sh production`.
+
+### Pilot
+
+The pilot is two weeks on one internal Slack workspace. Install the Slack app
+to the workspace through the install flow (`/v1/workspaces/slack/install`),
+sign in, and connect the workspace's model key at `PUT /v1/models/{role}` —
+BYO key; the catalog includes DeepSeek.
+
+Day 1, mention the bot with a question in a channel: the reply must answer
+with a citation link into the wiki — the issue's first acceptance criterion.
+Record the date and a screenshot or link in the pilot log.
+
+Each day, as a workspace admin with a personal access token:
+
+```sh
+curl -sH "Authorization: Bearer $LIVINGBRAIN_TOKEN" "https://api.livingbrain.wiki/v1/usage/daily?days=14"
+```
+
+It returns per-day counts (model requests/tokens, D1 queries, emails sent),
+attributed cost, month-to-date, and `status` — `ok` or `over` against
+`USAGE_BUDGET_CENTS_MONTHLY`, 300 cents by default: the $3.00 infra share of
+the $9/mo hosted Teams plan at a ~2/3 margin (pricing v3 in
+[origin-and-plan.md](origin-and-plan.md)). Model keys are BYO, so provider
+token spend is the workspace's own; the ledger records the tokens anyway, for
+credit accounting.
+
+Honesty notes: D1 cost has no per-workspace attribution yet, so while the
+pilot is single-workspace, read account-level D1 from the Cloudflare
+dashboard once a day and note it in the log; the `d1_queries` column is
+recorded for when attribution lands. Email costs 0 during the pilot (inside
+the mail provider's free tier); sends are counted.
+
+| date | answer with citation | usage status | D1 (dashboard) | notes |
+| --- | --- | --- | --- | --- |
+| 2026-10-13 (example) | yes — reply linked the page | `ok` | $0.02 | day 1: criterion met |
+| 2026-10-14 | — | `ok` | $0.02 | |
+| 2026-10-15 | — | `ok` | $0.03 | |
+| 2026-10-16 | — | `ok` | $0.02 | |
+
+Success: two weeks of daily `status` `ok` and the day-1 citation check.
 
 ## One-time setup
 

@@ -34,9 +34,10 @@ chacha20poly1305 = { workspace = true }
 getrandom = { workspace = true }
 # `HMAC-SHA256`, so the tests can sign a delivery the way Slack does.
 hmac = { workspace = true }
-# The agent's two injected seams, [`Answers`] in tests and the turn
-# coordinator (issue #7) in `src`: both are `dyn` traits with async methods.
-# Pure Rust, wasm-safe, already in the lockfile.
+# The module's injected seams, [`Answers`] in tests, the turn coordinator
+# (issue #7) and the cost ledger's `EmailLedger` (issue #12) in `src`: all
+# are `dyn` traits with async methods. Pure Rust, wasm-safe, already in the
+# lockfile.
 async-trait = { workspace = true }
 # Portable SQL built as parameterized statements over the `Database` port
 # (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.

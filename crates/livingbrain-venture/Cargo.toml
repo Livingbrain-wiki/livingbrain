@@ -51,6 +51,9 @@ livingbrain-pages = { path = "../livingbrain-pages" }
 livingbrain-tokens = { path = "../livingbrain-tokens" }
 # The MCP client (issue #11): remote servers per member, behind the write gate.
 livingbrain-tools = { path = "../livingbrain-tools" }
+# The cost ledger (issue #12): the per-workspace per-day usage table and its
+# admin read endpoint, mounted below beside the modules it bills.
+livingbrain-usage = { path = "../livingbrain-usage" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 # `serve_cli` drives the diverted CLI paths through the harness router.
 tower = { workspace = true }
@@ -62,6 +65,9 @@ getrandom = { workspace = true }
 # `DurableTurns` encodes a turn call as the request body the conversation
 # object reads back with `json()` (issue #7).
 serde_json = { workspace = true }
+# The timestamp the usage ledger's email seam passes to `record_email`
+# (issue #12) — the same `OffsetDateTime` the workspaces handler already holds.
+time = { workspace = true }
 
 # `#[durable_object]`'s expansion names the `wasm_bindgen` crate directly, so
 # the class in `src/conversation.rs` needs it linked on the wasm build. Native
