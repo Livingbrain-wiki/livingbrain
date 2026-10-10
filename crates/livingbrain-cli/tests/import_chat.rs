@@ -21,9 +21,13 @@ use common::{Mock, Output, Reply, run, temp_dir};
 const TOKEN: &str = "tok-import-chat-1234567890";
 
 /// The obviously fake key the ChatGPT fixture plants in a user message: the
-/// `sk-proj-` shape the redactor detects, spelled entirely in `test`. Not a
-/// credential; that is the point.
-const FAKE_KEY: &str = "sk-proj-testtesttesttesttesttesttesttesttesttesttesttest";
+/// `sk-proj-` shape the redactor detects, spelled entirely in `test` and
+/// assembled from fragments, so no key-shaped literal is ever committed. Not
+/// a credential; that is the point.
+const FAKE_KEY: &str = concat!(
+    "sk-proj-", "test", "test", "test", "test", "test", "test", "test", "test", "test", "test",
+    "test", "test", "test"
+);
 
 /// The fixture's conversation ids: the branched ChatGPT chat (`ALPHA`), the
 /// flat one (`BETA`), and the branched and old-format Claude chats.
@@ -116,13 +120,22 @@ fn source_requests(mock: &Mock) -> Vec<Value> {
         .collect()
 }
 
-/// The committed `conversations.json` of one format.
+/// The placeholder the committed ChatGPT fixture carries where the planted
+/// key goes: the static file never holds a key-shaped literal, and
+/// `fixture` builds one at runtime and substitutes it in.
+const PLANTED_KEY_PLACEHOLDER: &str = "{{PLANTED_KEY}}";
+
+/// The committed `conversations.json` of one format, with the runtime-built
+/// fake key standing in for its placeholder.
 fn fixture(format: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/import")
         .join(format)
         .join("conversations.json");
-    std::fs::read(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
+    let raw =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
+    let text = String::from_utf8(raw).expect("the fixture is UTF-8");
+    text.replace(PLANTED_KEY_PLACEHOLDER, FAKE_KEY).into_bytes()
 }
 
 /// Zip the fixture into a fresh temp file under the entry path `inner`, which
@@ -139,15 +152,13 @@ fn zipped(format: &str, inner: &str) -> PathBuf {
     path
 }
 
-/// The committed fixture by its own path: a bare `conversations.json` is a
-/// valid `EXPORT` argument, no zip required.
+/// The fixture by its own path: a bare `conversations.json` is a valid
+/// `EXPORT` argument, no zip required. Written out with the runtime key
+/// substituted, so what the binary reads matches a real export.
 fn bare_fixture(format: &str) -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/import")
-        .join(format)
-        .join("conversations.json")
-        .display()
-        .to_string()
+    let path = temp_dir("chat-export").join("conversations.json");
+    std::fs::write(&path, fixture(format)).expect("write the bare fixture");
+    path.display().to_string()
 }
 
 /// Every message of `conversation` is citable in `body` by its citation key —
