@@ -94,13 +94,14 @@ const DOES_NOT_KNOW: &str = "I don't know — ";
 /// composition that wired no agent at all — a page store is a tenant-wide
 /// capability and this module has no business holding one.
 pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) {
-    // The `HttpClient` is only held to check, here, that the deployment has
-    // one; the turn's answer re-reads both ports per turn, because a
-    // coalesced turn runs long after the event that started it.
-    let (Some(db), Some(_)) = (state.ctx.ports.db.clone(), state.ctx.ports.http.clone()) else {
+    // The turn's answer re-reads both ports per turn, because a coalesced
+    // turn runs long after the event that started it; the `HttpClient` held
+    // here posts only a near-miss reaction.
+    let (Some(db), Some(http)) = (state.ctx.ports.db.clone(), state.ctx.ports.http.clone()) else {
         return;
     };
     let db: &dyn Database = &*db;
+    let http: &dyn HttpClient = &*http;
     let Some(workspace_id) = workspace(db, team_id).await else {
         return;
     };
@@ -153,10 +154,6 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
         Speak::React => {
             // A near-miss: the reaction says somebody looked, and no answer
             // is computed for it.
-            let Some(http) = state.ctx.ports.http.clone() else {
-                return;
-            };
-            let http: &dyn HttpClient = &*http;
             let Some(token) = bot_token(db, &state.kms, team_id).await else {
                 return;
             };
@@ -235,9 +232,7 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
 /// What the coordinator is handed for one gated message: enough to answer
 /// it long after the event that carried it is gone, and enough to reply to
 /// it (see [`Pending::reply_target`]). The question is computed once, here,
-/// because the judge and the answer must read the same words; whether the
-/// message asked for the answer rides along, because the speak-up policy
-/// (issue #9) still applies to a turn that was coalesced.
+/// because the judge and the answer must read the same words.
 fn pending_for(message: &Message, user_id: &str, bot_user_id: &str, addressed: bool) -> Pending {
     Pending {
         user: user_id.to_owned(),
@@ -302,9 +297,7 @@ async fn answer_turn(
     };
     // **Cite, or don't know**: on a turn somebody asked for, an answer with
     // nothing behind it says so; on a proactive one it posts nothing at all.
-    // A coalesced turn was asked for when any of its messages was — one
-    // answer covers them all, so silencing the turn would leave a question
-    // somebody asked without even an "I don't know".
+    // A coalesced turn counts as asked for when any of its messages was.
     if answered.citations.is_empty() {
         if !turn.messages.iter().any(|pending| pending.addressed) {
             return None;

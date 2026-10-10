@@ -118,11 +118,10 @@ pub struct Pending {
     pub ts: String,
     /// The question, gated and with the bot's own name taken off.
     pub question: String,
-    /// Whether the message named the bot or arrived in a DM — a turn
-    /// somebody asked for, rather than one the loop volunteered into. One
-    /// conversation is one thread, so a coalesced turn may mix the two; the
-    /// speak-up policy reads the turn as asked for when any of its messages
-    /// was.
+    /// Whether the message named the bot or arrived in a DM (issue #9): a
+    /// turn that holds one is asked for, so an uncited answer says "I don't
+    /// know" rather than posting nothing. Defaults to `false` for a pending
+    /// message queued before the field existed.
     #[serde(default)]
     pub addressed: bool,
 }
