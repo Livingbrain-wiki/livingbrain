@@ -2,7 +2,8 @@
 //!
 //! A member with admin or owner rights connects a model per role, from any
 //! provider in the vendored catalog ([`crate::catalog`]) or from a `custom`
-//! endpoint that names its own wire and auth; any member can list them. The key
+//! endpoint that names its own wire and auth; any member can list them and
+//! ask which connection serves a role (`GET /{role}`). The key
 //! is encrypted before it is stored, and only its last four characters are
 //! ever shown — in `GET` and in `PUT`. No route returns the ciphertext, the
 //! full key, or a provider's response body, which can echo the key back.
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use cratefield_core::axum::extract::{Path, State};
 use cratefield_core::axum::http::{HeaderMap, StatusCode};
 use cratefield_core::axum::response::{IntoResponse, Response};
-use cratefield_core::axum::routing::{get, post, put};
+use cratefield_core::axum::routing::{get, post};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{DbError, ModuleContext, Problem, ProblemDef};
 // The one "who is calling" every route in this venture answers with: a
@@ -29,11 +30,12 @@ use time::format_description::well_known::Rfc3339;
 use crate::catalog::{self, Auth, Wire};
 use crate::crypto;
 use crate::probe;
+use crate::selection;
 use crate::ssrf;
 use crate::store;
 
 /// The roles a model can be connected for.
-const ROLES: &[&str] = &["triage", "main", "research"];
+pub(crate) const ROLES: &[&str] = &["triage", "main", "research"];
 
 /// Only a workspace admin or owner can connect or remove models.
 const FORBIDDEN: ProblemDef = ProblemDef {
@@ -41,6 +43,16 @@ const FORBIDDEN: ProblemDef = ProblemDef {
     status: StatusCode::FORBIDDEN,
     title: "Admin or owner access required",
     description: "Only a workspace admin or owner can connect or remove models.",
+};
+
+/// No connection serves the role the caller asked about: with nothing
+/// connected, the managed model answers. A 404, not a connection — so a
+/// job can tell "Main is serving" from "the managed model is".
+const MANAGED: ProblemDef = ProblemDef {
+    slug: "models/managed",
+    status: StatusCode::NOT_FOUND,
+    title: "No model connected",
+    description: "No connection serves this role, so the managed model answers.",
 };
 
 /// The endpoint URL was refused by the SSRF guard.
@@ -79,7 +91,10 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
     axum::Router::new()
         .route("/", get(list))
         .route("/discover", post(discover))
-        .route("/{role}", put(connect).delete(remove))
+        // `/discover` above is a static segment, so it wins the match: a
+        // `GET /v1/models/discover` is the method router's 405, and every
+        // other non-role path reaches `effective`'s role check.
+        .route("/{role}", get(effective).put(connect).delete(remove))
         .with_state(state)
 }
 
@@ -104,6 +119,35 @@ async fn list(
     let c = authenticate(&state.ctx.ports, &headers).await?;
     let rows = store::list(&*db, &c.workspace_id).await.map_err(database)?;
     Ok(Json(rows.into_iter().map(view).collect::<Vec<_>>()).into_response())
+}
+
+/// `GET /{role}` — the connection that serves a job for `role`. Any member
+/// can ask, as with [`list`]. The resolution is [`crate::selection`]'s
+/// product rule: the role's own connection if it has one, else Main.
+///
+/// The body's `role` is the *serving* connection's role, not the one the
+/// caller asked about: a triage job with no triage connection gets the
+/// Main connection back, `role: "main"` — the answer to "which model will
+/// run this job". When nothing serves the role at all the answer is the
+/// managed model's, and the response is a 404 naming `models/managed`
+/// rather than a body that looked like a connection.
+async fn effective(
+    State(state): State<Arc<ModuleState>>,
+    Path(role): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !ROLES.contains(&role.as_str()) {
+        return Err(Problem::validation_failed(format!(
+            "role must be one of triage|main|research, got {role:?}"
+        )));
+    }
+    let rows = store::list(&*db, &c.workspace_id).await.map_err(database)?;
+    let serving = selection::resolve(&rows, &role).ok_or_else(|| {
+        Problem::new(&MANAGED).with_detail("No model connected — the managed model answers.")
+    })?;
+    Ok(Json(view(serving.clone())).into_response())
 }
 
 /// `PUT /{role}` — connect (or replace) a model for a role. Admin or owner
