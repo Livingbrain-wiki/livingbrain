@@ -78,6 +78,24 @@ bucket_name = "livingbrain-blobs"
 binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
 
+# The per-conversation turn coordinator (issue #7): one Durable Object per
+# conversation, keyed by `Message::conversation_key`. workerd runs one
+# conversation object's requests one at a time with input gates held, which
+# is what serialises the turns of a thread. The class is
+# `#[durable_object(fetch)]` in `src/conversation.rs`; `fetch` in `src/lib.rs`
+# resolves this binding per request and hands it to the workspaces module's
+# turn seam.
+[[durable_objects.bindings]]
+name = "CONVERSATIONS"
+class_name = "ConversationObject"
+
+# The class's one-time migration: object storage is SQLite, the only backend
+# a new object gets. `[[migrations]]` is one of the few INHERITED keys, so
+# this is declared once at the top level — the binding above is not.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ConversationObject"]
+
 # Non-secret configuration. Secrets — `HARNESS_SECRET` (which signs every
 # cookie this Worker issues), `WORKSPACES_SLACK_CLIENT_SECRET`,
 # `MODEL_KEYS_SECRET` (issue #10: the AES-256-GCM key the `models` module
@@ -171,6 +189,11 @@ bucket_name = "livingbrain-blobs-staging"
 binding = "KV"
 id = "333ff8d934b04e87a0c6cb85f9daa572"
 
+# Not inherited from the top level (the `[[migrations]]` above is).
+[[env.staging.durable_objects.bindings]]
+name = "CONVERSATIONS"
+class_name = "ConversationObject"
+
 # `ENV` is what the harness reads: it names the deployment environment to the
 # production readiness gate and binds every cookie this Worker signs, so a
 # token minted in staging never verifies in production. `HARNESS_VENTURE` is
@@ -210,6 +233,11 @@ bucket_name = "livingbrain-blobs"
 [[env.production.kv_namespaces]]
 binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
+
+# Not inherited from the top level (the `[[migrations]]` above is).
+[[env.production.durable_objects.bindings]]
+name = "CONVERSATIONS"
+class_name = "ConversationObject"
 
 [env.production.vars]
 ENV = "production"

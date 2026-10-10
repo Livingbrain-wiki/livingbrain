@@ -1926,6 +1926,7 @@ dependencies = [
  "pollster",
  "serde_json",
  "tower",
+ "wasm-bindgen",
  "worker",
 ]
 

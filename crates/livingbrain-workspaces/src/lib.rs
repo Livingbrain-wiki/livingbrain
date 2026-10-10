@@ -31,12 +31,15 @@
 //! [`Answers`] is the same kind of seam for issue #123, in the other
 //! direction: this module owns the Slack conversation and cannot read a page,
 //! so a composition injects something that can, and the agent loop answers
-//! through it.
+//! through it. [`Turns`] is its sibling for issue #7: several people can
+//! talk in one thread at once, and what serialises the agent's turns is a
+//! per-conversation coordinator only the composition can provide.
 
 #![forbid(unsafe_code)]
 
 mod agent;
 mod config;
+mod conversation;
 mod events;
 mod flow;
 mod handlers;
@@ -47,6 +50,10 @@ mod store;
 mod turn;
 
 pub use config::Settings;
+pub use conversation::{
+    Admit, Answer, Call, Conversation, Exchange, LocalTurns, Pending, Room, Turn, TurnError, Turns,
+    apply,
+};
 pub use events::bot_scopes;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
 pub use handlers::{Caller, caller, caller_for};
@@ -136,14 +143,19 @@ pub struct Workspaces {
     /// The seam the Slack agent answers through (issue #123). A composition
     /// that leaves it `None` has a workspaces module and no agent.
     answers: Option<Arc<dyn Answers>>,
+    /// The seam the agent takes its turn from (issue #7). `None` is the
+    /// per-isolate [`LocalTurns`]: right for a single isolate, and what the
+    /// venture replaces with its per-conversation Durable Object.
+    turns: Option<Arc<dyn Turns>>,
 }
 
-// The answer seam is a `dyn` and not a `Debug`; the module itself is still
+// The two seams are `dyn`s and not a `Debug`; the module itself is still
 // one, so a composition that prints its modules keeps working.
 impl std::fmt::Debug for Workspaces {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workspaces")
             .field("answers", &self.answers.is_some())
+            .field("turns", &self.turns.is_some())
             .finish()
     }
 }
@@ -165,6 +177,21 @@ impl Workspaces {
     #[must_use]
     pub fn answering(mut self, answers: Arc<dyn Answers>) -> Self {
         self.answers = Some(answers);
+        self
+    }
+
+    /// Take the agent's turns from `turns` (issue #7).
+    ///
+    /// The seam is injected rather than built here because the coordinator
+    /// is a Durable Object keyed by the conversation, and a Durable Object
+    /// class can only be declared by the crate compiled into the Worker —
+    /// the same constraint [`Answers`] is injected for, with a different
+    /// answer behind it: what this module may hold is "a way to learn
+    /// whether a message in this conversation answers now or queues", which
+    /// is exactly what [`Turns`] is.
+    #[must_use]
+    pub fn taking_turns(mut self, turns: Arc<dyn Turns>) -> Self {
+        self.turns = Some(turns);
         self
     }
 }
@@ -377,6 +404,6 @@ impl Module for Workspaces {
     }
 
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        handlers::router(ctx, self.answers.clone())
+        handlers::router(ctx, self.answers.clone(), self.turns.clone())
     }
 }
