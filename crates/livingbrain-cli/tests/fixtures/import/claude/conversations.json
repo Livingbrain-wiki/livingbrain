@@ -1,0 +1,96 @@
+[
+  {
+    "uuid": "c3d4e5f6-a1b2-4c30-8d90-4a5b6c7d8e01",
+    "name": "Migration planning",
+    "created_at": "2026-05-01T10:00:00.000000Z",
+    "updated_at": "2026-05-01T10:06:00.000000Z",
+    "chat_messages": [
+      {
+        "uuid": "d1000000-0000-4000-8000-000000000001",
+        "sender": "human",
+        "created_at": "2026-05-01T10:00:00.000000Z",
+        "text": "Plan the migration of the billing database.",
+        "content": [
+          { "type": "text", "text": "Plan the migration of the billing database." }
+        ],
+        "attachments": []
+      },
+      {
+        "uuid": "d2000000-0000-4000-8000-000000000002",
+        "sender": "assistant",
+        "created_at": "2026-05-01T10:01:00.000000Z",
+        "text": "Here is a plan: step one, ship the schema; step two, backfill.",
+        "content": [
+          {
+            "type": "text",
+            "text": "Here is a plan: step one, ship the schema; step two, backfill."
+          }
+        ],
+        "parent_message_uuid": "d1000000-0000-4000-8000-000000000001"
+      },
+      {
+        "uuid": "d3000000-0000-4000-8000-000000000003",
+        "sender": "human",
+        "created_at": "2026-05-01T10:02:00.000000Z",
+        "text": "Use Postgres for everything.",
+        "content": [{ "type": "text", "text": "Use Postgres for everything." }],
+        "parent_message_uuid": "d2000000-0000-4000-8000-000000000002"
+      },
+      {
+        "uuid": "d4000000-0000-4000-8000-000000000004",
+        "sender": "assistant",
+        "created_at": "2026-05-01T10:03:00.000000Z",
+        "text": "Postgres plan: ship the schema to Postgres, then backfill.",
+        "content": [
+          {
+            "type": "text",
+            "text": "Postgres plan: ship the schema to Postgres, then backfill."
+          }
+        ],
+        "parent_message_uuid": "d3000000-0000-4000-8000-000000000003"
+      },
+      {
+        "uuid": "d5000000-0000-4000-8000-000000000005",
+        "sender": "human",
+        "created_at": "2026-05-01T10:05:00.000000Z",
+        "text": "Actually, try SQLite first.",
+        "content": [{ "type": "text", "text": "Actually, try SQLite first." }],
+        "attachments": [{ "file_name": "schema.dmp", "file_size": 20480 }],
+        "parent_message_uuid": "d2000000-0000-4000-8000-000000000002"
+      },
+      {
+        "uuid": "d6000000-0000-4000-8000-000000000006",
+        "sender": "assistant",
+        "created_at": "2026-05-01T10:06:00.000000Z",
+        "text": "SQLite plan: ship the schema to SQLite, then backfill.",
+        "content": [
+          {
+            "type": "text",
+            "text": "SQLite plan: ship the schema to SQLite, then backfill."
+          }
+        ],
+        "parent_message_uuid": "d5000000-0000-4000-8000-000000000005"
+      }
+    ]
+  },
+  {
+    "uuid": "e4f5a6b7-c8d9-4e40-9a10-5b6c7d8e9f02",
+    "name": "Old format chat",
+    "created_at": "2026-04-20T08:00:00.000Z",
+    "chat_messages": [
+      {
+        "uuid": "f1000000-0000-4000-8000-000000000001",
+        "sender": "human",
+        "created_at": "2026-04-20T08:00:00.000000Z",
+        "text": "Hello there. I attached my notes.",
+        "attachments": [{ "file_name": "notes.txt" }]
+      },
+      {
+        "uuid": "f2000000-0000-4000-8000-000000000002",
+        "sender": "assistant",
+        "created_at": "2026-04-20T08:01:00.000000Z",
+        "text": "Hi! I read the notes; the flag is set."
+      }
+    ]
+  }
+]

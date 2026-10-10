@@ -30,12 +30,16 @@ use crate::{CliResult, Out, err, text};
 /// disk is somebody's build output, and a page source is prose.
 const TEXT_EXTENSIONS: &[&str] = &["md", "markdown", "txt"];
 
-/// The source formats `livingbrain import` speaks. One variant each, so
-/// `import chatgpt` can follow without reshaping the command.
+/// The source formats `livingbrain import` speaks. One variant each, so the
+/// next format lands as a sibling without reshaping the command.
 #[derive(Subcommand, Debug)]
 pub enum Format {
     /// Import a directory of Markdown notes
     Markdown(Markdown),
+    /// Import a ChatGPT data export (Settings → Data controls → Export data)
+    Chatgpt(ChatExport),
+    /// Import a Claude data export (Settings → Privacy → Export data)
+    Claude(ChatExport),
 }
 
 /// The flags `livingbrain import markdown` takes.
@@ -63,6 +67,33 @@ pub struct Markdown {
         value_parser = clap::value_parser!(u64).range(1..=MAX_INPUT_BYTES as u64),
     )]
     max_bytes: u64,
+}
+
+/// The flags `import chatgpt` and `import claude` take — the same set, since
+/// the two exports ask the same questions.
+#[derive(Args, Debug)]
+pub struct ChatExport {
+    /// The export zip, or a bare `conversations.json`
+    #[arg(value_name = "EXPORT")]
+    export: PathBuf,
+    /// Import into the shared brain instead of your personal one
+    #[arg(long)]
+    shared: bool,
+    /// Upload without the confirmation prompt
+    #[arg(long)]
+    yes: bool,
+    /// Keep conversations created on or after this day (YYYY-MM-DD)
+    #[arg(long, value_name = "DATE")]
+    since: Option<String>,
+    /// Keep conversations created on or before this day (YYYY-MM-DD)
+    #[arg(long, value_name = "DATE")]
+    until: Option<String>,
+    /// Keep conversations whose title or messages contain this text, case-insensitively (repeatable: any match keeps a conversation)
+    #[arg(long, value_name = "TEXT")]
+    keyword: Vec<String>,
+    /// Keep the conversation with this id (repeatable)
+    #[arg(long, value_name = "ID")]
+    id: Vec<String>,
 }
 
 /// Everything the walk found, before any of it is uploaded.
@@ -94,12 +125,14 @@ struct Skipped {
 pub fn run(format: &Format, api_url: &str, out: &Out) -> CliResult<()> {
     match format {
         Format::Markdown(args) => markdown(args, api_url, out),
+        Format::Chatgpt(args) => chat(args, crate::chat_export::Kind::Chatgpt, api_url, out),
+        Format::Claude(args) => chat(args, crate::chat_export::Kind::Claude, api_url, out),
     }
 }
 
 fn markdown(args: &Markdown, api_url: &str, out: &Out) -> CliResult<()> {
     let plan = plan(args)?;
-    let (scope, brain) = scope(args);
+    let (scope, brain) = scope(args.shared);
     preview(args, &plan, brain);
 
     // A directory with nothing to say is a successful no-op, not a failure:
@@ -253,12 +286,216 @@ fn relative_path(root: &Path, path: &Path) -> CliResult<String> {
 }
 
 /// The wire scope, and the words the prompt uses for it.
-fn scope(args: &Markdown) -> (&'static str, &'static str) {
-    if args.shared {
+fn scope(shared: bool) -> (&'static str, &'static str) {
+    if shared {
         ("shared", "the shared brain")
     } else {
         ("personal", "your personal brain")
     }
+}
+
+// ---------------------------------------------------------------------------
+// Chat exports (`import chatgpt`, `import claude`)
+
+/// What a chat import would upload: one rendered, redacted part per entry.
+/// The parts known before the confirmation are the struct; the counts only an
+/// upload knows are [`ChatPlan::report`]'s arguments.
+struct ChatPlan<'a> {
+    kind: crate::chat_export::Kind,
+    export: &'a Path,
+    scope: &'a str,
+    selected: usize,
+    sources: Vec<Source>,
+    /// Secrets redacted out of `sources`, counted per class.
+    redaction: BTreeMap<&'a str, usize>,
+}
+
+impl ChatPlan<'_> {
+    /// The one object `--json` prints.
+    fn report(&self, created: usize, unchanged: usize, uploaded: &[Value]) -> Value {
+        json!({
+            "source": self.kind.as_str(),
+            "export": self.export.display().to_string(),
+            "scope": self.scope,
+            "conversations": self.selected,
+            "files": self.sources.len(),
+            "created": created,
+            "unchanged": unchanged,
+            "redacted": self.redaction.values().sum::<usize>(),
+            "redaction": self.redaction,
+            "sources": uploaded,
+        })
+    }
+}
+
+/// Run `import chatgpt` / `import claude`. The shape is [`markdown`]'s on
+/// purpose: the unzip, the parse, the selection, the render and the redaction
+/// are all local; the preview describes the redacted parts; and the token and
+/// the socket come only after the answer.
+fn chat(
+    args: &ChatExport,
+    kind: crate::chat_export::Kind,
+    api_url: &str,
+    out: &Out,
+) -> CliResult<()> {
+    let selection = crate::chat_export::Selection {
+        since: args
+            .since
+            .as_deref()
+            .map(|date| checked_date("--since", date))
+            .transpose()?,
+        until: args
+            .until
+            .as_deref()
+            .map(|date| checked_date("--until", date))
+            .transpose()?,
+        keywords: args.keyword.clone(),
+        ids: args.id.clone(),
+    };
+    let json = crate::chat_export::read_conversations_json(&args.export).map_err(err)?;
+    let conversations = crate::chat_export::parse(kind, &json).map_err(err)?;
+    let mut selected: Vec<&crate::chat_export::Conversation> = conversations
+        .iter()
+        .filter(|c| selection.keeps(c))
+        .collect();
+    // Date order, ties by id: the preview reads chronologically, and a second
+    // run of the same export uploads in the same order.
+    selected.sort_by(|a, b| (&a.created, &a.id).cmp(&(&b.created, &b.id)));
+
+    // Redaction happens here, before the preview: the summary below is what
+    // the upload would do, and nothing unredacted survives to the wire.
+    let (scope, brain) = scope(args.shared);
+    let mut plan = ChatPlan {
+        kind,
+        export: &args.export,
+        scope,
+        selected: selected.len(),
+        sources: Vec::new(),
+        redaction: BTreeMap::new(),
+    };
+    for conversation in &selected {
+        for part in crate::chat_export::render(kind, conversation) {
+            let (body, findings) = redact(&part.body, Policy::Redact).map_err(|e| {
+                err(format!(
+                    "could not redact the body of {}: {e}",
+                    conversation.id
+                ))
+            })?;
+            for finding in &findings {
+                *plan.redaction.entry(finding.class.as_str()).or_default() += 1;
+            }
+            plan.sources.push(Source {
+                path: crate::chat_export::part_path(kind, conversation, &part),
+                body,
+                secrets: findings.len(),
+            });
+        }
+    }
+
+    chat_preview(kind, &args.export, &selected, &plan, brain);
+    if plan.sources.is_empty() {
+        out.json_or(&plan.report(0, 0, &[]), || println!("Nothing to import."));
+        return Ok(());
+    }
+    if !args.yes && !confirm(plan.sources.len(), brain)? {
+        return Err(err("import cancelled — nothing was uploaded"));
+    }
+
+    // The first socket in the command, and the first read of the token — both
+    // after the confirmation, for the same reason [`markdown`]'s are.
+    let client = Client::new(api_url).with_token(crate::auth::token_for(api_url)?);
+    let mut created = 0usize;
+    let mut uploaded = Vec::new();
+    for source in &plan.sources {
+        // Stop at the first failure rather than push on, as in [`markdown`].
+        let value = client
+            .post_source("import", &source.path, &source.body, scope)
+            .map_err(|e| err(format!("{}: {e}", source.path)))?;
+        let is_new = value["created"].as_bool().unwrap_or(false);
+        created += usize::from(is_new);
+        uploaded.push(json!({
+            "path": source.path,
+            "id": text(&value, "id"),
+            "created": is_new,
+        }));
+    }
+
+    let unchanged = uploaded.len() - created;
+    let redacted: usize = plan.redaction.values().sum();
+    out.json_or(&plan.report(created, unchanged, &uploaded), || {
+        println!("Imported {created} new, {unchanged} already present ({redacted} redacted).")
+    });
+    Ok(())
+}
+
+/// What this run would upload, on stderr so `--json` keeps stdout to one
+/// object: the selected conversations, oldest first, then the per-class
+/// redaction summary, then the target.
+fn chat_preview(
+    kind: crate::chat_export::Kind,
+    export: &Path,
+    selected: &[&crate::chat_export::Conversation],
+    plan: &ChatPlan,
+    brain: &str,
+) {
+    let total: usize = plan.sources.iter().map(|s| s.body.len()).sum();
+    let messages: usize = selected.iter().map(|c| c.messages.len()).sum();
+    eprintln!(
+        "Import preview for {} export {}:",
+        kind.as_str(),
+        export.display()
+    );
+    eprintln!(
+        "  {} conversation(s), {messages} message(s), {} in {} part(s)",
+        selected.len(),
+        size_label(total),
+        plan.sources.len()
+    );
+    for conversation in selected {
+        let day = conversation
+            .created
+            .as_deref()
+            .and_then(|created| created.get(..10))
+            .unwrap_or("undated");
+        eprintln!(
+            "    {day}  {} ({} message(s))",
+            conversation.title,
+            conversation.messages.len()
+        );
+    }
+    if !plan.redaction.is_empty() {
+        let summary = plan
+            .redaction
+            .iter()
+            .map(|(class, count)| format!("{class}: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("  redaction: {summary} will be redacted before upload");
+    }
+    eprintln!("  target: {brain}");
+}
+
+/// A `--since`/`--until` value: `YYYY-MM-DD`, checked by hand — the comparison
+/// the flags make is lexicographic on exactly this shape, and `time`'s parser
+/// sits behind a feature this build does not otherwise need.
+fn checked_date(flag: &str, value: &str) -> CliResult<String> {
+    let bad = || err(format!("{flag} expects YYYY-MM-DD, got {value}"));
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 {
+        return Err(bad());
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        let separator = index == 4 || index == 7;
+        if separator != (*byte == b'-') || (!separator && !byte.is_ascii_digit()) {
+            return Err(bad());
+        }
+    }
+    let month: u8 = value[5..7].parse().map_err(|_| bad())?;
+    let day: u8 = value[8..10].parse().map_err(|_| bad())?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(bad());
+    }
+    Ok(value.to_owned())
 }
 
 /// What this run would do, on stderr so `--json` keeps stdout to one object.

@@ -94,6 +94,12 @@ zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 # the resolution it already needs: only the CLI depends on it, never a module,
 # so it stays out of the Worker's wasm graph.
 ignore = "0.4.23"
+# The chat export reader (issue #49): `import chatgpt` / `import claude` read
+# `conversations.json` straight out of the export zip, in memory, never
+# extracted to disk. Native-only like `ignore` above — only the CLI names it,
+# never a module. `deflate` only: an export zip stores or deflates, and the
+# test suite builds its fixtures with the same feature set.
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 # The URL-encoding `axum` and `url` already resolve.
 percent-encoding = "2.3"
 pollster = { version = "0.4", features = ["macro"] }

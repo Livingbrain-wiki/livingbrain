@@ -17,6 +17,7 @@ use api::Client;
 
 mod api;
 mod auth;
+mod chat_export;
 mod import;
 mod logs;
 mod mcp;

@@ -49,8 +49,18 @@ ignore = { workspace = true }
 # on every ingest path, so the thing that decides what is stored stays one
 # piece of code.
 livingbrain-redact = { path = "../livingbrain-redact" }
+# The chat export reader (issue #49): reads `conversations.json` out of the
+# export zip, in memory. See the note on `zip` in the root Cargo.toml.
+zip = { workspace = true }
+# ChatGPT stamps times in Unix seconds; every body this build renders records
+# them as RFC 3339. `formatting` is what that needs; `parsing` stays off — the
+# `--since`/`--until` dates are checked by hand (see `import::checked_date`).
+time = { workspace = true }
 
 [dev-dependencies]
 # The import test's mock keys "already imported?" on the body's SHA-256, the
 # same idempotency key the server uses. The lockfile already resolves `sha2`.
 sha2 = { workspace = true }
+# The import chat test builds its export zips at test time, so no binary
+# fixture is committed; only the `conversations.json` inside them is.
+zip = { workspace = true }
