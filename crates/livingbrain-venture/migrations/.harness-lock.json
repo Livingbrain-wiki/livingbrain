@@ -70,5 +70,9 @@
   "tools/0001": {
     "file": "0018_tools_0001_init.sql",
     "sha256": "0a4d2c03a8af4e1e8ae3d168fae7947858e893a9c59bb5d9334a58abb86b0307"
+  },
+  "usage/0001": {
+    "file": "0019_usage_0001_init.sql",
+    "sha256": "cdb8adf5ba7ab4697f77d5b20b7e2e315589d165c0bcadee0771a233f814d8cd"
   }
 }

@@ -65,9 +65,10 @@ pub use turn::set_proactivity;
 use std::sync::Arc;
 
 use cratefield_core::{
-    Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,
-    Port, SqlMigration,
+    Config, ConfigError, DataKind, Database, Disposition, Migrations, Module, ModuleContext,
+    PersonalDataSet, Port, SqlMigration,
 };
+use time::OffsetDateTime;
 
 /// The first migration: `workspaces` and `workspace_members`.
 const MIGRATION_INIT: SqlMigration = SqlMigration::new(
@@ -137,6 +138,19 @@ const MIGRATION_0004_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0004_turn.sql"),
 );
 
+/// Records an email send into the cost ledger, for the composition to
+/// inject (issue #12). A seam rather than a dependency because the graph
+/// runs the other way: the usage module reaches this one through `tokens`
+/// (`usage` → `tokens` → `workspaces`), so depending back on `usage` would
+/// be a cycle Cargo refuses. The same shape as [`Answers`], whose page
+/// store this module may not hold either.
+#[async_trait::async_trait]
+pub trait EmailLedger: Send + Sync {
+    /// Record one send for `workspace_id`. The implementation swallows its
+    /// own failures: a lost count must never fail the mail it counts.
+    async fn record_email(&self, db: &dyn Database, now: OffsetDateTime, workspace_id: &str);
+}
+
 /// Workspaces, Slack sign-in and the member mirror.
 #[derive(Default)]
 pub struct Workspaces {
@@ -147,6 +161,10 @@ pub struct Workspaces {
     /// per-isolate [`LocalTurns`]: right for a single isolate, and what the
     /// venture replaces with its per-conversation Durable Object.
     turns: Option<Arc<dyn Turns>>,
+    /// The seam the cost ledger counts an email send through (issue #12).
+    /// `None` is a composition that mounted no usage module: mail still
+    /// sends, nothing counts it.
+    ledger: Option<Arc<dyn EmailLedger>>,
 }
 
 // The two seams are `dyn`s and not a `Debug`; the module itself is still
@@ -156,6 +174,7 @@ impl std::fmt::Debug for Workspaces {
         f.debug_struct("Workspaces")
             .field("answers", &self.answers.is_some())
             .field("turns", &self.turns.is_some())
+            .field("ledger", &self.ledger.is_some())
             .finish()
     }
 }
@@ -192,6 +211,16 @@ impl Workspaces {
     #[must_use]
     pub fn taking_turns(mut self, turns: Arc<dyn Turns>) -> Self {
         self.turns = Some(turns);
+        self
+    }
+
+    /// Count each email send into `ledger` (issue #12).
+    ///
+    /// Injected rather than built here for the reason recorded on
+    /// [`EmailLedger`]: this module cannot depend on the usage crate.
+    #[must_use]
+    pub fn email_ledger(mut self, ledger: Arc<dyn EmailLedger>) -> Self {
+        self.ledger = Some(ledger);
         self
     }
 }
@@ -404,6 +433,11 @@ impl Module for Workspaces {
     }
 
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        handlers::router(ctx, self.answers.clone(), self.turns.clone())
+        handlers::router(
+            ctx,
+            self.answers.clone(),
+            self.turns.clone(),
+            self.ledger.clone(),
+        )
     }
 }

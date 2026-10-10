@@ -52,6 +52,11 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes", "allo
 # here as everywhere else (issue #72). It resolves the session through the
 # workspaces module, so the session itself is not reimplemented either.
 livingbrain-tokens = { path = "../livingbrain-tokens" }
+# The cost ledger (issue #12): a successful connect probe is this
+# workspace's model usage, so its tokens are recorded into `usage_daily`.
+# The edge is safe against cycles — the usage module reads this module's
+# `model_connections` by a read-only SELECT, never by a dependency.
+livingbrain-usage = { path = "../livingbrain-usage" }
 
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
