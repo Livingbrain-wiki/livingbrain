@@ -56,12 +56,13 @@ pub use store::{
     SearchHit, VersionMeta,
 };
 
+use std::sync::Arc;
+
 use cratefield_core::axum::Router;
 use cratefield_core::{
     Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,
     Port, SqlMigration,
 };
-use std::sync::Arc;
 
 /// The pages, links and history tables, in the portable SQL subset so
 /// Postgres runs the same file.
@@ -162,16 +163,42 @@ impl Pages {
     /// the surface is built from *this* module's context and reads the same
     /// blob prefix the pages do (issue #24).
     ///
-    /// One merged surface per module; a second call replaces the first.
-    /// It is handed the same `Arc` every nest is, so it reads the same
-    /// scoped ports rather than a re-viewed copy.
+    /// One surface of each kind per module, and the type says so:
+    /// `ModuleContext` is not `Clone` and a mount gets exactly one.
     #[must_use]
     pub fn surface(
-        mut self,
+        self,
         routes: impl Fn(Arc<ModuleContext>) -> Router + Send + Sync + 'static,
     ) -> Self {
-        self.surface = Some(Box::new(routes));
-        self
+        Self {
+            nest: self.nest,
+            surface: Some(Box::new(routes)),
+        }
+    }
+}
+
+/// A second context with this module's exact wiring, for a composition that
+/// both nests a surface and merges one at the mount root. A mount gets
+/// exactly one `ModuleContext` and it is not `Clone`, so the twin is
+/// rebuilt: [`Ports::view_for`](cratefield_core::Ports::view_for)
+/// re-derives the ports view the way the harness built the first one —
+/// except the blob, which is put back as scoped, because a second
+/// `view_for` would wrap it in `pages/` a second time. Everything else is
+/// an `Arc`, the cloned bus, or a bool, so the twin shares what the first
+/// context shares.
+fn twin_context(ctx: &ModuleContext, module: &dyn Module) -> ModuleContext {
+    let mut ports = ctx.ports.view_for(module);
+    ports.blob.clone_from(&ctx.ports.blob);
+    ModuleContext {
+        ports,
+        config: Arc::clone(&ctx.config),
+        events: ctx.events.clone(),
+        templates: Arc::clone(&ctx.templates),
+        venture: Arc::clone(&ctx.venture),
+        unprotected_writes_accepted: ctx.unprotected_writes_accepted,
+        personal_data: Arc::clone(&ctx.personal_data),
+        ui_mounted: ctx.ui_mounted,
+        scheduled: Arc::clone(&ctx.scheduled),
     }
 }
 
@@ -329,27 +356,35 @@ impl Module for Pages {
         MAX_SOURCE_BODY_BYTES
     }
 
-    /// Whatever a composition surfaced or nested, and nothing otherwise —
-    /// see the module docs. A `PageStore` is built from
-    /// [`ModuleContext::ports`].
+    /// Whatever a composition surfaced or nested, and nothing otherwise — see
+    /// the module docs. A `PageStore` is built from [`ModuleContext::ports`].
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        // One context, shared: `ModuleContext` is not `Clone`, so a module
-        // with more than one surface hands each the same `Arc` rather than a
-        // rebuilt copy. In particular the ports are **not** re-viewed through
-        // [`Ports::view_for`], which would scope the blob a second time
-        // (`pages/pages/…`) and put every nested surface somewhere the
-        // module's own blobs are not.
+        // One context per surface: with no merged surface, every nest shares
+        // the mount's own `Arc` — `ModuleContext` is not `Clone`, and the
+        // ports are **not** re-viewed through [`Ports::view_for`], which would
+        // scope the blob a second time (`pages/pages/…`) and put every nested
+        // surface somewhere the module's own blobs are not.
+        //
+        // With a merged surface, the surface keeps the mount's own context and
+        // each nest gets a twin ([`twin_context`]), which re-derives the view
+        // the way the harness built the first one and puts the scoped blob
+        // back, so the same no-second-scoping rule holds there too.
         //
         // [`Ports::view_for`]: cratefield_core::Ports::view_for
         let ctx = Arc::new(ctx);
         let mut api = cratefield_core::axum::Router::new();
-        // The merged surface is applied first, then each nest under it;
-        // all of them share the one context.
         if let Some(surface) = &self.surface {
+            // The merged surface is applied first, on the mount's context;
+            // each nest then gets its own twin.
             api = api.merge(surface(Arc::clone(&ctx)));
-        }
-        for (path, build) in &self.nest {
-            api = api.nest(path, build(Arc::clone(&ctx)));
+            for (path, build) in &self.nest {
+                let twin = twin_context(&ctx, self);
+                api = api.nest(path, build(Arc::new(twin)));
+            }
+        } else {
+            for (path, build) in &self.nest {
+                api = api.nest(path, build(Arc::clone(&ctx)));
+            }
         }
         api
     }

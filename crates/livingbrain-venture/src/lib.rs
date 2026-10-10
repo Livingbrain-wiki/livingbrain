@@ -11,13 +11,13 @@
 //! and the harness `waitlist` module —
 //! the early-access list behind issue #23: joins from livingbrain.wiki, double
 //! opt-in mail through Owlpost, and the CSV export behind the admin token;
-//! and `tokens` with the harness `device-auth` grant beside it — the personal
-//! access tokens behind issue #72, minted by a device that has no browser to
-//! sign in with, which are also what the MCP endpoint now accepts;
 //! and the CLI surface (issues #121 and #77) — `notes`, `search`, `ask`,
 //! `export` and `sources` from `livingbrain-api`, the five modules behind
 //! `livingbrain`'s client contract, whose paths `fetch` diverts through the
-//! harness router itself (`serve_cli` below).
+//! harness router itself (`serve_cli` below); and `tokens` with the harness
+//! `device-auth` grant beside it — the personal access tokens behind issue
+//! #72, minted by a device that has no browser to sign in with, which are
+//! also what the MCP endpoint now accepts.
 //! `wrangler.toml` and the D1 migrations are beside this crate.
 //!
 //! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
@@ -244,27 +244,56 @@ fn build(
     // module, built before the harness because the grant takes its hooks at
     // composition time and the ports only exist per request.
     let device_ports = DevicePorts::new();
-    let builder = Harness::builder()
-        .venture(venture())
-        // The waitlist module's confirm mails in this venture's theme.
-        .templates(templates())
-        .module(Canary::new())
-        .module(Workspaces::new().answering(Arc::new(answers.clone())))
-        .module(Models::new())
-        .module(device_auth_module(&device_ports))
-        .module(tokens_module(device_ports))
-        .module(pages_module(kms.clone(), &answers))
-        .module(waitlist_module());
-    // The CLI modules mount with the same key ring the pages surface gates
-    // on, so they join the fold the same way pages does.
-    let builder = cli_modules(kms)
-        .into_iter()
-        .fold(builder, HarnessBuilder::module_arc);
-    let harness = builder
-        .runtime(runtime.clone())
-        .build()
-        .expect("the livingbrain harness is valid");
+    let harness = {
+        let builder = Harness::builder()
+            .venture(venture())
+            // The waitlist module's confirm mails in this venture's theme.
+            .templates(templates())
+            .module(Canary::new())
+            .module(Workspaces::new().answering(Arc::new(answers.clone())))
+            .module(Models::new())
+            .module(device_auth_module(&device_ports))
+            .module(tokens_module(device_ports))
+            .module(pages_module(kms.clone(), &answers))
+            .module(waitlist_module());
+        // The CLI modules mount with the same key ring the pages surface gates
+        // on, so they join the fold the same way pages does.
+        let builder = cli_modules(kms)
+            .into_iter()
+            .fold(builder, HarnessBuilder::module_arc);
+        builder
+            .runtime(runtime.clone())
+            .build()
+            .expect("the livingbrain harness is valid")
+    };
     (harness, runtime)
+}
+
+/// The five CLI modules (issues #121 and #77): the routes `livingbrain`'s
+/// client speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
+/// `GET /v1/export`, `GET /v1/sources/{id}` — each mounted at its own name
+/// under the harness rule, every one constructed with the same [`Wiki`] over
+/// the key custodian and the [`TokenBearer`].
+///
+/// The blob a module's store reads is not decided here — the composition
+/// roots the per-request port layer on the pages key space instead, so the
+/// page bodies stay physical `pages/` objects no matter which route wrote
+/// them ([`PagesRebind`], planted in [`serve_cli`]). With no key custodian
+/// there is nothing to seal a page with, so — like [`pages_module`] — none
+/// of the five is mounted and every other route keeps working.
+fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
+    let Some(kms) = kms else {
+        return Vec::new();
+    };
+    let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
+    let wiki = Wiki::new(kms, Arc::clone(&auth));
+    vec![
+        Arc::new(Notes::new(wiki.clone())),
+        Arc::new(Search::new(wiki.clone())),
+        Arc::new(Ask::new(wiki.clone())),
+        Arc::new(Export::new(wiki.clone())),
+        Arc::new(Sources::new(wiki)),
+    ]
 }
 
 /// The device grant (issue #72) for a client with no browser to sign in
@@ -307,42 +336,15 @@ impl RandomBytes for WorkersRandom {
     }
 }
 
-/// The five CLI modules (issues #121 and #77): the routes `livingbrain`'s
-/// client speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
-/// `GET /v1/export`, `GET /v1/sources/{id}` — each mounted at its own name
-/// under the harness rule, every one constructed with the same [`Wiki`] over
-/// the key custodian and the [`TokenBearer`].
-///
-/// The blob a module's store reads is not decided here — the composition
-/// roots the per-request port layer on the pages key space instead, so the
-/// page bodies stay physical `pages/` objects no matter which route wrote
-/// them ([`PagesRebind`], planted in [`serve_cli`]). With no key custodian
-/// there is nothing to seal a page with, so — like [`pages_module`] — none
-/// of the five is mounted and every other route keeps working.
-fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
-    let Some(kms) = kms else {
-        return Vec::new();
-    };
-    let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
-    let wiki = Wiki::new(kms, Arc::clone(&auth));
-    vec![
-        Arc::new(Notes::new(wiki.clone())),
-        Arc::new(Search::new(wiki.clone())),
-        Arc::new(Ask::new(wiki.clone())),
-        Arc::new(Export::new(wiki.clone())),
-        Arc::new(Sources::new(wiki)),
-    ]
-}
-
 /// The pages module as this venture composes it, with the MCP server and the
-/// source importer nested in it (issues #24 and #81) and the page routes the CLI's `livingbrain page`
-/// speaks merged at the mount root (issue #121): `GET /v1/pages`,
-/// `GET|PUT /v1/pages/{slug}`. The harness scopes `Blob` per module name,
-/// so only a surface built from the pages module's own context can open a
-/// body those pages write.
+/// source importer nested in it (issues #24 and #81) and the page routes the
+/// CLI's `livingbrain page` speaks merged at the mount root (issue #121) —
+/// `GET /v1/pages`, `GET|PUT /v1/pages/{slug}`. The harness scopes `Blob` per
+/// module name, so only a surface built from the pages module's own context
+/// can open a body those pages write.
 ///
-/// With no key custodian there is no body anyone may open, so neither
-/// surface is mounted and every other route keeps working — a deployment
+/// With no key custodian there is no body anyone may open, so neither surface
+/// is mounted at all and every other route keeps working — a deployment
 /// missing a secret gets a working venture, not a Worker that panics on its
 /// first request.
 ///
@@ -363,9 +365,9 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
     let mcp_kms = Arc::clone(&kms);
     let mcp_auth = Arc::clone(&auth);
-    let cell = answers.clone();
     let surface_kms = Arc::clone(&kms);
     let surface_auth = Arc::clone(&auth);
+    let cell = answers.clone();
     Pages::new()
         .surface(move |ctx| {
             livingbrain_api::pages_routes(ctx, Arc::clone(&surface_kms), Arc::clone(&surface_auth))
@@ -733,12 +735,12 @@ mod tests {
         assert!(names.contains(&"models"), "{names:?}");
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"waitlist"), "{names:?}");
-        // Issue #72: the grant a CLI logs in through, and its credential.
-        assert!(names.contains(&"device-auth"), "{names:?}");
-        assert!(names.contains(&"tokens"), "{names:?}");
         for route in CLI_ROUTES {
             assert!(serves_cli(&harness, route), "{route}");
         }
+        // Issue #72: the grant a CLI logs in through, and its credential.
+        assert!(names.contains(&"device-auth"), "{names:?}");
+        assert!(names.contains(&"tokens"), "{names:?}");
     }
 
     /// The citation route carries the source id as its path segment, so the

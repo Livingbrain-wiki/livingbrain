@@ -29,10 +29,12 @@ use crate::{Wiki, port};
 /// clock and an id generator, and both are cheap `Arc`s, but a request
 /// ought not share a borrow with the router that served it.
 pub(crate) struct Service {
-    /// The module context, for its port view (`ctx.ports`). The `blob` there
-    /// is the store the page bodies travel over: rooted on `pages/` — by the composition's
+    /// The module's own context. Its port view is the store the page bodies
+    /// travel over: rooted on `pages/` — by the composition's
     /// [`RebindBlob`](crate::RebindBlob) for the four sibling modules,
-    /// by the module's own name for the merged pages surface.
+    /// by the module's own name for the merged pages surface. The context is
+    /// held behind an `Arc` — the way the pages module hands a surface its
+    /// context — and the ports are read per request.
     ctx: Arc<ModuleContext>,
     kms: Arc<dyn Kms>,
     auth: Arc<dyn BearerAuth>,
