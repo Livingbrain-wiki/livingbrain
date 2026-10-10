@@ -82,6 +82,18 @@ pub(crate) fn redaction_refused() -> Problem {
     Problem::new(&REDACTION_REFUSED)
 }
 
+/// A source id the caller cannot read: unknown, owned by another workspace,
+/// or in a scope their grant does not include. One answer for all three, the
+/// same rule [`PAGE_NOT_FOUND`] holds to — saying which would be an answer
+/// about somebody else's source, and citations resolve through this route.
+pub(crate) const SOURCE_NOT_FOUND: ProblemDef = ProblemDef {
+    slug: "api/source-not-found",
+    status: StatusCode::NOT_FOUND,
+    title: "No such source",
+    description: "No source the caller can read carries that id. It may not exist, \
+                  or it may belong to somebody else — this surface does not say which.",
+};
+
 /// The problem for a slug outside the slug rule on the way in (a `PUT`): a
 /// refused body rather than a missing page.
 pub(crate) fn slug_refused() -> Problem {

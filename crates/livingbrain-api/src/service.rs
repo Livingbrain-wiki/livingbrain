@@ -4,7 +4,7 @@
 //! once from the module context and the injected [`Wiki`].
 //!
 //! The blob the store is built over is `ctx.ports.blob` — **this module's
-//! own per-request view**. For the four sibling modules the composition has
+//! own per-request view**. For the sibling modules the composition has
 //! rooted that view on the pages key space
 //! ([`RebindBlob`](crate::RebindBlob) planted under the scope the harness
 //! applies), so the same expression serves the merged pages surface, whose
@@ -17,7 +17,7 @@ use cratefield_core::axum::http::{HeaderMap, header};
 use cratefield_core::{ModuleContext, Problem};
 use cratefield_kms::Kms;
 use livingbrain_mcp::{Asker, BearerAuth, page_scopes};
-use livingbrain_pages::PageStore;
+use livingbrain_pages::{PageStore, SourceStore};
 
 use crate::problems::UNAUTHORIZED;
 use crate::{Wiki, port};
@@ -76,6 +76,25 @@ impl Service {
     /// a 500 that says nothing about which port was missing.
     pub(crate) fn store(&self) -> Result<PageStore, Problem> {
         Ok(PageStore::new(
+            port(self.ctx.ports.db.clone())?,
+            port(self.ctx.ports.blob.clone())?,
+            self.kms.clone(),
+            port(self.ctx.ports.clock.clone())?,
+            port(self.ctx.ports.id_gen.clone())?,
+        ))
+    }
+
+    /// The source ledger for one request, over the same ports and the same
+    /// pages-rooted blob view — a source body is sealed exactly as a page
+    /// body is, so a route this composition has rooted on the pages key
+    /// space is a route that can open one.
+    ///
+    /// # Errors
+    ///
+    /// [`Problem::internal`] when the composition left a declared port
+    /// unwired, exactly as [`Service::store`] does.
+    pub(crate) fn sources_store(&self) -> Result<SourceStore, Problem> {
+        Ok(SourceStore::new(
             port(self.ctx.ports.db.clone())?,
             port(self.ctx.ports.blob.clone())?,
             self.kms.clone(),

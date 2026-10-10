@@ -2,7 +2,7 @@
 //!
 //! The composition is the one the venture will build: the `pages` module
 //! with [`pages_routes`](livingbrain_api::pages_routes) merged at its mount
-//! root (so the page routes are served at `/v1/pages`), and the four
+//! root (so the page routes are served at `/v1/pages`), and the sibling
 //! modules beside it, each constructed with the same
 //! [`Wiki`](livingbrain_api::Wiki) — the blob pre-scoped to `pages`, one
 //! key custodian, one bearer resolver.
@@ -19,13 +19,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cratefield_core::axum::http::{Method, StatusCode, header};
-use cratefield_core::{Blob, Clock, Ports, ScopedBlob, UlidIdGen};
+use cratefield_core::{Blob, Clock, Database, Defer, Ports, ScopedBlob, UlidIdGen};
 use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
-use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Wiki, pages_routes};
+use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Sources, Wiki, pages_routes};
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
-use livingbrain_pages::{Author, EntityType, Page, PageStore, PageWrite, Pages};
+use livingbrain_pages::{
+    Author, EntityType, Ingestor, Page, PageStore, PageWrite, Pages, SourceStore,
+};
 use serde_json::{Value, json};
 
 /// The one workspace in the test world.
@@ -55,12 +57,41 @@ fn kms() -> Arc<dyn Kms> {
     )
 }
 
-/// The harness router with all five modules mounted, plus a `PageStore`
-/// over the very same database and pages blob — the ports are read out of
-/// the harness's own set, so a page a test seeds is a page the routes read.
+/// The harness router with the sibling modules mounted, plus a `PageStore`
+/// and a `SourceStore` over the very same database and pages blob — the
+/// ports are read out of the harness's own set, so a page or a source a test
+/// seeds is one the routes read.
 pub struct Fixture {
     pub router: cratefield_core::axum::Router,
     pub store: PageStore,
+    pub sources: SourceStore,
+    db: Arc<dyn Database>,
+    blob: Arc<dyn Blob>,
+    key: Arc<dyn Kms>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Fixture {
+    /// An ingest pipeline over this fixture's own ports, so a test can put a
+    /// source through the real pipeline and read it back through the route.
+    /// `defer` is the caller's — a test asserting on deferred work passes
+    /// the harness's [`FakeDefer`](cratefield_testing::FakeDefer).
+    #[must_use]
+    pub fn ingestor(&self, defer: Arc<dyn Defer>) -> Ingestor {
+        Ingestor::new(
+            SourceStore::new(
+                self.db.clone(),
+                // The same pages-rooted view the seeded store and every
+                // module's routes read through: a raw handle here would land
+                // bodies one prefix away from where the citations open them.
+                Arc::new(ScopedBlob::new(self.blob.clone(), "pages")),
+                self.key.clone(),
+                self.clock.clone(),
+                Arc::new(UlidIdGen),
+            ),
+            defer,
+        )
+    }
 }
 
 /// One workspace, two people, nothing else.
@@ -108,7 +139,8 @@ pub fn fixture() -> Fixture {
         Box::new(Notes::new(wiki.clone())),
         Box::new(Search::new(wiki.clone())),
         Box::new(Ask::new(wiki.clone())),
-        Box::new(Export::new(wiki)),
+        Box::new(Export::new(wiki.clone())),
+        Box::new(Sources::new(wiki)),
     ];
 
     let kit = TestHarness::with_ports(modules, |ports| {
@@ -119,11 +151,22 @@ pub fn fixture() -> Fixture {
         router: kit.router.clone(),
         store: PageStore::new(
             kit.db.clone(),
-            Arc::new(ScopedBlob::new(memory, "pages")),
-            key,
-            clock,
+            Arc::new(ScopedBlob::new(Arc::clone(&memory), "pages")),
+            Arc::clone(&key),
+            clock.clone(),
             Arc::new(UlidIdGen),
         ),
+        sources: SourceStore::new(
+            kit.db.clone(),
+            Arc::new(ScopedBlob::new(Arc::clone(&memory), "pages")),
+            key.clone(),
+            clock.clone(),
+            Arc::new(UlidIdGen),
+        ),
+        db: kit.db.clone(),
+        blob: memory,
+        key,
+        clock,
     }
 }
 

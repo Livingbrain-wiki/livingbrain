@@ -911,9 +911,13 @@ fn a_key_a_source_body_still_names_is_not_retired() {
                 "team",
                 SourceWrite {
                     kind: SourceKind::Import,
+                    workspace: "ws-one".to_owned(),
+                    origin_ref: None,
+                    author: None,
                     rel_path: "notes/one.md".to_owned(),
                     markdown: "# One\n\nA note.\n".to_owned(),
                     imported_by: "u1".to_owned(),
+                    held: false,
                 },
             )
             .await
