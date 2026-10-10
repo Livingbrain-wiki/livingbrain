@@ -31,7 +31,9 @@ mod catalog;
 mod crypto;
 mod handlers;
 mod probe;
-mod ssrf;
+// Public so a sibling module that fetches a member-supplied URL reuses the
+// one guard instead of growing a second copy of it (issue #11).
+pub mod ssrf;
 mod store;
 
 use cratefield_core::{

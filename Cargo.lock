@@ -1878,6 +1878,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "chacha20poly1305",
+ "cratefield-core",
+ "cratefield-kms",
+ "cratefield-testing",
+ "getrandom 0.4.3",
+ "livingbrain-access",
+ "livingbrain-channel",
+ "livingbrain-models",
+ "pollster",
+ "sea-query",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
@@ -1899,6 +1920,7 @@ dependencies = [
  "livingbrain-models",
  "livingbrain-pages",
  "livingbrain-tokens",
+ "livingbrain-tools",
  "livingbrain-workspaces",
  "pollster",
  "serde_json",
