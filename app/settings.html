@@ -84,16 +84,14 @@
               </header>
 
               <div id="models-status" class="notice" role="status"></div>
-              <div id="model-rows" class="conn-list" aria-live="polite"></div>
+              <p class="hint slots__note">
+                Three jobs, one model each. An unset slot uses Main, and with
+                nothing connected the managed model answers.
+              </p>
+              <div id="model-rows" class="slots" aria-live="polite"></div>
 
               <form id="model-form" class="connect" novalidate>
-                <h3 id="connect-title">Connect a model</h3>
-
-                <fieldset class="choice" aria-describedby="err-role">
-                  <legend>What is it for?</legend>
-                  <div class="choice__grid choice__grid--roles" id="role-choices"></div>
-                  <p class="field-error" id="err-role"></p>
-                </fieldset>
+                <h3 id="connect-title">Connect Main</h3>
 
                 <fieldset class="choice" aria-describedby="err-provider">
                   <legend>Provider</legend>
@@ -113,7 +111,10 @@
                         placeholder="Search by name or host"
                         aria-controls="provider-list"
                       />
-                      <ul class="picker__list" id="provider-list"></ul>
+                      <div
+                        class="choice__grid choice__grid--providers picker__cards"
+                        id="provider-list"
+                      ></div>
                       <p class="hint" id="provider-empty" hidden>
                         Nothing matches. Choose Custom endpoint for anything not
                         listed.
@@ -178,8 +179,9 @@
                       aria-controls="api-key">Show</button>
                   </div>
                   <p class="hint" id="api-key-hint">
-                    <span id="api-key-kind"></span> Stored encrypted; only the
-                    last 4 characters are ever shown again.
+                    <span id="api-key-kind"></span> Needed again for every
+                    connect or change — a stored key never comes back. It is
+                    encrypted, and only the last 4 characters are ever shown.
                   </p>
                   <p class="field-error" id="err-apiKey"></p>
                 </div>

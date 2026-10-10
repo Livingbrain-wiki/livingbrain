@@ -13,7 +13,6 @@
 
 import { settingRequest, describeOutcome } from "./settings.js";
 import {
-  ROLES,
   PROVIDERS,
   POPULAR,
   POPULAR_LABELS,
@@ -23,15 +22,14 @@ import {
   CHIP_LIMIT,
   roleInfo,
   providerInfo,
-  providerHost,
   providerForConnection,
   searchProviders,
   fillTemplate,
   keyHint,
   validateConnect,
   discoverRequest,
-  connectionViews,
-  renderModelCards,
+  slotViews,
+  renderModelSlots,
 } from "./models.js";
 import { providerMark } from "./marks.js";
 import {
@@ -653,7 +651,7 @@ function fillConnectPanel() {
 
 async function wireModels() {
   const form = $("#model-form");
-  const cards = $("#model-rows");
+  const slots = $("#model-rows");
   const modelsStatus = $("#models-status");
   const baseUrl = $("#base-url");
   const editEndpoint = $("#edit-endpoint");
@@ -673,20 +671,21 @@ async function wireModels() {
   // groups (a provider can appear in both), so the choice lives here and
   // both groups are painted from it.
   let selectedId = "anthropic";
+  // The slot the form is for. Main until a slot's Connect or Change opens it
+  // for another job; the slot cards are the only role chooser.
+  let activeRole = "main";
 
-  choiceCards(
-    $("#role-choices"),
-    "role",
-    ROLES.map((r) => ({ value: r.id, label: r.label, detail: r.detail })),
-    "main",
-  );
+  /** The card's one small line: which API the provider speaks, never its host. */
+  const wireLabel = (provider) =>
+    provider.wire === "anthropic" ? "Anthropic API" : "OpenAI API";
+
   choiceCards(
     $("#provider-popular"),
     "provider",
     [
       ...POPULAR.map((id) => {
         const p = providerInfo(id);
-        return { value: id, label: POPULAR_LABELS[id] || p.name, detail: providerHost(p) };
+        return { value: id, label: POPULAR_LABELS[id] || p.name, detail: wireLabel(p) };
       }),
       { value: "custom", label: "Custom endpoint", detail: "Any other API" },
     ],
@@ -702,52 +701,29 @@ async function wireModels() {
     if (isSafeHref(href)) source.setAttribute("href", href);
   }
 
-  // The full list: one radio per provider, in the same group as the cards,
-  // with its host and a link to its site. Filtered by the search box.
+  // The full list: the same cards as the popular grid, in the same radio
+  // style, filtered by the search box. (A provider's site link waits in the
+  // "Selected:" line below — a link inside a card label would fight the
+  // radio for the click.)
   const renderList = () => {
     const matches = searchProviders(search.value);
-    list.replaceChildren();
-    for (const provider of matches) {
-      const li = document.createElement("li");
-      const label = document.createElement("label");
-      label.className = "picker__item";
-      const input = document.createElement("input");
-      input.type = "radio";
-      input.name = "provider-pick";
-      input.value = provider.id;
-      if (provider.id === selectedId) input.checked = true;
-      label.appendChild(input);
-      label.appendChild(providerMark(provider.id, provider.name));
-      const text = document.createElement("span");
-      text.className = "picker__text";
-      const name = document.createElement("strong");
-      name.textContent = provider.name;
-      text.appendChild(name);
-      const host = document.createElement("span");
-      host.textContent = `${providerHost(provider)} · ${
-        provider.wire === "anthropic" ? "Anthropic API" : "OpenAI API"
-      }`;
-      text.appendChild(host);
-      label.appendChild(text);
-      li.appendChild(label);
-      if (provider.site && isSafeHref(provider.site)) {
-        const site = document.createElement("a");
-        site.className = "picker__site";
-        site.href = provider.site;
-        site.target = "_blank";
-        site.rel = "noopener noreferrer";
-        site.textContent = "Site";
-        site.setAttribute("aria-label", `${provider.name} website`);
-        li.appendChild(site);
-      }
-      list.appendChild(li);
-    }
+    choiceCards(
+      list,
+      "provider-pick",
+      matches.map((provider) => ({
+        value: provider.id,
+        label: provider.name,
+        detail: wireLabel(provider),
+      })),
+      selectedId,
+      true,
+    );
     $("#provider-empty").hidden = matches.length > 0;
   };
   search.addEventListener("input", renderList);
   renderList();
 
-  /** Records the choice and checks its card and its list row, if shown. */
+  /** Records the choice and checks its card in both groups. */
   const select = (id) => {
     selectedId = id;
     for (const input of form.querySelectorAll('input[name="provider"], input[name="provider-pick"]')) {
@@ -884,7 +860,6 @@ async function wireModels() {
     if (event.target.name === "provider" || event.target.name === "provider-pick") {
       applyProvider(event.target.value);
     }
-    if (event.target.name === "role") fieldError("role", "");
     if (event.target.name === "wire") fieldError("wire", "");
     if (event.target.name === "auth") {
       fieldError("auth", "");
@@ -911,9 +886,10 @@ async function wireModels() {
     input.addEventListener("input", () => fieldError(id, "", input));
   }
 
-  /** Reads the form into what `validateConnect` checks. */
+  /** Reads the form into what `validateConnect` checks. The role is the
+   *  slot the form was opened for; there is no radio for it any more. */
   const readForm = () => ({
-    role: checked(form, "role"),
+    role: activeRole,
     provider: selectedId,
     variables: variableValues(),
     baseUrl: baseUrl.value,
@@ -926,7 +902,6 @@ async function wireModels() {
 
   /** Puts each error under its field; answers the first field with one. */
   const showErrors = (errors) => {
-    fieldError("role", errors.role);
     fieldError("provider", errors.provider);
     fieldError("baseUrl", errors.baseUrl, baseUrl);
     fieldError("wire", errors.wire);
@@ -976,7 +951,8 @@ async function wireModels() {
     form.reset();
     apiKey.type = "password";
     $("#toggle-key").textContent = "Show";
-    $("#connect-title").textContent = "Connect a model";
+    const info = roleInfo(activeRole);
+    $("#connect-title").textContent = `Connect ${info ? info.label : activeRole}`;
     submit.textContent = "Connect model";
     cancel.hidden = true;
     search.value = "";
@@ -989,11 +965,11 @@ async function wireModels() {
   const load = async () => {
     try {
       rows = await api("/v1/models");
-      renderModelCards(cards, connectionViews(rows));
+      renderModelSlots(slots, slotViews(rows));
       notice(modelsStatus, "");
     } catch (error) {
       rows = [];
-      cards.replaceChildren();
+      slots.replaceChildren();
       notice(modelsStatus, `Could not load your models: ${error.message}`, "warn");
     }
   };
@@ -1024,18 +1000,15 @@ async function wireModels() {
     }
   });
 
-  // Replace and Disconnect, one listener for every card.
-  cards.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-action]");
-    if (!button) return;
-    const role = button.dataset.role;
+  /** Opens the form for one slot. Change prefills what the stored connection
+   *  can offer; the key never travels back out of the server, so it is always
+   *  typed again. */
+  const openSlot = (role, row) => {
     const info = roleInfo(role);
     const name = info ? info.label : role;
-    if (button.dataset.action === "replace") {
-      const row = rows.find((r) => r.role === role) || {};
+    activeRole = role;
+    if (row) {
       const provider = providerForConnection(row);
-      const roleInput = form.querySelector(`input[name="role"][value="${role}"]`);
-      if (roleInput) roleInput.checked = true;
       applyProvider(provider.id, { keepModel: true });
       const stored = String(row.base_url || "").replace(/\/+$/, "");
       if (provider.id === "custom") {
@@ -1051,29 +1024,49 @@ async function wireModels() {
         baseUrl.value = stored;
       }
       model.value = row.model || "";
-      apiKey.value = "";
-      $("#connect-title").textContent = `Replace the ${name} model`;
+      $("#connect-title").textContent = `Change ${name}`;
       submit.textContent = "Save and test";
-      cancel.hidden = false;
-      form.scrollIntoView({ behavior: "smooth", block: "start" });
-      apiKey.focus({ preventScroll: true });
+    } else {
+      applyProvider("anthropic");
+      $("#connect-title").textContent = `Connect ${name}`;
+      submit.textContent = "Connect model";
+    }
+    apiKey.value = "";
+    cancel.hidden = false;
+    form.scrollIntoView({ behavior: "smooth", block: "start" });
+    apiKey.focus({ preventScroll: true });
+  };
+
+  // Connect, Change and Remove, one listener for every slot.
+  slots.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const role = button.dataset.role;
+    const info = roleInfo(role);
+    const name = info ? info.label : role;
+    if (button.dataset.action === "remove") {
+      const mainGone = role === "main";
+      const ok = await confirmAction({
+        title: `Remove the ${name} model?`,
+        body: mainGone
+          ? "Its key is deleted. Until you connect another, the managed model answers for every job."
+          : "Its key is deleted. This job uses Main while Main is set, and the managed model when it is not.",
+        confirm: "Remove",
+      });
+      if (!ok) return;
+      button.disabled = true;
+      const outcome = await setSetting("models", role, null);
+      if (outcome.ok) {
+        toast(`${name} model removed.`, "ok");
+        await load();
+      } else {
+        button.disabled = false;
+        toast(`Not removed: ${outcome.message}`, "bad");
+      }
       return;
     }
-    const ok = await confirmAction({
-      title: `Disconnect the ${name} model?`,
-      body: "Its key is deleted. The brain uses the managed model for this job until you connect another.",
-      confirm: "Disconnect",
-    });
-    if (!ok) return;
-    button.disabled = true;
-    const outcome = await setSetting("models", role, null);
-    if (outcome.ok) {
-      toast(`${name} model disconnected.`, "ok");
-      await load();
-    } else {
-      button.disabled = false;
-      toast(`Not disconnected: ${outcome.message}`, "bad");
-    }
+    const row = rows.find((r) => r.role === role) || null;
+    openSlot(role, button.dataset.action === "change" ? row : null);
   });
 
   await load();

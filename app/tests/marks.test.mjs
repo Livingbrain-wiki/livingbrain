@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { PROVIDERS, CUSTOM } from "../assets/models.js";
+import { PROVIDERS, POPULAR, CUSTOM } from "../assets/models.js";
 import { MARKS, MARK_BY_ID, markOf, initialsOf, providerMark } from "../assets/marks.js";
 
 /** A doc that records calls, in the style of the models.test.mjs fake. */
@@ -67,6 +67,7 @@ test("the providers with artwork are exactly these, so a catalog change is notic
     "minimax-en",
     "modelscope",
     "nvidia",
+    "openai",
     "openrouter",
     "qianwen-ai",
     "qianwen-coding-plan",
@@ -101,7 +102,9 @@ test("has artwork, not initials, for Z.AI, Zhipu, Meta and BytePlus", () => {
 test("still falls back to initials for a vendor with no mark", () => {
   assert.equal(initialsOf("OpenAI"), "OA");
   assert.equal(initialsOf("Z.AI"), "ZA");
-  assert.equal(markOf("openai"), undefined);
+  const unmarked = providerMark("novita-ai", "Novita AI", doc);
+  assert.match(unmarked.className, /provider-mark--letters/);
+  assert.equal(unmarked.textContent, "NA");
   const custom = providerMark("custom", CUSTOM.name, doc);
   assert.match(custom.className, /provider-mark--letters/);
   assert.equal(custom.textContent, "CE");
@@ -109,6 +112,13 @@ test("still falls back to initials for a vendor with no mark", () => {
   const unknown = providerMark("gone-provider", "Gone Provider", doc);
   assert.equal(unknown.textContent, "GP");
   assert.equal(providerMark(undefined, "", doc).textContent, "?");
+});
+
+test("every popular provider wears a real mark, not initials", () => {
+  for (const id of POPULAR) {
+    assert.ok(artworkOf(id), `${id} has artwork`);
+    assert.doesNotMatch(providerMark(id, "Whatever", doc).className, /provider-mark--letters/, id);
+  }
 });
 
 test("the built tile is decorative, and its SVG is one currentColor path", () => {
@@ -140,5 +150,5 @@ test("no dead artwork: every mark in the table is reachable from the map", () =>
     assert.match(mark.d, /^[\sA-Za-z0-9.,+-]+$/, `${key}'s path data is path data`);
     if (mark.fillRule) assert.equal(mark.fillRule, "evenodd");
   }
-  assert.equal(Object.keys(MARKS).length, 14);
+  assert.equal(Object.keys(MARKS).length, 15);
 });

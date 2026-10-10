@@ -8,7 +8,9 @@
 //! context size, and stores the connection with the provider key encrypted
 //! (AES-256-GCM, AAD = workspace_id + role). No silent fallback to the
 //! managed model: `fallback_to_managed` defaults `false` and is only set
-//! when a member explicitly sends it.
+//! when a member explicitly sends it. Which connection serves a job — its
+//! own role's, else Main, else the managed model — is
+//! [`selection::resolve`], and `GET /v1/models/{role}` answers it.
 //!
 //! Keys are never shown in full: the API shows `…` followed by the last
 //! four characters, and the ciphertext is never returned. Provider
@@ -31,6 +33,7 @@ mod catalog;
 mod crypto;
 mod handlers;
 mod probe;
+mod selection;
 mod ssrf;
 mod store;
 
