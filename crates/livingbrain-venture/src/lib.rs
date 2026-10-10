@@ -53,10 +53,16 @@ use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_tokens::{DevicePorts, Tokens};
-use livingbrain_workspaces::Workspaces;
+use livingbrain_workspaces::{
+    Admit, Exchange, LocalTurns, Pending, Turn, TurnError, Turns, Workspaces,
+};
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt;
-use worker::{Context, Env, Request, Response, event};
+use worker::{Context, Env, ObjectNamespace, Request, Response, event};
+
+mod conversation;
+
+use conversation::{CONVERSATIONS, DurableTurns};
 
 /// The product slug the site's waitlist form joins (issue #23).
 pub const WAITLIST_PRODUCT: &str = "livingbrain";
@@ -127,7 +133,7 @@ fn build_captcha(env: &Env) -> Option<Turnstile> {
     )
 }
 
-static INSTANCE: OnceLock<(Harness, Cloudflare)> = OnceLock::new();
+static INSTANCE: OnceLock<(Harness, Cloudflare, TurnsCell)> = OnceLock::new();
 
 /// The sender when `MAIL_FROM` is unset: a person-readable name on the
 /// venture's own domain, which must be verified in Owlpost.
@@ -197,7 +203,7 @@ fn build(
     mail: MailSettings,
     captcha: Option<Turnstile>,
     kms: Option<Arc<dyn Kms>>,
-) -> (Harness, Cloudflare) {
+) -> (Harness, Cloudflare, TurnsCell) {
     let runtime = Cloudflare::new()
         // The bindings `wrangler.toml` declares. `workspaces` and `waitlist`
         // read their tables through the D1 binding, `pages` its bodies through
@@ -240,6 +246,10 @@ fn build(
     // The Slack agent's answer seam (issue #123), filled by the pages
     // module's own closure and read per event. See [`AnswersCell`].
     let answers = AnswersCell::default();
+    // The agent's turn seam (issue #7): the conversation objects, published
+    // per request and answered through the per-isolate coordinator until
+    // the first one lands. See [`TurnsCell`].
+    let turns = TurnsCell::default();
     // Issue #72: one handle shared by the device grant's hooks and the tokens
     // module, built before the harness because the grant takes its hooks at
     // composition time and the ports only exist per request.
@@ -250,7 +260,11 @@ fn build(
             // The waitlist module's confirm mails in this venture's theme.
             .templates(templates())
             .module(Canary::new())
-            .module(Workspaces::new().answering(Arc::new(answers.clone())))
+            .module(
+                Workspaces::new()
+                    .answering(Arc::new(answers.clone()))
+                    .taking_turns(Arc::new(turns.clone())),
+            )
             .module(Models::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
@@ -266,7 +280,7 @@ fn build(
             .build()
             .expect("the livingbrain harness is valid")
     };
-    (harness, runtime)
+    (harness, runtime, turns)
 }
 
 /// The five CLI modules (issues #121 and #77): the routes `livingbrain`'s
@@ -445,6 +459,57 @@ impl Answers for AnswersCell {
     }
 }
 
+/// The [`Turns`] the composition could not build yet (issue #7), the same
+/// shape as [`AnswersCell`]: the conversation objects are a Worker binding,
+/// which resolves from an `Env` that exists no earlier than the request
+/// carrying it — so `fetch` publishes the `CONVERSATIONS` namespace per
+/// request and the agent loop reads it back through here. Until one lands,
+/// the cell delegates to a plain [`LocalTurns`], the per-isolate
+/// coordinator: it serialises every turn *within this isolate* (what a
+/// native test gets) and the lease makes the cross-isolate gap visible
+/// rather than silent.
+#[derive(Clone, Default)]
+struct TurnsCell {
+    slot: Arc<std::sync::RwLock<Option<Arc<dyn Turns>>>>,
+    /// The per-isolate coordinator served until a namespace is published.
+    local: Arc<LocalTurns>,
+}
+
+impl TurnsCell {
+    fn publish(&self, namespace: ObjectNamespace) {
+        if let Ok(mut slot) = self.slot.write() {
+            *slot = Some(Arc::new(DurableTurns::new(namespace)));
+        }
+    }
+
+    /// The coordinator this request answers through: the conversation objects
+    /// when one has been published, the per-isolate one until then.
+    fn delegate(&self) -> Arc<dyn Turns> {
+        self.slot
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_else(|| self.local.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl Turns for TurnsCell {
+    async fn arrive(&self, key: &str, pending: Pending, now: i64) -> Result<Admit, TurnError> {
+        self.delegate().arrive(key, pending, now).await
+    }
+
+    async fn finish(
+        &self,
+        key: &str,
+        lease: u64,
+        exchange: Option<Exchange>,
+        now: i64,
+    ) -> Result<Option<Turn>, TurnError> {
+        self.delegate().finish(key, lease, exchange, now).await
+    }
+}
+
 /// The key custodian page bodies are sealed and opened with (issue #43), over
 /// the `HARNESS_KEK_CURRENT` / `HARNESS_KEK_V<n>` secret ring — the same
 /// names and the same shape the page store's own tests use. `None` when the
@@ -505,7 +570,7 @@ impl BearerAuth for TokenBearer {
 /// `Env`. Worker bindings are static for a deployment, so the first `Env` is
 /// every `Env`; secrets are read from it because `std::env` is empty on
 /// Workers.
-fn instance(env: &Env) -> &'static (Harness, Cloudflare) {
+fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
     INSTANCE.get_or_init(|| {
         build(
             MailSettings::from_env(env),
@@ -552,7 +617,16 @@ fn serves_cli(harness: &Harness, path: &str) -> bool {
 ///
 /// Propagates `worker::Error` from the harness router.
 pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
-    let (harness, runtime) = instance(&env);
+    let (harness, runtime, turns) = instance(&env);
+    // Issue #7: publish this request's `CONVERSATIONS` namespace, so the
+    // agent loop's turn calls reach the conversation objects. The publish is
+    // per request for the same reason `AnswersCell`'s is — the `Env`-derived
+    // handle belongs to the request that read it — and when the binding is
+    // missing the cell falls back to the per-isolate coordinator rather than
+    // dropping the turn on the floor.
+    if let Ok(namespace) = env.durable_object(CONVERSATIONS) {
+        turns.publish(namespace);
+    }
     if serves_cli(harness, req.path().as_str()) {
         return serve_cli(harness, runtime, req, env, ctx).await;
     }
@@ -697,7 +771,7 @@ fn copy_headers(worker_headers: &mut worker::Headers, headers: &HeaderMap) {
 /// confirmation claims here. The cron lives in `wrangler.toml`; a trigger on
 /// another Worker never reaches this handler.
 pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::ScheduleContext) {
-    let (harness, runtime) = instance(&env);
+    let (harness, runtime, _) = instance(&env);
     serve_scheduled(harness, runtime, event, env, ctx).await;
 }
 
@@ -724,7 +798,7 @@ mod tests {
     fn the_composition_mounts_every_module() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
         let names: Vec<&str> = harness
             .modules()
             .iter()
@@ -752,7 +826,7 @@ mod tests {
     fn the_sources_route_diverts_with_its_id_segment() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
         assert!(
             serves_cli(&harness, "/v1/sources/01HZZZBBBBBBBBBBBBBBBBBBB"),
             "a citation must divert to serve_cli"
@@ -786,7 +860,7 @@ mod tests {
     /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
-        let (harness, _) = build(unconfigured_mail(), None, None);
+        let (harness, _, _) = build(unconfigured_mail(), None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");

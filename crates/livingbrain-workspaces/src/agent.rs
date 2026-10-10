@@ -41,11 +41,16 @@
 //! path for one judgement is a bigger change than this issue, and a judgement
 //! that reaches no sink is not worth a new one. Treat this as a known gap.
 //!
-//! Errors are swallowed the way [`crate::events`] swallows them: nothing
-//! awaits this future, Slack has already been told `200`, and the inbox claim
-//! is what keeps the retry from doing it twice. A *diagnostic* line still
-//! goes out through [`report`] — swallowing and being unobservable are
-//! different things.
+//! ## The turn
+//!
+//! Every gate stands **before** the coordinator (issue #7), so what it is
+//! ever handed is a message that will be answered: [`Turns`] admits it to
+//! its conversation's turn — keyed by [`Message::conversation_key`] — or
+//! queues it behind the turn already running; the answer posts exactly as a
+//! lone message's does; and the finish hands back whatever arrived mid-turn,
+//! coalesced, as the next turn. Errors are swallowed the way
+//! [`crate::events`] swallows them — nothing awaits this future and Slack
+//! has already been told `200` — with a diagnostic line through [`report`].
 
 use std::sync::Arc;
 
@@ -54,10 +59,11 @@ use livingbrain_access::{ChannelId, Location as AccessLocation};
 use livingbrain_channel::slack::{Slack, SlackEvent};
 use livingbrain_channel::{Channel, Location, Message, Visibility};
 use livingbrain_judge::{Judge, JudgeSettings};
-use livingbrain_pages::{Answered, Answers, Asker};
+use livingbrain_pages::{Answers, Asker};
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
 
+use crate::conversation::{Admit, Exchange, Pending, Room, Turn};
 use crate::handlers::ModuleState;
 use crate::reply;
 use crate::store;
@@ -70,11 +76,13 @@ use crate::store;
 /// composition that wired no agent at all — a page store is a tenant-wide
 /// capability and this module has no business holding one.
 pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) {
-    let (Some(db), Some(http)) = (state.ctx.ports.db.clone(), state.ctx.ports.http.clone()) else {
+    // The `HttpClient` is only held to check, here, that the deployment has
+    // one; the turn's answer re-reads both ports per turn, because a
+    // coalesced turn runs long after the event that started it.
+    let (Some(db), Some(_)) = (state.ctx.ports.db.clone(), state.ctx.ports.http.clone()) else {
         return;
     };
     let db: &dyn Database = &*db;
-    let http: &dyn HttpClient = &*http;
     let Some(workspace_id) = workspace(db, team_id).await else {
         return;
     };
@@ -106,14 +114,116 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
     let Some(answers) = state.answers.as_deref() else {
         return;
     };
-    let answered = match ask(
-        answers,
-        &workspace_id,
-        &user_id,
-        &message,
-        &slack.bot_user_id,
-    )
-    .await
+    // The turn (issue #7): every gate has passed, so this message is going
+    // to be answered — the only question the coordinator settles is whether
+    // it answers now, or joins the turn already running.
+    let Some(clock) = state.ctx.ports.clock.clone() else {
+        return;
+    };
+    let key = message.conversation_key();
+    let mut turn = match state
+        .turns
+        .arrive(
+            &key,
+            pending_for(&message, &user_id, &slack.bot_user_id),
+            clock.now().unix_timestamp(),
+        )
+        .await
+    {
+        Ok(Admit::Run(turn)) => turn,
+        // The running turn folds this message in when it finishes: nothing
+        // is said now, and nothing is dropped.
+        Ok(Admit::Queued) => return,
+        // A coordinator that cannot be reached must not silence the bot: the
+        // gates all passed. Answering unserialised is the pre-#7 behaviour,
+        // the honest degradation; the lease id below is one no conversation
+        // ever mints (ids start at one), so the finish releases nothing.
+        Err(err) => {
+            report(&format!(
+                "agent: turn coordinator unavailable, answering unserialised: {err:?}"
+            ));
+            Turn {
+                lease: 0,
+                messages: vec![pending_for(&message, &user_id, &slack.bot_user_id)],
+                context: Vec::new(),
+            }
+        }
+    };
+    loop {
+        let exchange = answer_turn(state, answers, team_id, &workspace_id, &slack, &turn).await;
+        match state
+            .turns
+            .finish(&key, turn.lease, exchange, clock.now().unix_timestamp())
+            .await
+        {
+            // Whatever arrived mid-turn is the next turn, already coalesced.
+            Ok(Some(next)) => turn = next,
+            Ok(None) => break,
+            // The finish is what releases the floor; when even it fails,
+            // stopping is all there is — the lease's TTL hands the thread
+            // to the next arrival.
+            Err(err) => {
+                report(&format!("agent: could not finish the turn: {err:?}"));
+                break;
+            }
+        }
+    }
+}
+
+/// What the coordinator is handed for one gated message: enough to answer
+/// it long after the event that carried it is gone, and enough to reply to
+/// it (see [`Pending::reply_target`]). The question is computed once, here,
+/// because the judge and the answer must read the same words.
+fn pending_for(message: &Message, user_id: &str, bot_user_id: &str) -> Pending {
+    Pending {
+        user: user_id.to_owned(),
+        slack_user: message.author.user.clone(),
+        channel: message.location.channel.clone(),
+        room: Room::of(message.location.visibility),
+        thread: message.thread.clone().unwrap_or_else(|| message.id.clone()),
+        ts: message.id.clone(),
+        question: question(&message.text, bot_user_id),
+    }
+}
+
+/// Answers one admitted turn, and reports what the conversation should
+/// remember: `Some` only when the reply actually posted — a turn that asked
+/// nothing, or whose post never landed, is `None`, so the context never
+/// remembers an answer the thread never saw. The turn is one ask, because
+/// the coordinator coalesced one member's messages: the questions joined in
+/// arrival order, answered under that member's own scope, posted once, to
+/// the thread they all share.
+async fn answer_turn(
+    state: &ModuleState,
+    answers: &dyn Answers,
+    team_id: &str,
+    workspace_id: &str,
+    slack: &Slack,
+    turn: &Turn,
+) -> Option<Exchange> {
+    // The same ports `consider` read, re-read here: the turn may outlive the
+    // clones the caller held (a coalesced next turn runs long after the
+    // event that started it).
+    let (Some(db), Some(http)) = (state.ctx.ports.db.clone(), state.ctx.ports.http.clone()) else {
+        return None;
+    };
+    let db: &dyn Database = &*db;
+    let http: &dyn HttpClient = &*http;
+    let lead = &turn.messages[0];
+    let asked = turn
+        .messages
+        .iter()
+        .map(|pending| pending.question.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The reply target is every message's: one conversation is one thread.
+    let to = lead.reply_target(team_id);
+    let answered = match answers
+        .answer(
+            &Asker::new(workspace_id, &lead.user).at(access_location(&to.location)),
+            &asked,
+        )
+        .await
     {
         Ok(answered) => answered,
         Err(err) => {
@@ -122,16 +232,14 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
             // (issue #123). Without this line such a bot is mute for ever and
             // says nothing about why.
             report(&format!("agent: nothing to answer from: {err:?}"));
-            return;
+            return None;
         }
     };
-    let Some(token) = bot_token(db, &state.kms, team_id).await else {
-        return;
-    };
+    let token = bot_token(db, &state.kms, team_id).await?;
     let out = slack.reply(
-        &message,
+        &to,
         &livingbrain_channel::Reply {
-            text: answered.text,
+            text: answered.text.clone(),
             citations: answered.citations.iter().map(citation).collect(),
         },
     );
@@ -139,7 +247,12 @@ pub(crate) async fn consider(state: &ModuleState, team_id: &str, event: &Value) 
     // the message (see `SlackError::refused`), so it is safe to say.
     if let Err(err) = reply::post(http, &token, &out).await {
         report(&format!("agent: could not post the answer: {err:?}"));
+        return None;
     }
+    Some(Exchange {
+        question: asked,
+        answer: answered.text,
+    })
 }
 
 /// One diagnostic line about a turn that produced no answer.
@@ -245,26 +358,6 @@ async fn member(db: &dyn Database, workspace_id: &str, message: &Message) -> Opt
         .flatten()
         .map(|member| member.user_id)
         .filter(|id| !id.is_empty())
-}
-
-/// The answer, from that member's own pages at the place they asked.
-///
-/// The question is the same [`question`] the judge read, so a message the
-/// judge saw as `what is the refund window?` is searched for under exactly
-/// those words.
-async fn ask(
-    answers: &dyn Answers,
-    workspace_id: &str,
-    user_id: &str,
-    message: &Message,
-    bot_user_id: &str,
-) -> Result<Answered, livingbrain_pages::AnswerError> {
-    answers
-        .answer(
-            &Asker::new(workspace_id, user_id).at(access_location(&message.location)),
-            &question(&message.text, bot_user_id),
-        )
-        .await
 }
 
 /// The bot token this team's answer is sent with, or `None` when there is

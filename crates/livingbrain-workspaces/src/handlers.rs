@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
 use crate::config::{self, Settings};
+use crate::conversation::{LocalTurns, Turns};
 use crate::events;
 use crate::events::events as slack_events;
 use crate::flow::{self, Flow, Session};
@@ -197,6 +198,11 @@ pub(crate) struct ModuleState {
     /// composition that wired no agent: the events still arrive, are
     /// deduplicated and are answered by nobody.
     pub(crate) answers: Option<Arc<dyn Answers>>,
+    /// The seam the agent takes its turn from (issue #7). Absent at build,
+    /// the per-isolate coordinator is the answer — one isolate serialises
+    /// itself, which is all a composition without the venture's Durable
+    /// Object can promise.
+    pub(crate) turns: Arc<dyn Turns>,
 }
 
 impl ModuleState {
@@ -233,7 +239,11 @@ impl ModuleState {
 }
 
 /// The module's routes.
-pub(crate) fn router(ctx: ModuleContext, answers: Option<Arc<dyn Answers>>) -> axum::Router {
+pub(crate) fn router(
+    ctx: ModuleContext,
+    answers: Option<Arc<dyn Answers>>,
+    turns: Option<Arc<dyn Turns>>,
+) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
     let mail_from = config::mail_from(&*ctx.config);
@@ -247,6 +257,7 @@ pub(crate) fn router(ctx: ModuleContext, answers: Option<Arc<dyn Answers>>) -> a
         signing_secret,
         kms,
         answers,
+        turns: turns.unwrap_or_else(|| Arc::new(LocalTurns::default())),
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))

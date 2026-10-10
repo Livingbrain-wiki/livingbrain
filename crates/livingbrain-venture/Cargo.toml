@@ -57,14 +57,22 @@ worker = { workspace = true }
 # `wasm_js` is what makes it work in a Workers isolate; on a native build it
 # is the operating system's.
 getrandom = { workspace = true }
+# `DurableTurns` encodes a turn call as the request body the conversation
+# object reads back with `json()` (issue #7).
+serde_json = { workspace = true }
+
+# `#[durable_object]`'s expansion names the `wasm_bindgen` crate directly, so
+# the class in `src/conversation.rs` needs it linked on the wasm build. Native
+# builds — the tests, clippy — never see the class (it is `#[cfg]`-gated), so
+# this never reaches their graph.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.129"
 
 [dev-dependencies]
 # The fake HTTP client the Owlpost test records a send with, the snapshot tool
-# for the rendered mail layouts, `serde_json` for the sample data and the
-# recorded body, and the block-on the async tests need. The waitlist test
-# mounts the venture's composition over the kit's fakes and an in-memory
-# SQLite database. Dev-only: none of them reach the wasm graph.
+# for the rendered mail layouts, and the block-on the async tests need. The
+# waitlist test mounts the venture's composition over the kit's fakes and an
+# in-memory SQLite database. Dev-only: none of them reach the wasm graph.
 cratefield-testing = { workspace = true }
 insta = { workspace = true }
 pollster = { workspace = true }
-serde_json = { workspace = true }
