@@ -10,6 +10,7 @@
  * the app's data must never be served from a stale cache.
  */
 
+
 const CACHE = "lb-app-v8";
 
 const SHELL = [
