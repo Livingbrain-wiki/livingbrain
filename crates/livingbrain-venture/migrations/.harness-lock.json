@@ -66,5 +66,9 @@
   "pages/0004": {
     "file": "0017_pages_0004_source_ledger.sql",
     "sha256": "75795d68d54db610bfbbad26ee4da5ed28b78553f7b9cca12be2e78f8eafba23"
+  },
+  "tools/0001": {
+    "file": "0018_tools_0001_init.sql",
+    "sha256": "0a4d2c03a8af4e1e8ae3d168fae7947858e893a9c59bb5d9334a58abb86b0307"
   }
 }
