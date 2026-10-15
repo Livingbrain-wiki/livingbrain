@@ -76,10 +76,27 @@ pub struct ChatRequest<'a> {
     /// it (`response_format` on the OpenAI wire). The Anthropic wire has
     /// none; the prompt has to ask.
     pub json: bool,
+    /// Ask for the answer as one forced tool call whose input is held to a
+    /// JSON Schema, where the provider's card says it serves that
+    /// ([`crate::curated::structured`]); elsewhere the call goes out as
+    /// plain text (with `json` as above) and the caller parses the text.
+    /// Either way the reply's `text` is the JSON.
+    pub structured: Option<Structured<'a>>,
     /// How long one call may take: a streamed call's whole body, capped at
     /// [`crate::stream::MAX_STREAM_DEADLINE`]; an unstreamed call's
     /// exchange, clamped by the port to 30 s.
     pub timeout: Duration,
+}
+
+/// The one tool a structured call is forced to call: its input is the
+/// answer. Anthropic wire: `tools` + `tool_choice: {type: tool}`; OpenAI
+/// wire: a `function` tool + `tool_choice: {type: function}`.
+#[derive(Debug, Clone, Copy)]
+pub struct Structured<'a> {
+    pub name: &'a str,
+    pub description: &'a str,
+    /// The input's JSON Schema.
+    pub schema: &'a Value,
 }
 
 /// What came back.
@@ -100,6 +117,9 @@ pub struct ChatReply {
     /// Whether a member's own runner answered (see [`crate::jobs`]): its
     /// tokens were spent on their subscription and cost the brain nothing.
     pub runner: bool,
+    /// The provider stopped at `max_tokens` (`stop_reason: max_tokens`,
+    /// `finish_reason: length`): the text is likely cut off.
+    pub truncated: bool,
 }
 
 /// The connection a job for `role` would run on, without its key: the
@@ -404,7 +424,10 @@ pub async fn chat(
         .map_err(|_| InvokeError::Refused)?;
 
     let stream = curated::streams(&connection.provider);
-    let mut body = request_body(wire, &connection.model, request);
+    let structured = request
+        .structured
+        .filter(|_| curated::structured(&connection.provider));
+    let mut body = request_body(wire, &connection.model, request, structured);
     if stream {
         stream_body(&mut body, wire);
     }
@@ -493,6 +516,7 @@ pub async fn chat(
     if text.is_none() && !exhausted {
         return Err(InvokeError::BadResponse);
     }
+    let truncated = stopped_at_ceiling(&parsed, wire);
     let usage = usage(&parsed, wire);
     let (prompt_tokens, completion_tokens) = usage.unwrap_or((0, 0));
     // The ledger (issue #12). A lost count must never fail the call that
@@ -517,6 +541,7 @@ pub async fn chat(
         provider: connection.provider,
         model: connection.model,
         runner: false,
+        truncated,
     })
 }
 
@@ -549,8 +574,14 @@ fn thinking_optional(model: &str) -> bool {
         || model.starts_with("glm-5-")
 }
 
-/// The request body for one wire.
-fn request_body(wire: Wire, model: &str, request: &ChatRequest<'_>) -> Value {
+/// The request body for one wire: a forced tool call when `structured`,
+/// else plain text (a JSON object where the wire can ask for one).
+fn request_body(
+    wire: Wire,
+    model: &str,
+    request: &ChatRequest<'_>,
+    structured: Option<Structured<'_>>,
+) -> Value {
     match wire {
         Wire::Openai => {
             let mut body = json!({
@@ -561,17 +592,38 @@ fn request_body(wire: Wire, model: &str, request: &ChatRequest<'_>) -> Value {
                 ],
                 "max_tokens": request.max_tokens,
             });
-            if request.json {
+            if let Some(tool) = structured {
+                body["tools"] = json!([{
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.schema,
+                    },
+                }]);
+                body["tool_choice"] = json!({"type": "function", "function": {"name": tool.name}});
+            } else if request.json {
                 body["response_format"] = json!({"type": "json_object"});
             }
             body
         }
-        Wire::Anthropic => json!({
-            "model": model,
-            "system": request.system,
-            "messages": [{"role": "user", "content": request.user}],
-            "max_tokens": request.max_tokens,
-        }),
+        Wire::Anthropic => {
+            let mut body = json!({
+                "model": model,
+                "system": request.system,
+                "messages": [{"role": "user", "content": request.user}],
+                "max_tokens": request.max_tokens,
+            });
+            if let Some(tool) = structured {
+                body["tools"] = json!([{
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.schema,
+                }]);
+                body["tool_choice"] = json!({"type": "tool", "name": tool.name});
+            }
+            body
+        }
     }
 }
 
@@ -594,23 +646,45 @@ fn event_stream(headers: &http::HeaderMap) -> bool {
 }
 
 /// The completion's text, per wire; `None` when the answer carries none.
+/// A forced tool call's input is the answer: its JSON text.
 fn completion_text(parsed: &Value, wire: Wire) -> Option<String> {
     match wire {
-        // `content` only: a reasoning model's `reasoning_content` is its
-        // thinking, not its answer, and an empty `content` (the budget went
-        // on thinking) is no completion at all.
-        Wire::Openai => parsed
-            .get("choices")?
-            .get(0)?
-            .get("message")?
-            .get("content")?
-            .as_str()
-            .filter(|text| !text.trim().is_empty())
-            .map(str::to_owned),
-        // Every `text` block, in order: `thinking` and `redacted_thinking`
-        // blocks (a GLM answer starts with one) are skipped.
+        // `content`, else the first tool call's arguments (a JSON string).
+        // Never `reasoning_content`: a reasoning model's thinking is not its
+        // answer, and an empty `content` (the budget went on thinking) is no
+        // completion at all.
+        Wire::Openai => {
+            let message = parsed.get("choices")?.get(0)?.get("message")?;
+            message
+                .get("content")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .or_else(|| {
+                    message
+                        .pointer("/tool_calls/0/function/arguments")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                })
+                .map(str::to_owned)
+        }
+        // A `tool_use` block's input, when there is one; else every `text`
+        // block, in order: `thinking` and `redacted_thinking` blocks (a GLM
+        // answer starts with one) are skipped.
         Wire::Anthropic => {
             let blocks = parsed.get("content")?.as_array()?;
+            if let Some(input) = blocks
+                .iter()
+                .find(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .and_then(|b| b.get("input"))
+            {
+                // A streamed input that did not parse (cut off) is carried
+                // as its raw text, so the caller can say why.
+                return match input {
+                    Value::String(raw) => Some(raw.clone()),
+                    other => Some(other.to_string()),
+                }
+                .filter(|text| !text.trim().is_empty());
+            }
             let text: String = blocks
                 .iter()
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
@@ -670,9 +744,10 @@ mod tests {
             user: "u",
             max_tokens: 10,
             json: true,
+            structured: None,
             timeout: Duration::from_secs(1),
         };
-        let body = request_body(Wire::Openai, "m", &request);
+        let body = request_body(Wire::Openai, "m", &request, None);
         assert_eq!(body["response_format"]["type"], "json_object");
         assert_eq!(body["messages"][0]["role"], "system");
         let plain = ChatRequest {
@@ -680,10 +755,81 @@ mod tests {
             ..request
         };
         assert!(
-            request_body(Wire::Openai, "m", &plain)
+            request_body(Wire::Openai, "m", &plain, None)
                 .get("response_format")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_structured_call_forces_its_one_tool_on_both_wires() {
+        let schema = json!({"type": "object", "properties": {"pages": {"type": "array"}}});
+        let tool = Structured {
+            name: "apply_edits",
+            description: "the edit list",
+            schema: &schema,
+        };
+        let request = ChatRequest {
+            system: "s",
+            user: "u",
+            max_tokens: 10,
+            json: true,
+            structured: Some(tool),
+            timeout: Duration::from_secs(1),
+        };
+        let anthropic = request_body(Wire::Anthropic, "m", &request, Some(tool));
+        assert_eq!(anthropic["tools"][0]["name"], "apply_edits");
+        assert_eq!(anthropic["tools"][0]["input_schema"], schema);
+        assert_eq!(
+            anthropic["tool_choice"],
+            json!({"type": "tool", "name": "apply_edits"})
+        );
+        let openai = request_body(Wire::Openai, "m", &request, Some(tool));
+        assert_eq!(openai["tools"][0]["type"], "function");
+        assert_eq!(openai["tools"][0]["function"]["parameters"], schema);
+        assert_eq!(openai["tool_choice"]["function"]["name"], "apply_edits");
+        // The schema replaces the looser JSON switch.
+        assert!(openai.get("response_format").is_none());
+    }
+
+    #[test]
+    fn a_forced_tool_call_is_read_as_the_answer_on_both_wires() {
+        let anthropic = json!({
+            "content": [
+                {"type": "thinking", "thinking": "…"},
+                {"type": "tool_use", "id": "t", "name": "apply_edits",
+                 "input": {"summary": "s", "pages": []}}
+            ],
+            "stop_reason": "tool_use"
+        });
+        let text = completion_text(&anthropic, Wire::Anthropic).expect("an answer");
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).expect("json"),
+            json!({"summary": "s", "pages": []})
+        );
+        assert!(!stopped_at_ceiling(&anthropic, Wire::Anthropic));
+        // A streamed input cut off at the limit arrives as its raw text.
+        let cut = json!({
+            "content": [{"type": "tool_use", "name": "apply_edits", "input": "{\"summary\": \"s"}],
+            "stop_reason": "max_tokens"
+        });
+        assert_eq!(
+            completion_text(&cut, Wire::Anthropic).as_deref(),
+            Some("{\"summary\": \"s")
+        );
+        assert!(stopped_at_ceiling(&cut, Wire::Anthropic));
+        let openai = json!({"choices": [{
+            "message": {"role": "assistant", "content": null, "tool_calls": [{
+                "type": "function",
+                "function": {"name": "apply_edits", "arguments": "{\"summary\":\"s\",\"pages\":[]}"}
+            }]},
+            "finish_reason": "length"
+        }]});
+        assert_eq!(
+            completion_text(&openai, Wire::Openai).as_deref(),
+            Some("{\"summary\":\"s\",\"pages\":[]}")
+        );
+        assert!(stopped_at_ceiling(&openai, Wire::Openai));
     }
 
     #[test]
@@ -693,9 +839,10 @@ mod tests {
             user: "data",
             max_tokens: 10,
             json: true,
+            structured: None,
             timeout: Duration::from_secs(1),
         };
-        let body = request_body(Wire::Anthropic, "m", &request);
+        let body = request_body(Wire::Anthropic, "m", &request, None);
         assert_eq!(body["system"], "rules");
         assert_eq!(body["messages"][0]["content"], "data");
     }
@@ -707,13 +854,14 @@ mod tests {
             user: "u",
             max_tokens: 10,
             json: false,
+            structured: None,
             timeout: Duration::from_secs(1),
         };
-        let mut openai = request_body(Wire::Openai, "m", &request);
+        let mut openai = request_body(Wire::Openai, "m", &request, None);
         stream_body(&mut openai, Wire::Openai);
         assert_eq!(openai["stream"], true);
         assert_eq!(openai["stream_options"]["include_usage"], true);
-        let mut anthropic = request_body(Wire::Anthropic, "m", &request);
+        let mut anthropic = request_body(Wire::Anthropic, "m", &request, None);
         stream_body(&mut anthropic, Wire::Anthropic);
         assert_eq!(anthropic["stream"], true);
         assert!(anthropic.get("stream_options").is_none());

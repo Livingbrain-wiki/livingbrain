@@ -67,6 +67,13 @@ struct Card {
     /// serves it. `false` sends that provider's calls unstreamed.
     #[serde(default)]
     stream: Option<bool>,
+    /// How a call that wants a structured answer gets one: `"tool"` — one
+    /// forced tool call whose input is held to the answer's JSON Schema
+    /// (`tools` + `tool_choice` on the card's wire). Absent: the provider
+    /// is not known to serve a forced tool call, and the answer comes back
+    /// as text the caller parses.
+    #[serde(default)]
+    structured: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +116,14 @@ pub(crate) fn listing(provider: &str) -> Listing {
         Some(url) if url.starts_with("https://") => Listing::Url(url.to_owned()),
         _ => Listing::Native,
     }
+}
+
+/// Whether a structured call to `provider` is sent as a forced tool call:
+/// its card's `structured` is `"tool"`. A provider without a card —
+/// `custom` included — is not: a forced `tool_choice` it does not serve
+/// would fail every call, where text still parses.
+pub(crate) fn structured(provider: &str) -> bool {
+    card(provider).and_then(|card| card.structured.as_deref()) == Some("tool")
 }
 
 /// Whether a model call to `provider` asks to stream: its card's `stream`
@@ -162,6 +177,16 @@ pub(crate) fn annotate(provider: &str, listed: Vec<Model>) -> Vec<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forced_tool_call_is_carded_only_where_verified() {
+        for provider in ["anthropic", "openai", "zhipu-glm-en"] {
+            assert!(structured(provider), "{provider}");
+        }
+        for provider in ["deepseek", "custom", "not-a-provider"] {
+            assert!(!structured(provider), "{provider}");
+        }
+    }
 
     /// The card file parses, every API card names a catalog provider (or
     /// `custom`), every listing is one of the three shapes, and ids are

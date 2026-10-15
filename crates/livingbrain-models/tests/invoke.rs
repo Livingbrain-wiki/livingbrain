@@ -18,6 +18,7 @@ fn request() -> ChatRequest<'static> {
         user: "the data",
         max_tokens: 64,
         json: true,
+        structured: None,
         timeout: Duration::from_secs(5),
     }
 }

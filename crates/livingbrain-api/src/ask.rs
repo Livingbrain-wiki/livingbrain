@@ -867,6 +867,7 @@ async fn answer_with_model(
         user: &user,
         max_tokens: crate::budgets::ask_max_tokens(&own),
         json: false,
+        structured: None,
         timeout: CALL_TIMEOUT,
     };
     let call = JobCall {

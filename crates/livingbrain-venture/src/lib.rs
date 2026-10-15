@@ -1297,6 +1297,7 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
             .as_deref(),
     );
     let mut split = ScheduledSplit::new(limits, start, harness.modules().len());
+    let mut took = Vec::new();
     for module in harness.modules() {
         let now = clock
             .as_ref()
@@ -1314,7 +1315,30 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
             );
         }
         split.settle(&budget);
+        let end = clock.as_ref().map_or(now, |clock| clock.now());
+        took.push((module.name().to_owned(), end - now));
     }
+    let end = clock.as_ref().map_or(start, |clock| clock.now());
+    worker::console_log!("{}", tick_line(&cron, end - start, &took));
+}
+
+/// The one line a cron invocation logs when it ends: which trigger fired it
+/// and where its time went. Without it a firing left no line at all in
+/// Workers Logs, so a cadence that was not the configured one (the trigger
+/// changed to every five minutes kept firing as `*/15` for an hour while
+/// Cloudflare propagated it) could only be seen by tailing for `event.cron`.
+/// Modules that took under a second are left out.
+fn tick_line(cron: &str, total: time::Duration, took: &[(String, time::Duration)]) -> String {
+    let busy: Vec<String> = took
+        .iter()
+        .filter(|(_, spent)| *spent >= time::Duration::SECOND)
+        .map(|(name, spent)| format!("{name}={}s", spent.whole_seconds()))
+        .collect();
+    format!(
+        "scheduled: cron=\"{cron}\" took={}s modules=[{}]",
+        total.whole_seconds(),
+        busy.join(" ")
+    )
 }
 
 /// What one cron invocation may spend, split across the modules in order
@@ -1405,6 +1429,45 @@ const CODING_AGENTS_MODULE: &str = "coding-agents";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tick_logs_its_trigger_and_where_its_time_went() {
+        let took = vec![
+            ("waitlist".to_owned(), time::Duration::milliseconds(20)),
+            ("coding-agents".to_owned(), time::Duration::seconds(212)),
+            ("github".to_owned(), time::Duration::seconds(31)),
+        ];
+        assert_eq!(
+            tick_line("*/5 * * * *", time::Duration::seconds(250), &took),
+            "scheduled: cron=\"*/5 * * * *\" took=250s modules=[coding-agents=212s github=31s]"
+        );
+    }
+
+    /// The cadence the scheduled limits are sized for: a five-minute cron
+    /// beside the daily one, declared once at the top level and inherited
+    /// by staging and production (a `[env.*.triggers]` would replace it).
+    #[test]
+    fn the_cron_fires_every_five_minutes_in_every_environment() {
+        let config = include_str!("../wrangler.toml");
+        let crons: Vec<&str> = config
+            .lines()
+            .filter(|line| line.trim_start().starts_with("crons"))
+            .collect();
+        assert_eq!(crons, vec![r#"crons = ["19 4 * * *", "*/5 * * * *"]"#]);
+        assert!(
+            !config.lines().any(|line| {
+                let line = line.trim();
+                line.starts_with("[env.") && line.ends_with(".triggers]")
+            }),
+            "an environment must not override the cron"
+        );
+        // The compile drain's start window (5.5 minutes) covers the gap
+        // between two firings, so the pool never sits idle between them.
+        assert!(
+            CRON_HARD_WALL - livingbrain_compiler::WALL_AFTER_BUDGET - time::Duration::seconds(30)
+                >= time::Duration::minutes(5)
+        );
+    }
     use cratefield_kms::{Dek, LocalFileKms};
 
     #[test]

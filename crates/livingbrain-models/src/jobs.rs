@@ -370,6 +370,7 @@ pub async fn dispatch(
                     provider: format!("local-runner:{}", runner.agent),
                     model: runner.model,
                     runner: true,
+                    truncated: false,
                 }));
             }
             "failed" => {

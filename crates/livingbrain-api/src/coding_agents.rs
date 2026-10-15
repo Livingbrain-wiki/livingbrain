@@ -68,7 +68,7 @@ use livingbrain_compiler::{
     Call, ClaimFilter, Classifiers, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model,
     ModelFailure, Queue, Reply, Settings,
 };
-use livingbrain_models::invoke::{self, ChatRequest, InvokeError};
+use livingbrain_models::invoke::{self, ChatRequest, InvokeError, Structured};
 use livingbrain_models::jobs::{self, Dispatch, JobCall};
 use livingbrain_pages::access::{AccessPlan, KIND_PAGES, KIND_SOURCES, ScopeFilter};
 use livingbrain_pages::{FactError, FactInput, FactStore};
@@ -191,18 +191,20 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 4] = [
+        const SQLITE: [SqlMigration; 5] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
             livingbrain_compiler::MIGRATION_PARALLEL,
+            livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 4] = [
+        const POSTGRES: [SqlMigration; 5] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
             livingbrain_compiler::MIGRATION_PARALLEL_POSTGRES,
+            livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -470,11 +472,19 @@ impl Model for WorkspaceModel {
         user: &str,
         max_tokens: u32,
     ) -> Result<Reply, ModelFailure> {
+        // The edit list's schema: where the provider serves a forced tool
+        // call, the answer is held to it; elsewhere it is parsed from text.
+        let schema = livingbrain_compiler::edits::schema();
         let request = ChatRequest {
             system,
             user,
             max_tokens,
             json: true,
+            structured: Some(Structured {
+                name: "apply_edits",
+                description: "Apply this session's wiki edit list: the log summary, the page edits and the temporal facts.",
+                schema: &schema,
+            }),
             timeout: CALL_TIMEOUT,
         };
         let ports = jobs::Ports {
@@ -495,6 +505,7 @@ impl Model for WorkspaceModel {
                 prompt_tokens: reply.prompt_tokens,
                 completion_tokens: reply.completion_tokens,
                 runner: reply.runner,
+                truncated: reply.truncated,
             }),
             Ok(Dispatch::Pending { .. }) => Err(ModelFailure::Pending),
             Err(InvokeError::NoModel) => Err(ModelFailure::NoModel),

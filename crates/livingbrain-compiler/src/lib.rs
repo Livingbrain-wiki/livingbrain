@@ -117,6 +117,22 @@ pub const MIGRATION_PARALLEL_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0004_parallel.sql"),
 );
 
+/// The fifth migration: the compiles that failed as a bare `bad-output`
+/// before the edit list was asked for as a forced tool call, kept short and
+/// repaired once are queued again, their attempts reset.
+pub const MIGRATION_REQUEUE_BAD_OUTPUT: SqlMigration = SqlMigration::new(
+    "0005",
+    "requeue_bad_output",
+    include_str!("../migrations/sqlite/0005_requeue_bad_output.sql"),
+);
+
+/// The Postgres form: the same statement.
+pub const MIGRATION_REQUEUE_BAD_OUTPUT_POSTGRES: SqlMigration = SqlMigration::new(
+    "0005",
+    "requeue_bad_output",
+    include_str!("../migrations/postgres/0005_requeue_bad_output.sql"),
+);
+
 /// The tables the module that mounts the compiler owns.
 pub const TABLES: [&str; 4] = [
     "coding_agent_jobs",

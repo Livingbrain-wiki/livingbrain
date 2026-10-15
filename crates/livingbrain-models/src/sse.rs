@@ -184,6 +184,12 @@ impl Failure {
 pub(crate) struct Completion {
     /// The answer, concatenated across text blocks / content deltas.
     pub(crate) text: String,
+    /// A tool call's name, when the answer was one (a forced tool call:
+    /// [`crate::invoke::Structured`]).
+    pub(crate) tool_name: Option<String>,
+    /// That call's input, as the raw JSON text its deltas carried — whole,
+    /// or cut off where the stream stopped.
+    pub(crate) tool_input: String,
     /// Thinking or reasoning characters seen and dropped (diagnostics only).
     pub(crate) thinking_chars: usize,
     /// The wire's own stop reason (`max_tokens`, `length`, `end_turn`, …).
@@ -201,10 +207,20 @@ impl Completion {
         let usage = self.input_tokens.zip(self.output_tokens);
         match wire {
             Wire::Anthropic => {
+                let mut content = vec![json!({"type": "text", "text": self.text})];
+                if let Some(name) = &self.tool_name {
+                    // An input that does not parse (cut off) is carried as
+                    // its raw text, so the caller can say why.
+                    let input = serde_json::from_str::<Value>(&self.tool_input)
+                        .unwrap_or_else(|_| Value::String(self.tool_input.clone()));
+                    content.push(json!({
+                        "type": "tool_use", "id": "toolu_streamed", "name": name, "input": input,
+                    }));
+                }
                 let mut out = json!({
                     "type": "message",
                     "role": "assistant",
-                    "content": [{"type": "text", "text": self.text}],
+                    "content": content,
                     "stop_reason": self.stop_reason,
                 });
                 if let Some((input, output)) = usage {
@@ -221,6 +237,13 @@ impl Completion {
                         "finish_reason": self.stop_reason,
                     }],
                 });
+                if let Some(name) = &self.tool_name {
+                    out["choices"][0]["message"]["tool_calls"] = json!([{
+                        "id": "call_streamed",
+                        "type": "function",
+                        "function": {"name": name, "arguments": self.tool_input},
+                    }]);
+                }
                 if let Some((prompt, completion)) = usage {
                     out["usage"] =
                         json!({"prompt_tokens": prompt, "completion_tokens": completion});
@@ -239,6 +262,8 @@ pub(crate) struct Accumulator {
     completion: Completion,
     /// Anthropic: the type of each open content block, by index.
     blocks: Vec<(u64, String)>,
+    /// Anthropic: the index of the tool block whose input is the answer.
+    tool_index: Option<u64>,
     /// The answer text is held to this many bytes.
     max_text_bytes: usize,
 }
@@ -250,6 +275,7 @@ impl Accumulator {
             framer: Framer::default(),
             completion: Completion::default(),
             blocks: Vec::new(),
+            tool_index: None,
             max_text_bytes,
         }
     }
@@ -318,10 +344,24 @@ impl Accumulator {
     }
 
     fn push_text(&mut self, text: &str) -> Result<(), Failure> {
-        if self.completion.text.len() + text.len() > self.max_text_bytes {
+        if self.completion.text.len() + self.completion.tool_input.len() + text.len()
+            > self.max_text_bytes
+        {
             return Err(Failure::too_large());
         }
         self.completion.text.push_str(text);
+        Ok(())
+    }
+
+    /// A piece of the (first) tool call's input JSON, held to the same
+    /// bound as the text.
+    fn push_tool_input(&mut self, json: &str) -> Result<(), Failure> {
+        if self.completion.text.len() + self.completion.tool_input.len() + json.len()
+            > self.max_text_bytes
+        {
+            return Err(Failure::too_large());
+        }
+        self.completion.tool_input.push_str(json);
         Ok(())
     }
 
@@ -349,6 +389,15 @@ impl Accumulator {
                 {
                     self.push_text(text)?;
                 }
+                // The first tool call is the answer; a second is ignored.
+                if block_type == "tool_use" && self.tool_index.is_none() {
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    self.completion.tool_name = Some(name.to_owned());
+                    self.tool_index = Some(index);
+                }
                 self.blocks.retain(|(open, _)| *open != index);
                 self.blocks.push((index, block_type));
             }
@@ -373,8 +422,13 @@ impl Accumulator {
                             .and_then(Value::as_str)
                             .map_or(0, str::len);
                     }
-                    // `signature_delta`, `input_json_delta` (a tool call) and
-                    // anything newer carry no answer text.
+                    // The tool call's input, in the first tool block only.
+                    Some("input_json_delta") if self.tool_index == Some(index) => {
+                        if let Some(json) = delta.get("partial_json").and_then(Value::as_str) {
+                            self.push_tool_input(json)?;
+                        }
+                    }
+                    // `signature_delta` and anything newer carry no answer.
                     _ => {}
                 }
             }
@@ -398,6 +452,29 @@ impl Accumulator {
         if let Some(choice) = value.pointer("/choices/0") {
             if let Some(text) = choice.pointer("/delta/content").and_then(Value::as_str) {
                 self.push_text(text)?;
+            }
+            // The first tool call (index 0) is the answer: its name once,
+            // its arguments in pieces.
+            if let Some(calls) = choice
+                .pointer("/delta/tool_calls")
+                .and_then(Value::as_array)
+            {
+                for call in calls
+                    .iter()
+                    .filter(|call| call.get("index").and_then(Value::as_u64).unwrap_or(0) == 0)
+                {
+                    if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                        self.completion
+                            .tool_name
+                            .get_or_insert_with(String::new)
+                            .push_str(name);
+                    }
+                    if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
+                    {
+                        self.completion.tool_name.get_or_insert_with(String::new);
+                        self.push_tool_input(args)?;
+                    }
+                }
             }
             for field in ["reasoning_content", "reasoning"] {
                 if let Some(thinking) = choice
@@ -557,6 +634,78 @@ mod tests {
         assert_eq!(completion.input_tokens, Some(900));
         assert_eq!(completion.output_tokens, Some(42));
         assert!(completion.finished);
+    }
+
+    /// A forced tool call as Z.AI streams it on the Anthropic wire
+    /// (recorded shape, 2026-10-15): thinking, then one `tool_use` block
+    /// whose input arrives as `input_json_delta` pieces.
+    fn anthropic_tool_stream(stop: &str, pieces: &[&str]) -> String {
+        let mut body = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"apply_edits\",\"input\":{}}}\n\n",
+        ]
+        .concat();
+        for piece in pieces {
+            body.push_str(&format!(
+                "event: content_block_delta\ndata: {}\n\n",
+                json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": piece}})
+            ));
+        }
+        body + "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n"
+            + &format!(
+                "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop}\"}},\"usage\":{{\"output_tokens\":7}}}}\n\n"
+            )
+            + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+    }
+
+    #[test]
+    fn a_streamed_tool_call_is_the_answer_on_the_anthropic_wire() {
+        let body = anthropic_tool_stream("tool_use", &["{\"summary\": \"s\", ", "\"pages\": []}"]);
+        let completion = read_body(body.as_bytes(), Wire::Anthropic, MAX).expect("ok");
+        assert_eq!(completion.tool_name.as_deref(), Some("apply_edits"));
+        assert_eq!(completion.text, "");
+        let native = completion.native_json(Wire::Anthropic);
+        assert_eq!(native["content"][1]["type"], "tool_use");
+        assert_eq!(
+            native["content"][1]["input"],
+            json!({"summary": "s", "pages": []})
+        );
+        // Cut off at the ceiling: the raw input is kept, not lost.
+        let body = anthropic_tool_stream(
+            "max_tokens",
+            &["{\"summary\": \"s\", ", "\"pages\": [{\"slug"],
+        );
+        let native = read_body(body.as_bytes(), Wire::Anthropic, MAX)
+            .expect("ok")
+            .native_json(Wire::Anthropic);
+        assert_eq!(native["stop_reason"], "max_tokens");
+        assert_eq!(
+            native["content"][1]["input"],
+            "{\"summary\": \"s\", \"pages\": [{\"slug"
+        );
+    }
+
+    #[test]
+    fn a_streamed_tool_call_is_the_answer_on_the_openai_wire() {
+        let body = [
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"apply_edits\",\"arguments\":\"\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"summary\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"s\\\",\\\"pages\\\":[]}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .concat();
+        let completion = read_body(body.as_bytes(), Wire::Openai, MAX).expect("ok");
+        assert_eq!(completion.tool_name.as_deref(), Some("apply_edits"));
+        assert_eq!(completion.tool_input, "{\"summary\":\"s\",\"pages\":[]}");
+        let native = completion.native_json(Wire::Openai);
+        assert_eq!(
+            native["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"summary\":\"s\",\"pages\":[]}"
+        );
     }
 
     #[test]

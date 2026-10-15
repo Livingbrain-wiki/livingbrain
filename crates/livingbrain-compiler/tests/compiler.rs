@@ -49,11 +49,12 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 4] = [
+        const SET: [cratefield_core::SqlMigration; 5] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
             livingbrain_compiler::MIGRATION_PARALLEL,
+            livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
         ];
         Migrations {
             sqlite: &SET,
@@ -91,6 +92,8 @@ type Script = Box<dyn Fn(&str, usize) -> Result<Reply, ModelFailure> + Send + Sy
 #[derive(Clone)]
 struct Fake {
     inputs: Arc<Mutex<Vec<String>>>,
+    /// The `max_tokens` of every call, in order.
+    limits: Arc<Mutex<Vec<u32>>>,
     script: Arc<Script>,
     available: bool,
 }
@@ -101,6 +104,7 @@ impl Fake {
     ) -> Self {
         Self {
             inputs: Arc::default(),
+            limits: Arc::default(),
             script: Arc::new(Box::new(script)),
             available: true,
         }
@@ -132,8 +136,9 @@ impl Model for Fake {
         _call: &Call<'_>,
         system: &str,
         user: &str,
-        _max_tokens: u32,
+        max_tokens: u32,
     ) -> Result<Reply, ModelFailure> {
+        self.limits.lock().expect("limits").push(max_tokens);
         let index = {
             let mut inputs = self.inputs.lock().expect("inputs");
             inputs.push(format!("{system}\n{user}"));
@@ -156,7 +161,7 @@ fn reply(pages: &[(&str, Option<u32>, &str)]) -> Reply {
             .to_string(),
         prompt_tokens: 1_000,
         completion_tokens: 200,
-        runner: false,
+        ..Reply::default()
     }
 }
 
@@ -845,20 +850,232 @@ fn bad_output_fails_the_job_without_writing() {
             text: "Sure! Here are your pages.".to_owned(),
             prompt_tokens: 10,
             completion_tokens: 5,
-            runner: false,
+            ..Reply::default()
         })
     });
     let processed = world.drain(&world.compiler(&model));
     assert_eq!(processed[0].status, JobStatus::Failed);
-    assert_eq!(processed[0].error.as_deref(), Some("bad-output"));
-    // The spend is still counted.
+    // Why, not only that: the reason is in the status.
+    assert_eq!(
+        processed[0].error.as_deref(),
+        Some("bad-output: no JSON object in the reply")
+    );
+    // One repair round was tried, and said what was wrong.
+    assert_eq!(model.calls(), 2);
+    let repair = &model.inputs()[1];
+    assert!(
+        repair.contains(
+            "REPAIR: your previous answer could not be used (no JSON object in the reply)"
+        )
+    );
+    // The spend of both calls is still counted.
     let spent = pollster::block_on(Queue::new(world.db.clone()).spent(
         WORKSPACE,
         "2000-01-01",
         "2100-01-01",
     ))
     .expect("spend");
-    assert_eq!(spent, 15);
+    assert_eq!(spent, 30);
+    // And the coding-agents log names it.
+    let scope = personal(WORKSPACE, "u1");
+    let log = pollster::block_on(world.pages().read(&scope, layout::LOG))
+        .expect("a read")
+        .expect("the log");
+    assert!(
+        log.markdown
+            .contains("bad-output: no JSON object in the reply"),
+        "{}",
+        log.markdown
+    );
+}
+
+/// The answer text a model gives for `pages`, wrapped by `wrap`.
+fn answer(pages: &[(&str, Option<u32>, &str)], wrap: impl Fn(String) -> String) -> Reply {
+    let text = reply(pages).text;
+    Reply {
+        text: wrap(text),
+        ..reply(pages)
+    }
+}
+
+#[test]
+fn a_fenced_answer_and_one_in_prose_are_both_applied() {
+    let slug = decisions();
+    for wrap in [
+        (|json: String| format!("```json\n{json}\n```")) as fn(String) -> String,
+        |json: String| format!("Here is the edit list you asked for:\n\n{json}\n\nAnything else?"),
+    ] {
+        let world = world();
+        world.sync(WORKSPACE, "u1", "s-1", "x");
+        let model = {
+            let slug = slug.clone();
+            Fake::answering(move |_, _| Ok(answer(&[(&slug, None, "- a decision")], wrap)))
+        };
+        let processed = world.drain(&world.compiler(&model));
+        assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+        assert!(processed[0].pages.contains(&slug));
+        assert_eq!(model.calls(), 1, "no repair needed");
+    }
+}
+
+#[test]
+fn a_schema_invalid_answer_is_corrected_on_repair() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    let slug = decisions();
+    let model = {
+        let slug = slug.clone();
+        Fake::answering(move |_, index| match index {
+            // Drift: the page list under the wrong type, then fixed.
+            0 => Ok(Reply {
+                text: r#"{"summary":"s","pages":{"slug":"x"}}"#.to_owned(),
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                ..Reply::default()
+            }),
+            _ => Ok(reply(&[(&slug, None, "- a decision")])),
+        })
+    };
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    assert_eq!(model.calls(), 2);
+    assert!(model.inputs()[1].contains("(schema: `pages` is not a list)"));
+    let scope = personal(WORKSPACE, "u1");
+    let page = pollster::block_on(world.pages().read(&scope, &slug))
+        .expect("a read")
+        .expect("written");
+    assert!(page.markdown.contains("- a decision"));
+}
+
+#[test]
+fn every_edit_refused_is_repaired_with_the_paths() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    let slug = decisions();
+    let model = {
+        let slug = slug.clone();
+        Fake::answering(move |_, index| match index {
+            0 => Ok(Reply {
+                text: format!(r#"{{"summary":"s","pages":[{{"slug":"{slug}"}}]}}"#),
+                ..Reply::default()
+            }),
+            _ => Ok(reply(&[(&slug, None, "- fixed")])),
+        })
+    };
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    assert!(
+        model.inputs()[1]
+            .contains("every page edit refused: pages[0]: missing `body` (or `edits`)"),
+        "{}",
+        model.inputs()[1]
+    );
+}
+
+#[test]
+fn a_cut_off_answer_is_retried_with_a_larger_limit_and_shorter_edits() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    let slug = decisions();
+    let model = {
+        let slug = slug.clone();
+        Fake::answering(move |_, index| match index {
+            0 => {
+                let full = reply(&[(&slug, None, &"- a long decision\n".repeat(50))]).text;
+                Ok(Reply {
+                    text: full[..full.len() / 2].to_owned(),
+                    prompt_tokens: 1_000,
+                    completion_tokens: 6_000,
+                    truncated: true,
+                    ..Reply::default()
+                })
+            }
+            _ => Ok(reply(&[(&slug, None, "- a decision")])),
+        })
+    };
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    let limits = model.limits.lock().expect("limits").clone();
+    assert_eq!(limits, vec![6_000, 12_000], "twice the limit on the repair");
+    assert!(model.inputs()[1].contains("cut off at the output limit (6000 tokens)"));
+    assert!(model.inputs()[1].contains("use \"edits\""));
+}
+
+#[test]
+fn a_cut_off_answer_twice_fails_saying_so() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    let model = Fake::answering(|_, _| {
+        Ok(Reply {
+            text: "{\n  \"summary\": \"s\",\n  \"pages\": [{\"slug\": \"a\", \"body\": \"- one"
+                .to_owned(),
+            prompt_tokens: 10,
+            completion_tokens: 6_000,
+            truncated: true,
+            ..Reply::default()
+        })
+    });
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Failed);
+    assert_eq!(
+        processed[0].error.as_deref(),
+        Some(
+            "bad-output: cut off at the output limit (12000 tokens): JSON cut off at line 3 column 40"
+        )
+    );
+    assert_eq!(model.calls(), 2);
+}
+
+#[test]
+fn find_replace_edits_change_only_what_they_name() {
+    let world = world();
+    let scope = personal(WORKSPACE, "u1");
+    let slug = decisions();
+    // A first compile writes the page whole.
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    let first = {
+        let slug = slug.clone();
+        Fake::answering(move |_, _| {
+            Ok(reply(&[(
+                &slug,
+                None,
+                "# Decisions\n\n- **2026-01-01** · Use D1\n",
+            )]))
+        })
+    };
+    world.drain(&world.compiler(&first));
+    let version = pollster::block_on(world.pages().read(&scope, &slug))
+        .expect("a read")
+        .expect("written")
+        .version;
+    // A second session edits it in place.
+    world.sync(WORKSPACE, "u1", "s-2", "y");
+    let second = {
+        let slug = slug.clone();
+        Fake::answering(move |_, _| {
+            Ok(Reply {
+                text: serde_json::json!({"summary": "s", "pages": [{
+                    "slug": slug, "base_version": version,
+                    "edits": [{"find": "- **2026-01-01** · Use D1", "replace": "- ~~**2026-01-01** · Use D1~~ · superseded 2026-02-01\n- **2026-02-01** · Use Postgres"}]
+                }]})
+                .to_string(),
+                ..Reply::default()
+            })
+        })
+    };
+    let processed = world.drain(&world.compiler(&second));
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    let page = pollster::block_on(world.pages().read(&scope, &slug))
+        .expect("a read")
+        .expect("written");
+    assert!(
+        page.markdown
+            .contains("~~**2026-01-01** · Use D1~~ · superseded 2026-02-01"),
+        "{}",
+        page.markdown
+    );
+    assert!(page.markdown.contains("- **2026-02-01** · Use Postgres"));
+    assert!(page.markdown.contains("# Decisions"));
 }
 
 #[test]
@@ -1907,4 +2124,63 @@ fn a_cron_tick_starts_only_what_it_has_time_for() {
     let processed = world.drain(&compiler);
     assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
     assert!(model.calls().len() > 2);
+}
+
+/// The release migration queues again the jobs that failed as a bare
+/// `bad-output` — attempts reset, so even one that ran out of attempts is
+/// compiled under the new rules — and leaves a failure that names its
+/// reason alone.
+#[test]
+fn the_requeue_migration_takes_only_bare_bad_output_failures() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    world.sync(WORKSPACE, "u1", "s-2", "y");
+    let model = Fake::answering(|_, _| {
+        Ok(Reply {
+            text: "no".to_owned(),
+            ..Reply::default()
+        })
+    });
+    let compiler = world.compiler(&model);
+    world.drain(&compiler);
+    world.drain(&compiler);
+    let failed: Vec<_> = world
+        .jobs()
+        .into_iter()
+        .filter(|job| job.status == JobStatus::Failed)
+        .collect();
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    // One failed the old way, out of attempts.
+    pollster::block_on(world.db.execute(&Statement::new(format!(
+        "UPDATE coding_agent_jobs SET last_error = 'bad-output', attempts = 3 \
+         WHERE source_id = '{}'",
+        failed[0].source_id
+    ))))
+    .expect("an update");
+    pollster::block_on(
+        world.db.execute(&Statement::new(
+            livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT
+                .sql
+                .to_owned(),
+        )),
+    )
+    .expect("the migration");
+    let jobs = world.jobs();
+    let old = jobs
+        .iter()
+        .find(|job| job.source_id == failed[0].source_id)
+        .expect("old");
+    assert_eq!(old.status, JobStatus::Queued);
+    assert_eq!(old.attempts, 0);
+    assert_eq!(old.next_attempt_at, None);
+    let new = jobs
+        .iter()
+        .find(|job| job.source_id == failed[1].source_id)
+        .expect("new");
+    assert_eq!(new.status, JobStatus::Failed);
+    assert!(
+        new.last_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("bad-output: "))
+    );
 }
