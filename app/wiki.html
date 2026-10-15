@@ -52,10 +52,17 @@
             aria-describedby="wiki-search-hint"
           />
           <span id="wiki-search-hint" class="sr">Press / to search. Results open with Enter.</span>
+          <select
+            id="wiki-project"
+            class="wiki-project"
+            aria-label="Search within a project"
+            hidden
+          ></select>
           <div id="wiki-search-results" class="wiki-search__panel" role="listbox" aria-label="Search results" hidden></div>
         </form>
         <nav class="nav" aria-label="App">
           <a href="wiki.html" aria-current="page">Wiki</a>
+          <a href="wiki.html?view=sessions">Agent sessions</a>
           <a href="settings.html">Settings</a>
           <a href="index.html" id="header-signin">Sign in</a>
         </nav>
@@ -82,6 +89,7 @@
     <aside id="wiki-drawer" class="wiki-drawer" aria-label="Menu" hidden>
       <nav class="wiki-drawer__nav" aria-label="App">
         <a href="wiki.html">Home</a>
+        <a href="wiki.html?view=sessions">Agent sessions</a>
         <a href="settings.html">Settings</a>
         <a href="index.html" id="drawer-signin">Sign in</a>
         <button type="button" id="drawer-signout" class="wiki-drawer__signout" hidden>Sign out</button>
@@ -129,6 +137,32 @@
             something worth keeping said in Slack. Or start one by hand now.
           </p>
           <button type="button" data-new-page data-variant="primary">New page</button>
+        </div>
+      </section>
+
+      <!-- sessions: the coding-agent sessions `livingbrain logs sync` filed,
+           newest first, filtered by project -->
+      <section id="sessions-view" hidden>
+        <h1>Agent sessions</h1>
+        <div class="wiki-toolbar">
+          <select
+            id="sessions-project"
+            class="wiki-filter"
+            aria-label="Show sessions from one project"
+            hidden
+          ></select>
+          <span class="status" id="sessions-status" role="status"></span>
+        </div>
+        <ul id="sessions-list" class="wiki-list" hidden></ul>
+        <button id="sessions-more" type="button" hidden>Load more</button>
+        <div id="sessions-empty" class="card wiki-empty" hidden>
+          <h2>No sessions yet</h2>
+          <p>
+            Coding-agent sessions arrive with <code>livingbrain logs sync</code>,
+            from the repositories you opted in with
+            <code>livingbrain logs allow</code>. Each one is filed under its
+            repository's name, which is the project you filter by here.
+          </p>
         </div>
       </section>
 

@@ -14,7 +14,9 @@
 //! | `POST /v1/notes` | `{body, project?, title?, slug?}` | `{id, url, version, redacted, unchanged}` |
 //! | `GET /v1/pages/{slug}` | — (slug percent-encoded) | `{slug, title, markdown, url}` |
 //! | `GET /v1/export` | `?format=obsidian` | a zip response body |
-//! | `POST /v1/pages/sources` | `{kind:"import"\|"agent_log", path, body, scope}` | `{id, kind, scope, path, sha256, wikilinks:[], redacted, created, created_at}` (issues #81, #45) |
+//! | `POST /v1/pages/sources` | `{kind:"import"\|"agent_log", path, body, scope, project?}` | `{id, kind, scope, path, project, sha256, wikilinks:[], redacted, created, created_at}` (issues #81, #45) |
+//! | `GET /v1/sources` | `?kind=&project=&limit=&cursor=` | `{sources:[{id, kind, scope, path, project, held, created_at}], next_cursor}` |
+//! | `GET /v1/sources/projects` | `?kind=` | `{projects:[{project, sources}]}` |
 //!
 //! `POST /v1/device-auth/token` answers `400 {error}` with one of
 //! `authorization_pending`, `slow_down`, `expired_token`, `access_denied`
@@ -209,13 +211,53 @@ impl Client {
     /// <id>`. `body` is the already-redacted text; the server re-redacts and
     /// derives the wikilinks itself, and answers `201` for a new source or
     /// `200` for one it already holds (the idempotency key is the scope plus
-    /// the body's SHA-256).
-    pub fn post_source(&self, kind: &str, path: &str, body: &str, scope: &str) -> CliResult<Value> {
+    /// the body's SHA-256). `project`, when given, files the source under a
+    /// project (`logs sync` sends the session's repository basename); a
+    /// re-upload that names one fills in a row that had none.
+    pub fn post_source(
+        &self,
+        kind: &str,
+        path: &str,
+        body: &str,
+        scope: &str,
+        project: Option<&str>,
+    ) -> CliResult<Value> {
         self.post_json(
             "/v1/pages/sources",
             json!({ "kind": kind, "path": path, "body": body, "scope": scope }),
-            None,
+            project,
         )
+    }
+
+    /// `GET /v1/sources` — the caller's sources, newest first, without their
+    /// bodies; `cursor` is the previous page's `next_cursor`.
+    pub fn sources(
+        &self,
+        kind: Option<&str>,
+        project: Option<&str>,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> CliResult<Value> {
+        let mut request = self.get("/v1/sources");
+        for (name, value) in [("kind", kind), ("project", project), ("cursor", cursor)] {
+            if let Some(value) = value {
+                request = request.query(name, value);
+            }
+        }
+        if let Some(limit) = limit {
+            request = request.query("limit", limit.to_string());
+        }
+        read_json(request.call().map_err(transport)?)
+    }
+
+    /// `GET /v1/sources/projects` — the projects the caller's sources are
+    /// filed under, with a count each.
+    pub fn source_projects(&self, kind: Option<&str>) -> CliResult<Value> {
+        let mut request = self.get("/v1/sources/projects");
+        if let Some(kind) = kind {
+            request = request.query("kind", kind);
+        }
+        read_json(request.call().map_err(transport)?)
     }
 
     /// POST one JSON body (plus `project`) and read the JSON answer.

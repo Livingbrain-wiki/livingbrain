@@ -137,6 +137,7 @@ fn sources_mock() -> Mock {
             "kind": body["kind"].clone(),
             "scope": body["scope"].clone(),
             "path": body["path"].clone(),
+            "project": body["project"].clone(),
             "sha256": digest,
             "wikilinks": Vec::<String>::new(),
             "redacted": 0,
@@ -302,6 +303,9 @@ fn an_opted_in_repo_uploads_redacted_sessions() {
         assert_eq!(request.bearer().as_deref(), Some(TOKEN));
         let envelope: Value = serde_json::from_str(&request.body_text()).expect("a JSON envelope");
         assert_eq!(envelope["kind"], "agent_log", "{envelope}");
+        // Filed under the repository's basename, so the server can list and
+        // filter the sessions by project without opening a body.
+        assert_eq!(envelope["project"], "demo", "{envelope}");
         // The bytes that crossed the socket are the redacted ones: the record
         // carries neither the planted key nor either spelling of the home.
         let body = envelope["body"].as_str().expect("a body string");

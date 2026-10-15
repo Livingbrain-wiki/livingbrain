@@ -1,0 +1,31 @@
+-- The project a source belongs to: one short, optional name per row, so the
+-- ledger can be listed and filtered by project (`GET /v1/sources?project=`)
+-- without opening a single sealed body.
+--
+-- A coding agent's session log names the repository it ran in only inside
+-- its body (`SessionRecord.repo`), and the body is sealed, so before this
+-- column the only way to ask "which sessions were about livingbrain?" was
+-- to unseal every one of them. `livingbrain logs sync` now sends the repo's
+-- basename as `project`, and an import may name one too.
+--
+-- Nullable, with no default: every row this migration finds arrived without
+-- a project, and NULL says exactly that. A re-upload of the same body that
+-- does name a project fills the column in (the `(scope, body_sha256)` key is
+-- unchanged, so it is never a second row).
+--
+-- Size ceiling: the route refuses a project over 64 bytes or outside
+-- `[A-Za-z0-9._-]`, so the column adds at most 64 bytes to a row and the
+-- index below stays small. It is plaintext like `rel_path` — a name the
+-- caller filed the source under, not its content — and goes with the row on
+-- erasure.
+--
+-- Same portable subset as 0001–0004 — TEXT, `ALTER TABLE ADD COLUMN`, a plain
+-- `CREATE INDEX IF NOT EXISTS` — so Postgres runs this file unchanged and no
+-- postgres override ships.
+ALTER TABLE sources ADD COLUMN project TEXT;
+
+-- The listing reads one workspace, the asker's scopes in it, and optionally
+-- one project and one kind; the projects facet reads the same prefix and
+-- groups on `project`. Leading with `workspace` and `scope` keeps the listing
+-- inside the asker's own rows before any filter applies.
+CREATE INDEX IF NOT EXISTS sources_by_project ON sources (workspace, scope, project, kind);

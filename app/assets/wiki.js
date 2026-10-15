@@ -1,5 +1,6 @@
 // The wiki page: home (list + pins), a page, its editor, the new-page form,
-// the ask panel and header search.
+// the agent-sessions list, the ask panel and header search (with its
+// project filter).
 //
 // `app.js` imports `wikiPage` from here and its boot dispatches it for
 // `body[data-page="wiki"]`, so this file is the one module the wiki page runs
@@ -44,6 +45,13 @@ const SEARCH_DEBOUNCE_MS = 200;
 /** Header search: the API caps `limit` at 25; ten fits the panel. */
 const SEARCH_LIMIT = 10;
 
+/** The server's project rule (`livingbrain_pages::is_project`): 1..64 of
+ * ASCII letters, digits, `.`, `_` and `-`, starting with a letter or digit. */
+export const PROJECT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Agent sessions: one page of the list. The API caps `limit` at 100. */
+const SESSIONS_LIMIT = 50;
+
 /** What a `TreeWalker` over text nodes asks for: `NodeFilter.SHOW_TEXT`,
  * spelled out for DOM stubs running under Node, which has no `NodeFilter`. */
 const SHOW_TEXT = 4;
@@ -67,6 +75,28 @@ export function slugify(value) {
 /** True when `value` is exactly what the server accepts as a slug. */
 export function validSlug(value) {
   return typeof value === "string" && SLUG_PATTERN.test(value);
+}
+
+/** True when `value` is exactly what the server accepts as a project. */
+export function validProject(value) {
+  return typeof value === "string" && PROJECT_PATTERN.test(value);
+}
+
+/** The header search's request: `q` and `limit`, plus `project` when one is
+ * chosen. With no project the URL is exactly what it always was. */
+export function searchPath(query, project, limit = SEARCH_LIMIT) {
+  let path = `/v1/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+  if (validProject(project)) path += `&project=${encodeURIComponent(project)}`;
+  return path;
+}
+
+/** One page of the agent-sessions list: `kind=agent_log`, the project when
+ * one is chosen, and the previous page's cursor when there is one. */
+export function sessionsPath({ project = "", cursor = "", limit = SESSIONS_LIMIT } = {}) {
+  const params = new URLSearchParams({ kind: "agent_log", limit: String(limit) });
+  if (validProject(project)) params.set("project", project);
+  if (cursor) params.set("cursor", cursor);
+  return `/v1/sources?${params.toString()}`;
 }
 
 /**
@@ -258,6 +288,8 @@ export async function wikiPage(api) {
   const params = new URLSearchParams(location.search);
   const startSlug = params.get("slug") || "";
   const startInEdit = params.get("mode") === "edit";
+  const startView = params.get("view") || "";
+  const startProject = validProject(params.get("project")) ? params.get("project") : "";
 
   const els = {
     views: {
@@ -265,6 +297,7 @@ export async function wikiPage(api) {
       page: $("#page-view"),
       editor: $("#editor-view"),
       new: $("#new-page-view"),
+      sessions: $("#sessions-view"),
     },
     notice: $("#wiki-notice"),
     status: $("#wiki-status"),
@@ -305,6 +338,12 @@ export async function wikiPage(api) {
     searchForm: $("#wiki-search-form"),
     searchInput: $("#wiki-search"),
     searchResults: $("#wiki-search-results"),
+    searchProject: $("#wiki-project"),
+    sessionsProject: $("#sessions-project"),
+    sessionsStatus: $("#sessions-status"),
+    sessionsList: $("#sessions-list"),
+    sessionsEmpty: $("#sessions-empty"),
+    sessionsMore: $("#sessions-more"),
     drawerToggle: $("#drawer-toggle"),
     drawer: $("#wiki-drawer"),
     drawerSignin: $("#drawer-signin"),
@@ -331,12 +370,19 @@ export async function wikiPage(api) {
     searchOptions: [],
     activeSearch: -1,
     previewing: false,
+    // The header search's project filter: "" is every project.
+    project: "",
+    // The projects the asker's sources are filed under (`/v1/sources/projects`).
+    projects: [],
+    sessions: [],
+    sessionsProject: startProject,
+    sessionsCursor: null,
   };
   let searchTimer = null;
 
   /* -- small shared pieces ------------------------------------------ */
 
-  const VIEWS = ["home", "page", "editor", "new"];
+  const VIEWS = ["home", "page", "editor", "new", "sessions"];
 
   function showView(name) {
     for (const view of VIEWS) els.views[view].hidden = view !== name;
@@ -495,6 +541,115 @@ export async function wikiPage(api) {
       renderHomeSignedOut();
       notice(els.notice, `Could not load pages: ${error.message}`, "bad");
       els.notice.appendChild(mkButton("Retry", loadHome));
+    }
+  }
+
+  /* -- projects: the filter both the search and the sessions list use -- */
+
+  /** Fills one `<select>` with "All projects" and then every project, keeps
+   * `selected` chosen when it is still one of them, and hides the control
+   * when there is nothing to choose between. */
+  function fillProjectSelect(select, selected) {
+    if (!select) return;
+    select.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All projects";
+    select.appendChild(all);
+    for (const entry of state.projects) {
+      const option = document.createElement("option");
+      option.value = entry.project;
+      option.textContent = `${entry.project} (${entry.sources})`;
+      select.appendChild(option);
+    }
+    const known = state.projects.some((entry) => entry.project === selected);
+    select.value = known ? selected : "";
+    select.hidden = state.projects.length === 0;
+  }
+
+  /** The projects the asker's sources are filed under. A failure here costs
+   * the filter, never the page: the selects simply stay hidden. */
+  async function loadProjects() {
+    try {
+      const data = await api("/v1/sources/projects");
+      const list = data && Array.isArray(data.projects) ? data.projects : [];
+      state.projects = list.filter((entry) => entry && validProject(entry.project));
+    } catch {
+      state.projects = [];
+    }
+    fillProjectSelect(els.searchProject, state.project);
+    fillProjectSelect(els.sessionsProject, state.sessionsProject);
+  }
+
+  /* -- agent sessions ------------------------------------------------ */
+
+  function sessionElement(row) {
+    const li = document.createElement("li");
+    li.className = "wiki-row";
+    const line = document.createElement("span");
+    line.className = "wiki-row__link";
+    const name = document.createElement("span");
+    name.className = "wiki-row__slug";
+    name.textContent = row.path || row.id || "(unnamed session)";
+    line.appendChild(name);
+    if (row.project) {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = row.project;
+      line.appendChild(pill);
+    }
+    const meta = document.createElement("span");
+    meta.className = "wiki-row__meta";
+    meta.textContent = [formatDate(row.created_at), row.scope === "shared" ? "shared" : ""]
+      .filter(Boolean)
+      .join(" · ");
+    line.appendChild(meta);
+    li.appendChild(line);
+    return li;
+  }
+
+  function renderSessions() {
+    els.sessionsList.replaceChildren();
+    for (const row of state.sessions) els.sessionsList.appendChild(sessionElement(row));
+    els.sessionsList.hidden = state.sessions.length === 0;
+    els.sessionsEmpty.hidden = state.sessions.length !== 0;
+    els.sessionsMore.hidden = !state.sessionsCursor;
+    const count = state.sessions.length;
+    els.sessionsStatus.textContent = `${count}${state.sessionsCursor ? "+" : ""} ${
+      count === 1 ? "session" : "sessions"
+    }`;
+  }
+
+  /** One page of sessions: the first (replacing the list) or the next one
+   * (`more`, appended after the cursor). */
+  async function loadSessions({ more = false } = {}) {
+    showView("sessions");
+    if (!state.signedIn) {
+      els.sessionsList.hidden = true;
+      els.sessionsEmpty.hidden = true;
+      els.sessionsMore.hidden = true;
+      if (els.sessionsProject) els.sessionsProject.hidden = true;
+      els.sessionsStatus.textContent = "";
+      signInNotice("Sign in to see your agent sessions.");
+      return;
+    }
+    const cursor = more ? state.sessionsCursor : "";
+    try {
+      const data = await api(sessionsPath({ project: state.sessionsProject, cursor }));
+      const rows = data && Array.isArray(data.sources) ? data.sources : [];
+      state.sessions = more ? state.sessions.concat(rows) : rows;
+      state.sessionsCursor = (data && data.next_cursor) || null;
+      renderSessions();
+      clearNotice();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        await loadSessions();
+        return;
+      }
+      notice(els.notice, `Could not load agent sessions: ${error.message}`, "bad");
+      els.notice.appendChild(mkButton("Retry", () => loadSessions({ more })));
     }
   }
 
@@ -1031,9 +1186,7 @@ export async function wikiPage(api) {
   async function runSearch(query) {
     let data;
     try {
-      data = await api(
-        `/v1/search?q=${encodeURIComponent(query)}&limit=${SEARCH_LIMIT}`,
-      );
+      data = await api(searchPath(query, state.project));
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) paintSearchMessage("Sign in to search.");
       else closeSearch();
@@ -1091,6 +1244,33 @@ export async function wikiPage(api) {
 
   for (const trigger of $$("[data-new-page]")) {
     trigger.addEventListener("click", openNewPage);
+  }
+
+  if (els.searchProject) {
+    els.searchProject.addEventListener("change", () => {
+      state.project = validProject(els.searchProject.value) ? els.searchProject.value : "";
+      // A query already typed is re-asked under the new filter at once.
+      const query = els.searchInput.value.trim();
+      if (query.length >= 2) runSearch(query);
+    });
+  }
+
+  if (els.sessionsProject) {
+    els.sessionsProject.addEventListener("change", async () => {
+      state.sessionsProject = validProject(els.sessionsProject.value)
+        ? els.sessionsProject.value
+        : "";
+      // The address names the filter, so a reload or a shared link keeps it.
+      const query = state.sessionsProject
+        ? `?view=sessions&project=${encodeURIComponent(state.sessionsProject)}`
+        : "?view=sessions";
+      history.replaceState(null, "", `wiki.html${query}`);
+      state.sessionsCursor = null;
+      await loadSessions();
+    });
+  }
+  if (els.sessionsMore) {
+    els.sessionsMore.addEventListener("click", () => loadSessions({ more: true }));
   }
 
   els.listFilter.addEventListener("input", () => {
@@ -1195,7 +1375,9 @@ export async function wikiPage(api) {
   state.session = await checkSession(api);
   state.signedIn = state.session.kind === "signed-in";
   paintSession();
+  if (state.signedIn) await loadProjects();
 
   if (startSlug) await openPage(startSlug, { edit: startInEdit });
+  else if (startView === "sessions") await loadSessions();
   else await loadHome();
 }

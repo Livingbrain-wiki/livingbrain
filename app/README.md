@@ -54,6 +54,8 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `PUT /v1/pages/{slug}` | `wiki.html` | **yes** — body `{markdown, base_version, title}`; `base_version: null` creates, a stale number is refused with `409`, and the response (post-redaction) is what the page then renders |
 | `GET /v1/search?q=&limit=` | `wiki.html` | **yes** — `{results:[{title, url, snippet}]}`; the header's search box asks for 10 of the server's 25 cap |
 | `POST /v1/ask` | `wiki.html` | **yes** — body `{question}`; `{answer, citations}` rendered in the ask dialog |
+| `GET /v1/sources/projects` | `wiki.html` | **yes** — `{projects:[{project, sources}]}`; fills the project filter beside the search box and on Agent sessions, hidden when empty or on any failure. With a project chosen, search sends `&project=` |
+| `GET /v1/sources?kind=agent_log&limit=50&project=&cursor=` | `wiki.html?view=sessions` | **yes** — `{sources:[{id, kind, scope, path, project, held, created_at}], next_cursor}`, newest first; "Load more" sends the cursor, and the chosen project is kept in the address (`&project=`) |
 
 ## What is NOT wired to a backend yet
 

@@ -160,6 +160,24 @@ enum Command {
         #[command(subcommand)]
         format: import::Format,
     },
+    /// List your sources (newest first): synced agent sessions, imports
+    Sources {
+        /// Only sources of this kind (`agent_log`, `import`, …)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only sources filed under this project
+        #[arg(long)]
+        project: Option<String>,
+        /// Maximum number of sources (the server caps it at 100)
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Continue from a previous listing's `next_cursor`
+        #[arg(long)]
+        cursor: Option<String>,
+        /// List the projects your sources are filed under instead
+        #[arg(long, conflicts_with_all = ["project", "limit", "cursor"])]
+        projects: bool,
+    },
     /// Sync local coding agents' session logs into the brain (opt-in per repo)
     Logs {
         #[command(subcommand)]
@@ -235,6 +253,28 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             write_export(&path, &bytes, *force)?;
             let value = json!({ "path": path, "bytes": bytes.len() });
             out.json_or(&value, || println!("Wrote {path} ({} bytes)", bytes.len()));
+            Ok(())
+        }
+        Command::Sources {
+            kind,
+            project,
+            limit,
+            cursor,
+            projects,
+        } => {
+            let client = client(cli)?;
+            if *projects {
+                let value = client.source_projects(kind.as_deref())?;
+                out.json_or(&value, || render_source_projects(&value));
+            } else {
+                let value = client.sources(
+                    kind.as_deref(),
+                    project.as_deref(),
+                    *limit,
+                    cursor.as_deref(),
+                )?;
+                out.json_or(&value, || render_sources(&value));
+            }
             Ok(())
         }
         // The walk, the preview and the confirmation all happen before the
@@ -363,5 +403,52 @@ fn render_page(value: &Value) {
     print!("{markdown}");
     if !markdown.ends_with('\n') {
         println!();
+    }
+}
+
+fn render_sources(value: &Value) {
+    let empty = Vec::new();
+    let sources = value
+        .get("sources")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if sources.is_empty() {
+        println!("No sources.");
+    }
+    for source in sources {
+        let project = match text(source, "project") {
+            "" => "-",
+            project => project,
+        };
+        println!(
+            "{}  {}  {}  {}  {}",
+            text(source, "created_at"),
+            text(source, "kind"),
+            project,
+            text(source, "path"),
+            text(source, "id"),
+        );
+    }
+    let next = text(value, "next_cursor");
+    if !next.is_empty() {
+        println!("More: --cursor {next}");
+    }
+}
+
+fn render_source_projects(value: &Value) {
+    let empty = Vec::new();
+    let projects = value
+        .get("projects")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if projects.is_empty() {
+        println!("No projects.");
+    }
+    for entry in projects {
+        println!(
+            "{}  ({} source(s))",
+            text(entry, "project"),
+            entry.get("sources").and_then(Value::as_u64).unwrap_or(0)
+        );
     }
 }
