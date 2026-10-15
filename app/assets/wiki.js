@@ -1,6 +1,7 @@
-// The wiki page: home (list + pins), a page, its editor, the new-page form,
-// the agent-sessions list and one session's transcript, the ask panel and
-// header search (with its project filter).
+// The wiki page: home (list + pins, and the compiled `coding-agents/`
+// folder), a page, its editor, the new-page form, the agent-sessions list
+// with each session's compile status and the queue card, one session's
+// transcript, the ask panel and header search (with its project filter).
 //
 // `app.js` imports `wikiPage` from here and its boot dispatches it for
 // `body[data-page="wiki"]`, so this file is the one module the wiki page runs
@@ -290,6 +291,137 @@ export function transcriptNodes(record) {
   return nodes;
 }
 
+/* ------------------------------------------------- the coding-agents wiki */
+
+/** The compiled wiki's collection (crates/livingbrain-compiler, layout.rs):
+ * a slug has no `/`, so its folder is spelled with `--` between segments —
+ * `coding-agents--claude--chi-infra--decisions` is
+ * `coding-agents/claude/chi-infra/decisions`. */
+export const CODING_AGENTS = "coding-agents";
+
+/** The folder the cross-agent project rollups live in. */
+const ROLLUP = "projects";
+
+/** A collection slug to where it sits, or null for any other slug:
+ * `{ kind: "top" | "agent" | "rollup" | "project", path, agent?, project?, page? }`. */
+export function codingAgentsPlace(slug) {
+  if (!validSlug(slug)) return null;
+  const parts = String(slug).split("--");
+  if (parts[0] !== CODING_AGENTS || parts.length < 2 || parts.length > 4) return null;
+  const rest = parts.slice(1);
+  if (rest.some((part) => !part || part.startsWith("-") || part.endsWith("-"))) return null;
+  const path = [CODING_AGENTS, ...rest];
+  if (rest.length === 1) return { kind: "top", path, page: rest[0] };
+  if (rest.length === 2 && rest[0] === ROLLUP) return { kind: "rollup", path, project: rest[1] };
+  if (rest.length === 2) return { kind: "agent", path, agent: rest[0], page: rest[1] };
+  if (rest[0] === ROLLUP) return null;
+  return { kind: "project", path, agent: rest[0], project: rest[1], page: rest[2] };
+}
+
+/** The order pages sit in inside a folder: the index first, then the fixed
+ * pages, then topics alphabetically. */
+const PAGE_ORDER = ["index", "log", "schema", "lint", "patterns", "decisions", "learnings", "architecture", "open-questions"];
+
+function pageRank(page) {
+  const at = PAGE_ORDER.indexOf(page);
+  return at === -1 ? PAGE_ORDER.length : at;
+}
+
+function byPage(a, b) {
+  return pageRank(a.place.page) - pageRank(b.place.page) || a.place.page.localeCompare(b.place.page);
+}
+
+/** The collection's pages out of a page listing, as a folder tree:
+ * `{ top, agents: [{ agent, pages, projects: [{ project, pages }] }], rollups }`,
+ * each page `{ row, place }`. Rows outside the collection are left out. */
+export function codingAgentsTree(rows) {
+  const top = [];
+  const rollups = [];
+  const agents = new Map();
+  const agent = (name) => {
+    if (!agents.has(name)) agents.set(name, { agent: name, pages: [], projects: new Map() });
+    return agents.get(name);
+  };
+  for (const row of rows || []) {
+    const place = codingAgentsPlace(row && row.slug);
+    if (!place) continue;
+    const entry = { row, place };
+    if (place.kind === "top") top.push(entry);
+    else if (place.kind === "rollup") rollups.push(entry);
+    else if (place.kind === "agent") agent(place.agent).pages.push(entry);
+    else {
+      const folder = agent(place.agent);
+      if (!folder.projects.has(place.project)) {
+        folder.projects.set(place.project, { project: place.project, pages: [] });
+      }
+      folder.projects.get(place.project).pages.push(entry);
+    }
+  }
+  top.sort(byPage);
+  rollups.sort((a, b) => a.place.project.localeCompare(b.place.project));
+  return {
+    top,
+    rollups,
+    agents: [...agents.values()]
+      .sort((a, b) => a.agent.localeCompare(b.agent))
+      .map((folder) => ({
+        agent: folder.agent,
+        pages: folder.pages.sort(byPage),
+        projects: [...folder.projects.values()]
+          .sort((a, b) => a.project.localeCompare(b.project))
+          .map((project) => ({ project: project.project, pages: project.pages.sort(byPage) })),
+      })),
+  };
+}
+
+/** The compile queue's status route, optionally for one source. */
+export function queuePath(source = "") {
+  return source
+    ? `/v1/coding-agents/queue?source=${encodeURIComponent(source)}`
+    : "/v1/coding-agents/queue?limit=100";
+}
+
+/** What each compile status says to a person. */
+export const JOB_LABELS = {
+  queued: "Queued",
+  processing: "Processing",
+  done: "Compiled",
+  failed: "Failed",
+  "skipped-no-model": "No model",
+  "over-budget": "Over budget",
+  superseded: "Superseded",
+  skipped: "Skipped",
+};
+
+export function jobLabel(status) {
+  return JOB_LABELS[status] || String(status || "");
+}
+
+/** The status route's counts as one line, busiest first, zeros left out. */
+export function queueSummary(counts) {
+  const parts = [];
+  for (const status of Object.keys(JOB_LABELS)) {
+    const n = Number((counts && counts[status]) || 0);
+    if (n > 0) parts.push(`${n} ${jobLabel(status).toLowerCase()}`);
+  }
+  return parts.length ? parts.join(" · ") : "Nothing queued";
+}
+
+/** The newest job per source id. */
+export function jobsBySource(jobs) {
+  const out = new Map();
+  for (const job of jobs || []) {
+    if (job && job.source_id && !out.has(job.source_id)) out.set(job.source_id, job);
+  }
+  return out;
+}
+
+/** A compiled page's slug as a readable path. */
+export function codingAgentsLabel(slug) {
+  const place = codingAgentsPlace(slug);
+  return place ? place.path.join("/") : String(slug || "");
+}
+
 /**
  * A search-result URL (`…/brain/{scope}/{slug}`) to its two halves, or null
  * when the path does not name both. Relative URLs are judged against the
@@ -536,6 +668,14 @@ export async function wikiPage(api) {
     sessionsList: $("#sessions-list"),
     sessionsEmpty: $("#sessions-empty"),
     sessionsMore: $("#sessions-more"),
+    caCard: $("#ca-card"),
+    caSummary: $("#ca-summary"),
+    caModel: $("#ca-model"),
+    caProcess: $("#ca-process"),
+    caResult: $("#ca-result"),
+    caSection: $("#coding-agents-section"),
+    caTree: $("#coding-agents-tree"),
+    transcriptCompile: $("#transcript-compile"),
     transcriptTitle: $("#transcript-title"),
     transcriptStatus: $("#transcript-status"),
     transcriptBody: $("#transcript-body"),
@@ -572,6 +712,8 @@ export async function wikiPage(api) {
     sessions: [],
     sessionsProject: startProject,
     sessionsCursor: null,
+    // The compile queue, keyed by source id (`/v1/coding-agents/queue`).
+    jobs: new Map(),
   };
   let searchTimer = null;
 
@@ -694,17 +836,74 @@ export async function wikiPage(api) {
     );
     const pins = readPins();
     const pinned = matches.filter((row) => pins.includes(pinId(row)));
-    const recent = matches.filter((row) => !pins.includes(pinId(row)));
+    // The compiled coding-agents pages are a folder of their own, not
+    // recent pages: they would crowd everything else off the list.
+    const recent = matches.filter(
+      (row) => !pins.includes(pinId(row)) && !codingAgentsPlace(row.slug),
+    );
     fillList(els.pinnedList, pinned, true);
     fillList(els.recentList, recent, false);
     els.pinnedSection.hidden = pinned.length === 0;
     els.recentSection.hidden = recent.length === 0;
+    renderCodingAgents(matches, query !== "");
     els.listFilter.hidden = state.rows.length === 0;
     els.homeEmpty.hidden = state.rows.length !== 0;
     els.homeNomatch.hidden = !(state.rows.length > 0 && matches.length === 0);
   }
 
+  /** One page link in the coding-agents tree, labelled by its last segment. */
+  function treeLink(entry) {
+    const li = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = `wiki.html?slug=${encodeURIComponent(entry.row.slug || "")}`;
+    link.textContent = entry.place.kind === "rollup" ? entry.place.project : entry.place.page;
+    li.appendChild(link);
+    return li;
+  }
+
+  /** A folder: `<details>` with its name and its pages and subfolders. */
+  function treeFolder(name, entries, children, open) {
+    const details = document.createElement("details");
+    details.className = "ca-folder";
+    if (open) details.setAttribute("open", "");
+    const summary = document.createElement("summary");
+    summary.textContent = `${name}/`;
+    details.appendChild(summary);
+    const list = document.createElement("ul");
+    list.className = "ca-folder__list";
+    for (const entry of entries) list.appendChild(treeLink(entry));
+    for (const child of children) {
+      const li = document.createElement("li");
+      li.appendChild(child);
+      list.appendChild(li);
+    }
+    details.appendChild(list);
+    return details;
+  }
+
+  /** The `coding-agents/` folder on the home view: agent, then project. */
+  function renderCodingAgents(rows, filtering) {
+    if (!els.caSection || !els.caTree) return;
+    const tree = codingAgentsTree(rows);
+    const empty = !tree.top.length && !tree.agents.length && !tree.rollups.length;
+    els.caSection.hidden = empty;
+    els.caTree.replaceChildren();
+    if (empty) return;
+    const agents = tree.agents.map((agent) =>
+      treeFolder(
+        agent.agent,
+        agent.pages,
+        agent.projects.map((project) => treeFolder(project.project, project.pages, [], filtering)),
+        filtering,
+      ),
+    );
+    const folders = [...agents];
+    if (tree.rollups.length) folders.push(treeFolder(ROLLUP, tree.rollups, [], filtering));
+    els.caTree.appendChild(treeFolder(CODING_AGENTS, tree.top, folders, true));
+  }
+
   function renderHomeSignedOut() {
+    if (els.caSection) els.caSection.hidden = true;
     els.listFilter.hidden = true;
     els.pinnedSection.hidden = true;
     els.recentSection.hidden = true;
@@ -798,6 +997,14 @@ export async function wikiPage(api) {
       pill.textContent = row.project;
       line.appendChild(pill);
     }
+    const job = state.jobs.get(row.id);
+    if (job) {
+      const status = document.createElement("span");
+      status.className = `pill ca-status ca-status--${job.status}`;
+      status.textContent = jobLabel(job.status);
+      if (job.error) status.setAttribute("title", job.error);
+      line.appendChild(status);
+    }
     const meta = document.createElement("span");
     meta.className = "wiki-row__meta";
     meta.textContent = [formatDate(row.created_at), row.scope === "shared" ? "shared" : ""]
@@ -805,7 +1012,98 @@ export async function wikiPage(api) {
       .join(" · ");
     line.appendChild(meta);
     li.appendChild(line);
+    if (job) {
+      const pages = compiledPages(job);
+      if (pages) li.appendChild(pages);
+    }
     return li;
+  }
+
+  /** The wiki pages one compile wrote, as links; null when it wrote none. */
+  function compiledPages(job) {
+    const slugs = (Array.isArray(job.pages) ? job.pages : []).filter(
+      (slug) => codingAgentsPlace(slug) && slug !== `${CODING_AGENTS}--log`,
+    );
+    if (!slugs.length) return null;
+    const wrap = document.createElement("span");
+    wrap.className = "ca-pages";
+    wrap.appendChild(document.createTextNode("Wrote "));
+    slugs.forEach((slug, index) => {
+      if (index) wrap.appendChild(document.createTextNode(", "));
+      const link = document.createElement("a");
+      link.href = `wiki.html?slug=${encodeURIComponent(slug)}`;
+      link.textContent = codingAgentsLabel(slug).replace(`${CODING_AGENTS}/`, "");
+      wrap.appendChild(link);
+    });
+    return wrap;
+  }
+
+  /** The queue card: counts, the model, the budget, and Process now. */
+  function paintQueueCard(data) {
+    if (!els.caCard) return;
+    if (!data) {
+      els.caCard.hidden = true;
+      return;
+    }
+    els.caCard.hidden = false;
+    els.caSummary.textContent = queueSummary(data.counts);
+    els.caModel.replaceChildren();
+    const model = data.model || {};
+    if (model.connected) {
+      els.caModel.textContent = `Compiling with ${model.provider || "your model"} · ${
+        model.model || ""
+      } (${model.role || "main"}).`;
+    } else {
+      els.caModel.textContent =
+        "No model connected, so nothing is compiled yet. Connect one under ";
+      const link = document.createElement("a");
+      link.href = "settings.html";
+      link.textContent = "Settings → Models";
+      els.caModel.appendChild(link);
+      els.caModel.appendChild(document.createTextNode(" (Main)."));
+    }
+    const budget = data.budget || {};
+    if (budget.daily_tokens != null) {
+      els.caModel.appendChild(
+        document.createTextNode(
+          ` Budget today: ${budget.spent_today || 0} of ${budget.daily_tokens} tokens.`,
+        ),
+      );
+    }
+  }
+
+  /** The compile queue for the sessions list. A failure hides the card and
+   * the statuses, never the list. */
+  async function loadQueue() {
+    try {
+      const data = await api(queuePath());
+      state.jobs = jobsBySource(data && data.jobs);
+      paintQueueCard(data);
+    } catch {
+      state.jobs = new Map();
+      paintQueueCard(null);
+    }
+  }
+
+  /** `Process now`: compile the next of the asker's sessions in the
+   * request, then show the result and refresh the list. */
+  async function processNow() {
+    if (!els.caProcess) return;
+    els.caProcess.disabled = true;
+    els.caResult.textContent = "Compiling…";
+    try {
+      const data = await api("/v1/coding-agents/process", { method: "POST", body: { max: 1 } });
+      const done = data && Array.isArray(data.processed) ? data.processed : [];
+      els.caResult.textContent = done.length
+        ? done.map((job) => jobLabel(job.status)).join(", ")
+        : "Nothing waiting.";
+    } catch (error) {
+      els.caResult.textContent = `Could not compile: ${error.message}`;
+    } finally {
+      els.caProcess.disabled = false;
+    }
+    await loadQueue();
+    renderSessions();
   }
 
   function renderSessions() {
@@ -826,6 +1124,7 @@ export async function wikiPage(api) {
   async function loadSessions({ more = false } = {}) {
     showView("sessions");
     if (!state.signedIn) {
+      if (els.caCard) els.caCard.hidden = true;
       els.sessionsList.hidden = true;
       els.sessionsEmpty.hidden = true;
       els.sessionsMore.hidden = true;
@@ -840,6 +1139,7 @@ export async function wikiPage(api) {
       const rows = data && Array.isArray(data.sources) ? data.sources : [];
       state.sessions = more ? state.sessions.concat(rows) : rows;
       state.sessionsCursor = (data && data.next_cursor) || null;
+      if (!more) await loadQueue();
       renderSessions();
       clearNotice();
     } catch (error) {
@@ -851,6 +1151,26 @@ export async function wikiPage(api) {
       }
       notice(els.notice, `Could not load agent sessions: ${error.message}`, "bad");
       els.notice.appendChild(mkButton("Retry", () => loadSessions({ more })));
+    }
+  }
+
+  /** What the compiler made of this session, above its transcript. */
+  async function paintTranscriptCompile(id) {
+    if (!els.transcriptCompile) return;
+    els.transcriptCompile.replaceChildren();
+    els.transcriptCompile.hidden = true;
+    try {
+      const data = await api(queuePath(id));
+      const job = jobsBySource(data && data.jobs).get(id);
+      if (!job) return;
+      els.transcriptCompile.appendChild(
+        document.createTextNode(`Wiki: ${jobLabel(job.status)}${job.error ? ` (${job.error})` : ""}. `),
+      );
+      const pages = compiledPages(job);
+      if (pages) els.transcriptCompile.appendChild(pages);
+      els.transcriptCompile.hidden = false;
+    } catch {
+      // The status is a nicety: the transcript stands without it.
     }
   }
 
@@ -877,6 +1197,7 @@ export async function wikiPage(api) {
           record.session_id || "",
         ).slice(0, 8)}${source.project ? ` · ${source.project}` : ""}`;
         renderInto(els.transcriptBody, transcriptNodes(record));
+        await paintTranscriptCompile(id);
       } else {
         renderInto(els.transcriptBody, [
           el("pre", [el("code", [tx((source && source.body) || "")])]),
@@ -1061,6 +1382,7 @@ export async function wikiPage(api) {
     const facts = [];
     if (page.version != null) facts.push(`v${page.version}`);
     if (where && where.scope) facts.push(where.scope);
+    if (codingAgentsPlace(page.slug)) facts.push(codingAgentsLabel(page.slug));
     if (facts.length) els.pageMeta.appendChild(document.createTextNode(facts.join(" · ")));
     renderInto(els.pageBody, renderMarkdown(stripFrontmatter(page.markdown || "")));
     linkWikilinks(els.pageBody);
@@ -1521,6 +1843,7 @@ export async function wikiPage(api) {
   if (els.sessionsMore) {
     els.sessionsMore.addEventListener("click", () => loadSessions({ more: true }));
   }
+  if (els.caProcess) els.caProcess.addEventListener("click", processNow);
 
   els.listFilter.addEventListener("input", () => {
     state.filter = els.listFilter.value;

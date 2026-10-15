@@ -140,6 +140,17 @@ one-adapter change.
   written there and nowhere else. Neither a client nor a model can name a
   scope.
 
+## In the app
+
+- **Wiki home**: the compiled pages are a `coding-agents/` folder (agent →
+  project, plus `projects/` for the rollups) instead of rows under Recent.
+  A compiled page's meta line shows its path.
+- **Agent sessions**: a queue card shows the counts, which model compiles (or
+  a link to **Settings → Models** when none is connected), the day's budget,
+  and **Process now**. Each session shows its compile status and links to
+  the pages it wrote. The transcript view shows the same above the session.
+- **Mac app**: not yet. It is a follow-up.
+
 ## Lint
 
 The lint pass is cheap and uses no model. It writes `coding-agents--lint`
