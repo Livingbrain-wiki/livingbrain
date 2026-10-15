@@ -78,5 +78,9 @@
   "pages/0005": {
     "file": "0020_pages_0005_source_project.sql",
     "sha256": "9c186496a70a760cf6c22ecaafd028fdaddf61188b2c3ba734c6d1d2f4732e61"
+  },
+  "coding-agents/0001": {
+    "file": "0021_coding-agents_0001_init.sql",
+    "sha256": "950a2cbca645ab8c41d9559e8fd4a53548627291b50135952c9697ed884199b2"
   }
 }

@@ -33,6 +33,11 @@ livingbrain-redact = { path = "../livingbrain-redact" }
 # same macro, as does declaring the `SessionAuth` seam. It is already in the
 # tree.
 async-trait = { workspace = true }
+# The coding-agents compiler (its queue, its pages), the job path onto the
+# workspace's own model, and the usage ledger whose budget gates a compile.
+livingbrain-compiler = { path = "../livingbrain-compiler" }
+livingbrain-models = { path = "../livingbrain-models" }
+livingbrain-usage = { path = "../livingbrain-usage" }
 # Request bodies, and the SHA-256 behind a note slug.
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -32,6 +32,8 @@
 mod catalog;
 mod crypto;
 mod handlers;
+// The job path: run a completion on a workspace's own connection.
+pub mod invoke;
 mod probe;
 mod selection;
 // Public so a sibling module that fetches a member-supplied URL reuses the

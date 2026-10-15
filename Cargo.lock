@@ -1695,9 +1695,12 @@ dependencies = [
  "cratefield-kms",
  "cratefield-testing",
  "livingbrain-access",
+ "livingbrain-compiler",
  "livingbrain-mcp",
+ "livingbrain-models",
  "livingbrain-pages",
  "livingbrain-redact",
+ "livingbrain-usage",
  "pollster",
  "serde",
  "serde_json",
@@ -1748,6 +1751,24 @@ dependencies = [
  "time",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "livingbrain-compiler"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cratefield-core",
+ "cratefield-kms",
+ "cratefield-testing",
+ "livingbrain-access",
+ "livingbrain-pages",
+ "livingbrain-redact",
+ "pollster",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "time",
 ]
 
 [[package]]

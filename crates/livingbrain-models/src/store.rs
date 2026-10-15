@@ -126,6 +126,25 @@ pub(crate) async fn get(
     Ok(db.query(&statement).await?.first().map(from_row))
 }
 
+/// The encrypted key of one connection, or `None`. The only read of the
+/// ciphertext column: the job path ([`crate::invoke::chat`]) decrypts it
+/// for one request and drops it; no route selects it.
+pub(crate) async fn key_ciphertext(
+    db: &dyn Database,
+    workspace_id: &str,
+    role: &str,
+) -> Result<Option<Vec<u8>>, DbError> {
+    let statement = Statement::with_values(
+        "SELECT key_ciphertext FROM model_connections WHERE workspace_id = ? AND role = ?",
+        vec![text(workspace_id), text(role)],
+    );
+    Ok(db
+        .query(&statement)
+        .await?
+        .first()
+        .and_then(|row| row.get::<Vec<u8>>("key_ciphertext")))
+}
+
 /// Deletes a model connection.
 pub(crate) async fn delete(
     db: &dyn Database,

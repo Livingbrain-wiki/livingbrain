@@ -195,6 +195,20 @@ impl Service {
         }
     }
 
+    /// This module's own context: its ports and its config.
+    pub(crate) fn ctx(&self) -> &ModuleContext {
+        &self.ctx
+    }
+
+    /// The page access this service was built with.
+    pub(crate) fn wiki(&self) -> Wiki {
+        Wiki {
+            kms: self.kms.clone(),
+            auth: self.auth.clone(),
+            session: self.session.clone(),
+        }
+    }
+
     /// The page scopes the asker may read, most specific first. The only
     /// way a route names scopes, and the reason no route takes one from the
     /// client.

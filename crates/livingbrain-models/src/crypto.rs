@@ -139,11 +139,9 @@ pub(crate) fn encrypt(
 /// Decrypts a blob produced by [`encrypt`], using the same
 /// `(workspace_id, role)` AAD. Fails if the AAD does not match.
 ///
-/// Test-only for now: nothing in this module calls a model yet, so there is
-/// no code path that spends the key. It stays because the round trip and
-/// the AAD binding are the two claims about the ciphertext worth keeping
-/// true, and a round trip needs both halves.
-#[cfg(test)]
+/// The job path ([`crate::invoke::chat`]) is the one caller that spends
+/// the key; the round trip and the AAD binding are the two claims about
+/// the ciphertext the tests keep true.
 pub(crate) fn decrypt(
     key: &[u8; 32],
     blob: &[u8],

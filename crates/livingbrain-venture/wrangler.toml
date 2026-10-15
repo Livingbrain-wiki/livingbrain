@@ -47,9 +47,12 @@ period = 60
 # Worker's modules — the `waitlist` module prunes expired confirmation claims
 # on it. A trigger configured on some other Worker never reaches this
 # handler, so the cron has to live here or the pass silently never runs.
-# Daily, in a quiet hour; the pass is safe at any cadence.
+# Daily, in a quiet hour; the pass is safe at any cadence. The quarter-hourly
+# firing drains the `coding-agents` compile queue a job or two at a time
+# (`CODING_AGENTS_BATCH`); every module sees every firing, and the waitlist's
+# prune is as safe every fifteen minutes as it is daily.
 [triggers]
-crons = ["19 4 * * *"]
+crons = ["19 4 * * *", "*/15 * * * *"]
 
 # D1 database `livingbrain`. The id is a PLACEHOLDER: `wrangler dev --local`
 # simulates the database and ignores it, so this is enough locally. A real

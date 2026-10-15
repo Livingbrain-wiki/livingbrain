@@ -24,11 +24,16 @@ pub enum EntityType {
     /// rather than a glossary term, because a radar page is not a
     /// definition and its frontmatter is a different shape.
     Radar,
+    /// A page the brain compiled out of many sources about one subject — the
+    /// coding-agents wiki's index, decisions, learnings and topic pages. Its
+    /// frontmatter says which collection and folder it belongs to, so a
+    /// reader can group compiled pages without parsing a slug.
+    Topic,
 }
 
 impl EntityType {
     /// Every variant, so a caller can enumerate them without a `match`.
-    pub const ALL: [EntityType; 7] = [
+    pub const ALL: [EntityType; 8] = [
         EntityType::Person,
         EntityType::Project,
         EntityType::Decision,
@@ -36,6 +41,7 @@ impl EntityType {
         EntityType::System,
         EntityType::Glossary,
         EntityType::Radar,
+        EntityType::Topic,
     ];
 
     /// The stable wire name, also what a `type:` frontmatter key holds.
@@ -49,6 +55,7 @@ impl EntityType {
             Self::System => "system",
             Self::Glossary => "glossary",
             Self::Radar => "radar",
+            Self::Topic => "topic",
         }
     }
 
@@ -63,6 +70,7 @@ impl EntityType {
             "system" => Some(Self::System),
             "glossary" => Some(Self::Glossary),
             "radar" => Some(Self::Radar),
+            "topic" => Some(Self::Topic),
             _ => None,
         }
     }
@@ -148,6 +156,28 @@ fn schema(entity: EntityType) -> Schema {
             required: &["title"],
             optional: &["source", "url", "topic", "score", "urgent"],
             enums: &[("urgent", &["yes", "no"])],
+        },
+        // A compiled page names the collection and folder it sits in
+        // (`collection: coding-agents`, its agent and project), what kind of
+        // page it is within that folder, when it was last compiled and the
+        // sources it was compiled from — the citation trail in frontmatter,
+        // beside the links in the body.
+        EntityType::Topic => Schema {
+            required: &["title"],
+            optional: &[
+                "collection",
+                "agent",
+                "project",
+                "page",
+                "updated",
+                "sources",
+                "decided_at",
+                "valid_from",
+                "valid_to",
+                "supersedes",
+                "superseded_by",
+            ],
+            enums: &[],
         },
     }
 }
