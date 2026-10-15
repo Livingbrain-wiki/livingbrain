@@ -7,7 +7,7 @@
 //! the page an MCP client cited. **Change them together or not at all**;
 //! the constants below must keep the original values.
 
-use livingbrain_pages::{Frontmatter, Page, PageStore, parse_frontmatter};
+use livingbrain_pages::{Page, PageStore, parse_frontmatter};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -78,8 +78,6 @@ pub(crate) struct Found {
     pub url: String,
     /// The body after the frontmatter fence, which is what a snippet quotes.
     pub body: String,
-    /// The parsed frontmatter, which the project filter reads.
-    pub frontmatter: Frontmatter,
 }
 
 impl Found {
@@ -91,7 +89,6 @@ impl Found {
             url: wiki_url(&page.scope, &page.slug),
             title: title_of(page),
             body: body_of(page),
-            frontmatter: page.frontmatter.clone(),
         }
     }
 
@@ -132,18 +129,56 @@ pub(crate) async fn find(
     Ok(found)
 }
 
-/// Keeps only the pages whose frontmatter names `project`, exactly — the
-/// `project` a note carries in its fence, or a page written with one. A
-/// page with no `project` key is not a match: an unlabelled page answers no
-/// labelled question.
-pub(crate) fn keep_project(found: Vec<Found>, project: Option<&str>) -> Vec<Found> {
-    match project {
-        Some(project) => found
-            .into_iter()
-            .filter(|page| page.frontmatter.get("project") == Some(project))
-            .collect(),
-        None => found,
+/// How many search hits a project-filtered query examines before giving
+/// up on finding `limit` pages filed under the project. The filter reads
+/// frontmatter, which only a page read reveals, so the scan is bounded
+/// rather than open-ended; it stops early as soon as `limit` pages match.
+pub(crate) const PROJECT_SCAN: usize = 250;
+
+/// [`find`], narrowed to the pages whose frontmatter names `project`
+/// exactly — the `project` a note carries in its fence, or a page written
+/// with one. A page with no `project` key is not a match: an unlabelled
+/// page answers no labelled question.
+///
+/// **The filter runs before the limit**, not after it: the search
+/// over-fetches up to [`PROJECT_SCAN`] hits and the reads stop as soon as
+/// `limit` of them match. Filtering the first `limit` hits instead would
+/// answer a narrow project with nothing whenever unlabelled pages happened
+/// to sort ahead of it. Without a project this is exactly [`find`].
+///
+/// # Errors
+///
+/// [`Problem`] from the store, mapped by [`crate::problems`].
+pub(crate) async fn find_in_project(
+    store: &PageStore,
+    scopes: &[String],
+    query: &str,
+    limit: usize,
+    project: Option<&str>,
+) -> Result<Vec<Found>, Problem> {
+    let Some(project) = project else {
+        return find(store, scopes, query, limit).await;
+    };
+    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let hits = store
+        .search(&names, query, PROJECT_SCAN.max(limit))
+        .await
+        .map_err(page_read_error)?;
+    let mut found = Vec::with_capacity(limit);
+    for hit in hits {
+        if found.len() >= limit {
+            break;
+        }
+        match store.read(&hit.scope, &hit.slug).await {
+            Ok(None) => {}
+            Ok(Some(page)) if page.frontmatter.get("project") == Some(project) => {
+                found.push(Found::of(&page));
+            }
+            Ok(Some(_)) => {}
+            Err(error) => return Err(page_read_error(error)),
+        }
     }
+    Ok(found)
 }
 
 /// A body with its whitespace collapsed, cut to [`SNIPPET_CHARS`] on a

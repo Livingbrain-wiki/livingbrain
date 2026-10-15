@@ -10,7 +10,7 @@
 
 mod common;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -95,9 +95,36 @@ fn sha256_hex(text: &str) -> String {
 /// `201 created:true` the first time it sees a body's SHA-256, `200
 /// created:false` after — dedupe on the body, which is the ledger's own
 /// idempotency key — and echoes the `kind` that arrived.
+///
+/// It answers `POST /v1/notes` the way the notes route does for a keyed
+/// note: one page per `slug`, a new version only when the note's content
+/// (title, project, body) changed, `unchanged: true` otherwise.
 fn sources_mock() -> Mock {
     let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let pages: Arc<Mutex<HashMap<String, (String, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
     let handler = move |request: &common::Request| {
+        if request.path == "/v1/notes" {
+            let body: Value = serde_json::from_str(&request.body_text()).unwrap_or(Value::Null);
+            let Some(slug) = body["slug"].as_str() else {
+                return Reply::json(400, r#"{"error":"the mock only keeps keyed notes"}"#);
+            };
+            let content = format!("{}|{}|{}", body["title"], body["project"], body["body"]);
+            let mut pages = pages.lock().expect("pages lock");
+            let (version, unchanged) = match pages.get(slug) {
+                Some((held, version)) if *held == content => (*version, true),
+                Some((_, version)) => (version + 1, false),
+                None => (1, false),
+            };
+            pages.insert(slug.to_owned(), (content, version));
+            let reply = json!({
+                "id": format!("user-scope/{slug}"),
+                "url": format!("https://livingbrain.wiki/brain/user-scope/{slug}"),
+                "version": version,
+                "redacted": 0,
+                "unchanged": unchanged,
+            });
+            return Reply::json(200, &reply.to_string());
+        }
         if request.path != "/v1/pages/sources" {
             return Reply::json(404, r#"{"error":"no such route"}"#);
         }
@@ -190,6 +217,15 @@ fn source_bodies(mock: &Mock) -> Vec<Value> {
         .collect()
 }
 
+/// Every `POST /v1/notes` body the mock saw, parsed.
+fn note_bodies(mock: &Mock) -> Vec<Value> {
+    mock.requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/notes")
+        .map(|request| serde_json::from_str(&request.body_text()).expect("a JSON note body"))
+        .collect()
+}
+
 /// The redacted session record an envelope carries.
 fn record_of(envelope: &Value) -> Value {
     serde_json::from_str(envelope["body"].as_str().expect("a body string"))
@@ -255,7 +291,11 @@ fn an_opted_in_repo_uploads_redacted_sessions() {
     // rewritten to `~` before redaction ran, so it costs the redactor nothing.
     assert_eq!(report["redacted"], 2, "{report}");
 
-    let requests = mock.requests();
+    let requests: Vec<common::Request> = mock
+        .requests()
+        .into_iter()
+        .filter(|request| request.path != "/v1/notes")
+        .collect();
     assert_eq!(requests.len(), 2, "exactly the opted-in sessions went out");
     for request in &requests {
         assert_eq!(request.path, "/v1/pages/sources");
@@ -608,8 +648,137 @@ fn a_dry_run_sends_nothing() {
             assert_eq!(session["status"], "would_upload", "{report}");
         }
     }
+    // The notes the run would write are reported too, by slug and project,
+    // without a byte of them sent.
+    assert_eq!(report["notes"], json!({ "would_write": 2 }), "{report}");
+    let claude = report["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|session| session["session_id"] == CLAUDE_SESSION)
+        .expect("the claude session is reported");
+    assert_eq!(
+        claude["note"],
+        json!({
+            "slug": format!("agent-log-claude-code-{CLAUDE_SESSION}"),
+            "project": "demo",
+            "status": "would_write",
+        }),
+        "{report}"
+    );
     assert!(
         mock.requests().is_empty(),
         "a dry run still touched the network"
+    );
+}
+
+/// (h) Every uploaded session also gets a searchable note: keyed by agent
+/// and session, filed under the repo's basename as its project, built from
+/// the same elided and redacted record, citing the source the upload
+/// answered with. A session that did not upload gets no note.
+#[test]
+fn each_uploaded_session_gets_a_note_filed_under_its_repo() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let extra = fixture_dirs(&home);
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let output = sync(&home, &real_home_envs(&mock.base), &extra);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["notes"], json!({ "written": 2 }), "{report}");
+
+    let notes = note_bodies(&mock);
+    assert_eq!(notes.len(), 2, "one note per uploaded session: {notes:?}");
+    let mut slugs: Vec<&str> = notes
+        .iter()
+        .map(|note| note["slug"].as_str().expect("a slug"))
+        .collect();
+    slugs.sort();
+    assert_eq!(
+        slugs,
+        [
+            format!("agent-log-claude-code-{CLAUDE_SESSION}"),
+            format!("agent-log-codex-{CODEX_SESSION}"),
+        ],
+        "{notes:?}"
+    );
+    for note in &notes {
+        assert_eq!(note["project"], "demo", "{note}");
+        let body = note["body"].as_str().expect("a body");
+        assert!(body.contains("- Repo: ~/code/demo"), "{body}");
+        assert!(body.contains("- Source: src-"), "cites the source: {body}");
+        assert!(body.contains("## Conversation"), "{body}");
+        assert!(!body.contains(planted_key().as_str()), "{body}");
+        assert!(!body.contains(planted_aws_key().as_str()), "{body}");
+        assert!(!body.contains("/home/alice"), "{body}");
+        assert!(!body.contains(SIDE_SESSION), "{body}");
+    }
+    let claude = notes
+        .iter()
+        .find(|note| note["body"].as_str().unwrap().contains(CLAUDE_SESSION))
+        .expect("the claude note");
+    assert_eq!(
+        claude["title"],
+        format!("claude_code session {CLAUDE_SESSION}")
+    );
+    let body = claude["body"].as_str().expect("a body");
+    assert!(body.contains("- Branch: main"), "{body}");
+    assert!(body.contains("- Models: claude-sonnet-4-5"), "{body}");
+    assert!(body.contains("- Tool calls: 1 (Bash ×1)"), "{body}");
+    assert!(
+        body.contains("- Tokens: 120 in, 45 out, 30 cache read, 15 cache write, 0 reasoning"),
+        "{body}"
+    );
+    assert!(body.contains("**User:**"), "{body}");
+    assert!(body.contains("[REDACTED:anthropic_key]"), "{body}");
+
+    // The report names each note by where it landed.
+    let sessions = report["sessions"].as_array().expect("sessions");
+    for session in sessions {
+        if session["status"] == "skipped" {
+            assert!(session.get("note").is_none(), "{session}");
+        } else {
+            assert_eq!(session["note"]["status"], "written", "{session}");
+            assert_eq!(session["note"]["project"], "demo", "{session}");
+        }
+    }
+}
+
+/// (i) Notes are idempotent: a second sync of the same sessions sends the
+/// same notes to the same slugs, and the server's `unchanged` answer is
+/// what the report says — no second page, no new version.
+#[test]
+fn re_syncing_leaves_the_notes_unchanged() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let first = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(first.status.success(), "stderr: {}", first.stderr);
+    assert_eq!(json_of(&first)["notes"], json!({ "written": 2 }));
+    let first_notes = note_bodies(&mock);
+
+    let second = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(second.status.success(), "stderr: {}", second.stderr);
+    let report = json_of(&second);
+    assert_eq!(report["notes"], json!({ "unchanged": 2 }), "{report}");
+    let second_notes: Vec<Value> = note_bodies(&mock)
+        .into_iter()
+        .skip(first_notes.len())
+        .collect();
+    let key = |note: &Value| note["slug"].as_str().unwrap_or("").to_owned();
+    let mut a = first_notes.clone();
+    let mut b = second_notes.clone();
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    assert_eq!(
+        a, b,
+        "the re-sync sent different notes for the same sessions"
     );
 }

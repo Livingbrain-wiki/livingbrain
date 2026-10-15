@@ -18,6 +18,12 @@
 //! is also the identity: a record serialises deterministically, so the
 //! ledger's `(scope, sha256)` key makes a re-sync read rows back instead of
 //! sealing copies.
+//!
+//! Each uploaded session also gets a searchable note filed under its repo's
+//! project ([`note`]), because a source alone is not a page and `search`
+//! and `ask` read pages.
+
+mod note;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -912,6 +918,9 @@ struct Prepared {
     uploaded: Option<String>,
     /// Whether the upload created the row (201) or read one back (200).
     created: bool,
+    /// The session's searchable note — planned for an opted-in session
+    /// with a repo, written after its source upload succeeds.
+    note: Option<note::Planned>,
 }
 
 /// `livingbrain logs sync`: everything before [`upload`] is local — walk,
@@ -999,6 +1008,7 @@ fn collect_sessions(
                 (None, 0)
             };
             let tool_calls = record.turns.iter().map(|turn| turn.tool_calls.len()).sum();
+            let planned_note = if opted { note::plan(&record) } else { None };
             sessions.push(Prepared {
                 record,
                 opted_in: opted,
@@ -1007,6 +1017,7 @@ fn collect_sessions(
                 tool_calls,
                 uploaded: None,
                 created: false,
+                note: planned_note,
             });
         }
     }
@@ -1039,6 +1050,16 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
             .get("created")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // Uploaded or already there, the source is in the ledger: now the
+        // page that makes it findable.
+        if let Some(planned) = session.note.as_mut() {
+            note::write(
+                &client,
+                &session.record,
+                planned,
+                session.uploaded.as_deref(),
+            );
+        }
     }
     Ok(())
 }
@@ -1055,6 +1076,7 @@ fn report(
     let (mut uploaded, mut unchanged, mut skipped) = (0usize, 0usize, 0usize);
     let mut would_upload = 0usize;
     let mut redacted_total = 0usize;
+    let mut notes: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     let mut entries = Vec::new();
     let mut lines = Vec::new();
     for session in sessions {
@@ -1095,6 +1117,11 @@ fn report(
         if let Some(id) = &session.uploaded {
             entry["id"] = json!(id);
         }
+        if session.opted_in {
+            let (note_entry, note_status) = note::report(session.note.as_ref(), dry_run);
+            entry["note"] = note_entry;
+            *notes.entry(note_status).or_default() += 1;
+        }
         entries.push(entry);
         lines.push(human_line(session, status));
     }
@@ -1108,6 +1135,7 @@ fn report(
         "unparsed": unparsed,
         "redacted": redacted_total,
         "dry_run": dry_run,
+        "notes": notes,
         "sessions": entries,
     });
     out.json_or(&report, || {
@@ -1141,6 +1169,19 @@ fn report(
             ));
         }
         println!("{summary}.");
+        if !notes.is_empty() {
+            let parts: Vec<String> = notes
+                .iter()
+                .map(|(status, count)| format!("{count} {}", status.replace('_', " ")))
+                .collect();
+            println!("Notes (searchable with --project <repo>): {}.", parts.join(", "));
+        }
+        for line in sessions
+            .iter()
+            .filter_map(|session| note::failure_line(session.note.as_ref()))
+        {
+            println!("  {line}");
+        }
         if dry_run {
             println!("Dry run: nothing was sent.");
         }

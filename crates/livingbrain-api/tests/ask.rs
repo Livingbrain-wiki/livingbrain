@@ -207,3 +207,37 @@ fn an_ask_of_the_shared_scope_finds_the_shared_page() {
         );
     }
 }
+
+/// Regression: the project narrows the pages an ask reads **before** the
+/// context-page cap, so unlabelled pages that sort first cannot crowd the
+/// project's own out of the brief.
+#[test]
+fn a_project_is_applied_before_the_context_cap() {
+    let fixture = fixture();
+    for index in 0..8 {
+        seed(
+            &fixture,
+            WORKSPACE,
+            &user("user-a"),
+            &format!("a-unlabelled-{index:02}"),
+            &format!("---\ntitle: Unlabelled {index}\n---\nThe cutover plan, take {index}."),
+        );
+    }
+    seed(
+        &fixture,
+        WORKSPACE,
+        &user("user-a"),
+        "zz-atlas",
+        "---\ntitle: Atlas cutover\nproject: atlas\n---\nThe atlas cutover plan is Friday.",
+    );
+
+    let (status, narrowed) = ask(
+        &fixture,
+        TOKEN_A,
+        json!({ "question": "cutover", "project": "atlas" }),
+    );
+    assert_eq!(status, 200, "{narrowed}");
+    let citations = narrowed["citations"].as_array().expect("citations");
+    assert_eq!(citations.len(), 1, "{narrowed}");
+    assert_eq!(citations[0]["title"], "Atlas cutover", "{narrowed}");
+}

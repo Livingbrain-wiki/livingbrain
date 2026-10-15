@@ -11,7 +11,7 @@
 //! | `POST /v1/device-auth/token` | form `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…&client_id=livingbrain-cli` | `{access_token}` |
 //! | `POST /v1/ask` | `{question, project?}` | `{answer, citations:[{title, url, quote?}]}` |
 //! | `GET /v1/search` | `?q=&project=&limit=` | `{results:[{title, url, snippet}]}` |
-//! | `POST /v1/notes` | `{body, project?}` | `{id, url}` |
+//! | `POST /v1/notes` | `{body, project?, title?, slug?}` | `{id, url, version, redacted, unchanged}` |
 //! | `GET /v1/pages/{slug}` | — (slug percent-encoded) | `{slug, title, markdown, url}` |
 //! | `GET /v1/export` | `?format=obsidian` | a zip response body |
 //! | `POST /v1/pages/sources` | `{kind:"import"\|"agent_log", path, body, scope}` | `{id, kind, scope, path, sha256, wikilinks:[], redacted, created, created_at}` (issues #81, #45) |
@@ -164,6 +164,25 @@ impl Client {
     /// `POST /v1/notes`.
     pub fn note(&self, body_text: &str, project: Option<&str>) -> CliResult<Value> {
         self.post_json("/v1/notes", json!({ "body": body_text }), project)
+    }
+
+    /// `POST /v1/notes` with the page named by the caller: `slug` keys the
+    /// note, so the same slug updates one page in place, and a resend whose
+    /// markdown is already the page's answers `unchanged: true` without a
+    /// new version. `livingbrain logs sync` keeps one note per session this
+    /// way.
+    pub fn keyed_note(
+        &self,
+        slug: &str,
+        title: &str,
+        body_text: &str,
+        project: Option<&str>,
+    ) -> CliResult<Value> {
+        self.post_json(
+            "/v1/notes",
+            json!({ "body": body_text, "title": title, "slug": slug }),
+            project,
+        )
     }
 
     /// `GET /v1/pages/{slug}`.
