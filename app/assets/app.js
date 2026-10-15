@@ -104,6 +104,7 @@ import { wikiPage } from "./wiki.js";
 import { mountShell } from "./shell.js";
 import { brainPage } from "./brain.js";
 import { settingsTab, SETTINGS_TABS } from "./nav.js";
+import { mountGithub } from "./github.js";
 
 /**
  * The API base. Same-origin by default, because the app is served from the
@@ -595,7 +596,7 @@ pages.brain = function brain() {
 const TAB_HEADS = Object.freeze({
   models: ["Settings", "Models", "Bring your own model for each job the brain does. Keys are encrypted before they are stored."],
   limits: ["Settings", "Usage & limits", "How much the brain may spend on the workspace's model, and what it has spent."],
-  integrations: ["Settings", "Integrations", "Connect your coding agent, the CLI and the tools that read from the brain."],
+  integrations: ["Settings", "Integrations", "Connect your coding agent, GitHub, the CLI and the tools that read from the brain."],
   tokens: ["Settings", "API tokens", "Tokens let a coding agent or the CLI read your brain without a browser."],
   members: ["Workspace", "Members", "Who is in this workspace and what they may do."],
   account: ["Settings", "Account", "Who you are signed in as, your workspaces, and signing out."],
@@ -650,7 +651,20 @@ pages.settings = async function settings() {
   wireSectionNav();
   wireCopyButtons();
   fillConnectPanel();
-  await Promise.all([wireModels(), wireTokens(), wireMembers(), wireBudgets()]);
+  await Promise.all([
+    wireModels(),
+    wireTokens(),
+    wireMembers(),
+    wireBudgets(),
+    mountGithub({
+      api,
+      confirm: confirmAction,
+      notify: notice,
+      document,
+      location,
+      history: window.history,
+    }).catch((error) => notice($("#github-status"), `Could not load GitHub: ${error.message}`, "bad")),
+  ]);
 };
 
 /* --- small shared pieces ------------------------------------------- */

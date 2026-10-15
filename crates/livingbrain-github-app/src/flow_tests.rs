@@ -836,7 +836,7 @@ fn the_manifest_flow_creates_seals_installs_and_lists_repositories() {
             "only this workspace's repository: {repos:?}"
         );
         assert_eq!(repos[0]["full_name"], "EarthOS-world/EarthOS.world");
-        assert_eq!(repos[0]["project"], "earthos.world");
+        assert_eq!(repos[0]["project"], "EarthOS.world");
         assert_eq!(repos[0]["scope"], "shared");
         assert_eq!(repos[0]["backfill"]["state"], "pending");
         // The credentials are sealed: the plaintext is nowhere in the row.
@@ -1303,7 +1303,7 @@ fn the_drain_backfills_within_its_budget_resumes_and_files_the_right_records() {
         assert_eq!(kinds(&w1, "github_commit"), 3);
         assert_eq!(kinds(&w1, "github_issue"), 2);
         assert_eq!(kinds(&w1, "github_pr"), 1);
-        assert!(w1.iter().all(|r| r.3 == "earthos.world"), "{w1:?}");
+        assert!(w1.iter().all(|r| r.3 == "EarthOS.world"), "{w1:?}");
         assert!(
             w1.iter()
                 .any(|r| r.2 == "github/EarthOS-world/EarthOS.world/pr/3"),

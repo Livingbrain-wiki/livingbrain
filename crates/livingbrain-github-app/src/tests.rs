@@ -562,7 +562,7 @@ fn no_read_or_write_crosses_workspaces() {
             assert_eq!(w1.len(), 1);
             assert_eq!(w1[0].installation_id, INST1);
             assert_eq!(
-                w1[0].project, "repo-one",
+                w1[0].project, "Repo-one",
                 "the default project is the repo name"
             );
             assert_eq!(w1[0].scope, "shared");
@@ -722,7 +722,7 @@ fn no_read_or_write_crosses_workspaces() {
                 .unwrap();
             assert_eq!(
                 (repo.scope.as_str(), repo.project.as_str()),
-                ("user:U1PLAIN", "brain-repo-")
+                ("user:U1PLAIN", "Brain-Repo-")
             );
             assert!(!repo.included && !repo.active);
         }

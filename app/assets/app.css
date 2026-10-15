@@ -3485,3 +3485,42 @@ body[data-page="signin"]:not([data-session="signed-in"]) .topbar .brand__word {
   padding: 8px 16px;
   border-top: 1px solid var(--line2);
 }
+
+/* GitHub rows: the mark sits on the text line, and a GitHub link keeps the
+   link colour rather than the citation's plain text. */
+.github-row .ico {
+  flex: none;
+  margin-right: 0.35em;
+  vertical-align: -3px;
+}
+
+/* GitHub setup: the owner choice is two plain radios on one line. */
+.github-owner {
+  border: 0;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+.github-owner legend {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+.github-owner label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.github-owner input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.github-owner span {
+  white-space: nowrap;
+}

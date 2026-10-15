@@ -388,6 +388,85 @@
               </ol>
             </section>
 
+            <!-- GitHub: the connection (docs/github.md). Under Integrations;
+                 the owner or admin creates the app, everyone else reads. -->
+            <section class="card sect" id="github" aria-labelledby="github-h">
+              <header class="sect__head">
+                <h2 id="github-h">GitHub</h2>
+                <p class="muted">
+                  Living Brain reads the repositories you include, read only:
+                  commits, issues and pull requests. Each repository files under
+                  its own name as a project, so agent sessions from the same
+                  repository land beside them.
+                </p>
+              </header>
+              <div id="github-banner" class="notice" role="status" aria-live="polite"></div>
+              <div id="github-status" class="notice" role="status" aria-live="polite"></div>
+              <p id="github-readonly" class="hint" hidden></p>
+
+              <div id="github-setup" hidden>
+                <fieldset class="github-owner">
+                  <legend>Create the app under</legend>
+                  <label>
+                    <input type="radio" name="github-owner" id="github-owner-user" value="user" checked />
+                    <span>Your GitHub account</span>
+                  </label>
+                  <label>
+                    <input type="radio" name="github-owner" id="github-owner-org" value="org" />
+                    <span>An organization</span>
+                  </label>
+                </fieldset>
+                <div class="field">
+                  <label for="github-org">Organization login</label>
+                  <input id="github-org" type="text" autocomplete="off" spellcheck="false" placeholder="World-360" disabled />
+                  <p class="hint">The login as it appears in the organization's GitHub URL.</p>
+                </div>
+                <div class="form-actions">
+                  <button type="button" id="github-create" data-variant="primary">Create the GitHub App</button>
+                </div>
+                <p class="hint">
+                  GitHub opens its "Create GitHub App" page with read-only
+                  permissions filled in. Nothing is read until you include a
+                  repository.
+                </p>
+              </div>
+
+              <div id="github-connected" hidden>
+                <div id="github-app" class="sect__line"></div>
+                <h3>Accounts</h3>
+                <ul id="github-installs" class="plain-list"></ul>
+                <div class="form-actions">
+                  <button type="button" id="github-add">Add another account</button>
+                  <button type="button" id="github-remove">Remove</button>
+                </div>
+                <h3>Repositories</h3>
+                <p class="hint">
+                  Shared repositories serve the whole workspace; personal ones
+                  only you. Backfill runs on the server's schedule, and the
+                  progress shows here.
+                </p>
+                <div class="table-scroll table-cards" role="region" aria-label="GitHub repositories" tabindex="0">
+                  <table class="table">
+                    <caption class="sr">Repositories GitHub has given this workspace</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Repository</th>
+                        <th scope="col">Project</th>
+                        <th scope="col">Scope</th>
+                        <th scope="col">Included</th>
+                        <th scope="col">Backfill</th>
+                        <th scope="col">Last webhook</th>
+                        <th scope="col">Last error</th>
+                      </tr>
+                    </thead>
+                    <tbody id="github-repos"></tbody>
+                  </table>
+                </div>
+                <p id="github-queue" class="tiny"></p>
+              </div>
+              <div id="github-removed" class="notice" role="status" hidden></div>
+            </section>
+
             <!-- not built yet: one compact group, nothing that looks clickable -->
             <section class="card sect" id="soon" aria-labelledby="soon-h">
               <header class="sect__head sect__head--row">

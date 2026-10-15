@@ -34,6 +34,7 @@ import {
 import { applyHeader, checkSession } from "./session.js";
 import { factsDescription, factsPath } from "./facts.js";
 import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
+import { icon } from "./shell.js";
 
 /** Where the per-browser list of pinned `scope/slug` keys lives. */
 const PIN_KEY = "lb-wiki-pinned";
@@ -86,6 +87,62 @@ export function validSlug(value) {
 /** True when `value` is exactly what the server accepts as a project. */
 export function validProject(value) {
   return typeof value === "string" && PROJECT_PATTERN.test(value);
+}
+
+/** The GitHub kinds the sources listing files under (docs/github.md). */
+export const GITHUB_KINDS = Object.freeze(["github_commit", "github_issue", "github_pr"]);
+
+/** What a GitHub kind is called in the filter and on a row. */
+export const GITHUB_KIND_LABELS = Object.freeze({
+  github_commit: "Commit",
+  github_issue: "Issue",
+  github_pr: "Pull request",
+});
+
+/** `""` (every GitHub kind) or one of `GITHUB_KINDS`. */
+export function validGithubKind(value) {
+  return value === "" || GITHUB_KINDS.includes(value);
+}
+
+/** One page of the GitHub listing for one kind: the project when chosen, and
+ * the previous page's cursor when there is one. */
+export function githubPath({ kind = "", project = "", cursor = "", limit = SESSIONS_LIMIT } = {}) {
+  const params = new URLSearchParams({ kind, limit: String(limit) });
+  if (validProject(project)) params.set("project", project);
+  if (cursor) params.set("cursor", cursor);
+  return `/v1/sources?${params.toString()}`;
+}
+
+const GITHUB_PATH_PATTERN = /^github\/([A-Za-z0-9._-]{1,100})\/([A-Za-z0-9._-]{1,100})\/(commit|issue|pr)\/([A-Za-z0-9]{1,64})$/;
+
+/** A GitHub source's label, repository and permalink, from its listing path
+ * (`github/<owner>/<repo>/commit/<sha>`, `…/issue/<n>`, `…/pr/<n>`), or null.
+ * The permalink is rebuilt from the parts, so only github.com is ever linked. */
+export function githubRef(path) {
+  const match = GITHUB_PATH_PATTERN.exec(String(path || ""));
+  if (!match) return null;
+  const [, owner, repo, leaf, id] = match;
+  const base = `https://github.com/${owner}/${repo}`;
+  const repoName = `${owner}/${repo}`;
+  if (leaf === "commit") {
+    if (!/^[0-9a-f]{7,40}$/.test(id)) return null;
+    return { label: id.slice(0, 7), repo: repoName, url: `${base}/commit/${id}` };
+  }
+  if (!/^[0-9]+$/.test(id)) return null;
+  const url = leaf === "issue" ? `${base}/issues/${id}` : `${base}/pull/${id}`;
+  return { label: `#${id}`, repo: repoName, url };
+}
+
+const GITHUB_URL_PATTERN = /^https:\/\/github\.com\/([A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100})\/(commit\/[0-9a-f]{7,40}|issues\/[0-9]+|pull\/[0-9]+)(?:[#?][^\s]*)?$/;
+
+/** The label and permalink a GitHub URL names (a citation's link), or null. */
+export function githubCitation(url) {
+  const match = GITHUB_URL_PATTERN.exec(String(url || ""));
+  if (!match) return null;
+  const [, repo, rest] = match;
+  const [kind, id] = rest.split("/");
+  const label = kind === "commit" ? id.slice(0, 7) : `#${id}`;
+  return { repo, label, url: `https://github.com/${repo}/${rest}` };
 }
 
 /** The header search's request: `q` and `limit`, plus `project` when one is
@@ -1048,6 +1105,7 @@ export async function wikiPage(api) {
       ask: $("#ask-view"),
       "coding-agents": $("#coding-agents-view"),
       imports: $("#imports-view"),
+      github: $("#github-view"),
     },
     notice: $("#wiki-notice"),
     status: $("#wiki-status"),
@@ -1073,6 +1131,12 @@ export async function wikiPage(api) {
     importsList: $("#imports-list"),
     importsMore: $("#imports-more"),
     importsEmpty: $("#imports-empty"),
+    githubKind: $("#github-kind"),
+    githubProject: $("#github-project"),
+    githubStatus: $("#github-status"),
+    githubList: $("#github-list"),
+    githubMore: $("#github-more"),
+    githubEmpty: $("#github-empty"),
     pageTitle: $("#page-title"),
     pageMeta: $("#page-meta"),
     pageBody: $("#page-body"),
@@ -1171,6 +1235,11 @@ export async function wikiPage(api) {
     // The imports listing (`/v1/sources?kind=import`) and its cursor.
     imports: [],
     importsCursor: null,
+    // The GitHub listing (`/v1/sources?kind=github_*`): kind, project, cursor.
+    github: [],
+    githubCursor: null,
+    githubKind: validGithubKind(params.get("kind")) ? params.get("kind") : "",
+    githubProject: startProject,
   };
   let searchTimer = null;
 
@@ -1178,7 +1247,7 @@ export async function wikiPage(api) {
 
   const VIEWS = [
     "home", "page", "editor", "new", "sessions", "transcript", "facts",
-    "ask", "coding-agents", "imports",
+    "ask", "coding-agents", "imports", "github",
   ];
 
   /** The tab title per view; a page's own title replaces it when it loads. */
@@ -1612,6 +1681,90 @@ export async function wikiPage(api) {
     }
   }
 
+  /* -- GitHub (Sources → GitHub) -------------------------------------- */
+
+  /** One GitHub item: its icon, the repository and `#123` or the short sha,
+   * a link to its permalink on github.com, the project and the date. */
+  function githubElement(row) {
+    const ref = githubRef(row.path);
+    const li = document.createElement("li");
+    li.className = "wiki-row github-row";
+    const line = document.createElement(ref ? "a" : "span");
+    line.className = "wiki-row__link";
+    if (ref) {
+      line.href = ref.url;
+      line.setAttribute("rel", "noopener noreferrer");
+    }
+    const mark = icon(document, "github");
+    if (mark) line.appendChild(mark);
+    const name = document.createElement("span");
+    name.className = "wiki-row__slug";
+    name.textContent = ref ? `${ref.repo} ${ref.label}` : row.path || row.id || "(unnamed GitHub item)";
+    line.appendChild(name);
+    if (row.project) {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = row.project;
+      line.appendChild(pill);
+    }
+    const meta = document.createElement("span");
+    meta.className = "wiki-row__meta";
+    meta.textContent = [GITHUB_KIND_LABELS[row.kind] || "GitHub item", formatDate(row.created_at)]
+      .filter(Boolean)
+      .join(" · ");
+    line.appendChild(meta);
+    li.appendChild(line);
+    return li;
+  }
+
+  /** Lists the chosen GitHub kind (or each kind, newest first, when none is
+   * chosen: one page of each). Only one kind pages with "Load more". */
+  async function loadGithub({ more = false } = {}) {
+    showView("github");
+    if (!state.signedIn) {
+      els.githubList.hidden = true;
+      els.githubEmpty.hidden = true;
+      els.githubMore.hidden = true;
+      els.githubStatus.textContent = "";
+      signInNotice("Sign in to see your GitHub items.");
+      return;
+    }
+    const kind = state.githubKind;
+    const project = state.githubProject;
+    const cursor = more && kind ? state.githubCursor : "";
+    els.githubStatus.textContent = "Loading…";
+    try {
+      const kinds = kind ? [kind] : GITHUB_KINDS;
+      const answers = await Promise.all(
+        kinds.map((each) => api(githubPath({ kind: each, project, cursor }))),
+      );
+      const rows = answers.flatMap((data) => (data && Array.isArray(data.sources) ? data.sources : []));
+      rows.sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+      state.github = more ? state.github.concat(rows) : rows;
+      state.githubCursor = kind ? (answers[0] && answers[0].next_cursor) || null : null;
+      if (!more) els.githubList.replaceChildren();
+      for (const row of rows) els.githubList.appendChild(githubElement(row));
+      els.githubList.hidden = state.github.length === 0;
+      els.githubEmpty.hidden = state.github.length !== 0;
+      els.githubMore.hidden = !state.githubCursor;
+      const count = state.github.length;
+      els.githubStatus.textContent = count
+        ? `${count}${state.githubCursor ? "+" : ""} ${count === 1 ? "item" : "items"}${kind ? "" : " · newest first, one page of each kind"}`
+        : "";
+      clearNotice();
+    } catch (error) {
+      els.githubStatus.textContent = "";
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        await loadGithub();
+        return;
+      }
+      notice(els.notice, `Could not load the GitHub items: ${error.message}`, "bad");
+      els.notice.appendChild(mkButton("Retry", () => loadGithub({ more })));
+    }
+  }
+
   /* -- ask the brain (the one box) ------------------------------------ */
 
   /** The Ask view; `question` pre-fills the box and asks at once. */
@@ -1729,6 +1882,7 @@ export async function wikiPage(api) {
     }
     fillProjectSelect(els.searchProject, state.project);
     fillProjectSelect(els.sessionsProject, state.sessionsProject);
+    fillProjectSelect(els.githubProject, state.githubProject);
   }
 
   /* -- agent sessions ------------------------------------------------ */
@@ -2538,10 +2692,19 @@ export async function wikiPage(api) {
       const title = String(citation.title == null ? "Untitled source" : citation.title);
       const url = String(citation.url == null ? "" : citation.url).trim();
       const quote = String(citation.quote == null ? "" : citation.quote).trim();
+      const github = githubCitation(url);
+      // A GitHub item names itself by repository and number (or short sha),
+      // and links to its permalink on github.com.
       const children = [
-        isSafeHref(url)
-          ? el("a", [tx(title)], { href: url, rel: "noopener noreferrer" })
-          : el("span", [tx(title)]),
+        github
+          ? el("a", [tx(`GitHub ${github.repo} ${github.label}`)], {
+              href: github.url,
+              rel: "noopener noreferrer",
+              class: "gh-link",
+            })
+          : isSafeHref(url)
+            ? el("a", [tx(title)], { href: url, rel: "noopener noreferrer" })
+            : el("span", [tx(title)]),
       ];
       if (quote) children.push(el("blockquote", [tx(quote)]));
       return el("li", children);
@@ -2738,6 +2901,23 @@ export async function wikiPage(api) {
   if (els.importsMore) {
     els.importsMore.addEventListener("click", () => loadImports({ more: true }));
   }
+  if (els.githubKind) {
+    els.githubKind.addEventListener("change", () => {
+      const value = els.githubKind.value;
+      state.githubKind = validGithubKind(value) ? value : "";
+      loadGithub();
+    });
+  }
+  if (els.githubProject) {
+    els.githubProject.addEventListener("change", () => {
+      const value = els.githubProject.value;
+      state.githubProject = validProject(value) ? value : "";
+      loadGithub();
+    });
+  }
+  if (els.githubMore) {
+    els.githubMore.addEventListener("click", () => loadGithub({ more: true }));
+  }
   if (els.caProcess) els.caProcess.addEventListener("click", processNow);
   if (els.caRetry) els.caRetry.addEventListener("click", retryFailed);
   if (els.sessionsList) {
@@ -2856,6 +3036,7 @@ export async function wikiPage(api) {
 
   /* -- boot: session, then route ------------------------------------------ */
 
+  if (els.githubKind) els.githubKind.value = state.githubKind;
   state.session = await checkSession(api);
   state.signedIn = state.session.kind === "signed-in";
   paintSession();
@@ -2868,6 +3049,7 @@ export async function wikiPage(api) {
   else if (startView === "ask") await openAskView(String(params.get("q") || "").trim());
   else if (startView === "coding-agents") await loadCodingAgents();
   else if (startView === "imports") await loadImports();
+  else if (startView === "github") await loadGithub();
   else if (startView === "new" && state.signedIn) {
     await loadHome();
     openNewPage();

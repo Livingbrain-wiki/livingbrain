@@ -212,7 +212,7 @@ test("the sidebar: a link per destination, a Soon row per slot, the current item
   const current = links.filter((a) => a.getAttribute("aria-current") === "page");
   assert.deepEqual(current.map((a) => a.getAttribute("data-nav")), ["facts"]);
   const soon = all(byId.get("app-nav"), "[aria-disabled]");
-  assert.deepEqual(soon.map((row) => row.getAttribute("data-nav")), ["github", "agents", "access"]);
+  assert.deepEqual(soon.map((row) => row.getAttribute("data-nav")), ["agents", "access"]);
   for (const row of soon) {
     assert.equal(row.tagName, "SPAN", "a slot is not a link");
     assert.match(row.textContent, /Soon/);

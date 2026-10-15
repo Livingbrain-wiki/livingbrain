@@ -388,6 +388,10 @@ const {
   projectSegment,
   folderSummary,
   sessionsHref,
+  githubPath,
+  githubRef,
+  githubCitation,
+  validGithubKind,
 } = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
@@ -2499,4 +2503,149 @@ test("?view=new opens the new-page form; a page shows its breadcrumbs", async ()
   assert.deepEqual(crumbs, ["Pages", "Hello"]);
   assert.equal(walk(el("page-crumbs"), "a")[0].getAttribute("href"), "wiki.html");
   assert.equal(globalThis.document.body.dataset.view, "page");
+});
+
+/* ------------------------------------------------------- GitHub (Sources) */
+
+const GH_COMMIT = {
+  id: "01HGHCOMMIT",
+  kind: "github_commit",
+  scope: "shared",
+  path: "github/World-360/EarthOS.world/commit/9f2c1e0000000000000000000000000000000000",
+  project: "EarthOS.world",
+  created_at: "2026-10-03T09:00:00Z",
+};
+const GH_ISSUE = {
+  id: "01HGHISSUE",
+  kind: "github_issue",
+  scope: "shared",
+  path: "github/World-360/EarthOS.world/issue/123",
+  project: "EarthOS.world",
+  created_at: "2026-10-01T09:00:00Z",
+};
+const GH_PR = {
+  id: "01HGHPR",
+  kind: "github_pr",
+  scope: "shared",
+  path: "github/World-360/EarthOS.world/pr/45",
+  project: "EarthOS.world",
+  created_at: "2026-10-02T09:00:00Z",
+};
+
+test("github helpers: the listing path, the permalink from a rel_path, and a citation's label", () => {
+  assert.equal(validGithubKind(""), true);
+  assert.equal(validGithubKind("github_pr"), true);
+  assert.equal(validGithubKind("import"), false);
+  assert.equal(validGithubKind("github_release"), false);
+
+  assert.equal(githubPath({ kind: "github_issue" }), "/v1/sources?kind=github_issue&limit=50");
+  assert.equal(
+    githubPath({ kind: "github_pr", project: "EarthOS.world", cursor: "01JX" }),
+    "/v1/sources?kind=github_pr&limit=50&project=EarthOS.world&cursor=01JX",
+  );
+  assert.equal(githubPath({ kind: "github_pr", project: "../x" }), "/v1/sources?kind=github_pr&limit=50");
+
+  assert.deepEqual(githubRef(GH_ISSUE.path), {
+    label: "#123",
+    repo: "World-360/EarthOS.world",
+    url: "https://github.com/World-360/EarthOS.world/issues/123",
+  });
+  assert.equal(githubRef(GH_PR.path).url, "https://github.com/World-360/EarthOS.world/pull/45");
+  assert.equal(githubRef(GH_COMMIT.path).label, "9f2c1e0");
+  assert.equal(githubRef(GH_COMMIT.path).url, `https://github.com/World-360/EarthOS.world/commit/${GH_COMMIT.path.split("/").pop()}`);
+  // Anything that is not a GitHub path gets no link, so nothing else is linked.
+  assert.equal(githubRef("notes/one.md"), null);
+  assert.equal(githubRef("github/o/r/issue/abc"), null);
+
+  assert.deepEqual(githubCitation("https://github.com/World-360/EarthOS.world/issues/123#issuecomment-9"), {
+    repo: "World-360/EarthOS.world",
+    label: "#123",
+    url: "https://github.com/World-360/EarthOS.world/issues/123",
+  });
+  assert.equal(githubCitation("https://example.com/World-360/EarthOS.world/issues/123"), null);
+  assert.equal(githubCitation("javascript:alert(1)"), null);
+});
+
+test("GitHub view: all kinds merge newest first, each row links to github.com", async () => {
+  reset({ search: "?view=github" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [{ project: "EarthOS.world", sources: 3 }] });
+    if (url === "/v1/sources?kind=github_commit&limit=50") return json({ sources: [GH_COMMIT], next_cursor: null });
+    if (url === "/v1/sources?kind=github_issue&limit=50") return json({ sources: [GH_ISSUE], next_cursor: null });
+    if (url === "/v1/sources?kind=github_pr&limit=50") return json({ sources: [GH_PR], next_cursor: null });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("github-view").hidden, false);
+  assert.equal(globalThis.document.body.dataset.view, "github");
+  const rows = el("github-list").children;
+  assert.equal(rows.length, 3);
+  // Newest first: the commit (10-03), the pull request (10-02), the issue (10-01).
+  assert.match(rows[0].textContent, /World-360\/EarthOS\.world 9f2c1e0/);
+  assert.match(rows[1].textContent, /#45/);
+  assert.match(rows[2].textContent, /#123/);
+  const links = walk(el("github-list"), "a").map((a) => a.href);
+  assert.deepEqual(links, [
+    `https://github.com/World-360/EarthOS.world/commit/${GH_COMMIT.path.split("/").pop()}`,
+    "https://github.com/World-360/EarthOS.world/pull/45",
+    "https://github.com/World-360/EarthOS.world/issues/123",
+  ]);
+  assert.equal(el("github-more").hidden, true, "every kind is one page, so nothing pages");
+  assert.match(el("github-status").textContent, /3 items/);
+  // The project filter is filled from the same list the other filters use.
+  assert.equal(el("github-project").hidden, false);
+});
+
+test("GitHub view: one kind is one request, and it pages with its own cursor", async () => {
+  reset({ search: "?view=github&kind=github_issue" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [] });
+    if (url === "/v1/sources?kind=github_issue&limit=50") {
+      return json({ sources: [GH_ISSUE], next_cursor: "01HGHISSUE" });
+    }
+    if (url === "/v1/sources?kind=github_issue&limit=50&cursor=01HGHISSUE") {
+      return json({ sources: [{ ...GH_ISSUE, id: "01HGHISSUE2", path: "github/World-360/EarthOS.world/issue/77" }], next_cursor: null });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("github-kind").value, "github_issue");
+  assert.equal(el("github-list").children.length, 1);
+  assert.equal(el("github-more").hidden, false);
+  assert.equal(el("github-project").hidden, true, "no projects, no project filter");
+  assert.ok(!calls.some((call) => call.url.includes("kind=github_pr")), "only the chosen kind is asked for");
+  await el("github-more").fire("click");
+  await drain();
+  assert.equal(el("github-list").children.length, 2);
+  assert.match(el("github-list").children[1].textContent, /#77/);
+  assert.equal(el("github-more").hidden, true);
+});
+
+test("GitHub view: none yet explains how to connect, and signed out says sign in", async () => {
+  reset({ search: "?view=github" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [] });
+    if (url.startsWith("/v1/sources?kind=github_")) return json({ sources: [], next_cursor: null });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("github-list").hidden, true);
+  assert.equal(el("github-empty").hidden, false);
+
+  reset({ search: "?view=github" });
+  seedTriggers();
+  respond = (method, url) => (url === "/v1/workspaces/me" ? json({ title: "signed out" }, 401) : json({ title: "not found" }, 404));
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(calls.some((call) => call.url.startsWith("/v1/sources?")), false, "no listing when signed out");
+  assert.match(el("wiki-notice").textContent, /Sign in to see your GitHub items/);
 });
