@@ -3,12 +3,13 @@
 # single-use states of the manifest and install flows, the installation ->
 # workspace binding, the repositories an installation reaches with their
 # backfill progress, delivery replay protection and the work queue the
-# in-Worker cron drain consumes. Routes and the drain body arrive in Part C
-# on top of this crate's store API (docs/github.md, "Storage & secrets").
+# in-Worker cron drain consumes; and (Part C) the routes under /v1/github —
+# manifest flow, install callback, webhook, settings — and the drain body
+# that backfills and ingests (docs/github.md).
 
 [package]
 name = "livingbrain-github-app"
-description = "Living Brain module: GitHub App credentials (sealed), installation binding, repositories, backfill progress and webhook replay protection"
+description = "Living Brain module: GitHub App credentials (sealed), installation binding, repositories, backfill progress, webhook intake, and the in-Worker backfill drain"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -47,7 +48,23 @@ time = { workspace = true }
 # write rather than trusted from a flag the caller passes in.
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 
+# Part C. The pure core (webhook verification, models, planner, record
+# mapping, rate-limit decision); the ledger pipeline the drain files into;
+# the access scope a repository files under; and the one `authenticate`
+# every cookie-or-bearer route here answers to.
+livingbrain-github = { path = "../livingbrain-github" }
+livingbrain-pages = { path = "../livingbrain-pages" }
+livingbrain-access = { path = "../livingbrain-access" }
+livingbrain-tokens = { path = "../livingbrain-tokens" }
+# The app JWT (RS256 over the unsealed private key). Pure Rust, no RNG:
+# wasm-safe. See `src/github.rs` for the timing note.
+cratefield-push-auth = { workspace = true }
+
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the parity suite.
 cratefield-testing = { workspace = true, features = ["postgres"] }
 pollster = { workspace = true }
+tower = { workspace = true }
+# The tests sign webhook bodies the way GitHub does.
+hmac = { workspace = true }
+async-trait = { workspace = true }

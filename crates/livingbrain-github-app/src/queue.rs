@@ -112,3 +112,21 @@ pub async fn queued_count(db: &dyn Database, workspace_id: &str) -> Result<i64, 
         .first()
         .map_or(0, |row| crate::common::get_int(row, "n")))
 }
+
+/// How many items in `workspace_id` were parked as dead after
+/// [`crate::drain::MAX_ATTEMPTS`], for a status line.
+///
+/// # Errors
+///
+/// A storage failure.
+pub async fn dead_count(db: &dyn Database, workspace_id: &str) -> Result<i64, StoreError> {
+    let rows = db
+        .query(&Statement::with_values(
+            "SELECT COUNT(*) AS n FROM github_queue WHERE workspace_id = ? AND dead = 1",
+            vec![text(workspace_id)],
+        ))
+        .await?;
+    Ok(rows
+        .first()
+        .map_or(0, |row| crate::common::get_int(row, "n")))
+}

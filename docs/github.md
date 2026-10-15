@@ -112,9 +112,8 @@ permission failure, not a wait.
 The `livingbrain-github-app` crate is the `github` module: the tables, the
 sealed credentials and the store API the routes and the cron drain use. It
 owns migration `github/0001` (collected as
-`crates/livingbrain-venture/migrations/0028_github_0001_init.sql`). It has no
-routes yet; the manifest flow, the install callback, the webhook endpoint and
-the drain body go on top of the functions below.
+`crates/livingbrain-venture/migrations/0028_github_0001_init.sql`). The routes
+and the drain body (Part C) are described in "Routes and the drain" below.
 
 ### One app per workspace
 
@@ -123,7 +122,8 @@ GitHub App on their own GitHub account. Its private key is that workspace's
 credential, so `github_app` holds one row per workspace (`workspace_id` is
 unique, `app_id` is the key). A leaked key reaches one tenant, and an
 installation can be checked against the one app it may belong to. Webhooks
-arrive per app, at `POST /v1/github/webhook/{app_id}`.
+arrive at `POST /v1/github/webhook`, and the app is named by the delivery's
+`X-GitHub-Hook-Installation-Target-ID` (see "Webhook intake" below).
 
 ### Tables
 
@@ -292,7 +292,232 @@ in code, not just stated:
 | Secrets in logs or errors | `Secret` has no `Display`, and its `Debug` is redacted. `StoreError` carries scrubbed `DbError`s and fixed `KmsError` texts. Stored error text is limited to 300 characters with control characters stripped, and the drain must never pass a header, token or body. |
 | Two cron runs at once | Queue claims are a compare-and-set on the lease, and completion needs the lease token, so an expired holder cannot complete an item that another run now holds. |
 
-Not covered here, and left for Part C: verifying the installation with GitHub
-before `bind_installation`; minting and caching installation tokens (never
-store them in these tables); answering `ping`; respecting `ctx.scheduled`
-inside the drain.
+Part C closes the four items Part B left open: the install callback verifies
+the installation with GitHub before `bind_installation`; installation tokens
+are minted and cached in memory only; `ping` is answered after the signature
+verifies; and the drain runs inside `ctx.scheduled`.
+
+## Routes and the drain (Part C)
+
+The routes are mounted at `/v1/github`. A cookie-authenticated write must pass
+the same-origin check (`livingbrain_tokens::same_origin`); a bearer write does
+not need it. Every write is owner or admin only, and the role is re-read by the
+store at the moment of the write.
+
+| route | who | what |
+|---|---|---|
+| `GET /v1/github` | any member | `configured`, `can_manage`, the app (id, slug, client id, `html_url`, `install_url`; no secrets), installations (id, account, status, `bound_by`), repositories (settings, `backfill` state, items, batches, started and finished, `waiting_until`, `last_webhook_at`, `last_error`), queue `{queued, dead}` |
+| `POST /v1/github/app/manifest` | owner/admin | body `{"owner":"user"}` or `{"owner":"org","org":"<login>"}`. Mints a manifest state and answers `{action, method:"POST", field:"manifest", manifest, manifest_json, expires_in}`. The UI posts a form with one field, `manifest` (= `manifest_json`), to `action`. 409 if the workspace already has an app |
+| `GET /v1/github/app/callback?code&state` | the member who started it (cookie) | spends the state, calls `POST /app-manifests/{code}/conversions`, seals the credentials with `save_app`, mints an install state and redirects to `https://github.com/apps/<slug>/installations/new?state=…` |
+| `POST /v1/github/app/install` | owner/admin | answers `{url}`, a fresh install link (to add another account, or to retry an install) |
+| `GET /v1/github/install/callback?installation_id&setup_action&state` | the member who started it (cookie) | spends the state, confirms the installation with GitHub, binds it, lists its repositories, redirects to the settings page |
+| `PATCH /v1/github/repos/{repo_id}` | owner/admin | body: any of `included` (bool), `scope` (`shared` or `user:<member id>`), `project`. Answers the repository |
+| `DELETE /v1/github/app` | owner/admin | forgets the app (`remove_app`) and answers `{removed, next_step:{message,url}}`: the app still exists on GitHub and must be deleted there |
+| `POST /v1/github/webhook` | GitHub | see "Webhook intake". `/v1/github/webhook/{app_id}` is accepted too |
+
+The two callbacks are browser navigations from github.com. They carry the
+session cookie (`SameSite=Lax`) and always answer `302` to a fixed path,
+`/settings.html?github=<outcome>[&reason=<reason>]#github`, never to a URL read
+from the request. Outcomes: `installed` (with `reason=repos` when the
+repository list could not be read, or `reason=suspended`), `requested` (an
+organization member asked an owner to approve; no state is spent), `created`
+(the app was saved but no install state could be minted), and `error` with one
+of `bad-request`, `signed-out`, `not-configured`, `state` (unknown, expired,
+reused, another member's or another purpose's), `conversion`, `app-exists`,
+`app-id-taken`, `forbidden`, `store`, `no-app`, `github`, `not-confirmed`,
+`bound-elsewhere`, `refused`.
+
+There is no route that runs a backfill, a sync or an import. Including a
+repository makes it due for the next cron tick.
+
+### The manifest
+
+`name` is `Living Brain (<workspace name>) <4 hex>`, at most 34 characters (the
+GitHub limit, and the suffix avoids GitHub's global name collisions). `url` is
+the web app's origin (`WORKSPACES_REDIRECT_BASE`, `https://app.livingbrain.wiki`
+in production). `hook_attributes.url` is `<origin>/v1/github/webhook` and
+`active` is true. `redirect_url` is `<origin>/v1/github/app/callback` and
+`setup_url` is `<origin>/v1/github/install/callback`. `setup_on_update` is
+false, `public` is false, and `request_oauth_on_install` is false. The default
+permissions are metadata, contents, issues and pull requests, all read. The
+default events are `push`, `issues`, `issue_comment`, `pull_request`,
+`pull_request_review`, `pull_request_review_comment` and `release`.
+Installation events are always sent to an app.
+
+### Confirming an installation
+
+The setup URL's `installation_id` is attacker-controlled. The callback mints an
+RS256 app JWT from the unsealed private key (`cratefield-push-auth`'s
+`Rs256Signer`; `iat` = now − 60 s, `exp` = now + 9 min, `iss` = the app id). It
+calls `GET /app/installations/{id}` and binds only when GitHub answers 200 for
+that id **and** that app id. The account it binds comes from GitHub's answer,
+not from the request. A 404 (another app's installation, or an id that does
+not exist) is `not-confirmed`, and no row is written. The repository list is
+then read with an installation token (`POST
+/app/installations/{id}/access_tokens`, then `GET /installation/repositories`,
+at most 10 pages) and stored with `upsert_repos`.
+
+Installation tokens live in a per-isolate in-memory cache for 50 minutes (they
+are valid for 60). They are never stored, logged or returned, and they are
+dropped when GitHub answers 401 or the app is removed.
+
+### Webhook intake
+
+The manifest has to name the hook URL before GitHub assigns an app id, so the
+URL carries none. GitHub names the app on every delivery with
+`X-GitHub-Hook-Installation-Target-Type: integration` and
+`X-GitHub-Hook-Installation-Target-ID: <app id>`, which GitHub documents as
+"the resource where the webhook was created". That header only selects which
+stored secret the body must verify under. A forged header gains nothing,
+because the body still needs a valid HMAC under that app's secret. Updating the
+hook URL after creation (`PATCH /app/hook/config`) would cost another call and
+add a failure mode for no added security, so it is not done.
+
+The steps, in order:
+
+1. Refuse a body over 1 MiB with 413 (`MAX_WEBHOOK_BYTES`, which is also the
+   module's body ceiling).
+2. Read the app id from the path or the header. If both are present and
+   disagree, there is no app.
+3. Look up `webhook_secret(app_id)`.
+4. Run `livingbrain_github::webhook::verify` over the raw bytes.
+5. `ping` answers 200.
+6. Run `Delivery::parse`. An event this connection does not act on answers
+   200 `ignored`.
+7. `record_delivery`. A replay answers 200 `replay`.
+8. Apply the delivery.
+
+Anything that does not verify (an unknown app, a missing or bad signature, the
+wrong target type) answers the same 401.
+
+The delivery is applied as follows:
+
+- `installation`: `observe_installation` with the payload's account (it never
+  binds). `deleted`, `suspend` and `unsuspend` go to `set_installation_status`.
+  `created` under an installation that is already bound upserts its
+  repositories.
+- `installation_repositories`: `upsert_repos` for the added repositories and
+  `remove_repo` for the removed ones.
+- Content events: `note_webhook`, then a reference is enqueued. `issues` and
+  `issue_comment` enqueue `item`/`<issue number>`. `pull_request`,
+  `pull_request_review` and `pull_request_review_comment` enqueue
+  `item`/`<pr number>`. `push` enqueues `push` (nothing for a deleted branch).
+  `release` is only noted, because schema version 1 has no release record.
+- Nothing happens for an installation that is unbound, not active, or bound
+  under another app.
+
+The webhook never calls GitHub. A store failure after `record_delivery`
+answers 500. GitHub's redelivery of that id then reads as a replay. The daily
+reopen below catches up whatever was missed.
+
+### The drain
+
+`GithubApp::scheduled` → `drain::run` (housekeeping, then mints the `Drain`) →
+`sync::run`. Without the key ring, or without a blob, id or defer port, only
+the housekeeping runs.
+
+- **Budget.** A tick may make at most `min(planner::DEFAULT_BUDGET,
+  ctx.scheduled remaining)` GitHub calls, and it stops at the scheduled
+  deadline. A token mint counts as a call; a cached token does not. The venture
+  mounts the module **last**, so it inherits whatever subrequests the earlier
+  modules left in the invocation (45 in total, split in order).
+- **Daily reopen.** A repository that finished more than 24 hours ago goes back
+  to `running`. Its stored cursor is the planner's `next_run`, so this is an
+  incremental pass.
+- **Queue first**, with at most half the tick when backfills are due. Items are
+  claimed one at a time, and only while at least 4 calls remain. `item`
+  re-reads the issue, its comments and (for a pull request) its reviews, then
+  files it. `push` makes a finished repository due (incremental), or sets
+  `rerun` on a running one so its next pass starts as soon as this one ends.
+  `push` makes no call. A failed item is retried by the store's `fail` with a
+  growing delay and is parked dead after its fifth attempt.
+- **Backfill.** `repos_due` (oldest `updated_at` first), skipping repositories
+  whose `wait_until` has not passed. Each repository gets `ceil(left / repos
+  left)` calls, at least 4. A pass makes one planned request at a time:
+  listings and commit details go through `planner::apply`. A listing is held
+  back while its queue holds 200 entries, which keeps the cursor far below the
+  64 KiB cap.
+- **Items as units.** An issue or pull request is read with all of its
+  activity in one tick: the issue (unless the listing just returned it), up to
+  10 pages of comments and up to 3 pages of reviews. It is then mapped
+  (`record::map_item`), filed, and removed from the planner's queue. Nothing
+  GitHub said is kept between ticks except the cursor. A unit that runs out of
+  budget is dropped and retried. If it was the first work of its tick, it is
+  filed with what was read instead, so one huge thread cannot stall a
+  repository.
+- **Cursor** (`backfill_cursor`): `{v, state: BackfillState, rerun,
+  wait_until, failures, etag_commits, etag_issues}`. It holds no content. A
+  first listing page is requested with `If-None-Match`, and a 304 costs no
+  quota.
+- **Limits.** Every answer goes through `rate::decide`. A wait (exhausted
+  quota, `retry-after`, a 429, a 5xx, a network failure, or a 2xx that leaves
+  under 10 requests) stores `wait_until` and holds every repository of that
+  installation for the rest of the tick. Any other non-success is a failure:
+  it is recorded in `last_error` as a status and a fixed text, and backs the
+  repository off for 5 minutes, doubling up to 6 hours. A 404, 410 or 422 on
+  one item or commit removes it from the queue. A 409 (an empty repository)
+  and a 410 (issues disabled) are empty listings.
+- **Done.** When the planner state is done, the cursor becomes `next_run()`.
+  The repository is marked done, unless `rerun` was set, in which case it stays
+  running for the incremental pass.
+
+### Filing
+
+Each record goes through `livingbrain_pages::Ingestor` as a `SourceIngest`:
+
+- `kind`: `GithubCommit`, `GithubIssue` or `GithubPr`.
+- `workspace`: the binding's workspace.
+- `scope`: `page_scope(workspace, Shared)`, or the member's own scope for a
+  repository set to `user:<member id>`.
+- `project`: the repository's project setting (default: the repository name,
+  lowercased). It is filed with no project if the ledger refuses the name.
+- `origin_ref`: the GitHub permalink.
+- `rel_path`: `github/<owner>/<repo>/commit/<sha>`, `/issue/<n>` or `/pr/<n>`.
+- `body`: the canonical JSON.
+- `imported_by`: the member who bound the installation (`brain:github` if that
+  id was erased).
+- `author`: none, because a GitHub login is not a member id.
+
+The pipeline redacts, dedupes on `(scope, sha256)` and seals. The same GitHub
+state produces the same bytes, so a re-read files nothing. A changed issue
+files a new source. A record redaction will not take (too large, or refused) is
+skipped. A ledger failure stops the pass without saving its cursor, so the next
+tick re-reads it and dedupe absorbs whatever had already landed.
+
+The composition roots the module's blob view on the pages key space
+(`PagesRebind` now includes `github`), so the drain's source bodies are the same
+physical `pages/…` objects every other ledger route reads.
+
+### Connecting a workspace (owner click-path)
+
+These steps use World-360's `EarthOS.world` as the example. They assume Part D
+has built the settings UI on the routes above.
+
+1. Sign in to `https://app.livingbrain.wiki` as an owner or admin of the
+   workspace. Open Settings, then GitHub.
+2. Choose **Create the GitHub App**. For World-360, pick the organization owner
+   `EarthOS-world` (or whichever GitHub org owns the repository). Living Brain
+   calls `POST /v1/github/app/manifest` and posts the manifest form to GitHub.
+3. On GitHub's "Create GitHub App" page, the name, permissions (read only) and
+   events are filled in. Click **Create GitHub App for EarthOS-world**. GitHub
+   creates the app and sends you back to Living Brain, which stores its
+   credentials sealed and forwards you to the app's install page.
+4. On the install page, pick the account (`EarthOS-world`), choose **Only
+   select repositories**, select `EarthOS.world`, and click **Install**. GitHub
+   sends you back to Living Brain, which confirms the installation with GitHub,
+   binds it to the workspace and lists the repository.
+5. Back on Settings → GitHub, the repository shows as pending, shared, project
+   `earthos.world`. Change the scope or project here if needed. The backfill
+   starts on the next cron tick (every 15 minutes) and shows its progress on
+   this page. Nothing needs to be clicked to start it, and nothing can.
+
+To disconnect, choose **Remove**. Living Brain forgets the credentials, and the
+answer links to the app on GitHub, which must be deleted there (Advanced, then
+Delete GitHub App).
+
+### Deployment
+
+No new secret or binding is needed. The app credentials live sealed in D1 under
+the existing `HARNESS_KEK_*` ring. The tables are the existing `github/0001`
+migration. `WORKSPACES_REDIRECT_BASE` already names each environment's
+origin, so a staging app points its webhook at the staging Worker.

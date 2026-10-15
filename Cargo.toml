@@ -54,6 +54,10 @@ cratefield-adapter-typesafe = "=0.3.0"
 # wrap and unwrap a data key (issue #43). It has no dependency on
 # `cratefield-core` at all, so it cannot pull a second copy of the ports in.
 cratefield-kms = "=0.2.0"
+# RS256 for the GitHub App's JWT (the GitHub connection, Part C): the
+# harness's own pure-Rust signer, `rsa` 0.9 with no RNG, so it builds for the
+# Worker. It depends on `cratefield-core` 0.8, the one copy above.
+cratefield-push-auth = "=0.3.0"
 # Turnstile, the captcha on the waitlist's public join form (issue #23).
 cratefield-adapter-turnstile = "=0.3.0"
 

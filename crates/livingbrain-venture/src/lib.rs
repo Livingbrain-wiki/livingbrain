@@ -408,17 +408,26 @@ fn build(
             // ask route's numbers and the spend limit, over the usage
             // module's `usage_budgets` row. No blob, so it is served like
             // `usage` rather than through the CLI divert.
-            .module(BudgetSettings::new())
-            // The GitHub connection (Part B: storage and sealed secrets).
-            // No routes yet; mounted so its tables are migrated and its
-            // cron housekeeping runs. Part C adds the routes and the drain.
-            .module(GithubApp::new());
+            .module(BudgetSettings::new());
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
-        let builder = cli_modules(kms, classifier)
+        let builder = cli_modules(kms.clone(), classifier)
             .into_iter()
             .fold(builder, HarnessBuilder::module_arc);
+        // The GitHub connection (docs/github.md): the manifest flow, the
+        // install callback, the webhook, the settings routes and the cron
+        // drain that backfills into the ledger. Mounted with or without the
+        // key ring so its tables are always migrated; without it the flow
+        // answers 503 and the drain only does housekeeping. **Mounted
+        // last on purpose:** the cron splits one invocation's subrequests
+        // across the modules in order, each module's unspent share rolling
+        // forward, so the last module inherits whatever the others left.
+        let github = match kms {
+            Some(kms) => GithubApp::new().with_kms(kms),
+            None => GithubApp::new(),
+        };
         builder
+            .module(github)
             .runtime(runtime.clone())
             .build()
             .expect("the livingbrain harness is valid")

@@ -4,13 +4,13 @@
 //! the repositories an installation reaches with their backfill progress,
 //! webhook replay protection, and the work queue the cron drain consumes.
 //!
-//! This is Part B of the GitHub connection. Part A (`livingbrain-github`)
+//! Parts B and C of the GitHub connection. Part A (`livingbrain-github`)
 //! is the pure crate — webhook signature verification, payload models, the
-//! payload → page mapping, the backfill planner — and Part C adds this
-//! module's routes (manifest flow, install callback, `POST
-//! /v1/github/webhook/{app_id}`) and the body of its cron drain on top of
-//! the store API exported here. `docs/github.md` ("Storage & secrets")
-//! documents that API and its threat model.
+//! payload → page mapping, the backfill planner. Part B is the store API
+//! exported here; Part C is the module's routes (`routes.rs`: manifest
+//! flow, install callback, `POST /v1/github/webhook`, the settings reads
+//! and writes) and the body of its cron drain (`sync.rs`).
+//! `docs/github.md` documents the API, the routes and the threat model.
 //!
 //! # Why a module crate, not a pure store crate
 //!
@@ -29,9 +29,10 @@
 //! credential, so it is stored per workspace (`github_app.workspace_id` is
 //! unique), which keeps the blast radius of one leaked key to one tenant and
 //! lets an installation be checked against the one app it may belong to.
-//! Webhooks therefore arrive per app (`/v1/github/webhook/{app_id}`), are
-//! verified with that app's secret ([`webhook_secret`]), and route only to
-//! installations held under that app id ([`route_installation`]).
+//! Webhooks therefore arrive per app (`POST /v1/github/webhook`, the app
+//! named by `X-GitHub-Hook-Installation-Target-ID`), are verified with that
+//! app's secret ([`webhook_secret`]), and route only to installations held
+//! under that app id ([`route_installation`]).
 //!
 //! # Backfill runs only inside the Worker
 //!
@@ -44,10 +45,14 @@ mod app;
 mod common;
 mod deliveries;
 pub mod drain;
+mod github;
 mod installations;
+mod intake;
 mod queue;
 mod repos;
+mod routes;
 mod seal;
+mod sync;
 
 pub use app::{
     AppCredentials, AppSummary, DEFAULT_STATE_TTL_SECS, MAX_STATE_TTL_SECS, NewApp, SaveAppOutcome,
@@ -61,28 +66,82 @@ pub use installations::{
     Account, BindOutcome, Installation, InstallationStatus, Route, bind_installation,
     list_installations, observe_installation, route_installation, set_installation_status,
 };
-pub use queue::{WorkItem, enqueue, queued_count};
+pub use queue::{WorkItem, dead_count, enqueue, queued_count};
 pub use repos::{
     BackfillPhase, Repo, RepoRef, RepoSettings, get_repo, list_repos, note_webhook, remove_repo,
     set_repo_settings, upsert_repos,
 };
 pub use seal::Secret;
 
+use std::sync::Arc;
+
 use cratefield_core::axum;
 use cratefield_core::{
     AnyError, BoxFuture, Config, ConfigError, DataKind, Disposition, Migrations, Module,
     ModuleContext, PersonalDataSet, Port, SqlMigration,
 };
+use cratefield_kms::Kms;
 
-/// The GitHub module. Today it owns the tables and the scheduled
-/// housekeeping; Part C mounts its routes under `/v1/github`.
-#[derive(Debug, Default)]
-pub struct GithubApp;
+/// The largest webhook body accepted, in bytes. GitHub caps a payload at
+/// 25 MB, but every event this connection subscribes to is far smaller (a
+/// push lists at most 20 commits); a bigger body is refused unread rather
+/// than buffered.
+pub const MAX_WEBHOOK_BYTES: usize = 1024 * 1024;
+
+/// What the routes and the drain share for the life of the isolate: the
+/// key custodian the app credentials are sealed under, and the in-memory
+/// installation-token cache.
+pub(crate) struct Shared {
+    pub kms: Option<Arc<dyn Kms>>,
+    pub tokens: github::TokenCache,
+}
+
+/// The GitHub module: its tables, the routes under `/v1/github` (manifest
+/// flow, install callback, webhook, settings) and the cron drain that
+/// backfills and ingests.
+///
+/// Without a key custodian ([`GithubApp::with_kms`]) the tables are still
+/// migrated and the housekeeping runs, but nothing can seal or open an app
+/// credential: the flow routes answer 503 and the webhook 401.
+pub struct GithubApp {
+    shared: Arc<Shared>,
+}
+
+impl std::fmt::Debug for GithubApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubApp")
+            .field("kms", &self.shared.kms.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for GithubApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GithubApp {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            shared: Arc::new(Shared {
+                kms: None,
+                tokens: github::TokenCache::default(),
+            }),
+        }
+    }
+
+    /// The key ring the app credentials are sealed under — the venture's
+    /// `HARNESS_KEK_*`, the same custodian the page store uses.
+    #[must_use]
+    pub fn with_kms(self, kms: Arc<dyn Kms>) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                kms: Some(kms),
+                tokens: github::TokenCache::default(),
+            }),
+        }
     }
 }
 
@@ -106,9 +165,24 @@ impl Module for GithubApp {
     }
 
     /// The database holds everything; the clock stamps rows and drives the
-    /// scheduled housekeeping.
+    /// scheduled housekeeping; the HTTP client reaches GitHub; the signer
+    /// verifies the session cookie.
     fn requires(&self) -> &'static [Port] {
-        &[Port::Db, Port::Clock]
+        &[Port::Db, Port::Clock, Port::HttpClient, Port::Signer]
+    }
+
+    /// What the drain files into the ledger with: the page store's blob
+    /// (rebound onto the pages key space by the composition), ids, and the
+    /// defer port the pipeline enqueues extraction on. Without them the
+    /// drain does its housekeeping and files nothing.
+    fn optional(&self) -> &'static [Port] {
+        &[Port::Blob, Port::IdGen, Port::Defer]
+    }
+
+    /// Webhook bodies can exceed the 64 KiB JSON default (a push lists up
+    /// to 20 commits; an installation event lists its repositories).
+    fn max_body_bytes(&self, _cfg: &dyn Config) -> usize {
+        MAX_WEBHOOK_BYTES
     }
 
     fn tables(&self) -> &'static [&'static str] {
@@ -205,9 +279,8 @@ impl Module for GithubApp {
         Ok(())
     }
 
-    /// No routes yet: Part C mounts them here.
-    fn router(&self, _ctx: ModuleContext) -> axum::Router {
-        axum::Router::new()
+    fn router(&self, ctx: ModuleContext) -> axum::Router {
+        routes::router(ctx, Arc::clone(&self.shared))
     }
 
     /// The in-Worker drain, and the only place a [`Drain`] is minted.
@@ -217,7 +290,7 @@ impl Module for GithubApp {
         cron: &'a str,
     ) -> BoxFuture<'a, Result<(), AnyError>> {
         Box::pin(async move {
-            drain::run(ctx, cron)
+            drain::run(ctx, cron, &self.shared)
                 .await
                 .map_err(|error| AnyError::from(error.to_string()))
         })
@@ -226,3 +299,6 @@ impl Module for GithubApp {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod flow_tests;

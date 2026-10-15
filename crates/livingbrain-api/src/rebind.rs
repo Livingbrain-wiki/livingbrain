@@ -123,7 +123,7 @@ impl Blob for RebindBlob {
 /// The whole port layer, rooted on the pages key space: every key one of
 /// this crate's modules writes arrives carrying that module's own scope
 /// (`notes/…`, `search/…`, `ask/…`, `export/…`, `sources/…`,
-/// `coding-agents/…`, `model-jobs/…` — the harness's
+/// `coding-agents/…`, `model-jobs/…`, `github/…` — the harness's
 /// [`ScopedBlob`] keyed it) and is rewritten to `pages/…`; every other key
 /// passes through untouched, so the `pages` module's own `pages/…` keys land
 /// exactly as they always did.
@@ -147,7 +147,7 @@ pub struct PagesRebind {
     /// store the runtime resolved, and the `pages` module's own path.
     inner: Arc<dyn Blob>,
     /// The per-module rebinds, one per name this crate mounts.
-    rebinds: [(&'static str, RebindBlob); 7],
+    rebinds: [(&'static str, RebindBlob); 8],
 }
 
 impl PagesRebind {
@@ -185,6 +185,13 @@ impl PagesRebind {
                 (
                     "model-jobs",
                     RebindBlob::new(Arc::clone(&inner), "model-jobs", "pages"),
+                ),
+                // The GitHub drain files commits, issues and pull requests
+                // into the source ledger, whose bodies live in the pages
+                // key space (docs/github.md).
+                (
+                    "github",
+                    RebindBlob::new(Arc::clone(&inner), "github", "pages"),
                 ),
             ],
             inner,
@@ -455,7 +462,16 @@ mod tests {
         let memory = Arc::new(MemoryBlob::new());
         let planted = Arc::new(PagesRebind::new(memory.clone()));
 
-        for module in ["notes", "search", "ask", "export", "sources"] {
+        for module in [
+            "notes",
+            "search",
+            "ask",
+            "export",
+            "sources",
+            "coding-agents",
+            "model-jobs",
+            "github",
+        ] {
             let scoped = ScopedBlob::new(Arc::clone(&planted) as Arc<dyn Blob>, module);
             // The key as the page store writes it: relative, because the
             // scope has not crossed it yet.
