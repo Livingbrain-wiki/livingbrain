@@ -50,6 +50,16 @@
 //! answers a missing or rejected credential with **one** 401 problem body —
 //! the two cases are indistinguishable from the outside, exactly as the
 //! MCP server answers.
+//!
+//! The web app is the other client, and it never sends a bearer: its session
+//! is the `HttpOnly` cookie the browser attaches. A request with no
+//! `Authorization` header at all is resolved through [`SessionAuth`] when
+//! the composition wired one ([`Wiki::with_session`]) — the venture backs it
+//! with the tokens module's session resolver, the same one `/v1/models` and
+//! `/v1/usage` answer to — and a cookie-authenticated request whose method
+//! is not safe must also pass the same-origin check, because a cookie is a
+//! credential the browser sends whoever wrote the page. The MCP endpoint is
+//! not one of these routes and stays bearer-only.
 
 #![forbid(unsafe_code)]
 
@@ -71,6 +81,7 @@ pub use notes::Notes;
 pub use pages::pages_routes;
 pub use rebind::{PagesRebind, RebindBlob};
 pub use search::Search;
+pub use service::SessionAuth;
 pub use sources::Sources;
 
 use cratefield_core::Problem;
@@ -88,6 +99,9 @@ use std::sync::Arc;
 ///   module itself is handed one.
 /// - `auth` — the bearer-to-asker resolver, issue #72's seam. The OAuth
 ///   server replaces the implementation; these routes do not change.
+/// - `session` — the session-cookie resolver the web app's requests are
+///   answered through ([`SessionAuth`]), or `None` for a bearer-only
+///   surface. [`Wiki::new`] leaves it unset; [`Wiki::with_session`] wires it.
 ///
 /// The pages blob is deliberately **not** one of them: it arrives per
 /// request through the module's own `ctx.ports.blob`, rooted on the pages
@@ -103,14 +117,29 @@ pub struct Wiki {
     pub kms: Arc<dyn Kms>,
     /// Resolves a bearer credential to the asker it speaks for.
     pub auth: Arc<dyn BearerAuth>,
+    /// Resolves the web app's session cookie, when one is wired.
+    pub session: Option<Arc<dyn SessionAuth>>,
 }
 
 impl Wiki {
     /// A `Wiki` over one key custodian and one credential resolver — the
-    /// `Arc`s the composition already holds for the pages module.
+    /// `Arc`s the composition already holds for the pages module. Bearer
+    /// only until [`Wiki::with_session`] adds the cookie.
     #[must_use]
     pub fn new(kms: Arc<dyn Kms>, auth: Arc<dyn BearerAuth>) -> Self {
-        Self { kms, auth }
+        Self {
+            kms,
+            auth,
+            session: None,
+        }
+    }
+
+    /// The same `Wiki`, also answering to the web app's session cookie
+    /// through `session` (see [`SessionAuth`] for when it is consulted).
+    #[must_use]
+    pub fn with_session(mut self, session: Arc<dyn SessionAuth>) -> Self {
+        self.session = Some(session);
+        self
     }
 }
 

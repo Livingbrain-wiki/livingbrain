@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::{Query, State};
-use cratefield_core::axum::http::HeaderMap;
+use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use serde_json::{Value, json};
@@ -94,10 +94,11 @@ impl Module for Search {
 /// unparseable `limit`, and the store's mapped problem otherwise.
 async fn search(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let q = query
         .get("q")
         .map(|q| q.trim())

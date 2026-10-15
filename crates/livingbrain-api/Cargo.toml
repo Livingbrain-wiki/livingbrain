@@ -30,7 +30,8 @@ livingbrain-access = { path = "../livingbrain-access" }
 livingbrain-redact = { path = "../livingbrain-redact" }
 # The `Blob` port is declared with `#[async_trait]`, so implementing it here
 # (`RebindBlob`, the per-request bridge onto the pages key space) needs the
-# same macro. It is already in the tree.
+# same macro, as does declaring the `SessionAuth` seam. It is already in the
+# tree.
 async-trait = { workspace = true }
 # Request bodies, and the SHA-256 behind a note slug.
 serde = { workspace = true }

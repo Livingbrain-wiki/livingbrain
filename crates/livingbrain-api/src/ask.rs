@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::State;
-use cratefield_core::axum::http::HeaderMap;
+use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::post;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use serde::Deserialize;
@@ -105,10 +105,11 @@ struct AskRequest {
 /// mapped problem otherwise.
 async fn ask(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Json(request): Json<AskRequest>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let question = request.question.trim();
     if question.is_empty() {
         return Err(Problem::validation_failed("`question` is required"));

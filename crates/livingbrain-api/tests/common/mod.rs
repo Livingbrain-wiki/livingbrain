@@ -134,15 +134,8 @@ pub fn fixture() -> Fixture {
     let memory: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
     let wiki = Wiki::new(Arc::clone(&key), Arc::clone(&auth));
 
-    let auth_for_routes = Arc::clone(&auth);
-    let key_for_routes = Arc::clone(&key);
-    let pages = Pages::new().surface(move |ctx| {
-        pages_routes(
-            ctx,
-            Arc::clone(&key_for_routes),
-            Arc::clone(&auth_for_routes),
-        )
-    });
+    let wiki_for_routes = wiki.clone();
+    let pages = Pages::new().surface(move |ctx| pages_routes(ctx, &wiki_for_routes));
     let modules: Vec<Box<dyn cratefield_core::Module>> = vec![
         Box::new(pages),
         Box::new(Notes::new(wiki.clone())),

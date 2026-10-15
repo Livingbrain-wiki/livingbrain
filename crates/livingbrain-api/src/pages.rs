@@ -20,13 +20,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cratefield_core::axum::extract::{Path, Query, State};
-use cratefield_core::axum::http::HeaderMap;
+use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::axum::{Json, Router};
 use cratefield_core::{ModuleContext, Problem};
-use cratefield_kms::Kms;
 use livingbrain_access::{Scope, UserId};
-use livingbrain_mcp::{BearerAuth, page_scope};
+use livingbrain_mcp::page_scope;
 use livingbrain_pages::{
     Author, EntityType, Page, PageStore, PageWrite, is_slug, parse_frontmatter,
 };
@@ -34,6 +33,7 @@ use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::Wiki;
 use crate::problems::{
     PAGE_CONFLICT, PAGE_NOT_FOUND, PAGE_REFUSED, page_read_error, page_write_error,
     redaction_refused, slug_not_found, slug_refused,
@@ -53,12 +53,8 @@ const MAX_PAGE_LIMIT: usize = 200;
 /// `Blob` is scoped to `pages`, so a body the page store writes is a body
 /// these routes can open. The venture merges this at the module's mount root
 /// via `Pages::surface`, so the routes are served at `/v1/pages`.
-pub fn pages_routes(
-    ctx: Arc<ModuleContext>,
-    kms: Arc<dyn Kms>,
-    auth: Arc<dyn BearerAuth>,
-) -> Router {
-    let state = Arc::new(Service::for_pages(ctx, kms, auth));
+pub fn pages_routes(ctx: Arc<ModuleContext>, wiki: &Wiki) -> Router {
+    let state = Arc::new(Service::for_pages(ctx, wiki));
     Router::new()
         .route("/", get(list))
         .route("/{slug}", get(read_one).put(edit))
@@ -77,10 +73,11 @@ pub fn pages_routes(
 /// unparseable limit, and the store's mapped problem otherwise.
 async fn list(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let limit = match query.get("limit") {
         None => DEFAULT_PAGE_LIMIT,
         Some(raw) => raw
@@ -124,10 +121,11 @@ async fn list(
 /// and the store's mapped problem otherwise.
 async fn read_one(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     if !is_slug(&slug) {
         return Err(slug_not_found());
     }
@@ -220,11 +218,12 @@ struct PagePut {
 /// store's mapped problem otherwise.
 async fn edit(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Path(slug): Path<String>,
     Json(body): Json<PagePut>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     if !is_slug(&slug) {
         return Err(slug_refused());
     }

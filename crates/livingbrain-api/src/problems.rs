@@ -17,10 +17,24 @@ use livingbrain_pages::PageError;
 pub(crate) const UNAUTHORIZED: ProblemDef = ProblemDef {
     slug: "api/unauthorized",
     status: StatusCode::UNAUTHORIZED,
-    title: "Bearer token required",
-    description: "This endpoint answers only with a valid bearer token, and every \
-                  read and write is scoped to the user it speaks for. Sign in with \
-                  `livingbrain login` and send `Authorization: Bearer <token>`.",
+    title: "Sign in, or present a bearer token",
+    description: "This endpoint answers only to a signed-in person (the web app's session \
+                  cookie) or to a valid bearer token, and every read and write is scoped to \
+                  the user it speaks for. From a terminal, sign in with `livingbrain login` \
+                  and send `Authorization: Bearer <token>`.",
+};
+
+/// A cookie-authenticated write a browser reported as coming from another
+/// site. The session cookie is an ambient credential — the browser attaches
+/// it to any request to this host — so a write that rides on it must come
+/// from this venture's own origin. A bearer write is never refused this way:
+/// a token is only ever sent by a caller that already holds it.
+pub(crate) const CROSS_SITE_REQUEST: ProblemDef = ProblemDef {
+    slug: "api/cross-site-request",
+    status: StatusCode::FORBIDDEN,
+    title: "A same-origin request is required",
+    description: "A write signed in with the session cookie is accepted only from this \
+                  venture's own origin. Nothing was written.",
 };
 
 /// A slug no readable page carries. Absent and owned-by-someone-else are

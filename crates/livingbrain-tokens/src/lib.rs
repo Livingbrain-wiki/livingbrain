@@ -358,6 +358,58 @@ pub fn origin_of_request(headers: &HeaderMap, uri: &Uri) -> Option<String> {
     origin_of(&format!("{scheme}://{host}")).ok()
 }
 
+/// Why a request was refused as cross-site by [`same_origin`]: the detail a
+/// problem body carries, saying which browser signal failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossSite {
+    pub detail: String,
+}
+
+/// The same-origin rule for a **cookie-authenticated write** — one
+/// implementation, shared by this module's own token routes and by every
+/// other surface whose writes accept the session cookie (the wiki routes in
+/// `livingbrain-api`, through the venture's session seam), so the rule
+/// cannot drift between them.
+///
+/// `sec-fetch-site` is checked first — `same-origin` and `none` pass and
+/// everything else, including `same-site`, is refused, because a sibling
+/// subdomain can post here — then `Origin`, when present, must be this
+/// request's own origin, compared with `origin_of` as RFC 6454 origins
+/// rather than as strings (so `Origin: null` is refused). A request carrying
+/// neither header is not a browser, so it carries no ambient credential a
+/// stranger could borrow, and is accepted.
+///
+/// # Errors
+///
+/// [`CrossSite`] when either browser signal names another site.
+pub fn same_origin(headers: &HeaderMap) -> Result<(), CrossSite> {
+    let refused = |detail: String| CrossSite { detail };
+    if let Some(site) = headers.get("sec-fetch-site") {
+        let site = site.to_str().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(site.as_str(), "same-origin" | "none") {
+            return Err(refused(format!(
+                "sec-fetch-site is {site}; only same-origin or none is accepted"
+            )));
+        }
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let presented = origin
+        .to_str()
+        .map_err(|_| refused("origin was not valid UTF-8".to_owned()))?;
+    let presented = origin_of(presented)
+        .map_err(|err| refused(format!("origin {presented:?} is not an origin: {err}")))?;
+    let own = own_origin(headers)
+        .ok_or_else(|| refused("origin was present but the request named no host".to_owned()))?;
+    if presented != own {
+        return Err(refused(format!(
+            "origin {presented} does not match the host this request reached ({own})"
+        )));
+    }
+    Ok(())
+}
+
 /// The host a same-origin check compares an `Origin` against.
 fn own_origin(headers: &HeaderMap) -> Option<String> {
     origin_of_request(headers, &Uri::default())
