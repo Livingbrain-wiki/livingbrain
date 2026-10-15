@@ -111,13 +111,16 @@ permission failure, not a wait.
 
 The `livingbrain-github-app` crate is the `github` module: the tables, the
 sealed credentials and the store API the routes and the cron drain use. It
-owns migration `github/0001` (collected as
-`crates/livingbrain-venture/migrations/0028_github_0001_init.sql`). The routes
+owns migrations `github/0001` (collected as
+`crates/livingbrain-venture/migrations/0028_github_0001_init.sql`) and
+`github/0002` (the shared app, collected as `0032_github_0002_shared_app.sql`). The routes
 and the drain body (Part C) are described in "Routes and the drain" below.
 
-### One app per workspace
+### One app per workspace (the advanced option)
 
-The manifest flow is started by a workspace owner or admin and creates a
+The default is the shared app ("The shared app" below). The per-workspace
+app stays as **Advanced: use your own GitHub App**, for an enterprise or a
+self-hosted deployment. The manifest flow is started by a workspace owner or admin and creates a
 GitHub App on their own GitHub account. Its private key is that workspace's
 credential, so `github_app` holds one row per workspace (`workspace_id` is
 unique, `app_id` is the key). A leaked key reaches one tenant, and an
@@ -133,8 +136,8 @@ expiry, pruning and leases are compared in SQL.
 | table | holds |
 |---|---|
 | `github_app` | app id, slug, client id, and the private key, webhook secret and client secret, all sealed; `created_by` |
-| `github_states` | single-use state tokens for the manifest and install round trips: the SHA-256 of the token, never the token |
-| `github_installations` | installation id, app id, the bound workspace (NULL until bound), the account login and type, status `active` / `suspended` / `deleted`, `bound_by` |
+| `github_states` | single-use state tokens for the manifest, install, shared-install and verify round trips: the SHA-256 of the token, never the token; `subject` is the installation id a verify state may bind |
+| `github_installations` | installation id, app id, `app_kind` (`workspace` or `shared`), the bound workspace (NULL until bound), the account login, type and id, `installer_id` (the GitHub user who installed it, from the signed `installation` `created` delivery), status `active` / `suspended` / `deleted`, `bound_by` |
 | `github_repos` | per (installation, repo): workspace, full name, project, scope, `included`, `active`, backfill phase, cursor JSON, item and batch counters, `removed_at`, last webhook, last error |
 | `github_deliveries` | (app id, delivery id) already accepted, kept 30 days |
 | `github_queue` | work a verified delivery leaves for the drain: a reference (`kind`, `subject`), never GitHub content |
@@ -286,6 +289,9 @@ in code, not just stated:
 | Installation hijack: binding another tenant's installation | The bind is one compare-and-set (`workspace_id IS NULL`). A row held under another app is refused. A deleted installation is never bound. Part C must confirm the installation with GitHub before binding, because the setup URL's `installation_id` is attacker-controlled. |
 | An admin pre-binding an installation id of another workspace's app (skipping the GitHub check) | No data is exposed: GitHub will not mint a token for an installation of another app, and that app's webhooks do not route to the row. The other workspace's bind is refused, though, so this is a denial of service. The GitHub check in Part C is what closes it. |
 | One app's webhook speaking for another app's installation | `observe_installation`, `route_installation` and `set_installation_status` all match on the app id whose secret verified the delivery. |
+| Claiming another organization's installation of the public shared app (a spoofed `installation_id` on the setup URL, or an installation made on GitHub directly) | The setup callback binds nothing for the shared app. The bind needs a verify state minted for that installation id, and a GitHub user token whose `GET /user/installations` lists it and whose `GET /user` id is the installer GitHub named in the signed `installation` `created` delivery (or the personal account itself). An organization member who can see the installation but did not install it is refused (`not-installer`). |
+| The shared app's keys | Worker secrets only; read per request into wiped `Secret`s; never in a response, log, error, row or queue item. The setup script converts the manifest code on the operator's machine and pipes the keys straight into `wrangler secret put`. |
+| One app's delivery speaking for the other kind | Every installation read and write matches app id **and** `app_kind`; a workspace app can never be saved under the shared app id. |
 | Replay of a captured delivery | `record_delivery` is insert-if-absent on (app id, delivery id). After the 30-day retention a replay is accepted again. That only costs a refetch, because work items are references and the drain re-reads current state from GitHub. |
 | A webhook filing data into another workspace | `upsert_repos` and `enqueue` take the workspace from the installation binding (`INSERT … SELECT … WHERE workspace_id = ? AND status = 'active'`), so a mismatched pair writes nothing. |
 | Suspended or deleted installation keeps syncing | Suspension stops the repositories, and the claim skips the queue. Deletion is terminal and drops the queue. `repos_due` and `claim` also join on installation status. |
@@ -306,11 +312,14 @@ store at the moment of the write.
 
 | route | who | what |
 |---|---|---|
-| `GET /v1/github` | any member | `configured`, `can_manage`, the app (id, slug, client id, `html_url`, `install_url`; no secrets), installations (id, account, status, `bound_by`), repositories (settings, `backfill` state, items, batches, started and finished, `waiting_until`, `last_webhook_at`, `last_error`), queue `{queued, dead}` |
+| `GET /v1/github` | any member | `configured`, `can_manage`, `shared {configured, slug, html_url}`, `advanced {configured}`, the workspace's own app (id, slug, client id, `html_url`, `install_url`; no secrets), installations (id, `app_kind`, `manage_url`, account, status, `bound_by`), repositories (settings, `backfill` state, items, batches, started and finished, `waiting_until`, `last_webhook_at`, `last_error`), queue `{queued, dead}` |
 | `POST /v1/github/app/manifest` | owner/admin | body `{"owner":"user"}` or `{"owner":"org","org":"<login>"}`. Mints a manifest state and answers `{action, method:"POST", field:"manifest", manifest, manifest_json, expires_in}`. The UI posts a form with one field, `manifest` (= `manifest_json`), to `action`. 409 if the workspace already has an app |
 | `GET /v1/github/app/callback?code&state` | the member who started it (cookie) | spends the state, calls `POST /app-manifests/{code}/conversions`, seals the credentials with `save_app`, mints an install state and redirects to `https://github.com/apps/<slug>/installations/new?state=…` |
-| `POST /v1/github/app/install` | owner/admin | answers `{url}`, a fresh install link (to add another account, or to retry an install) |
-| `GET /v1/github/install/callback?installation_id&setup_action&state` | the member who started it (cookie) | spends the state, confirms the installation with GitHub, binds it, lists its repositories, redirects to the settings page |
+| `POST /v1/github/app/install` | owner/admin | answers `{url}`, a fresh install link for the workspace's own app (to add another account, or to retry an install) |
+| `POST /v1/github/shared/install` | owner/admin | answers `{url}`: the shared app's install link with a fresh shared-install state. 503 `github/shared-not-configured` when the shared secrets are unset |
+| `GET /v1/github/install/callback?installation_id&setup_action&state` | the member who started it (cookie) | the setup URL of both kinds of app. The state's purpose picks the flow: a workspace app's installation is confirmed and bound here; a shared one is confirmed and goes on to the OAuth hop. With no state, see "The shared app" |
+| `GET /v1/github/oauth/callback?code&state` | the member who started it (cookie) | the shared app's OAuth hop: proves the installer, binds, lists repositories, redirects to the settings page |
+| `POST /v1/github/shared/verify` | owner/admin | body `{"installation_id": n}`: a fresh OAuth hop for an unclaimed shared installation (the retry after `installer-unknown`). Binds nothing itself; 404 when there is nothing unclaimed with that id |
 | `PATCH /v1/github/repos/{repo_id}` | owner/admin | body: any of `included` (bool), `scope` (`shared` or `user:<member id>`), `project`. Answers the repository |
 | `DELETE /v1/github/app` | owner/admin | forgets the app (`remove_app`) and answers `{removed, next_step:{message,url}}`: the app still exists on GitHub and must be deleted there |
 | `POST /v1/github/webhook` | GitHub | see "Webhook intake". `/v1/github/webhook/{app_id}` is accepted too |
@@ -325,7 +334,13 @@ organization member asked an owner to approve; no state is spent), `created`
 of `bad-request`, `signed-out`, `not-configured`, `state` (unknown, expired,
 reused, another member's or another purpose's), `conversion`, `app-exists`,
 `app-id-taken`, `forbidden`, `store`, `no-app`, `github`, `not-confirmed`,
-`bound-elsewhere`, `refused`.
+`bound-elsewhere`, `refused`, and for the shared app `unclaimed` (an install
+made on GitHub directly, with no state), `not-verified` (the OAuth hop was
+declined, or GitHub does not list the installation for that GitHub user),
+`not-installer` (the proven GitHub user is not the one who installed it) and
+`installer-unknown` (the `installation` delivery naming the installer has not
+arrived yet; the address also carries `installation=<id>` and the page offers
+**Finish connecting**, which calls `POST /v1/github/shared/verify`).
 
 There is no route that runs a backfill, a sync or an import. Including a
 repository makes it due for the next cron tick.
@@ -489,6 +504,126 @@ The composition roots the module's blob view on the pages key space
 (`PagesRebind` now includes `github`), so the drain's source bodies are the same
 physical `pages/…` objects every other ledger route reads.
 
+### The shared app
+
+One operator-owned GitHub App, **Living Brain**, in the `Livingbrain-wiki`
+organization, serves every workspace. It is public, so any organization can
+install it, and it asks for the same read-only permissions and events as a
+workspace's own app (`scripts/github-shared-app/manifest.json`; a test keeps
+the two in step).
+
+**Credentials are Worker secrets, never rows.** `GITHUB_APP_ID`,
+`GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_PRIVATE_KEY` (the PEM),
+`GITHUB_WEBHOOK_SECRET` and `GITHUB_APP_CLIENT_SECRET`. They are read per
+request from the config port into wiped-on-drop `Secret`s, and never
+returned, logged or stored. All six must be set and well formed; with any one
+missing, shared mode is off: the settings page says "GitHub isn't configured
+on this deployment", `POST /v1/github/shared/install` answers 503, a delivery
+naming the shared id is an unknown app (401), and the advanced flow is
+unaffected. The client id and secret exist for the OAuth hop below.
+
+**Why an OAuth hop.** A workspace's own app is private, so only its owner
+can install it, and "GitHub confirms this is an installation of our app" is
+enough to bind. A public app can be installed by anyone, and GitHub warns
+that the setup URL's `installation_id` can be spoofed. So the shared flow
+proves *who* is finishing it, as GitHub recommends, with a user token:
+
+1. Settings → GitHub → **Install Living Brain on GitHub** (owner or admin;
+   cookie same-origin, or bearer) → `POST /v1/github/shared/install` mints a
+   `shared-install` state (single use, 15 minutes, bound to workspace and
+   member) → the browser *navigates* (a link, not a form) to
+   `https://github.com/apps/<GITHUB_APP_SLUG>/installations/new?state=…`.
+2. The person installs it on an account and picks repositories. GitHub
+   sends the signed `installation` `created` delivery, whose `sender` is the
+   GitHub user who installed it: the webhook records the installation
+   **unbound**, with that `installer_id`.
+3. GitHub redirects to the setup URL. The callback spends the state,
+   confirms the installation with an app JWT from the shared key
+   (`GET /app/installations/{id}`: this app, this id; the account comes from
+   GitHub's answer), records it under the shared app, and — unless it is
+   already bound to this workspace — mints a `verify` state whose subject is
+   that installation id and redirects to
+   `https://github.com/login/oauth/authorize?client_id=…&redirect_uri=<origin>/v1/github/oauth/callback&state=…`.
+   An installation bound to another workspace is refused here
+   (`bound-elsewhere`).
+4. GitHub returns to `/v1/github/oauth/callback?code&state`. The callback
+   spends the verify state, exchanges the code (client id + secret) for a
+   user token, and with it reads `GET /user/installations` (the installation
+   must be listed, under the shared app id) and `GET /user` (the GitHub user
+   id). The token is then dropped: never cached, stored, logged or returned.
+5. `bind_shared_installation` binds in one compare-and-set: the row is the
+   shared app's, unbound, not deleted, the member is still an owner or
+   admin, the verify state names this installation, and the proven GitHub
+   user **is the recorded installer** — or, while the installer is not yet
+   known, the personal account the app is installed on. Then the
+   repositories are listed with an installation token (shared key) and
+   upserted, and the browser lands on the settings page.
+
+The installer check is stricter than GitHub's `/user/installations` alone,
+which also lists an organization's installation for members who can reach
+one of its repositories. Checking organization ownership instead would need
+the Members permission, which this read-only app does not ask for. The
+consequence: when an organization member *requests* the app and an owner
+approves it on GitHub, the approving owner is the installer and must finish
+in Living Brain.
+
+`setup_on_update` is true for the shared app. A visit to the setup URL
+**without our state** (an install or a repository change made on github.com
+directly) never binds: for an installation already bound to the caller's
+workspace (owner or admin) it re-reads the repositories; otherwise it answers
+`unclaimed`. Such an installation is recorded by its webhooks but shown to
+no one; to connect it, its installer uses the button in Settings → GitHub
+(GitHub then offers the existing installation's configuration). Repository
+additions and removals also arrive as `installation_repositories` deliveries.
+
+**Webhooks.** One URL, `POST /v1/github/webhook`. When
+`X-GitHub-Hook-Installation-Target-ID` equals `GITHUB_APP_ID`, the body must
+verify under `GITHUB_WEBHOOK_SECRET` and the delivery acts only on
+installations held under the shared app; any other id is looked up among
+the workspaces' own apps as before. One id is never tried against both
+secrets. Signature first, then replay protection, exactly as in "Webhook
+intake".
+
+**The drain** picks the key per installation: the shared private key for an
+installation held under the shared app (and only while `GITHUB_APP_ID` still
+names that app), the workspace's unsealed key for its own app's
+installations. Installation tokens stay memory-only.
+
+**Disconnecting** is done on GitHub: each account's **Manage on GitHub**
+link opens the installation's settings, where it can be reconfigured or
+uninstalled. Uninstalling sends `installation` `deleted`, which stops its
+repositories and drops its queue.
+
+#### Creating the shared app (operator, once per environment)
+
+Run on the operator's machine, signed in to GitHub as an owner of
+`Livingbrain-wiki` and to Cloudflare with `npx wrangler login`:
+
+```sh
+python3 scripts/github-shared-app/setup.py --env production   # app "Living Brain"
+python3 scripts/github-shared-app/setup.py --env staging      # app "Living Brain Staging"
+```
+
+The script serves one local page, `http://127.0.0.1:8765/`, whose form posts
+the manifest to `https://github.com/organizations/Livingbrain-wiki/settings/apps/new`
+(name, `url` = the origin, hook `<origin>/v1/github/webhook`, setup URL
+`<origin>/v1/github/install/callback`, OAuth callback
+`<origin>/v1/github/oauth/callback`, `public: true`, read-only permissions and
+events). The manifest's `redirect_url` is that local server, so GitHub's
+one-time conversion `code` comes back to the operator's machine, not to the
+Worker. The script checks its state, converts the code, and pipes each of
+the six values into `wrangler secret put NAME --env <env>` over stdin: no key
+is shown in the browser or the terminal. If `wrangler` fails, what is left
+goes to a `0600` file in a fresh `0700` directory with the commands to finish
+by hand; delete it afterwards. `--print-manifest` shows the manifest only;
+`--name` picks another name if GitHub reports "Living Brain" as taken.
+
+The Worker cannot set its own secrets, and showing converted keys in a
+browser page would put them in history and screen recordings, so the
+conversion runs locally. Each `wrangler secret put` publishes a new Worker
+version with the secret, so the Install button appears without a code
+deploy — but the code that reads these secrets must be deployed first.
+
 ### Connecting a workspace (owner click-path)
 
 These steps use the World-360 organization and its `EarthOS.world` repository
@@ -497,34 +632,49 @@ as the example. The settings UI is in Settings → Integrations → GitHub (the
 
 1. Sign in to `https://app.livingbrain.wiki` as an owner or admin of the
    workspace. Open Settings → Integrations, then GitHub.
-2. Choose **Create the GitHub App**, and pick the owner: the organization
-   **World-360**, or your own account for a personal app. Living Brain calls
-   `POST /v1/github/app/manifest` and posts the manifest form to GitHub.
-3. On GitHub's "Create GitHub App" page, the name, permissions (read only) and
-   events are filled in. Click **Create GitHub App**. GitHub creates the app
-   and sends you back to Living Brain, which stores its credentials sealed and
-   forwards you to the app's install page.
-4. On the install page, pick **World-360**, choose **Only select
-   repositories**, select `EarthOS.world`, and click **Install**. GitHub sends
-   you back to Living Brain, which confirms the installation with GitHub, binds
-   it to the workspace and lists the repository.
-5. Back in Settings → GitHub, the repository shows as pending, shared, project
-   `EarthOS.world` (the repository's own name, in its own case, so agent
-   sessions from the same repository file under the same project). Change the
-   scope or project here if needed. The backfill starts on the next cron tick
-   (every 15 minutes) and shows its progress on this page. Nothing needs to be
-   clicked to start it, and nothing can.
+2. Choose **Install Living Brain on GitHub**. GitHub opens the Living Brain
+   app's install page.
+3. Pick **World-360** (you must be an owner of it; a member's install becomes
+   an approval request, and then the approving owner finishes these steps),
+   choose **Only select repositories**, select `EarthOS.world`, and click
+   **Install**.
+4. GitHub asks you to **Authorize Living Brain** once. This only proves to
+   Living Brain that you are the GitHub user who just installed it; the
+   token is used for two reads and dropped.
+5. Back in Settings → GitHub, World-360 is listed under Accounts and the
+   repository shows as pending, shared, project `EarthOS.world` (the
+   repository's own name, in its own case, so agent sessions from the same
+   repository file under the same project). Change the scope or project here
+   if needed. The backfill starts on the next cron tick (every 15 minutes)
+   and shows its progress on this page. Nothing needs to be clicked to start
+   it, and nothing can.
 
-To add another account, use **Add another account**. To disconnect, choose
-**Remove**. Living Brain forgets the credentials, and the answer links to the
-app on GitHub, which must be deleted there (Advanced, then Delete GitHub App).
+To add or remove repositories, or to disconnect, use **Manage on GitHub**
+beside the account. If the page says GitHub has not yet told Living Brain who
+installed the app, wait a few seconds and choose **Finish connecting**.
+
+**Advanced: use your own GitHub App.** Under the collapsible section, choose
+**Create the GitHub App** and the owner (your account or an organization).
+GitHub's "Create GitHub App" page opens with the read-only permissions and
+events filled in; create it, install it on the account, and Living Brain
+confirms the installation and binds it. **Add another account** installs
+your app elsewhere; **Remove** forgets its credentials, and the answer links
+to the app on GitHub, which must be deleted there (Advanced, then Delete
+GitHub App). Both kinds can be connected to one workspace at once.
 
 The GitHub source filter is under Sources → GitHub. It lists commits, issues
 and pull requests by kind and project, each linked to its page on github.com.
 
 ### Deployment
 
-No new secret or binding is needed. The app credentials live sealed in D1 under
-the existing `HARNESS_KEK_*` ring. The tables are the existing `github/0001`
-migration. `WORKSPACES_REDIRECT_BASE` already names each environment's
-origin, so a staging app points its webhook at the staging Worker.
+- Migration `github/0002` (`0032_github_0002_shared_app.sql`) adds
+  `app_kind`, `account_id` and `installer_id` to `github_installations` and
+  `subject` to `github_states`. Existing rows read as `workspace`, which is
+  what they are. Apply it before the code that reads the new columns.
+- The shared app needs the six `GITHUB_*` Worker secrets above, per
+  environment, set by `scripts/github-shared-app/setup.py`. Without them,
+  shared mode is off and everything else works as before.
+- A workspace's own app credentials live sealed in D1 under the existing
+  `HARNESS_KEK_*` ring. `WORKSPACES_REDIRECT_BASE` names each environment's
+  origin, so a staging app points its webhook at the staging Worker; staging
+  has its own shared app ("Living Brain Staging").

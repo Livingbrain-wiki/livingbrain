@@ -1,5 +1,10 @@
-//! Installations of a workspace's app, and the installation → workspace
-//! binding webhook routing reads.
+//! Installations of a workspace's app or of the shared app, and the
+//! installation → workspace binding webhook routing reads.
+//!
+//! An installation belongs to exactly one app: the row's `app_id` and
+//! `app_kind` together. Every read and write that names an app matches on
+//! both, so the shared app's deliveries cannot speak for a workspace app's
+//! installation, nor the other way round.
 
 use cratefield_core::{Database, Row, Statement};
 
@@ -38,12 +43,40 @@ impl InstallationStatus {
     }
 }
 
+/// Which app an installation belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppKind {
+    /// A workspace's own app (the manifest flow, "Use your own GitHub App").
+    Workspace,
+    /// The operator's shared "Living Brain" app, whose credentials are
+    /// Worker secrets (`GITHUB_APP_*`).
+    Shared,
+}
+
+impl AppKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Shared => "shared",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "shared" => Self::Shared,
+            _ => Self::Workspace,
+        }
+    }
+}
+
 /// The account an installation sits on, as GitHub's payload names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
     pub login: String,
     /// `User` or `Organization`.
     pub kind: String,
+    /// GitHub's numeric id of the account, when the answer carried one.
+    pub id: Option<i64>,
 }
 
 /// One installation, as the store holds it.
@@ -51,6 +84,11 @@ pub struct Account {
 pub struct Installation {
     pub installation_id: i64,
     pub app_id: i64,
+    /// Which kind of app `app_id` is.
+    pub app_kind: AppKind,
+    /// The GitHub user who installed it, from the signed `installation`
+    /// `created` delivery (`sender.id`); `None` until that arrives.
+    pub installer_id: Option<i64>,
     /// `None` until an owner or admin binds it.
     pub workspace_id: Option<String>,
     pub account: Account,
@@ -59,17 +97,20 @@ pub struct Installation {
     pub bound_at: Option<i64>,
 }
 
-const COLUMNS: &str = "installation_id, app_id, workspace_id, account_login, account_type, \
-                       status, bound_by, bound_at";
+const COLUMNS: &str = "installation_id, app_id, app_kind, workspace_id, account_login, \
+                       account_type, account_id, installer_id, status, bound_by, bound_at";
 
 fn installation_from(row: &Row) -> Installation {
     Installation {
         installation_id: get_int(row, "installation_id"),
         app_id: get_int(row, "app_id"),
+        app_kind: AppKind::parse(&get_text(row, "app_kind")),
+        installer_id: get_opt_int(row, "installer_id"),
         workspace_id: get_opt_text(row, "workspace_id"),
         account: Account {
             login: get_text(row, "account_login"),
             kind: get_text(row, "account_type"),
+            id: get_opt_int(row, "account_id"),
         },
         status: InstallationStatus::parse(&get_text(row, "status")),
         bound_by: get_opt_text(row, "bound_by"),
@@ -77,7 +118,10 @@ fn installation_from(row: &Row) -> Installation {
     }
 }
 
-async fn read(db: &dyn Database, installation_id: i64) -> Result<Option<Installation>, StoreError> {
+pub(crate) async fn read(
+    db: &dyn Database,
+    installation_id: i64,
+) -> Result<Option<Installation>, StoreError> {
     let rows = db
         .query(&Statement::with_values(
             format!("SELECT {COLUMNS} FROM github_installations WHERE installation_id = ?"),
@@ -107,25 +151,66 @@ pub async fn observe_installation(
     installation_id: i64,
     account: &Account,
 ) -> Result<bool, StoreError> {
+    observe_installation_as(
+        db,
+        now,
+        AppKind::Workspace,
+        app_id,
+        installation_id,
+        account,
+        None,
+    )
+    .await
+}
+
+/// [`observe_installation`] for an app of either kind, and with the GitHub
+/// user who installed it when the caller knows that from a **verified**
+/// source (the `sender` of a signed `installation` `created` delivery).
+/// The installer is written once: a later value never replaces it.
+///
+/// Answers `false` (and writes nothing) when the row is held under another
+/// app id or another kind.
+///
+/// # Errors
+///
+/// A storage failure, or an invalid id.
+pub async fn observe_installation_as(
+    db: &dyn Database,
+    now: time::OffsetDateTime,
+    kind: AppKind,
+    app_id: i64,
+    installation_id: i64,
+    account: &Account,
+    installer_id: Option<i64>,
+) -> Result<bool, StoreError> {
     check_github_id(app_id, "app id")?;
     check_github_id(installation_id, "installation id")?;
     let now = unix(now);
     let login = bounded(&account.login, 100);
-    let kind = bounded(&account.kind, 20);
+    let account_kind = bounded(&account.kind, 20);
+    let account_id = account.id.filter(|id| *id > 0);
+    let installer_id = installer_id.filter(|id| *id > 0);
     db.execute(&Statement::with_values(
         "INSERT INTO github_installations \
-           (installation_id, app_id, account_login, account_type, status, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, 'active', ?, ?) \
+           (installation_id, app_id, app_kind, account_login, account_type, account_id, \
+            installer_id, status, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) \
          ON CONFLICT (installation_id) DO UPDATE SET \
            account_login = excluded.account_login, \
            account_type = excluded.account_type, \
+           account_id = COALESCE(excluded.account_id, github_installations.account_id), \
+           installer_id = COALESCE(github_installations.installer_id, excluded.installer_id), \
            updated_at = excluded.updated_at \
-         WHERE github_installations.app_id = excluded.app_id",
+         WHERE github_installations.app_id = excluded.app_id \
+           AND github_installations.app_kind = excluded.app_kind",
         vec![
             int(installation_id),
             int(app_id),
+            text(kind.as_str()),
             text(&login),
-            text(&kind),
+            text(&account_kind),
+            crate::common::opt_int(account_id),
+            crate::common::opt_int(installer_id),
             int(now),
             int(now),
         ],
@@ -133,7 +218,7 @@ pub async fn observe_installation(
     .await?;
     Ok(read(db, installation_id)
         .await?
-        .is_some_and(|row| row.app_id == app_id))
+        .is_some_and(|row| row.app_id == app_id && row.app_kind == kind))
 }
 
 /// What [`bind_installation`] did.
@@ -145,8 +230,10 @@ pub enum BindOutcome {
     AlreadyThisWorkspace,
     /// It is bound to another workspace. Nothing changed (no hijack).
     BoundElsewhere,
-    /// It is deleted, or held under an app that is not this workspace's.
-    /// Nothing changed.
+    /// It is deleted, or held under an app that is not this workspace's
+    /// (or not the shared app), or — for the shared app — the person proven
+    /// by the OAuth hop is not the GitHub user who installed it. Nothing
+    /// changed.
     Refused,
     /// The workspace has no app, so there is nothing to bind to.
     NoApp,
@@ -196,23 +283,57 @@ pub async fn bind_installation(
     // Seen-or-create under this workspace's app; a row under another app is
     // left exactly as it was (and refused below).
     observe_installation(db, now, app.app_id, installation_id, account).await?;
+    bind_under(
+        db,
+        now,
+        &proof,
+        AppKind::Workspace,
+        app.app_id,
+        installation_id,
+        None,
+    )
+    .await
+}
 
-    let bound = db
-        .execute(&Statement::with_values(
-            "UPDATE github_installations \
-             SET workspace_id = ?, bound_by = ?, bound_at = ?, updated_at = ? \
-             WHERE installation_id = ? AND app_id = ? AND status <> 'deleted' \
-               AND workspace_id IS NULL",
-            vec![
-                text(workspace_id),
-                text(&proof.member_id),
-                int(unix(now)),
-                int(unix(now)),
-                int(installation_id),
-                int(app.app_id),
-            ],
-        ))
-        .await?;
+/// The one compare-and-set both kinds of bind end in. For the shared app,
+/// `installer` is the GitHub user the OAuth hop proved, and the row binds
+/// only when that user is the recorded installer — or, on a personal
+/// account, the account itself.
+async fn bind_under(
+    db: &dyn Database,
+    now: time::OffsetDateTime,
+    proof: &StateProof,
+    kind: AppKind,
+    app_id: i64,
+    installation_id: i64,
+    installer: Option<i64>,
+) -> Result<BindOutcome, StoreError> {
+    let workspace_id = proof.workspace_id.as_str();
+    let mut sql = String::from(
+        "UPDATE github_installations \
+         SET workspace_id = ?, bound_by = ?, bound_at = ?, updated_at = ? \
+         WHERE installation_id = ? AND app_id = ? AND app_kind = ? \
+           AND status <> 'deleted' AND workspace_id IS NULL",
+    );
+    let mut values = vec![
+        text(workspace_id),
+        text(&proof.member_id),
+        int(unix(now)),
+        int(unix(now)),
+        int(installation_id),
+        int(app_id),
+        text(kind.as_str()),
+    ];
+    if kind == AppKind::Shared {
+        let user = installer.filter(|id| *id > 0).unwrap_or(-1);
+        sql.push_str(
+            " AND (installer_id = ? \
+                OR (installer_id IS NULL AND account_type = 'User' AND account_id = ?))",
+        );
+        values.push(int(user));
+        values.push(int(user));
+    }
+    let bound = db.execute(&Statement::with_values(sql, values)).await?;
     if bound == 1 {
         return Ok(BindOutcome::Bound);
     }
@@ -220,14 +341,72 @@ pub async fn bind_installation(
         return Ok(BindOutcome::Refused);
     };
     Ok(
-        if row.app_id != app.app_id || row.status == InstallationStatus::Deleted {
+        if row.app_id != app_id || row.app_kind != kind || row.status == InstallationStatus::Deleted
+        {
             BindOutcome::Refused
         } else if row.workspace_id.as_deref() == Some(workspace_id) {
             BindOutcome::AlreadyThisWorkspace
-        } else {
+        } else if row.workspace_id.is_some() {
             BindOutcome::BoundElsewhere
+        } else {
+            // Unbound, but the proven user is not its installer.
+            BindOutcome::Refused
         },
     )
+}
+
+/// Binds an installation of the **shared** app (`shared_app_id`, the
+/// deployment's `GITHUB_APP_ID`) to the workspace a spent
+/// [`StatePurpose::Verify`] state names.
+///
+/// On top of [`bind_installation`]'s rules (owner or admin now, one
+/// compare-and-set, never moved, never a deleted row):
+///
+/// - the proof's subject is this installation id: a verify state minted
+///   for one installation cannot bind another;
+/// - the row must already be held under the shared app — written from
+///   GitHub's own answer (`GET /app/installations/{id}` with the shared
+///   app's JWT) or a verified webhook, never from the request;
+/// - `github_user_id` — proven by the caller with a one-time OAuth user
+///   token (`GET /user`, and the installation listed by
+///   `GET /user/installations`) — must be the GitHub user who installed it
+///   (`installer_id`, from the signed `installation` `created` delivery),
+///   or, while that is not yet known, the personal account it is installed
+///   on. A public app can be installed by anyone, so "this is an
+///   installation of our app" proves nothing about who may claim it.
+///
+/// # Errors
+///
+/// [`StoreError::Forbidden`] for a proof of another purpose, or a member
+/// who is no longer an owner or admin; a storage failure.
+pub async fn bind_shared_installation(
+    db: &dyn Database,
+    now: time::OffsetDateTime,
+    proof: StateProof,
+    shared_app_id: i64,
+    installation_id: i64,
+    github_user_id: i64,
+) -> Result<BindOutcome, StoreError> {
+    if proof.purpose != StatePurpose::Verify {
+        return Err(StoreError::Forbidden);
+    }
+    check_github_id(shared_app_id, "app id")?;
+    check_github_id(installation_id, "installation id")?;
+    check_github_id(github_user_id, "GitHub user id")?;
+    if proof.subject.as_deref() != Some(installation_id.to_string().as_str()) {
+        return Err(StoreError::Forbidden);
+    }
+    require_admin(db, &proof.workspace_id, &proof.member_id).await?;
+    bind_under(
+        db,
+        now,
+        &proof,
+        AppKind::Shared,
+        shared_app_id,
+        installation_id,
+        Some(github_user_id),
+    )
+    .await
 }
 
 /// Where a verified webhook for `app_id` about `installation_id` goes.
@@ -250,11 +429,26 @@ pub async fn route_installation(
     app_id: i64,
     installation_id: i64,
 ) -> Result<Option<Route>, StoreError> {
+    route_installation_as(db, AppKind::Workspace, app_id, installation_id).await
+}
+
+/// [`route_installation`] for an app of either kind.
+///
+/// # Errors
+///
+/// A storage failure.
+pub async fn route_installation_as(
+    db: &dyn Database,
+    kind: AppKind,
+    app_id: i64,
+    installation_id: i64,
+) -> Result<Option<Route>, StoreError> {
     let rows = db
         .query(&Statement::with_values(
             "SELECT workspace_id, status FROM github_installations \
-             WHERE installation_id = ? AND app_id = ? AND workspace_id IS NOT NULL",
-            vec![int(installation_id), int(app_id)],
+             WHERE installation_id = ? AND app_id = ? AND app_kind = ? \
+               AND workspace_id IS NOT NULL",
+            vec![int(installation_id), int(app_id), text(kind.as_str())],
         ))
         .await?;
     Ok(rows.first().and_then(|row| {
@@ -310,11 +504,31 @@ pub async fn set_installation_status(
     installation_id: i64,
     status: InstallationStatus,
 ) -> Result<bool, StoreError> {
+    set_installation_status_as(db, now, AppKind::Workspace, app_id, installation_id, status).await
+}
+
+/// [`set_installation_status`] for an app of either kind.
+///
+/// # Errors
+///
+/// A storage failure.
+pub async fn set_installation_status_as(
+    db: &dyn Database,
+    now: time::OffsetDateTime,
+    kind: AppKind,
+    app_id: i64,
+    installation_id: i64,
+    status: InstallationStatus,
+) -> Result<bool, StoreError> {
     let now = unix(now);
     let Some(row) = read(db, installation_id).await? else {
         return Ok(false);
     };
-    if row.app_id != app_id || row.status == InstallationStatus::Deleted || row.status == status {
+    if row.app_id != app_id
+        || row.app_kind != kind
+        || row.status == InstallationStatus::Deleted
+        || row.status == status
+    {
         return Ok(false);
     }
     let mut statements = vec![Statement::with_values(

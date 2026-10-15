@@ -22,7 +22,16 @@
 //! does. Part A stays a dependency-free library this crate can depend on
 //! once it lands.
 //!
-//! # One app per workspace
+//! # The shared app, and one app per workspace
+//!
+//! The default is one operator-owned **shared** "Living Brain" app that
+//! every workspace installs; its credentials are Worker secrets
+//! ([`SharedApp`], `GITHUB_APP_*`), never rows. Because anyone can install
+//! a public app, a shared installation binds only after a one-time OAuth
+//! hop proves the person finishing the flow is the GitHub user who
+//! installed it ([`bind_shared_installation`]). The per-workspace app below
+//! stays as the advanced "use your own GitHub App" option; an installation
+//! belongs to exactly one app ([`AppKind`]).
 //!
 //! The manifest flow is driven by a workspace owner or admin and creates an
 //! app on *their* GitHub account. Its private key is that workspace's
@@ -52,19 +61,21 @@ mod queue;
 mod repos;
 mod routes;
 mod seal;
+mod shared;
 mod sync;
 
 pub use app::{
     AppCredentials, AppSummary, DEFAULT_STATE_TTL_SECS, MAX_STATE_TTL_SECS, NewApp, SaveAppOutcome,
     StateProof, StatePurpose, app_credentials, app_summary, consume_state, create_state,
-    prune_states, remove_app, save_app, webhook_secret,
+    create_state_about, prune_states, remove_app, save_app, state_purpose, webhook_secret,
 };
 pub use common::StoreError;
 pub use deliveries::{DELIVERY_RETENTION_SECS, prune_deliveries, record_delivery};
 pub use drain::{BackfillProgress, Claimed, Drain};
 pub use installations::{
-    Account, BindOutcome, Installation, InstallationStatus, Route, bind_installation,
-    list_installations, observe_installation, route_installation, set_installation_status,
+    Account, AppKind, BindOutcome, Installation, InstallationStatus, Route, bind_installation,
+    bind_shared_installation, list_installations, observe_installation, observe_installation_as,
+    route_installation, route_installation_as, set_installation_status, set_installation_status_as,
 };
 pub use queue::{WorkItem, dead_count, enqueue, queued_count};
 pub use repos::{
@@ -72,6 +83,7 @@ pub use repos::{
     set_repo_settings, upsert_repos,
 };
 pub use seal::Secret;
+pub use shared::{SHARED_APP_KEYS, SharedApp};
 
 use std::sync::Arc;
 
@@ -228,8 +240,9 @@ impl Module for GithubApp {
                 ),
                 description: "For a GitHub installation you connected to a workspace: your \
                               member id, as the person who connected it. The row also names \
-                              the GitHub account it is installed on, which belongs to the \
-                              workspace's connection and stays with it.",
+                              the GitHub account it is installed on and the numeric GitHub id \
+                              of the person who installed it there (as GitHub reported it), \
+                              which belong to the workspace's connection and stay with it.",
                 redacted: &[],
                 subject_via: None,
             },
@@ -263,9 +276,20 @@ impl Module for GithubApp {
             "init",
             include_str!("../migrations/postgres/0001_init.sql"),
         );
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        const MIGRATION_SHARED: SqlMigration = SqlMigration::new(
+            "0002",
+            "shared_app",
+            include_str!("../migrations/sqlite/0002_shared_app.sql"),
+        );
+        const MIGRATION_SHARED_POSTGRES: SqlMigration = SqlMigration::new(
+            "0002",
+            "shared_app",
+            include_str!("../migrations/postgres/0002_shared_app.sql"),
+        );
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_SHARED];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 1] = [MIGRATION_INIT_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
+            [MIGRATION_INIT_POSTGRES, MIGRATION_SHARED_POSTGRES];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,

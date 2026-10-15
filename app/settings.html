@@ -388,8 +388,11 @@
               </ol>
             </section>
 
-            <!-- GitHub: the connection (docs/github.md). Under Integrations;
-                 the owner or admin creates the app, everyone else reads. -->
+            <!-- GitHub: the connection (docs/github.md). Under Integrations.
+                 The default is the shared "Living Brain" GitHub App: an owner
+                 or admin installs it on GitHub (a link, no form). "Use your
+                 own GitHub App" is the advanced manifest flow. Everyone
+                 else reads. -->
             <section class="card sect" id="github" aria-labelledby="github-h">
               <header class="sect__head">
                 <h2 id="github-h">GitHub</h2>
@@ -401,49 +404,32 @@
                 </p>
               </header>
               <div id="github-banner" class="notice" role="status" aria-live="polite"></div>
+              <button type="button" id="github-retry" hidden>Finish connecting</button>
               <div id="github-status" class="notice" role="status" aria-live="polite"></div>
               <p id="github-readonly" class="hint" hidden></p>
 
-              <div id="github-setup" hidden>
-                <fieldset class="github-owner">
-                  <legend>Create the app under</legend>
-                  <label>
-                    <input type="radio" name="github-owner" id="github-owner-user" value="user" checked />
-                    <span>Your GitHub account</span>
-                  </label>
-                  <label>
-                    <input type="radio" name="github-owner" id="github-owner-org" value="org" />
-                    <span>An organization</span>
-                  </label>
-                </fieldset>
-                <div class="field">
-                  <label for="github-org">Organization login</label>
-                  <input id="github-org" type="text" autocomplete="off" spellcheck="false" placeholder="World-360" disabled />
-                  <p class="hint">The login as it appears in the organization's GitHub URL.</p>
-                </div>
+              <div id="github-shared" hidden>
                 <div class="form-actions">
-                  <button type="button" id="github-create" data-variant="primary">Create the GitHub App</button>
+                  <button type="button" id="github-shared-install" data-variant="primary">Install Living Brain on GitHub</button>
                 </div>
                 <p class="hint">
-                  GitHub opens its "Create GitHub App" page with read-only
-                  permissions filled in. Nothing is read until you include a
-                  repository.
+                  GitHub asks which account and which repositories, read only.
+                  Then it asks you once to authorize Living Brain, which proves
+                  you are the person who installed it. Nothing is read until a
+                  repository is included.
                 </p>
               </div>
+              <p id="github-shared-off" class="hint" hidden>GitHub isn't configured on this deployment.</p>
 
               <div id="github-connected" hidden>
-                <div id="github-app" class="sect__line"></div>
                 <h3>Accounts</h3>
                 <ul id="github-installs" class="plain-list"></ul>
-                <div class="form-actions">
-                  <button type="button" id="github-add">Add another account</button>
-                  <button type="button" id="github-remove">Remove</button>
-                </div>
                 <h3>Repositories</h3>
                 <p class="hint">
                   Shared repositories serve the whole workspace; personal ones
                   only you. Backfill runs on the server's schedule, and the
-                  progress shows here.
+                  progress shows here. To add or remove repositories, or to
+                  disconnect, use Manage on GitHub.
                 </p>
                 <div class="table-scroll table-cards" role="region" aria-label="GitHub repositories" tabindex="0">
                   <table class="table">
@@ -464,7 +450,49 @@
                 </div>
                 <p id="github-queue" class="tiny"></p>
               </div>
-              <div id="github-removed" class="notice" role="status" hidden></div>
+
+              <details class="disclosure" id="github-advanced" hidden>
+                <summary>Advanced: use your own GitHub App</summary>
+                <p class="hint">
+                  For an enterprise or self-hosted setup: create a GitHub App
+                  that belongs to you, with its own keys, instead of installing
+                  the shared one. Both can be connected at once.
+                </p>
+                <div id="github-setup" hidden>
+                  <fieldset class="github-owner">
+                    <legend>Create the app under</legend>
+                    <label>
+                      <input type="radio" name="github-owner" id="github-owner-user" value="user" checked />
+                      <span>Your GitHub account</span>
+                    </label>
+                    <label>
+                      <input type="radio" name="github-owner" id="github-owner-org" value="org" />
+                      <span>An organization</span>
+                    </label>
+                  </fieldset>
+                  <div class="field">
+                    <label for="github-org">Organization login</label>
+                    <input id="github-org" type="text" autocomplete="off" spellcheck="false" placeholder="World-360" disabled />
+                    <p class="hint">The login as it appears in the organization's GitHub URL.</p>
+                  </div>
+                  <div class="form-actions">
+                    <button type="button" id="github-create">Create the GitHub App</button>
+                  </div>
+                  <p class="hint">
+                    GitHub opens its "Create GitHub App" page with read-only
+                    permissions filled in. Nothing is read until you include a
+                    repository.
+                  </p>
+                </div>
+                <div id="github-own" hidden>
+                  <div id="github-app" class="sect__line"></div>
+                  <div class="form-actions">
+                    <button type="button" id="github-add">Add another account</button>
+                    <button type="button" id="github-remove">Remove</button>
+                  </div>
+                </div>
+                <div id="github-removed" class="notice" role="status" hidden></div>
+              </details>
             </section>
 
             <!-- not built yet: one compact group, nothing that looks clickable -->

@@ -1,0 +1,30 @@
+{
+  "name": "{{NAME}}",
+  "url": "{{BASE}}",
+  "description": "Living Brain files the commits, issues and pull requests of the repositories you include into your workspace's memory. Read only.",
+  "hook_attributes": {
+    "url": "{{BASE}}/v1/github/webhook",
+    "active": true
+  },
+  "redirect_url": "{{REDIRECT}}",
+  "callback_urls": ["{{BASE}}/v1/github/oauth/callback"],
+  "setup_url": "{{BASE}}/v1/github/install/callback",
+  "setup_on_update": true,
+  "public": true,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "read",
+    "issues": "read",
+    "pull_requests": "read"
+  },
+  "default_events": [
+    "push",
+    "issues",
+    "issue_comment",
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "release"
+  ]
+}

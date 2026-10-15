@@ -29,6 +29,13 @@ pub enum StatePurpose {
     /// `github.com/apps/<slug>/installations/new?state=…` → the setup URL
     /// with `installation_id` and `state`.
     Install,
+    /// The same round trip for the **shared** app (`GITHUB_APP_SLUG`): the
+    /// setup URL is the same, so the purpose is what tells the two apart.
+    SharedInstall,
+    /// The OAuth hop that proves the person finishing a shared install is
+    /// the GitHub user who installed it. Carries the installation id as its
+    /// subject: the proof binds that installation and no other.
+    Verify,
 }
 
 impl StatePurpose {
@@ -36,6 +43,18 @@ impl StatePurpose {
         match self {
             Self::Manifest => "manifest",
             Self::Install => "install",
+            Self::SharedInstall => "shared-install",
+            Self::Verify => "verify",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "manifest" => Some(Self::Manifest),
+            "install" => Some(Self::Install),
+            "shared-install" => Some(Self::SharedInstall),
+            "verify" => Some(Self::Verify),
+            _ => None,
         }
     }
 }
@@ -51,6 +70,9 @@ pub struct StateProof {
     pub(crate) purpose: StatePurpose,
     pub(crate) workspace_id: String,
     pub(crate) member_id: String,
+    /// What the state was minted about beyond its workspace and member (the
+    /// installation id of a [`StatePurpose::Verify`] state), as stored.
+    pub(crate) subject: Option<String>,
 }
 
 impl StateProof {
@@ -70,6 +92,12 @@ impl StateProof {
     #[must_use]
     pub fn purpose(&self) -> StatePurpose {
         self.purpose
+    }
+
+    /// The subject the state was minted with, if any.
+    #[must_use]
+    pub fn subject(&self) -> Option<&str> {
+        self.subject.as_deref()
     }
 }
 
@@ -95,6 +123,31 @@ pub async fn create_state(
     member_id: &str,
     ttl_secs: i64,
 ) -> Result<String, StoreError> {
+    create_state_about(db, now, purpose, workspace_id, member_id, None, ttl_secs).await
+}
+
+/// [`create_state`] with a subject the spent state hands back in its
+/// [`StateProof`] (at most 64 printable characters): the installation id a
+/// [`StatePurpose::Verify`] state is about.
+///
+/// # Errors
+///
+/// As [`create_state`], and [`StoreError::Invalid`] for a bad subject.
+pub async fn create_state_about(
+    db: &dyn Database,
+    now: time::OffsetDateTime,
+    purpose: StatePurpose,
+    workspace_id: &str,
+    member_id: &str,
+    subject: Option<&str>,
+    ttl_secs: i64,
+) -> Result<String, StoreError> {
+    if let Some(subject) = subject {
+        check_id(subject, "state subject")?;
+        if subject.len() > 64 {
+            return Err(StoreError::Invalid("state subject"));
+        }
+    }
     check_id(workspace_id, "workspace id")?;
     check_id(member_id, "member id")?;
     require_admin(db, workspace_id, member_id).await?;
@@ -108,8 +161,8 @@ pub async fn create_state(
     let now = unix(now);
     db.execute(&Statement::with_values(
         "INSERT INTO github_states \
-           (state_hash, purpose, workspace_id, created_by, created_at, expires_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+           (state_hash, purpose, workspace_id, created_by, created_at, expires_at, subject) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         vec![
             text(&state_hash(&token)),
             text(purpose.as_str()),
@@ -117,6 +170,7 @@ pub async fn create_state(
             text(member_id),
             int(now),
             int(now + ttl_secs.clamp(1, MAX_STATE_TTL_SECS)),
+            crate::common::opt_text(subject),
         ],
     ))
     .await?;
@@ -160,7 +214,7 @@ pub async fn consume_state(
     }
     let rows = db
         .query(&Statement::with_values(
-            "SELECT purpose, workspace_id, created_by, expires_at FROM github_states \
+            "SELECT purpose, workspace_id, created_by, expires_at, subject FROM github_states \
              WHERE state_hash = ?",
             vec![text(&hash)],
         ))
@@ -180,10 +234,38 @@ pub async fn consume_state(
             purpose,
             workspace_id: workspace_id.to_owned(),
             member_id: member_id.to_owned(),
+            subject: get_opt_text(row, "subject"),
         })),
         Err(StoreError::Forbidden) => Ok(None),
         Err(other) => Err(other),
     }
+}
+
+/// Which round trip an unspent state token was minted for, without spending
+/// it: the install callback is one URL for both apps, and this picks which
+/// of the two [`consume_state`] calls to make. `None` for an unknown or
+/// already spent token. Reveals nothing to the caller of the route — the
+/// spend that follows checks everything as before.
+///
+/// # Errors
+///
+/// A storage failure.
+pub async fn state_purpose(
+    db: &dyn Database,
+    token: &str,
+) -> Result<Option<StatePurpose>, StoreError> {
+    if token.is_empty() || token.len() > 128 {
+        return Ok(None);
+    }
+    let rows = db
+        .query(&Statement::with_values(
+            "SELECT purpose FROM github_states WHERE state_hash = ? AND spent_at IS NULL",
+            vec![text(&state_hash(token))],
+        ))
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|row| StatePurpose::parse(&get_text(row, "purpose"))))
 }
 
 /// Deletes state rows that expired before `before`. Housekeeping; safe to

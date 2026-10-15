@@ -11,6 +11,13 @@
 //! HMAC under that app's secret. `/webhook/{app_id}` is accepted too (the
 //! path is the selector then, and a header that disagrees is refused).
 //!
+//! **Two kinds of app.** When the selected id is the shared app's
+//! (`GITHUB_APP_ID`), the body must verify under the shared webhook secret
+//! (`GITHUB_WEBHOOK_SECRET`, a Worker secret) and the delivery speaks only
+//! for installations held under the shared app. Any other id is looked up
+//! among the workspaces' own apps, as before. One id is never tried
+//! against both secrets.
+//!
 //! **Order.** Size cap → app secret → `livingbrain_github::webhook::verify`
 //! over the exact bytes → `ping` answered → `Delivery::parse` →
 //! `record_delivery` (a replay is a 200 no-op) → apply. Nothing is read
@@ -35,7 +42,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::routes::{RouteState, St, port};
-use crate::{Account, InstallationStatus, RepoRef, WorkItem};
+use crate::seal::Secret;
+use crate::{Account, AppKind, InstallationStatus, RepoRef, SharedApp, WorkItem};
 
 pub(crate) const UNAUTHORIZED: ProblemDef = ProblemDef {
     slug: "github/webhook-unverified",
@@ -89,15 +97,27 @@ async fn intake(
     let Some(app_id) = select_app(path_app, header(headers, TARGET_ID)).filter(|id| *id > 0) else {
         return unverified();
     };
-    let (Some(kms), Ok(db), Ok(clock)) = (
-        state.shared.kms.clone(),
+    let (Ok(db), Ok(clock)) = (
         port(state.ctx.ports.db.clone()),
         port(state.ctx.ports.clock.clone()),
     ) else {
         return unverified();
     };
-    let Ok(Some((workspace_id, secret))) = crate::webhook_secret(&*kms, &*db, app_id).await else {
-        return unverified();
+    // The shared app first, by id; otherwise a workspace's own app.
+    let shared =
+        SharedApp::from_config(state.ctx.config.as_ref()).filter(|app| app.app_id == app_id);
+    let (kind, app_workspace, secret): (AppKind, Option<String>, Secret) = match shared {
+        Some(app) => (AppKind::Shared, None, app.webhook_secret),
+        None => {
+            let Some(kms) = state.shared.kms.clone() else {
+                return unverified();
+            };
+            let Ok(Some((workspace_id, secret))) = crate::webhook_secret(&*kms, &*db, app_id).await
+            else {
+                return unverified();
+            };
+            (AppKind::Workspace, Some(workspace_id), secret)
+        }
     };
     let signature = header(headers, webhook::SIGNATURE_HEADER).unwrap_or_default();
     if webhook::verify(secret.expose().as_bytes(), body, signature).is_err() {
@@ -128,7 +148,12 @@ async fn intake(
     let Ok(envelope) = serde_json::from_slice::<Envelope>(body) else {
         return Problem::validation_failed("malformed delivery").into_response();
     };
-    match apply(&*db, now, app_id, &workspace_id, delivery.event, &envelope).await {
+    let app = AppRef {
+        kind,
+        app_id,
+        workspace: app_workspace.as_deref(),
+    };
+    match apply(&*db, now, &app, delivery.event, &envelope).await {
         Ok(what) => accepted(what),
         Err(_) => Problem::internal().into_response(),
     }
@@ -154,6 +179,22 @@ struct Envelope {
     pull_request: Option<Numbered>,
     #[serde(default)]
     deleted: bool,
+    /// Who did it. Read only from an `installation` `created` delivery,
+    /// where it is the GitHub user who installed the app.
+    sender: Option<Sender>,
+}
+
+#[derive(Deserialize)]
+struct Sender {
+    id: i64,
+}
+
+/// The app whose secret verified the delivery: its kind, its id, and — for
+/// a workspace's own app — the one workspace it belongs to.
+struct AppRef<'a> {
+    kind: AppKind,
+    app_id: i64,
+    workspace: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +208,8 @@ struct AccountRef {
     login: String,
     #[serde(rename = "type", default)]
     kind: String,
+    #[serde(default)]
+    id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -196,11 +239,11 @@ fn refs(repos: &[RepoId]) -> Vec<RepoRef> {
 async fn apply(
     db: &dyn Database,
     now: time::OffsetDateTime,
-    app_id: i64,
-    app_workspace: &str,
+    app: &AppRef<'_>,
     event: Event,
     envelope: &Envelope,
 ) -> Result<&'static str, crate::StoreError> {
+    let app_id = app.app_id;
     let Some(installation) = envelope.installation.as_ref().filter(|i| i.id > 0) else {
         return Ok("no-installation");
     };
@@ -211,9 +254,23 @@ async fn apply(
             let account = Account {
                 login: account.login.clone(),
                 kind: account.kind.clone(),
+                id: account.id,
             };
+            // The installer is the sender of `created`, and only of that.
+            let installer = (action == "created")
+                .then(|| envelope.sender.as_ref().map(|sender| sender.id))
+                .flatten();
             // Seen-or-created, never bound: binding is the install callback's.
-            crate::observe_installation(db, now, app_id, installation.id, &account).await?;
+            crate::observe_installation_as(
+                db,
+                now,
+                app.kind,
+                app_id,
+                installation.id,
+                &account,
+                installer,
+            )
+            .await?;
         }
         let status = match action {
             "deleted" => Some(InstallationStatus::Deleted),
@@ -222,17 +279,22 @@ async fn apply(
             _ => None,
         };
         if let Some(status) = status {
-            crate::set_installation_status(db, now, app_id, installation.id, status).await?;
+            crate::set_installation_status_as(db, now, app.kind, app_id, installation.id, status)
+                .await?;
             return Ok("installation-status");
         }
     }
 
-    let Some(route) = crate::route_installation(db, app_id, installation.id).await? else {
+    let Some(route) = crate::route_installation_as(db, app.kind, app_id, installation.id).await?
+    else {
         return Ok("unbound");
     };
-    // Belt and braces: an app's installations only ever bind to the app's
-    // own workspace (bind_installation), so this never differs.
-    if route.workspace_id != app_workspace || route.status != InstallationStatus::Active {
+    // Belt and braces: a workspace app's installations only ever bind to
+    // that app's own workspace (bind_installation), so this never differs.
+    // The shared app's bind to whichever workspace claimed them.
+    if app.workspace.is_some_and(|ws| route.workspace_id != ws)
+        || route.status != InstallationStatus::Active
+    {
         return Ok("inactive");
     }
     let ws = route.workspace_id.as_str();

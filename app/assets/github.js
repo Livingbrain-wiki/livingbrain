@@ -4,8 +4,12 @@
 // page calls with its own `api`; every row is painted with elements and text
 // nodes only, never markup from a string, as everywhere in `app/`.
 //
-// The routes are in docs/github.md ("Routes and the drain"). Nothing here
-// starts a backfill: the server's cron does that, and there is no button for it.
+// The routes are in docs/github.md ("Routes and the drain", "The shared app").
+// The default way in is the shared "Living Brain" GitHub App: one button that
+// follows an install link to github.com (navigation, never a form). "Use your
+// own GitHub App" is the advanced manifest flow, the one form posted to GitHub.
+// Nothing here starts a backfill: the server's cron does that, and there is no
+// button for it.
 
 /** Every GitHub settings route hangs off this path. */
 export const GITHUB_PATH = "/v1/github";
@@ -33,6 +37,29 @@ export function ownerChoice(kind, org = "") {
 /** `POST /v1/github/app/manifest` for an owner choice. */
 export function manifestRequest(body) {
   return { method: "POST", path: `${GITHUB_PATH}/app/manifest`, body };
+}
+
+/** `POST /v1/github/shared/install`: the shared app's install link. */
+export function sharedInstallRequest() {
+  return { method: "POST", path: `${GITHUB_PATH}/shared/install` };
+}
+
+/** `POST /v1/github/shared/verify`: another OAuth hop for an unclaimed installation. */
+export function sharedVerifyRequest(installationId) {
+  return { method: "POST", path: `${GITHUB_PATH}/shared/verify`, body: { installation_id: installationId } };
+}
+
+/**
+ * The installation a `reason=installer-unknown` address names, as a number,
+ * or null: only digits are ever read from the address.
+ */
+export function retryInstallation(search = "") {
+  const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+  if (params.get("github") !== "error" || params.get("reason") !== "installer-unknown") return null;
+  const raw = params.get("installation") || "";
+  if (!/^[0-9]{1,15}$/.test(raw)) return null;
+  const id = Number(raw);
+  return id > 0 ? id : null;
 }
 
 /** `POST /v1/github/app/install`: a fresh install link. */
@@ -141,6 +168,14 @@ export const ERROR_TEXT = Object.freeze({
   "not-confirmed": "GitHub does not show that installation for this app, so it was not connected.",
   "bound-elsewhere": "That installation is already connected to another workspace.",
   refused: "Living Brain refused that installation.",
+  unclaimed:
+    "That installation was made on GitHub directly, so it is not connected. Use Install Living Brain on GitHub here, as an owner or admin.",
+  "not-verified":
+    "GitHub did not confirm that your GitHub account can reach that installation, so it was not connected. Sign in to GitHub as the person who installed it and try again.",
+  "not-installer":
+    "Only the GitHub user who installed Living Brain on that account can connect it. Ask them to finish here, or install it again yourself.",
+  "installer-unknown":
+    "GitHub has not yet told Living Brain who installed the app. Wait a few seconds, then choose Finish connecting.",
 });
 
 /** The scope as a person reads it: `shared`, or `personal` for `user:<id>`. */
@@ -190,10 +225,14 @@ export function repoView(repo, now = Date.now() / 1000) {
 export function installationView(entry) {
   const account = (entry && entry.account) || {};
   const status = String((entry && entry.status) || "");
+  const kind = entry && entry.app_kind === "workspace" ? "workspace" : entry && entry.app_kind === "shared" ? "shared" : "";
+  const via = kind === "workspace" ? " · your own app" : "";
   return {
     id: entry && entry.installation_id,
-    line: `${account.login || "(unknown account)"} · ${account.type || "account"} · ${status}`,
+    line: `${account.login || "(unknown account)"} · ${account.type || "account"} · ${status}${via}`,
     status,
+    kind,
+    manageUrl: isGithubLink(entry && entry.manage_url) ? entry.manage_url : "",
   };
 }
 
@@ -205,10 +244,22 @@ export function githubView(data, now = Date.now() / 1000) {
   const payload = data && typeof data === "object" ? data : {};
   const app = payload.app || null;
   const queue = payload.queue || {};
+  const shared = payload.shared && typeof payload.shared === "object" ? payload.shared : {};
+  const installations = (Array.isArray(payload.installations) ? payload.installations : []).map(installationView);
+  const repos = (Array.isArray(payload.repos) ? payload.repos : []).map((repo) => repoView(repo, now));
   return {
     configured: payload.configured !== false,
     canManage: Boolean(payload.can_manage),
+    // The shared app: on when the deployment's secrets are set.
+    shared: { configured: shared.configured === true, slug: String(shared.slug || "") },
+    // "Use your own GitHub App": on when the server can seal an app's keys.
+    advanced: payload.advanced && typeof payload.advanced === "object"
+      ? payload.advanced.configured === true
+      : payload.configured !== false,
+    // The own app's block: "setup" (no own app yet) or "connected".
     state: app ? "connected" : "setup",
+    // Anything connected at all, by either app: the accounts and repositories.
+    hasConnections: Boolean(app) || installations.length > 0 || repos.length > 0,
     app: app
       ? {
           slug: String(app.slug || ""),
@@ -217,8 +268,8 @@ export function githubView(data, now = Date.now() / 1000) {
           installUrl: isGithubLink(app.install_url) ? app.install_url : "",
         }
       : null,
-    installations: (Array.isArray(payload.installations) ? payload.installations : []).map(installationView),
-    repos: (Array.isArray(payload.repos) ? payload.repos : []).map((repo) => repoView(repo, now)),
+    installations,
+    repos,
     queued: Number(queue.queued) || 0,
     dead: Number(queue.dead) || 0,
   };
@@ -265,6 +316,12 @@ export async function mountGithub(deps) {
   const appLine = q("#github-app");
   const queueLine = q("#github-queue");
   const removed = q("#github-removed");
+  const sharedBlock = q("#github-shared");
+  const sharedOff = q("#github-shared-off");
+  const sharedInstall = q("#github-shared-install");
+  const advanced = q("#github-advanced");
+  const own = q("#github-own");
+  const retry = q("#github-retry");
 
   const outcome = outcomeBanner(deps.location && deps.location.search);
   if (outcome && banner) {
@@ -277,30 +334,51 @@ export async function mountGithub(deps) {
     }
   }
 
+  // `reason=installer-unknown&installation=<n>`: the OAuth hop can be retried.
+  const retryId = retryInstallation(deps.location && deps.location.search);
+
   const paint = (view) => {
     if (!view.configured) {
-      notify(status, "GitHub is not set up on this server yet.", "warn");
-      setHidden([setup, connected, readonly], true);
+      notify(status, "GitHub isn't configured on this deployment.", "warn");
+      setHidden([setup, connected, readonly, sharedBlock, sharedOff, advanced, own, retry], true);
       return;
     }
     notify(status, "", "");
-    setHidden([setup], view.state !== "setup");
-    setHidden([connected], view.state !== "connected");
-    if (view.state === "setup") {
-      setHidden([readonly], view.canManage);
-      if (readonly) readonly.textContent = "Only a workspace owner or admin can create the GitHub app.";
-      if (create) create.disabled = !view.canManage;
-      for (const control of [owner, orgField]) if (control) control.disabled = !view.canManage;
-      if (orgField) orgField.disabled = !view.canManage || !(owner && owner.checked);
+    // The default: the shared app's install button, or why it is missing.
+    setHidden([sharedBlock], !view.shared.configured);
+    setHidden([sharedOff], view.shared.configured);
+    if (sharedOff && !view.shared.configured) {
+      sharedOff.textContent = view.advanced
+        ? "GitHub isn't configured on this deployment. You can still use your own GitHub App under Advanced."
+        : "GitHub isn't configured on this deployment.";
     }
-    if (view.state === "connected") {
-      setHidden([readonly], true);
-      paintApp(view);
+    if (sharedInstall) sharedInstall.disabled = !view.canManage;
+    setHidden([retry], !(retryId && view.shared.configured && view.canManage));
+    setHidden([readonly], view.canManage);
+    if (readonly) readonly.textContent = "Only a workspace owner or admin can connect GitHub or change it.";
+
+    // What is connected, by either app.
+    setHidden([connected], !view.hasConnections);
+    if (view.hasConnections) {
       paintInstallations(view);
       paintRepos(view);
       if (queueLine) {
         queueLine.textContent = `Queued: ${view.queued} · failed for good: ${view.dead}`;
       }
+    }
+
+    // Advanced: the workspace's own app.
+    setHidden([advanced], !view.advanced);
+    if (advanced && view.state === "connected") advanced.open = true;
+    setHidden([setup], view.state !== "setup");
+    setHidden([own], view.state !== "connected");
+    if (view.state === "setup") {
+      if (create) create.disabled = !view.canManage;
+      for (const control of [owner, orgField]) if (control) control.disabled = !view.canManage;
+      if (orgField) orgField.disabled = !view.canManage || !(owner && owner.checked);
+    }
+    if (view.state === "connected") {
+      paintApp(view);
       if (add) add.disabled = !view.canManage;
       if (remove) remove.disabled = !view.canManage;
     }
@@ -327,6 +405,16 @@ export async function mountGithub(deps) {
     for (const install of view.installations) {
       const li = doc.createElement("li");
       li.textContent = install.line;
+      if (install.manageUrl) {
+        const gap = doc.createElement("span");
+        gap.textContent = " · ";
+        li.appendChild(gap);
+        const link = doc.createElement("a");
+        link.setAttribute("href", install.manageUrl);
+        link.setAttribute("rel", "noopener noreferrer");
+        link.textContent = "Manage on GitHub";
+        li.appendChild(link);
+      }
       installRows.appendChild(li);
     }
     if (!view.installations.length) {
@@ -391,6 +479,28 @@ export async function mountGithub(deps) {
 
   // Writes: each one re-reads the page after it lands, so the page shows
   // what the server now holds and not what the button last said.
+
+  // The shared app: a link the browser follows, only to github.com.
+  const follow = async (button, request, what) => {
+    button.disabled = true;
+    try {
+      const answer = await api(request.path, { method: request.method, body: request.body });
+      if (!isGithubLink(answer && answer.url)) throw new Error("GitHub did not return a link Living Brain can follow.");
+      deps.location.assign(answer.url);
+    } catch (error) {
+      button.disabled = false;
+      notify(status, githubErrorMessage(error, what), "bad");
+    }
+  };
+  if (sharedInstall) {
+    sharedInstall.addEventListener("click", () => follow(sharedInstall, sharedInstallRequest(), "start the install"));
+  }
+  if (retry) {
+    retry.addEventListener("click", () => {
+      if (retryId) return follow(retry, sharedVerifyRequest(retryId), "finish connecting");
+      return undefined;
+    });
+  }
   if (create) {
     create.addEventListener("click", async () => {
       const choice = ownerChoice(owner && owner.checked ? "org" : "user", orgField ? orgField.value : "");
