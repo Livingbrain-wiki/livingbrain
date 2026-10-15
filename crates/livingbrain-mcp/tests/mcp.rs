@@ -57,6 +57,9 @@ fn world() -> Fixture {
                 workspace_id: workspace.to_owned(),
                 user_id: user.to_owned(),
                 token_scopes: None,
+                agent_owner: None,
+                role: None,
+                credential: None,
             },
         )
     })
@@ -77,6 +80,7 @@ fn kms() -> Arc<dyn Kms> {
 struct Fixture {
     router: cratefield_core::axum::Router,
     store: PageStore,
+    db: Arc<dyn cratefield_core::Database>,
 }
 
 /// A world with the askers given, and nothing else.
@@ -90,6 +94,9 @@ fn fixture_with(askers: &[(&str, &str, &str)]) -> Fixture {
                     workspace_id: (*workspace).to_owned(),
                     user_id: (*user).to_owned(),
                     token_scopes: None,
+                    agent_owner: None,
+                    role: None,
+                    credential: None,
                 },
             )
         })
@@ -113,16 +120,23 @@ fn fixture(auth: Arc<dyn BearerAuth>) -> Fixture {
             Arc::clone(&auth_for_routes),
         )
     });
-    let kit = TestHarness::with_ports(vec![Box::new(pages)], |ports| {
-        let store: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
-        ports.blob = Some(store.clone());
-        blob = Some(store);
-        // The deployment's own origin, which every cited page is under.
-        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
-            livingbrain_pages::APP_BASE_KEY,
-            "https://app.brain.test",
-        )]));
-    });
+    let kit = TestHarness::with_ports(
+        vec![
+            Box::new(pages),
+            // The grants tables (ADR 0004): every tool reads its plan from them.
+            Box::new(livingbrain_accounts::Access::new()),
+        ],
+        |ports| {
+            let store: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
+            ports.blob = Some(store.clone());
+            blob = Some(store);
+            // The deployment's own origin, which every cited page is under.
+            ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
+                livingbrain_pages::APP_BASE_KEY,
+                "https://app.brain.test",
+            )]));
+        },
+    );
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
     Fixture {
         router: kit.router.clone(),
@@ -138,6 +152,7 @@ fn fixture(auth: Arc<dyn BearerAuth>) -> Fixture {
             clock,
             Arc::new(UlidIdGen),
         ),
+        db: kit.db.clone(),
     }
 }
 
@@ -676,5 +691,169 @@ fn the_challenge_names_the_host_the_request_reached() {
     assert_eq!(
         challenged_at(&fixture, "localhost:8787", Some("http")),
         "Bearer resource_metadata=\"http://localhost:8787/.well-known/oauth-protected-resource\"",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0004: an agent account through the MCP tools
+
+/// One member and an agent account they own, in one workspace, plus pages in
+/// two folders of the member's space.
+fn agent_world() -> Fixture {
+    let mut askers: BTreeMap<String, Asker> = BTreeMap::new();
+    askers.insert(
+        "member".to_owned(),
+        Asker {
+            workspace_id: "ws".to_owned(),
+            user_id: "u-a".to_owned(),
+            token_scopes: None,
+            agent_owner: None,
+            role: None,
+            credential: None,
+        },
+    );
+    askers.insert(
+        "agent".to_owned(),
+        Asker {
+            workspace_id: "ws".to_owned(),
+            user_id: "agt_x".to_owned(),
+            token_scopes: None,
+            agent_owner: Some("u-a".to_owned()),
+            role: None,
+            credential: Some("lba_00112233aabbccdd".to_owned()),
+        },
+    );
+    let fixture = fixture(Arc::new(Tokens(askers)));
+    seed(
+        &fixture,
+        "ws",
+        &user("u-a"),
+        "coding-agents--claude--x",
+        "---\ntitle: Claude page\n---\n\nmarigold claude",
+    );
+    seed(
+        &fixture,
+        "ws",
+        &user("u-a"),
+        "coding-agents--codex--y",
+        "---\ntitle: Codex page\n---\n\nmarigold codex",
+    );
+    seed(
+        &fixture,
+        "ws",
+        &user("u-a"),
+        "diary",
+        "---\ntitle: Diary\n---\n\nmarigold diary",
+    );
+    seed(
+        &fixture,
+        "ws",
+        &Scope::Shared,
+        "handbook",
+        "---\ntitle: Handbook\n---\n\nmarigold shared",
+    );
+    fixture
+}
+
+fn grant_agent(
+    fixture: &Fixture,
+    path: &str,
+    permission: cratefield_module_orgs::grants::Permission,
+) {
+    use cratefield_module_orgs::grants::{self, Effect, NewGrant, Selector, split_path};
+    pollster::block_on(grants::put_grant(
+        &*fixture.db,
+        "ws",
+        &format!("grt_{path}"),
+        &NewGrant {
+            principal: "agent:agt_x".to_owned(),
+            selector: Selector::new("pages", "personal:u-a", split_path(path)).expect("valid"),
+            permission,
+            effect: Effect::Allow,
+            expires_at: None,
+            created_by: "u-a".to_owned(),
+        },
+        time::OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("in range"),
+    ))
+    .expect("stores");
+}
+
+#[test]
+fn an_agent_account_sees_nothing_through_the_tools_until_granted() {
+    let fixture = agent_world();
+    let found = text_of(&post(
+        &fixture,
+        "agent",
+        call("brain_search", json!({"query": "marigold"})),
+    ));
+    assert!(!found.contains("marigold"), "{found}");
+    let page = post(
+        &fixture,
+        "agent",
+        call("brain_page", json!({"slug": "diary"})),
+    );
+    assert!(text_of(&page).starts_with("no page"), "{}", text_of(&page));
+    let context = text_of(&post(
+        &fixture,
+        "agent",
+        call(
+            "brain_context_for",
+            json!({"repo": "chi-infra", "task": "marigold"}),
+        ),
+    ));
+    assert!(!context.contains("marigold"), "{context}");
+    let note = post(
+        &fixture,
+        "agent",
+        call("brain_note", json!({"text": "hello"})),
+    );
+    assert_eq!(note.json()["result"]["isError"], true, "{}", note.json());
+}
+
+#[test]
+fn an_agent_account_reads_exactly_its_folder_through_the_tools() {
+    let fixture = agent_world();
+    grant_agent(
+        &fixture,
+        "coding-agents/claude",
+        cratefield_module_orgs::grants::Permission::Read,
+    );
+    let found = text_of(&post(
+        &fixture,
+        "agent",
+        call("brain_search", json!({"query": "marigold"})),
+    ));
+    assert!(found.contains("Claude page"), "{found}");
+    for leaked in ["Codex page", "Diary", "Handbook"] {
+        assert!(!found.contains(leaked), "{leaked}: {found}");
+    }
+    let page = post(
+        &fixture,
+        "agent",
+        call("brain_page", json!({"slug": "coding-agents--claude--x"})),
+    );
+    assert!(text_of(&page).contains("Claude page"));
+    let refused = post(
+        &fixture,
+        "agent",
+        call("brain_page", json!({"slug": "coding-agents--codex--y"})),
+    );
+    assert!(text_of(&refused).starts_with("no page"));
+    // Read is not write: a note is refused.
+    let note = post(
+        &fixture,
+        "agent",
+        call("brain_note", json!({"text": "hello"})),
+    );
+    assert_eq!(note.json()["result"]["isError"], true, "{}", note.json());
+    // The member still reads all of it.
+    let theirs = text_of(&post(
+        &fixture,
+        "member",
+        call("brain_search", json!({"query": "marigold"})),
+    ));
+    assert!(
+        theirs.contains("Diary") && theirs.contains("Codex page"),
+        "{theirs}"
     );
 }

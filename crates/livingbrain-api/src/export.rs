@@ -16,7 +16,9 @@ use cratefield_core::axum::http::{HeaderMap, Method, StatusCode, header};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_module_orgs::grants::Permission;
 use livingbrain_pages::PageError;
+use livingbrain_pages::access::KIND_PAGES;
 
 use crate::Wiki;
 use crate::problems::{EXPORT_FORMAT, page_read_error};
@@ -117,10 +119,10 @@ async fn export(
     }
 
     let store = state.store()?;
-    let scopes = state.scopes(&asker);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let plan = state.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
     let listed = store
-        .list(&names, EXPORT_PAGE_LIMIT)
+        .list_in(&filters, EXPORT_PAGE_LIMIT)
         .await
         .map_err(page_read_error)?;
 
@@ -138,6 +140,11 @@ async fn export(
         }
     }
 
+    // An export is the whole readable wiki leaving the service: always
+    // recorded, whoever asks (ADR 0004).
+    state
+        .audit(&asker, "export", &format!("pages:{}", entries.len()))
+        .await;
     // The page cap above keeps the entry count far below the zip format's
     // own; `None` would mean that bound was raised past the format's.
     let archive = zip::archive(&entries).ok_or_else(Problem::internal)?;

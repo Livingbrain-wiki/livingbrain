@@ -40,8 +40,15 @@ async-trait = { workspace = true }
 # SHA-256 of a workspace and a scope, so an access scope becomes a page slug.
 sha2 = { workspace = true }
 serde_json = { workspace = true }
+# "Now" for a grant's expiry (ADR 0004), from the Clock port.
+time = { workspace = true }
+# The permission vocabulary the grants plan answers in (ADR 0004).
+cratefield-module-orgs = { workspace = true }
 
 [dev-dependencies]
+time = { workspace = true }
+# The grants tables a test harness needs beside the routes (ADR 0004).
+livingbrain-accounts = { path = "../livingbrain-accounts" }
 cratefield-testing = { workspace = true, features = ["postgres"] }
 async-trait = { workspace = true }
 pollster = { workspace = true }

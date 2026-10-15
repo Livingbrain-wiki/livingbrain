@@ -456,6 +456,187 @@
               </div>
             </section>
 
+            <!-- agent accounts (ADR 0004). A key value lives in exactly one
+                 element (#agent-key-value), shown once. -->
+            <section class="card sect" id="agents" aria-labelledby="agents-h">
+              <header class="sect__head">
+                <h2 id="agents-h">Agent accounts</h2>
+                <p class="muted">
+                  An account for a coding agent, a CI job or an integration: it
+                  signs in with an API key, never a browser, and reaches nothing
+                  until you grant it access below. Everything it does is logged
+                  as the agent, on your behalf.
+                </p>
+              </header>
+              <div id="agents-status" class="notice" role="status" aria-live="polite"></div>
+              <div class="table-scroll table-cards" role="region" aria-label="Agent accounts" tabindex="0">
+                <table class="table">
+                  <caption class="sr">Agent accounts</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">What it is for</th>
+                      <th scope="col">Status</th>
+                      <th scope="col"><span class="sr">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="agent-rows"></tbody>
+                </table>
+              </div>
+
+              <div id="agent-keys" hidden>
+                <h3 id="agent-keys-title">Keys</h3>
+                <div class="table-scroll table-cards" role="region" aria-label="Keys" tabindex="0">
+                  <table class="table">
+                    <caption class="sr">Live keys of this agent account</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Label</th>
+                        <th scope="col">Prefix</th>
+                        <th scope="col">Expires</th>
+                        <th scope="col">Last used</th>
+                        <th scope="col"><span class="sr">Actions</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="agent-key-rows"></tbody>
+                  </table>
+                </div>
+                <form id="agent-key-form" class="connect" novalidate>
+                  <div class="field">
+                    <label for="agent-key-name">Label</label>
+                    <input id="agent-key-name" type="text" maxlength="100" placeholder="Laptop, CI…" />
+                  </div>
+                  <div class="field">
+                    <label for="agent-key-days">Expires after (days, optional)</label>
+                    <input id="agent-key-days" type="number" min="1" max="366" />
+                  </div>
+                  <div class="form-actions">
+                    <button type="submit" data-variant="primary">Create key</button>
+                  </div>
+                </form>
+              </div>
+
+              <div id="agent-key-reveal" class="reveal" hidden>
+                <p class="reveal__note">
+                  <strong>Copy this key now.</strong> You won't see it again.
+                </p>
+                <div class="copybox">
+                  <code id="agent-key-value"></code>
+                  <button type="button" id="copy-agent-key" class="btn-sm">Copy</button>
+                </div>
+                <button type="button" id="dismiss-agent-key">I've saved it</button>
+              </div>
+
+              <form id="agent-form" class="connect" novalidate>
+                <h3>Create an agent account</h3>
+                <div class="field">
+                  <label for="agent-name">Name</label>
+                  <input id="agent-name" type="text" maxlength="100" placeholder="Claude Code, CI…" aria-describedby="err-agentName" />
+                  <p class="field-error" id="err-agentName"></p>
+                </div>
+                <div class="field">
+                  <label for="agent-description">What it is for</label>
+                  <input id="agent-description" type="text" maxlength="1000" />
+                </div>
+                <div class="form-actions">
+                  <button type="submit" data-variant="primary">Create agent account</button>
+                </div>
+              </form>
+            </section>
+
+            <!-- access grants (ADR 0004) -->
+            <section class="card sect" id="access" aria-labelledby="access-h">
+              <header class="sect__head">
+                <h2 id="access-h">Access</h2>
+                <p class="muted">
+                  Who may read or write what. Your personal space is yours alone
+                  until you share part of it; the shared space is every member's.
+                  A deny always wins.
+                </p>
+              </header>
+              <div id="access-status" class="notice" role="status" aria-live="polite"></div>
+              <div class="table-scroll table-cards" role="region" aria-label="Grants" tabindex="0">
+                <table class="table">
+                  <caption class="sr">Access grants you can see</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Who</th>
+                      <th scope="col">Where</th>
+                      <th scope="col">What</th>
+                      <th scope="col">Access</th>
+                      <th scope="col"><span class="sr">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="grant-rows"></tbody>
+                </table>
+              </div>
+              <form id="grant-form" class="connect" novalidate>
+                <h3>Grant access</h3>
+                <div class="field">
+                  <label for="grant-principal">Who</label>
+                  <select id="grant-principal"></select>
+                </div>
+                <div class="field">
+                  <label for="grant-space">Space</label>
+                  <select id="grant-space">
+                    <option value="personal:me">My personal space</option>
+                    <option value="shared">The shared space (owners and admins)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="grant-folder">Folder (optional)</label>
+                  <input id="grant-folder" type="text" placeholder="coding-agents/claude" aria-describedby="err-grantFolder" />
+                  <p class="hint">Empty is the whole space.</p>
+                  <p class="field-error" id="err-grantFolder"></p>
+                </div>
+                <div class="field">
+                  <label for="grant-kind">What</label>
+                  <select id="grant-kind">
+                    <option value="*">Everything</option>
+                    <option value="pages">Pages</option>
+                    <option value="sources">Sources</option>
+                    <option value="facts">Facts</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="grant-permission">Access</label>
+                  <select id="grant-permission">
+                    <option value="read">Read</option>
+                    <option value="write">Read and write</option>
+                    <option value="admin">Admin (can share it on)</option>
+                    <option value="deny">Deny</option>
+                  </select>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" data-variant="primary">Grant</button>
+                </div>
+              </form>
+            </section>
+
+            <!-- audit log (ADR 0004): owners and admins only -->
+            <section class="card sect" id="audit" aria-labelledby="audit-h" data-admin-only hidden>
+              <header class="sect__head">
+                <h2 id="audit-h">Audit log</h2>
+                <p class="muted">Who did what to which part of the workspace, newest first.</p>
+              </header>
+              <div class="table-scroll table-cards" role="region" aria-label="Audit log" tabindex="0">
+                <table class="table">
+                  <caption class="sr">Audit log</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">When</th>
+                      <th scope="col">Who</th>
+                      <th scope="col">Did</th>
+                      <th scope="col">To</th>
+                      <th scope="col">With</th>
+                    </tr>
+                  </thead>
+                  <tbody id="audit-rows"></tbody>
+                </table>
+              </div>
+              <button type="button" id="audit-more" hidden>Load more</button>
+            </section>
+
             <!-- connect your coding agent -->
             <section class="card sect" id="connect" aria-labelledby="connect-h">
               <header class="sect__head">

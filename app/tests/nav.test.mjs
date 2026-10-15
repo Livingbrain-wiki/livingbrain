@@ -62,6 +62,9 @@ test("every address published before the shell still resolves to a destination",
     "/settings.html#connect": "integrations",
     "/settings.html#soon": "integrations",
     "/settings.html#stack": "integrations",
+    "/settings.html#agents": "agents",
+    "/settings.html#access": "access",
+    "/settings.html#audit": "access",
     "/brain.html": "map",
     "/settings.html#github": "integrations",
     "/wiki.html?view=github": "github",
@@ -84,10 +87,11 @@ test("the groups are Brain, Sources, Workspace, Settings, and reserved slots are
   const ids = navItems().map((item) => item.id);
   assert.equal(new Set(ids).size, ids.length, "ids are unique");
   assert.equal(navItem("github").href, "wiki.html?view=github", "GitHub is a source, not a slot");
+  // Agent accounts and access shipped with ADR 0004: real tabs now.
   for (const id of ["agents", "access"]) {
     const item = navItem(id);
-    assert.equal(item.href, undefined, `${id} is a slot`);
-    assert.ok(item.soon, `${id} says what is coming`);
+    assert.equal(item.href, `settings.html#${id}`, `${id} is a settings tab`);
+    assert.equal(item.soon, undefined, `${id} is no longer a slot`);
   }
   for (const item of navItems()) assert.ok(ICONS[item.icon], `${item.id} has an icon`);
 });

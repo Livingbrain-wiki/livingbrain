@@ -2,12 +2,14 @@
 //! pages, sources, projects and fact subjects as nodes, and the links
 //! between them as edges.
 //!
-//! **Who sees what.** Exactly what the listings show this asker: the page
-//! tables read through the asker's page scopes (the credential decides them,
-//! never the client — a narrowed token narrows the map), the source ledger
-//! and the compile queue through the asker's workspace *and* scopes. Nothing
-//! is unsealed: the map is built from slugs, kinds, projects, dates, links
-//! and counts ([`livingbrain_pages::graph_rows`]).
+//! **Who sees what.** Exactly what the listings show this asker, through the
+//! grants plan (ADR 0004): pages and links through its page filters, the
+//! source ledger and the compile queue through its sources reach (workspace
+//! *and* scope, or the granted projects), fact subjects through its facts
+//! filters — all in the query, before the cap. The credential decides them,
+//! never the client; a narrowed token narrows the map. Nothing is unsealed:
+//! the map is built from slugs, kinds, projects, dates, links and counts
+//! ([`livingbrain_pages::graph_rows_in`]).
 //!
 //! **Filters before the limit.** `project` and `kind` narrow the node set
 //! first; then the nodes are ranked (most connected, then newest) and the
@@ -36,15 +38,18 @@ use cratefield_core::axum::extract::{Query, State};
 use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::layout::segment;
 use livingbrain_compiler::{JobStatus, Queue};
-use livingbrain_pages::{GraphRows, graph_rows, is_project};
+use livingbrain_pages::access::{KIND_FACTS, KIND_PAGES, ScopeFilter, subject_path};
+use livingbrain_pages::{GraphReach, GraphRows, graph_rows_in, is_project};
 use serde_json::{Value, json};
 
 use crate::Wiki;
 use crate::facts::scope_label;
 use crate::port;
 use crate::service::Service;
+use crate::sources::SourceReach;
 
 /// How many nodes the map answers with when the caller names no limit.
 pub const DEFAULT_LIMIT: usize = 800;
@@ -153,17 +158,45 @@ async fn graph(
 ) -> Result<Json<Value>, Problem> {
     let asker = state.asker(&method, &headers).await?;
     let query = parse_query(&query)?;
-    let scopes = state.scopes(&asker);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    // The grants decide every table the map reads (ADR 0004): pages and
+    // links through the page filters, sources through the sources reach,
+    // fact subjects through the facts filters — each in the query, before
+    // the cap, so nothing ungranted is drawn, linked or counted.
+    let plan = state.access(&asker).await?;
+    let sources = SourceReach::of(&plan);
+    let (facts, fact_subjects): (Vec<ScopeFilter>, Vec<ScopeFilter>) = plan
+        .filters(KIND_FACTS, Permission::Read)
+        .into_iter()
+        .partition(ScopeFilter::is_whole);
+    let reach = GraphReach {
+        pages: plan.filters(KIND_PAGES, Permission::Read),
+        sources: sources.whole.clone(),
+        source_projects: sources.by_project,
+        facts: facts.into_iter().map(|filter| filter.scope).collect(),
+        fact_subjects: fact_subjects
+            .into_iter()
+            .map(|filter| filter.scope)
+            .collect(),
+    };
+    let fact_allowed = |scope: &str, subject: &str| {
+        plan.allows(KIND_FACTS, scope, &subject_path(subject), Permission::Read)
+    };
     let db = port(state.ctx().ports.db.clone())?;
-    let rows = graph_rows(db.as_ref(), &asker.workspace_id, &names, SCAN_CAP)
-        .await
-        .map_err(|_| Problem::internal())?;
+    let rows = graph_rows_in(
+        db.as_ref(),
+        &asker.workspace_id,
+        &reach,
+        &fact_allowed,
+        SCAN_CAP,
+    )
+    .await
+    .map_err(|_| Problem::internal())?;
     // The compile queue says which session each compiled page came from. A
     // composition without the compiler has no queue: the map just has no
-    // `cites` edges.
+    // `cites` edges. Only jobs of a source scope read whole, and an edge is
+    // drawn only between a page and a session already on the map.
     let compiled: Vec<Compiled> = Queue::new(db)
-        .list(&asker.workspace_id, &scopes, None, SCAN_CAP)
+        .list(&asker.workspace_id, &sources.whole, None, SCAN_CAP)
         .await
         .unwrap_or_default()
         .into_iter()

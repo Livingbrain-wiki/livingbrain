@@ -38,8 +38,8 @@ export const NAV = Object.freeze([
     label: "Workspace",
     items: [
       { id: "members", label: "Members", href: "settings.html#members", icon: "members", hint: "Who is in this workspace" },
-      { id: "agents", label: "Agent accounts", soon: "Agent accounts are coming soon.", icon: "agent" },
-      { id: "access", label: "Access & audit", soon: "Access grants and the audit log are coming soon.", icon: "lock" },
+      { id: "agents", label: "Agent accounts", href: "settings.html#agents", icon: "agent", hint: "Non-human accounts and their API keys" },
+      { id: "access", label: "Access & audit", href: "settings.html#access", icon: "lock", hint: "Who may read what, and the audit log" },
     ],
   },
   {
@@ -80,6 +80,8 @@ export const SETTINGS_TABS = Object.freeze({
   integrations: ["connect", "github", "soon", "stack"],
   tokens: ["tokens"],
   members: ["workspace", "members"],
+  agents: ["agents"],
+  access: ["access", "audit"],
   account: ["account"],
 });
 

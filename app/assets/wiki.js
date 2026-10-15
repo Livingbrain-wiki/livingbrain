@@ -35,6 +35,14 @@ import { applyHeader, checkSession } from "./session.js";
 import { displayValue, factsDescription, factsPath } from "./facts.js";
 import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
 import { icon } from "./shell.js";
+import {
+  pageAccessRequest,
+  grantCreateRequest,
+  grantDeleteRequest,
+  renderReaders,
+  agentViews,
+  accessErrorMessage,
+} from "./access.js";
 
 /** Where the per-browser list of pinned `scope/slug` keys lives. */
 const PIN_KEY = "lb-wiki-pinned";
@@ -1673,6 +1681,12 @@ export async function wikiPage(api) {
     pageBacklinks: $("#page-backlinks"),
     pageCitations: $("#page-citations"),
     pageFactsCard: $("#page-facts-card"),
+    pageAccessLoad: $("#page-access-load"),
+    pageAccessList: $("#page-access-list"),
+    pageAccessStatus: $("#page-access-status"),
+    pageShareForm: $("#page-share-form"),
+    pageShareWho: $("#page-share-who"),
+    pageSharePermission: $("#page-share-permission"),
     pageFacts: $("#page-facts"),
     pageFactsAsOf: $("#page-facts-as-of"),
     factsAsOf: $("#facts-as-of"),
@@ -3135,6 +3149,92 @@ export async function wikiPage(api) {
     if (els.pageFactsAsOf) els.pageFactsAsOf.value = "";
     paintPageFacts(page.facts);
     paintPin();
+    resetPageAccess();
+  }
+
+  /* -- who can see this (ADR 0004) ----------------------------------- */
+
+  let pageAccess = null;
+  let sharePeople = null;
+
+  function resetPageAccess() {
+    pageAccess = null;
+    if (!els.pageAccessList) return;
+    els.pageAccessList.replaceChildren();
+    els.pageShareForm.hidden = true;
+    notice(els.pageAccessStatus, "");
+  }
+
+  async function sharePrincipals() {
+    if (sharePeople) return sharePeople;
+    const [members, agents] = await Promise.all([
+      api("/v1/workspaces/members").catch(() => []),
+      api("/v1/agents").then(agentViews).catch(() => []),
+    ]);
+    sharePeople = { members: Array.isArray(members) ? members : [], agents };
+    return sharePeople;
+  }
+
+  async function loadPageAccess() {
+    const page = state.page || {};
+    if (!page.slug) return;
+    try {
+      const request = pageAccessRequest(page.slug);
+      pageAccess = await api(request.path);
+      const people = await sharePrincipals();
+      renderReaders(els.pageAccessList, pageAccess, people.members, people.agents);
+      els.pageShareForm.hidden = !pageAccess.you_can_share;
+      if (pageAccess.you_can_share) {
+        els.pageShareWho.replaceChildren();
+        for (const agent of people.agents) {
+          const option = document.createElement("option");
+          option.value = `agent:${agent.id}`;
+          option.textContent = `${agent.name} (agent)`;
+          els.pageShareWho.appendChild(option);
+        }
+        for (const member of people.members) {
+          const option = document.createElement("option");
+          option.value = `member:${member.user_id}`;
+          option.textContent = member.name || member.user_id;
+          els.pageShareWho.appendChild(option);
+        }
+      }
+      notice(els.pageAccessStatus, "");
+    } catch (error) {
+      notice(els.pageAccessStatus, accessErrorMessage(error, "see who can read this"), "warn");
+    }
+  }
+
+  async function sharePage(event) {
+    event.preventDefault();
+    if (!pageAccess) return;
+    const page = state.page || {};
+    try {
+      const request = grantCreateRequest({
+        principal: els.pageShareWho.value,
+        space: pageAccess.space,
+        // The page itself, as its folder path: a slug's `--` segments.
+        folder: String(page.slug || "").split("--").join("/"),
+        kind: "pages",
+        permission: els.pageSharePermission.value,
+      });
+      await api(request.path, { method: request.method, body: request.body });
+      await loadPageAccess();
+    } catch (error) {
+      notice(els.pageAccessStatus, accessErrorMessage(error, "share this page"), "warn");
+    }
+  }
+
+  async function removeReader(event) {
+    const button = event.target.closest("[data-grant-delete]");
+    if (!button) return;
+    try {
+      const request = grantDeleteRequest(button.dataset.grantDelete);
+      await api(request.path, { method: request.method });
+      await loadPageAccess();
+    } catch (error) {
+      notice(els.pageAccessStatus, accessErrorMessage(error, "remove that access"), "warn");
+    }
   }
 
   /* -- temporal facts (docs/temporal-facts.md) ------------------------ */
@@ -3718,6 +3818,11 @@ export async function wikiPage(api) {
   els.cancelEdit.addEventListener("click", leaveEditing);
   els.save.addEventListener("click", savePage);
   els.pinToggle.addEventListener("click", togglePin);
+  if (els.pageAccessLoad) {
+    els.pageAccessLoad.addEventListener("click", loadPageAccess);
+    els.pageShareForm.addEventListener("submit", sharePage);
+    els.pageAccessList.addEventListener("click", removeReader);
+  }
 
   els.editWrite.addEventListener("click", () => {
     state.previewing = false;

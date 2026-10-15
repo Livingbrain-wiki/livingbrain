@@ -46,6 +46,7 @@ async-trait = { workspace = true }
 # contract — `/v1/notes`, `/v1/pages`, `/v1/search`, `/v1/ask`,
 # `/v1/export`. `fetch` diverts the four non-pages paths through the harness
 # router itself (see `serve_cli` below).
+livingbrain-accounts = { path = "../livingbrain-accounts" }
 livingbrain-api = { path = "../livingbrain-api" }
 livingbrain-canary = { path = "../livingbrain-canary" }
 # Only for `WALL_AFTER_BUDGET`: how far past its cron deadline a compile
@@ -64,6 +65,9 @@ livingbrain-tools = { path = "../livingbrain-tools" }
 # admin read endpoint, mounted below beside the modules it bills.
 livingbrain-usage = { path = "../livingbrain-usage" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+# The removal hook disables a removed member's agent accounts and deletes
+# their grants through the harness's library functions (ADR 0004).
+cratefield-module-orgs = { workspace = true }
 # `serve_cli` drives the diverted CLI paths through the harness router.
 tower = { workspace = true }
 worker = { workspace = true }

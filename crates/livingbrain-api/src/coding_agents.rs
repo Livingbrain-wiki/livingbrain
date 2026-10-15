@@ -63,12 +63,14 @@ use cratefield_core::{
     IdGen, Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem, ScheduledBudget,
     SqlMigration,
 };
+use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::{
     Call, ClaimFilter, Classifiers, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model,
     ModelFailure, Queue, Reply, Settings,
 };
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError};
 use livingbrain_models::jobs::{self, Dispatch, JobCall};
+use livingbrain_pages::access::{AccessPlan, KIND_PAGES, KIND_SOURCES, ScopeFilter};
 use livingbrain_pages::{FactError, FactInput, FactStore};
 use serde_json::{Value, json};
 
@@ -594,7 +596,8 @@ async fn queue(
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Result<Json<Value>, Problem> {
     let asker = service.asker(&Method::GET, &headers).await?;
-    let scopes = service.scopes(&asker);
+    Service::member_only(&asker)?;
+    let (scopes, _) = job_scopes(&service.access(&asker).await?);
     let ctx = service.ctx();
     let db = port(ctx.ports.db.clone())?;
     let clock = port(ctx.ports.clock.clone())?;
@@ -729,15 +732,8 @@ async fn process(
             .map_or(1, |max| usize::try_from(max).unwrap_or(1))
             .clamp(1, MAX_PROCESS_NOW)
     };
-    let scopes = service.scopes(&asker);
-    // Only the asker's own memory is compiled on their say-so: a shared
-    // session (if one ever exists) is the cron's to drain, on the
-    // workspace's schedule, not any one member's button.
-    let own: Vec<String> = scopes
-        .iter()
-        .filter(|scope| scope.starts_with("user-"))
-        .cloned()
-        .collect();
+    Service::member_only(&asker)?;
+    let (scopes, own) = job_scopes(&service.access(&asker).await?);
     let compiler = compiler(service.ctx(), &service.wiki()).ok_or_else(Problem::internal)?;
     let filter = ClaimFilter {
         workspace: Some(asker.workspace_id.clone()),
@@ -786,13 +782,9 @@ async fn compile_fully(
         })
         .ok_or_else(|| Problem::validation_failed("source_id must be a source id"))?
         .to_owned();
-    let scopes = service.scopes(&asker);
+    Service::member_only(&asker)?;
     // The asker's own memory only, as for `Process now`.
-    let own: Vec<String> = scopes
-        .iter()
-        .filter(|scope| scope.starts_with("user-"))
-        .cloned()
-        .collect();
+    let (scopes, own) = job_scopes(&service.access(&asker).await?);
     let ctx = service.ctx();
     let clock = port(ctx.ports.clock.clone())?;
     let compiler = compiler(ctx, &service.wiki()).ok_or_else(Problem::internal)?;
@@ -841,13 +833,9 @@ async fn retry(
     headers: HeaderMap,
 ) -> Result<Json<Value>, Problem> {
     let asker = service.asker(&Method::POST, &headers).await?;
-    let scopes = service.scopes(&asker);
+    Service::member_only(&asker)?;
     // The asker's own memory only, as for `Process now`.
-    let own: Vec<String> = scopes
-        .iter()
-        .filter(|scope| scope.starts_with("user-"))
-        .cloned()
-        .collect();
+    let (scopes, own) = job_scopes(&service.access(&asker).await?);
     let ctx = service.ctx();
     let db = port(ctx.ports.db.clone())?;
     let clock = port(ctx.ports.clock.clone())?;
@@ -867,6 +855,35 @@ async fn retry(
             .map(|(status, n)| (status.as_str().to_owned(), json!(n)))
             .collect::<serde_json::Map<String, Value>>(),
     })))
+}
+
+/// The scopes a member's compile jobs are listed from, and the ones their
+/// own say-so may compile (ADR 0004).
+///
+/// A job is about a source, so it is listed to whoever may read that
+/// source's whole scope. Only the asker's own memory is compiled on their
+/// say-so — a shared session (if one ever exists) is the cron's to drain, on
+/// the workspace's schedule, not any one member's button — and only where
+/// the credential may write: a token narrowed to reading cannot start a
+/// compile that writes pages.
+pub(super) fn job_scopes(plan: &AccessPlan) -> (Vec<String>, Vec<String>) {
+    let scopes: Vec<String> = plan
+        .filters(KIND_SOURCES, Permission::Read)
+        .into_iter()
+        .filter(ScopeFilter::is_whole)
+        .map(|filter| filter.scope)
+        .collect();
+    let own = plan
+        .own_scope()
+        .filter(|own| scopes.contains(own))
+        .filter(|own| {
+            plan.filters(KIND_PAGES, Permission::Write)
+                .iter()
+                .any(|filter| &filter.scope == own && filter.is_whole())
+        })
+        .into_iter()
+        .collect();
+    (scopes, own)
 }
 
 /// One job as the routes answer it. No scope hash, no body hash: the

@@ -16,7 +16,8 @@ use std::sync::Arc;
 use cratefield_core::axum::http::{HeaderMap, Method, header};
 use cratefield_core::{ModuleContext, Ports, Problem};
 use cratefield_kms::Kms;
-use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scopes};
+use livingbrain_mcp::{Asker, AuthError, BearerAuth};
+use livingbrain_pages::access::AccessPlan;
 use livingbrain_pages::{FactStore, PageStore, SourceStore};
 
 use crate::problems::{CROSS_SITE_REQUEST, UNAUTHORIZED};
@@ -239,11 +240,70 @@ impl Service {
         }
     }
 
-    /// The page scopes the asker may read, most specific first. The only
+    /// Records what an asker did in the audit log (ADR 0004): every write an
+    /// agent account makes, and every export, are attributed — the agent,
+    /// the member it acts for, the credential's prefix. Best effort: the
+    /// action has already happened, and a lost line must not undo it.
+    pub(crate) async fn audit(&self, asker: &Asker, action: &str, resource: &str) {
+        let ports = &self.ctx.ports;
+        let (Some(db), Some(clock), Some(id_gen)) =
+            (ports.db.clone(), ports.clock.clone(), ports.id_gen.clone())
+        else {
+            return;
+        };
+        let entry = cratefield_module_orgs::audit::AuditEntry {
+            id: id_gen.ulid(),
+            org_id: asker.workspace_id.clone(),
+            actor_kind: if asker.is_agent() { "agent" } else { "member" }.to_owned(),
+            actor_id: asker.user_id.clone(),
+            on_behalf_of: asker.agent_owner.clone(),
+            credential: asker
+                .credential
+                .clone()
+                .unwrap_or_else(|| "session".to_owned()),
+            action: action.to_owned(),
+            resource: resource.to_owned(),
+            detail: String::new(),
+            at: String::new(),
+        };
+        if cratefield_module_orgs::audit::record(&*db, &entry, clock.now())
+            .await
+            .is_err()
+        {
+            eprintln!("an audit entry could not be written: {action}");
+        }
+    }
+
+    /// Refuses an agent account (ADR 0004) on a route that acts for a
+    /// member: their own compile queue and jobs, the workspace's settings.
+    /// Such a route has nothing a grant could open to an agent.
+    ///
+    /// # Errors
+    ///
+    /// [`AGENT_NOT_ALLOWED`](crate::problems::AGENT_NOT_ALLOWED) for an agent.
+    pub(crate) fn member_only(asker: &Asker) -> Result<(), Problem> {
+        if asker.is_agent() {
+            return Err(Problem::new(&crate::problems::AGENT_NOT_ALLOWED));
+        }
+        Ok(())
+    }
+
+    /// What the asker may read and write (ADR 0004): their implicit reach
+    /// and every live grant stored for them, read once per request. The only
     /// way a route names scopes, and the reason no route takes one from the
     /// client.
-    pub(crate) fn scopes(&self, asker: &Asker) -> Vec<String> {
-        page_scopes(asker)
+    ///
+    /// # Errors
+    ///
+    /// [`Problem::internal`] when the grants cannot be read: no plan is a
+    /// refusal, never an empty grant list.
+    pub(crate) async fn access(&self, asker: &Asker) -> Result<AccessPlan, Problem> {
+        let db = port(self.ctx.ports.db.clone())?;
+        let clock = port(self.ctx.ports.clock.clone())?;
+        asker
+            .access(&*db, clock.now())
+            .await
+            .map_err(|_| Problem::internal())
     }
 }
 

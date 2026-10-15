@@ -60,6 +60,11 @@ cratefield-kms = "=0.2.0"
 cratefield-push-auth = "=0.3.1"
 # Turnstile, the captcha on the waitlist's public join form (issue #23).
 cratefield-adapter-turnstile = "=0.3.2"
+# Service accounts, access grants and the audit log (ADR 0004): the generic
+# engine lives in the harness's orgs module; this venture calls its library
+# functions and applies its migrations, and does not mount its routes (they
+# answer to the harness `Auth` port, and Living Brain's identity is its own).
+cratefield-module-orgs = "=0.1.2"
 
 # The Workers SDK, pinned to the version the runtime crate targets. Only the
 # venture crate names it.

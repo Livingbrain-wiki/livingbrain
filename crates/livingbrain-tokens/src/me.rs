@@ -34,7 +34,7 @@ use livingbrain_workspaces as workspaces;
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 
-use crate::{AuthError, Member, authenticate};
+use crate::{AuthError, Authenticated, Member, authenticate, authenticate_any};
 
 /// A cookie write a browser reports as coming from another site.
 const CROSS_SITE_REQUEST: ProblemDef = ProblemDef {
@@ -157,12 +157,46 @@ async fn me_body(ctx: &ModuleContext, member: &Member) -> Result<Value, Problem>
     }))
 }
 
-/// `GET /` — the workspace, the principal and the credential.
+/// `GET /` — the workspace, the principal and the credential. The one
+/// route besides the wiki/MCP bearer seam that answers an agent key
+/// (ADR 0004): it is the "connected as" a client shows.
 async fn me(
     State(ctx): State<Arc<ModuleContext>>,
     headers: HeaderMap,
 ) -> Result<Response, Problem> {
-    let member = authenticate(&ctx.ports, &headers).await?;
+    let member = match authenticate_any(&ctx.ports, &headers).await? {
+        Authenticated::Member(member) => member,
+        Authenticated::Agent(agent) => {
+            let db = ctx.ports.db.clone().ok_or(AuthError)?;
+            let owner = workspaces::caller_for(&*db, &agent.workspace_id, &agent.owner_id)
+                .await
+                .map_err(|_| Problem::internal())?
+                .ok_or(AuthError)?;
+            return Ok(Json(json!({
+                "workspace": {
+                    "id": owner.workspace_id,
+                    "name": owner.workspace_name,
+                    "avatar_url": owner.workspace_avatar.map(|avatar| avatar.url),
+                },
+                "principal": {
+                    "kind": "agent",
+                    "id": agent.agent_id,
+                    "name": agent.name,
+                    "on_behalf_of": {
+                        "id": owner.user_id,
+                        "name": owner.name,
+                        "display_name": owner.display_name,
+                    },
+                },
+                "credential": {
+                    "kind": "agent_key",
+                    "prefix": agent.credential,
+                    "scopes": agent.scopes,
+                },
+            }))
+            .into_response());
+        }
+    };
     Ok(Json(me_body(&ctx, &member).await?).into_response())
 }
 

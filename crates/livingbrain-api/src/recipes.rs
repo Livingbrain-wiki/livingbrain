@@ -7,6 +7,7 @@
 //! the page an MCP client cited. **Change them together or not at all**;
 //! the constants below must keep the original values.
 
+use livingbrain_pages::access::ScopeFilter;
 use livingbrain_pages::{Page, PageStore, parse_frontmatter};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -109,13 +110,12 @@ impl Found {
 pub(crate) async fn find(
     store: &PageStore,
     base: &str,
-    scopes: &[String],
+    filters: &[ScopeFilter],
     query: &str,
     limit: usize,
 ) -> Result<Vec<Found>, Problem> {
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let hits = store
-        .search(&names, query, limit)
+        .search_in(filters, query, limit)
         .await
         .map_err(page_read_error)?;
     let mut found = Vec::with_capacity(hits.len());
@@ -154,17 +154,16 @@ pub(crate) const PROJECT_SCAN: usize = 250;
 pub(crate) async fn find_in_project(
     store: &PageStore,
     base: &str,
-    scopes: &[String],
+    filters: &[ScopeFilter],
     query: &str,
     limit: usize,
     project: Option<&str>,
 ) -> Result<Vec<Found>, Problem> {
     let Some(project) = project else {
-        return find(store, base, scopes, query, limit).await;
+        return find(store, base, filters, query, limit).await;
     };
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let hits = store
-        .search(&names, query, PROJECT_SCAN.max(limit))
+        .search_in(filters, query, PROJECT_SCAN.max(limit))
         .await
         .map_err(page_read_error)?;
     let want = livingbrain_pages::project_key(project);
@@ -232,4 +231,30 @@ pub(crate) fn result_json(found: &Found) -> Value {
         "url": found.url,
         "snippet": snippet(&found.body),
     })
+}
+
+/// Where a **new** page or note lands (ADR 0004). A member's goes into their
+/// own memory, as it always has. An agent account has no memory of its own:
+/// its page lands in its owner's personal space, else the shared one —
+/// whichever it holds `write` on for this slug. `None` when neither.
+pub(crate) fn new_page_scope(
+    plan: &livingbrain_pages::access::AccessPlan,
+    asker: &livingbrain_mcp::Asker,
+    slug: &str,
+) -> Option<String> {
+    use livingbrain_pages::access::{SHARED, personal, space_scope};
+    if let Some(own) = plan.own_scope() {
+        return Some(own);
+    }
+    let owner = asker.agent_owner.as_deref()?;
+    [personal(owner), SHARED.to_owned()]
+        .into_iter()
+        .filter_map(|space| space_scope(&asker.workspace_id, &space))
+        .find(|scope| {
+            plan.allows_page(
+                scope,
+                slug,
+                cratefield_module_orgs::grants::Permission::Write,
+            )
+        })
 }

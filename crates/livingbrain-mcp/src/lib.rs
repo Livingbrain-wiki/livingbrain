@@ -172,11 +172,7 @@ async fn call(
             _ => return unauthorized(&headers, &uri),
         }
     } else {
-        Asker {
-            workspace_id: String::new(),
-            user_id: String::new(),
-            token_scopes: None,
-        }
+        Asker::member(String::new(), String::new(), None)
     };
     jsonrpc(protocol::dispatch(&state, &asker, &id, &request).await)
 }

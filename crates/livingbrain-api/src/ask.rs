@@ -58,8 +58,10 @@ use cratefield_core::axum::http::{HeaderMap, Method, StatusCode};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::post;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_module_orgs::grants::Permission;
 use livingbrain_models::invoke::{self, ChatReply, ChatRequest, InvokeError, Serving};
 use livingbrain_models::jobs::{self, Dispatch, JobCall};
+use livingbrain_pages::access::KIND_PAGES;
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -418,14 +420,15 @@ async fn ask(
         )));
     }
 
-    // Retrieval, before any model and before the limit: only the asker's
-    // scopes, the project filter inside the search.
     let store = service.store()?;
-    let scopes = service.scopes(&asker);
+    // The grants decide what reaches the brief (ADR 0004): filtered in the
+    // search itself, before anything is ranked, limited or quoted.
+    let plan = service.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
     let found = find_in_project(
         &store,
         &service.base(),
-        &scopes,
+        &filters,
         question,
         CONTEXT_PAGES,
         request.project.as_deref(),
@@ -440,7 +443,7 @@ async fn ask(
         Some(raw) => as_of(Some(raw), now)?.1,
         None => livingbrain_memory::timeline::as_of_in_question(question, now).unwrap_or(now),
     };
-    let timelines = relevant(&facts, &asker, &scopes, question).await?;
+    let timelines = relevant(&facts, &asker, &plan, question).await?;
     let (lines, fact_citations) = brief_lines(&timelines, at);
     let at_text = livingbrain_memory::timeline::rfc3339(at);
 

@@ -172,6 +172,93 @@ pub async fn authenticate(ports: &Ports, headers: &HeaderMap) -> Result<Member, 
     session(ports, headers).await
 }
 
+/// The key brand of an agent account's API key (ADR 0004): `lba_<id>_<secret>`.
+pub const AGENT_KEY_BRAND: &str = "lba";
+
+/// An agent account a bearer key speaks for (ADR 0004). Never a person: it has
+/// no role, no session and no admin rights, and it reaches only what a grant
+/// gives it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Agent {
+    /// The workspace the key belongs to — the key row's, never the request's.
+    pub workspace_id: String,
+    /// The agent account (`agt_…`).
+    pub agent_id: String,
+    /// The member who owns it, and on whose behalf it acts.
+    pub owner_id: String,
+    /// What people call it.
+    pub name: String,
+    /// The key's scope list, or `None` for everything the account holds.
+    pub scopes: Option<Vec<String>>,
+    /// The key's public prefix.
+    pub credential: String,
+}
+
+impl std::fmt::Debug for Agent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Agent")
+            .field("workspace_id", &self.workspace_id)
+            .field("agent_id", &self.agent_id)
+            .field("owner_id", &self.owner_id)
+            .field("credential", &self.credential)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A member or an agent account: what [`authenticate_any`] resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Authenticated {
+    /// A person, by session or personal access token.
+    Member(Member),
+    /// An agent account, by its API key.
+    Agent(Agent),
+}
+
+/// Like [`authenticate`], but an agent account's API key (`lba_…`) is
+/// accepted too (ADR 0004). Only routes that decide access through the
+/// grants plan call this: every other route keeps [`authenticate`], which
+/// refuses an agent key like any unknown token, so an agent reaches nothing
+/// it was not explicitly wired for.
+///
+/// An agent key is refused when it is malformed, unknown, revoked or expired,
+/// when its account is disabled or deleted, and when the member who owns the
+/// account is no longer a member — every case the same 401.
+pub async fn authenticate_any(
+    ports: &Ports,
+    headers: &HeaderMap,
+) -> Result<Authenticated, AuthError> {
+    if let Some(token) = cratefield_core::bearer_token(headers)
+        && token.starts_with(&format!("{AGENT_KEY_BRAND}_"))
+    {
+        let db = port(ports.db.clone())?;
+        let clock = port(ports.clock.clone())?;
+        let Some(key) =
+            cratefield_module_orgs::service_accounts::verify_key(&*db, token, clock.now())
+                .await
+                .map_err(database)?
+        else {
+            return Err(AuthError);
+        };
+        let account = key.account;
+        // The owner must still be a member: an agent outlives nobody.
+        livingbrain_workspaces::caller_for(&*db, &account.org_id, &account.owner_sub)
+            .await
+            .map_err(database)?
+            .ok_or(AuthError)?;
+        return Ok(Authenticated::Agent(Agent {
+            workspace_id: account.org_id,
+            agent_id: account.id,
+            owner_id: account.owner_sub,
+            name: account.name,
+            scopes: key.scopes,
+            credential: key.prefix,
+        }));
+    }
+    authenticate(ports, headers)
+        .await
+        .map(Authenticated::Member)
+}
+
 /// The caller from the session cookie **only** — never from a bearer. A
 /// token that could mint a token is a credential factory, so `POST
 /// /v1/tokens` uses this instead of [`authenticate`].

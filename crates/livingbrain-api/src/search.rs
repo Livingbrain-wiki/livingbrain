@@ -14,6 +14,8 @@ use cratefield_core::axum::extract::{Query, State};
 use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_module_orgs::grants::Permission;
+use livingbrain_pages::access::KIND_PAGES;
 use serde_json::{Value, json};
 
 use crate::Wiki;
@@ -114,14 +116,15 @@ async fn search(
     let project = query.get("project").map(String::as_str);
 
     let store = state.store()?;
-    let scopes = state.scopes(&asker);
-    let found = find_in_project(&store, &state.base(), &scopes, q, limit, project).await?;
+    let plan = state.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
+    let found = find_in_project(&store, &state.base(), &filters, q, limit, project).await?;
     let results: Vec<Value> = found.iter().map(result_json).collect();
     // The facts `q` is about, as of now (docs/temporal-facts.md §5): what
     // holds today, with the history beside it.
     let facts = state.facts_store()?;
     let now = facts.now();
-    let fact_keys: Vec<Value> = relevant(&facts, &asker, &scopes, q)
+    let fact_keys: Vec<Value> = relevant(&facts, &asker, &plan, q)
         .await?
         .iter()
         .map(|timeline| timeline_json(timeline, now, &|fact| fact.source.clone()))

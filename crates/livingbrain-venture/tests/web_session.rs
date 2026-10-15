@@ -58,6 +58,8 @@ fn kit() -> TestHarness {
         Box::new(Export::new(wiki.clone())),
         Box::new(Facts::new(wiki.clone())),
         Box::new(Sources::new(wiki)),
+        // The grants tables every wiki route reads its access plan from.
+        Box::new(livingbrain_accounts::Access::new()),
     ];
     let memory: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
     TestHarness::with_ports(modules, move |ports| {

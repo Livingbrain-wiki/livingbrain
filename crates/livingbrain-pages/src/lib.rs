@@ -29,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access;
 mod answers;
 mod entity;
 mod facts;
@@ -49,9 +50,12 @@ pub use entity::{
 pub use facts::{
     FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
     MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
-    is_subject, person_subject, relevant,
+    is_subject, person_subject, relevant, relevant_where,
 };
-pub use graph::{GraphLink, GraphPage, GraphRows, GraphSource, GraphSubject, graph_rows};
+pub use graph::{
+    GraphLink, GraphPage, GraphReach, GraphRows, GraphSource, GraphSubject, graph_rows,
+    graph_rows_in,
+};
 pub use ingest::{
     Extract, IngestError, IngestOutcome, Ingested, Ingestor, NoExtract, NoScreen, Screen,
     SourceIngest, Verdict,

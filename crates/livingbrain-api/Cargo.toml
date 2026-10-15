@@ -12,6 +12,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The permission vocabulary the grants plan answers in (ADR 0004).
+cratefield-module-orgs = { workspace = true }
 # The only Cratefield dependencies a module is allowed: the ports, and the
 # KMS port beside them. `axum` arrives through `cratefield_core::axum`, so it
 # is not named directly.
@@ -51,6 +53,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+# The grants tables a test harness needs beside the routes (ADR 0004).
+livingbrain-accounts = { path = "../livingbrain-accounts" }
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
 # (issue #20). Dev-only, so sqlx and tokio never reach the module's wasm graph.
 cratefield-testing = { workspace = true, features = ["postgres"] }
