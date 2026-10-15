@@ -469,11 +469,20 @@
                 </p>
               </header>
               <div id="agents-status" class="notice" role="status" aria-live="polite"></div>
+              <div class="bulkbar" id="agent-bulk" role="group" aria-label="Bulk actions on agent accounts">
+                <label class="bulkbar__all"><input type="checkbox" id="agent-select-all" /> Select all</label>
+                <span id="agent-selected" class="muted" aria-live="polite">None selected</span>
+                <span class="bulkbar__actions">
+                  <button type="button" id="agent-disable-selected" class="btn-sm" disabled>Disable selected</button>
+                  <button type="button" id="agent-enable-selected" class="btn-sm" disabled>Enable selected</button>
+                </span>
+              </div>
               <div class="table-scroll table-cards" role="region" aria-label="Agent accounts" tabindex="0">
-                <table class="table">
+                <table class="table table-select">
                   <caption class="sr">Agent accounts</caption>
                   <thead>
                     <tr>
+                      <th scope="col"><span class="sr">Select</span></th>
                       <th scope="col">Name</th>
                       <th scope="col">What it is for</th>
                       <th scope="col">Status</th>
@@ -555,11 +564,33 @@
                 </p>
               </header>
               <div id="access-status" class="notice" role="status" aria-live="polite"></div>
+              <div class="filters" id="grant-filters" role="group" aria-label="Filter the grants">
+                <div class="field">
+                  <label for="grant-filter-who">Who</label>
+                  <select id="grant-filter-who"><option value="">Anyone</option></select>
+                </div>
+                <div class="field">
+                  <label for="grant-filter-where">Where</label>
+                  <select id="grant-filter-where"><option value="">Anywhere</option></select>
+                </div>
+                <div class="field">
+                  <label for="grant-filter-what">What</label>
+                  <select id="grant-filter-what"><option value="">Anything</option></select>
+                </div>
+              </div>
+              <div class="bulkbar" id="grant-bulk" role="group" aria-label="Bulk actions on grants">
+                <label class="bulkbar__all"><input type="checkbox" id="grant-select-all" /> Select all shown</label>
+                <span id="grant-selected" class="muted" aria-live="polite">None selected</span>
+                <span class="bulkbar__actions">
+                  <button type="button" id="grant-revoke-selected" class="btn-sm btn-danger" disabled>Revoke selected</button>
+                </span>
+              </div>
               <div class="table-scroll table-cards" role="region" aria-label="Grants" tabindex="0">
-                <table class="table">
+                <table class="table table-select">
                   <caption class="sr">Access grants you can see</caption>
                   <thead>
                     <tr>
+                      <th scope="col"><span class="sr">Select</span></th>
                       <th scope="col">Who</th>
                       <th scope="col">Where</th>
                       <th scope="col">What</th>
@@ -572,32 +603,36 @@
               </div>
               <form id="grant-form" class="connect" novalidate>
                 <h3>Grant access</h3>
-                <div class="field">
-                  <label for="grant-principal">Who</label>
-                  <select id="grant-principal"></select>
-                </div>
-                <div class="field">
-                  <label for="grant-space">Space</label>
-                  <select id="grant-space">
-                    <option value="personal:me">My personal space</option>
-                    <option value="shared">The shared space (owners and admins)</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label for="grant-folder">Folder (optional)</label>
-                  <input id="grant-folder" type="text" placeholder="coding-agents/claude" aria-describedby="err-grantFolder" />
-                  <p class="hint">Empty is the whole space.</p>
-                  <p class="field-error" id="err-grantFolder"></p>
-                </div>
-                <div class="field">
-                  <label for="grant-kind">What</label>
-                  <select id="grant-kind">
-                    <option value="*">Everything</option>
-                    <option value="pages">Pages</option>
-                    <option value="sources">Sources</option>
-                    <option value="facts">Facts</option>
-                  </select>
-                </div>
+                <p class="hint">
+                  Pick as many as you need: every one chosen under <em>Who</em>
+                  gets the same access to every place under <em>Where</em>.
+                </p>
+                <fieldset id="grant-who" aria-describedby="err-grantWho">
+                  <legend>Who</legend>
+                  <p class="field-error" id="err-grantWho"></p>
+                </fieldset>
+                <fieldset id="grant-spaces" class="checks" aria-describedby="err-grantSpaces">
+                  <legend>Where — spaces</legend>
+                  <label><input type="checkbox" name="grant-space" value="personal:me" checked /> My personal space</label>
+                  <label><input type="checkbox" name="grant-space" value="shared" /> The shared space (owners and admins)</label>
+                  <p class="field-error" id="err-grantSpaces"></p>
+                </fieldset>
+                <fieldset id="grant-folders" aria-describedby="hint-grantFolders">
+                  <legend>Where — folders and projects</legend>
+                  <p class="hint" id="hint-grantFolders">
+                    None chosen is the whole space. Type a folder such as
+                    <code>coding-agents/claude</code> and press Enter to add one
+                    that is not listed.
+                  </p>
+                </fieldset>
+                <fieldset id="grant-kinds" class="checks" aria-describedby="err-grantKinds">
+                  <legend>What</legend>
+                  <label><input type="checkbox" name="grant-kind" value="*" checked /> Everything</label>
+                  <label><input type="checkbox" name="grant-kind" value="pages" /> Pages</label>
+                  <label><input type="checkbox" name="grant-kind" value="sources" /> Sources</label>
+                  <label><input type="checkbox" name="grant-kind" value="facts" /> Facts</label>
+                  <p class="field-error" id="err-grantKinds"></p>
+                </fieldset>
                 <div class="field">
                   <label for="grant-permission">Access</label>
                   <select id="grant-permission">
@@ -607,8 +642,15 @@
                     <option value="deny">Deny</option>
                   </select>
                 </div>
+                <div class="field">
+                  <label for="grant-expires">Expires (optional)</label>
+                  <input id="grant-expires" type="date" aria-describedby="err-grantExpires" />
+                  <p class="hint">At the end of that day (UTC). Empty never expires.</p>
+                  <p class="field-error" id="err-grantExpires"></p>
+                </div>
+                <p id="grant-preview" class="preview" aria-live="polite"></p>
                 <div class="form-actions">
-                  <button type="submit" data-variant="primary">Grant</button>
+                  <button type="submit" id="grant-submit" data-variant="primary">Grant</button>
                 </div>
               </form>
             </section>

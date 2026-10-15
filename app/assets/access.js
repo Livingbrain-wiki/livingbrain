@@ -104,6 +104,252 @@ export function grantCreateRequest({ principal, space, folder, kind, permission,
   return { method: "POST", path: GRANTS_PATH, body };
 }
 
+/** The most grants one batch creates or revokes (the server's cap too). */
+export const MAX_BATCH = 100;
+
+/** Above this many, the form asks before it creates them. */
+export const CONFIRM_OVER = 10;
+
+const KINDS = ["pages", "sources", "facts"];
+
+function distinct(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map((v) => String(v).trim()).filter(Boolean))];
+}
+
+/** An expiry as the date input gives it (`2026-12-31`) to the end of that
+ * day, UTC; empty is none. */
+export function expiryOf(date) {
+  const text = String(date || "").trim();
+  if (!text) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T23:59:59Z`))) {
+    throw new Error("the expiry is a date");
+  }
+  return `${text}T23:59:59Z`;
+}
+
+/**
+ * The grant form's answer as grants: every chosen *who* × *space* ×
+ * *folder* (none = the whole space) × *kind* (`*` = everything), with one
+ * permission and an optional expiry. `permission: "deny"` is a deny.
+ * Answers `{ grants, count, who, spaces, folders, kinds }`; throws with what
+ * is missing.
+ */
+export function grantPlan({ principals, spaces, folders, kinds, permission, expires } = {}) {
+  const who = distinct(principals);
+  if (!who.length || who.some((p) => !/^(member|agent|role):.+$/.test(p))) {
+    throw new Error("choose who gets access");
+  }
+  const where = distinct(spaces);
+  if (!where.length || where.some((s) => s !== "shared" && !/^personal:.+$/.test(s))) {
+    throw new Error("choose a space");
+  }
+  const paths = distinct((Array.isArray(folders) ? folders : []).map(parseFolder));
+  const under = paths.length ? paths : [""];
+  const chosen = distinct(kinds);
+  if (!chosen.length) throw new Error("choose what it covers");
+  const what = chosen.includes("*") ? ["*"] : chosen.filter((k) => KINDS.includes(k));
+  if (!what.length) throw new Error("choose what it covers");
+  const deny = permission === "deny";
+  const perm = deny ? "read" : ["read", "write", "admin"].includes(permission) ? permission : "read";
+  const expiresAt = expiryOf(expires);
+  const grants = [];
+  for (const principal of who) {
+    for (const space of where) {
+      for (const path of under) {
+        for (const kind of what) {
+          const body = { principal, space, path, kind, permission: perm };
+          if (deny) body.effect = "deny";
+          if (expiresAt) body.expires_at = expiresAt;
+          grants.push(body);
+        }
+      }
+    }
+  }
+  return {
+    grants,
+    count: grants.length,
+    who: who.length,
+    spaces: where.length,
+    folders: under.length,
+    kinds: what.length,
+  };
+}
+
+function plural(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "This creates 6 grants: 2 people × 1 space × 3 folders × 1 kind." */
+export function grantPreview(plan) {
+  if (!plan || !plan.count) return "";
+  const head = plan.count === 1 ? "This creates 1 grant" : `This creates ${plan.count} grants`;
+  const parts = [
+    plural(plan.who, "grantee", "grantees"),
+    plural(plan.spaces, "space", "spaces"),
+    plan.folders === 1 ? "1 folder" : `${plan.folders} folders`,
+    plural(plan.kinds, "kind", "kinds"),
+  ];
+  const over = plan.count > MAX_BATCH ? ` — more than the ${MAX_BATCH} one request makes; narrow it down` : "";
+  return `${head}: ${parts.join(" × ")}${over}.`;
+}
+
+/** Whether the form should ask before creating `count` grants. */
+export function needsConfirm(count) {
+  return Number(count) > CONFIRM_OVER;
+}
+
+export function grantBatchRequest(grants) {
+  const list = Array.isArray(grants) ? grants : [];
+  if (!list.length) throw new Error("nothing to grant");
+  if (list.length > MAX_BATCH) {
+    throw new Error(`that is ${list.length} grants; one request makes at most ${MAX_BATCH}`);
+  }
+  return { method: "POST", path: `${GRANTS_PATH}/batch`, body: { grants: list } };
+}
+
+export function grantRevokeBatchRequest(ids) {
+  const list = distinct(ids);
+  if (!list.length) throw new Error("choose the grants to revoke");
+  if (list.length > MAX_BATCH) throw new Error(`revoke at most ${MAX_BATCH} at once`);
+  return { method: "POST", path: `${GRANTS_PATH}/batch/revoke`, body: { ids: list } };
+}
+
+export function agentBatchRequest(ids, disabled) {
+  const list = distinct(ids);
+  if (!list.length) throw new Error("choose the agent accounts");
+  if (list.length > MAX_BATCH) throw new Error(`change at most ${MAX_BATCH} at once`);
+  return { method: "POST", path: `${AGENTS_PATH}/batch`, body: { ids: list, disabled: Boolean(disabled) } };
+}
+
+/** The *who* choices: agents, other members, role groups. */
+export function principalOptions(members, agents, selfId) {
+  const options = [];
+  for (const member of Array.isArray(members) ? members : []) {
+    if (!member || !member.user_id || member.user_id === selfId) continue;
+    options.push({
+      value: `member:${member.user_id}`,
+      label: String(member.name || member.user_id),
+      group: "People",
+      hint: member.role ? String(member.role) : "",
+    });
+  }
+  for (const agent of Array.isArray(agents) ? agents : []) {
+    if (!agent || !agent.id) continue;
+    options.push({
+      value: `agent:${agent.id}`,
+      label: String(agent.name || agent.id),
+      group: "Agent accounts",
+      hint: agent.disabled ? "disabled" : "agent",
+    });
+  }
+  for (const role of ["member", "admin", "viewer"]) {
+    options.push({ value: `role:${role}`, label: `Everyone with the ${role} role`, group: "Role groups", hint: "" });
+  }
+  return options;
+}
+
+const MAX_FOLDERS = 300;
+
+/**
+ * The folder choices, from answers the app already reads (each filtered to
+ * what the asker may see): `GET /v1/coding-agents/tree` (agent and project
+ * folders), `GET /v1/pages` (the folders page slugs spell with `--`) and
+ * `GET /v1/sources/projects` (`project/<name>` for sources). `segment` maps a
+ * project name to its folder segment, as the compiler does (`projectSegment`).
+ */
+export function folderOptions({ tree, pages, projects } = {}, segment = (name) => name) {
+  const seen = new Map();
+  const offer = (path, group, hint) => {
+    let value;
+    try {
+      value = parseFolder(path);
+    } catch {
+      return;
+    }
+    if (!value || seen.has(value) || seen.size >= MAX_FOLDERS) return;
+    seen.set(value, { value, label: value, group, hint });
+  };
+  const agents = tree && Array.isArray(tree.agents) ? tree.agents : [];
+  if (agents.length) offer("coding-agents", "Coding agents", "every agent");
+  for (const agent of agents) {
+    const folder = String((agent && (agent.folder || agent.agent)) || "");
+    if (!folder) continue;
+    offer(`coding-agents/${folder}`, "Coding agents", String(agent.agent || folder));
+    for (const project of Array.isArray(agent.projects) ? agent.projects : []) {
+      const name = project && project.project ? String(project.project) : "";
+      offer(`coding-agents/${folder}/${segment(name)}`, "Coding agents", name || "no project");
+    }
+  }
+  const rows = pages && Array.isArray(pages.pages) ? pages.pages : [];
+  const counts = new Map();
+  for (const row of rows) {
+    const parts = String((row && row.slug) || "").split("--");
+    for (let n = 1; n < parts.length; n += 1) {
+      const path = parts.slice(0, n).join("/");
+      counts.set(path, (counts.get(path) || 0) + 1);
+    }
+  }
+  for (const [path, n] of [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    offer(path, "Page folders", plural(n, "page", "pages"));
+  }
+  const list = projects && Array.isArray(projects.projects) ? projects.projects : [];
+  for (const entry of list) {
+    const name = entry && entry.project ? String(entry.project) : "";
+    if (name) offer(`project/${name}`, "Source projects", plural(Number(entry.sources) || 0, "source", "sources"));
+  }
+  return [...seen.values()];
+}
+
+/** The grants list's filter choices, from the grants themselves. */
+export function grantFilterOptions(views, members, agents) {
+  const list = Array.isArray(views) ? views : [];
+  const who = distinct(list.map((v) => v.principal)).map((value) => ({
+    value,
+    label: principalLabel(value, members, agents),
+  }));
+  const where = [];
+  for (const space of distinct(list.map((v) => v.space))) {
+    where.push({ value: `space:${space}`, label: space === "shared" ? "Shared space" : space });
+  }
+  for (const path of distinct(list.map((v) => v.path))) {
+    where.push({ value: `folder:${path}`, label: `${path}/` });
+  }
+  const what = distinct(list.map((v) => v.kind)).map((value) => ({
+    value,
+    label: value === "*" ? "everything" : value,
+  }));
+  return { who, where, what };
+}
+
+/** The grants a filter keeps. Empty fields keep everything. */
+export function filterGrants(views, filter = {}) {
+  const list = Array.isArray(views) ? views : [];
+  return list.filter((view) => {
+    if (filter.who && view.principal !== filter.who) return false;
+    if (filter.what && view.kind !== filter.what) return false;
+    if (filter.where) {
+      if (filter.where.startsWith("space:") && view.space !== filter.where.slice(6)) return false;
+      if (filter.where.startsWith("folder:")) {
+        const folder = filter.where.slice(7);
+        if (view.path !== folder && !view.path.startsWith(`${folder}/`)) return false;
+      }
+    }
+    return true;
+  });
+}
+
+/** Which of `ids` are still in `views`: a selection kept across a reload or
+ * a filter change only holds rows that are there. */
+export function keepSelected(selected, views) {
+  const present = new Set((Array.isArray(views) ? views : []).map((v) => v.id));
+  return new Set([...(selected || [])].filter((id) => present.has(id)));
+}
+
+/** "2 selected" / "Revoke 2 grants". */
+export function selectionText(n, noun) {
+  return n ? `${plural(n, noun, `${noun}s`)} selected` : "None selected";
+}
+
 export function grantDeleteRequest(id) {
   return { method: "DELETE", path: `${GRANTS_PATH}/${enc(id, "a grant id")}` };
 }
@@ -163,6 +409,7 @@ export function grantView(entry) {
     id: String((entry && entry.id) || ""),
     principal: String((entry && entry.principal) || ""),
     space: String((entry && entry.space) || ""),
+    path: String((entry && entry.path) || ""),
     folder: String((entry && entry.path) || "") || "(everything)",
     kind: String((entry && entry.kind) || "*"),
     permission: String((entry && entry.permission) || ""),
@@ -217,6 +464,19 @@ function btn(doc, text, attrs, danger) {
   return b;
 }
 
+/** A row's selection box, named for what it selects. */
+function selectCell(doc, attr, id, checked, label) {
+  const cell = doc.createElement("td");
+  cell.className = "cell-select";
+  const box = doc.createElement("input");
+  box.type = "checkbox";
+  box.checked = Boolean(checked);
+  box.setAttribute(attr, id);
+  box.setAttribute("aria-label", label);
+  cell.appendChild(box);
+  return cell;
+}
+
 function emptyRow(doc, container, text, span) {
   const tr = doc.createElement("tr");
   const cell = td(doc, text);
@@ -225,16 +485,22 @@ function emptyRow(doc, container, text, span) {
   container.appendChild(tr);
 }
 
-export function renderAgentRows(container, views, doc = typeof document === "undefined" ? null : document) {
+export function renderAgentRows(
+  container,
+  views,
+  doc = typeof document === "undefined" ? null : document,
+  selected = new Set(),
+) {
   if (!container || !doc) return container;
   container.replaceChildren();
   const list = Array.isArray(views) ? views : [];
   if (!list.length) {
-    emptyRow(doc, container, "No agent accounts yet. An agent reaches nothing until you grant it access.", 4);
+    emptyRow(doc, container, "No agent accounts yet. An agent reaches nothing until you grant it access.", 5);
     return container;
   }
   for (const view of list) {
     const tr = doc.createElement("tr");
+    tr.appendChild(selectCell(doc, "data-agent-select", view.id, selected.has(view.id), `Select ${view.name}`));
     tr.appendChild(td(doc, view.name, "Name"));
     tr.appendChild(td(doc, view.description, "What it is for"));
     tr.appendChild(td(doc, view.disabled ? "Disabled" : "Active", "Status"));
@@ -278,17 +544,29 @@ export function renderKeyRows(container, views, doc = typeof document === "undef
   return container;
 }
 
-export function renderGrantRows(container, views, members, agents, doc = typeof document === "undefined" ? null : document) {
+export function renderGrantRows(
+  container,
+  views,
+  members,
+  agents,
+  doc = typeof document === "undefined" ? null : document,
+  selected = new Set(),
+  emptyText = "No grants. Everyone reads their own space and the shared one.",
+) {
   if (!container || !doc) return container;
   container.replaceChildren();
   const list = Array.isArray(views) ? views : [];
   if (!list.length) {
-    emptyRow(doc, container, "No grants. Everyone reads their own space and the shared one.", 5);
+    emptyRow(doc, container, emptyText, 6);
     return container;
   }
   for (const view of list) {
     const tr = doc.createElement("tr");
-    tr.appendChild(td(doc, principalLabel(view.principal, members, agents), "Who"));
+    const who = principalLabel(view.principal, members, agents);
+    tr.appendChild(
+      selectCell(doc, "data-grant-select", view.id, selected.has(view.id), `Select: ${who}, ${view.space} · ${view.folder}`),
+    );
+    tr.appendChild(td(doc, who, "Who"));
     tr.appendChild(td(doc, `${view.space} · ${view.folder}`, "Where"));
     tr.appendChild(td(doc, view.kind === "*" ? "everything" : view.kind, "What"));
     tr.appendChild(

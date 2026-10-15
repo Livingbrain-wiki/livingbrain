@@ -66,8 +66,10 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/workspaces/invites` / `POST` / `DELETE /v1/workspaces/invites/{id}` | `settings.html` | **yes** — open invitations; `POST {email, role}` mails a 7-day link |
 | `GET /v1/workspaces` / `POST /v1/workspaces/switch` | `settings.html` | **yes** — the workspaces your address belongs to, and switching the session to one |
 | `GET/POST /v1/agents`, `GET/PATCH/DELETE /v1/agents/{id}` | `settings.html` | **yes** — agent accounts (ADR 0004); session only |
+| `POST /v1/agents/batch` | `settings.html` | **yes** — body `{ids, disabled}`; the list's bulk **Disable**/**Enable**: up to 100, all or none, one audit line each; keys untouched |
 | `GET/POST /v1/agents/{id}/keys`, `POST …/keys/{prefix}/rotate`, `DELETE …/keys/{prefix}` | `settings.html` | **yes** — a key is returned once, by the mint or rotate |
 | `GET/POST /v1/access/grants`, `DELETE /v1/access/grants/{id}` | `settings.html` | **yes** — grants; only a space's owner (or an admin of it) shares it |
+| `POST /v1/access/grants/batch`, `POST /v1/access/grants/batch/revoke` | `settings.html`, `wiki.html` | **yes** — bodies `{grants:[…]}` / `{ids:[…]}`: the grant form's who × where × what, the page's Share, and the list's bulk **Revoke**; up to 100, each held to the single route's rule, all or none, one audit line each |
 | `GET /v1/access/pages/{slug}` | `wiki.html` | **yes** — who can see this page, and whether you may share it |
 | `GET /v1/audit?before=` | `settings.html` | **yes** — owners and admins |
 | `GET /v1/tokens` | `settings.html` | **yes** |

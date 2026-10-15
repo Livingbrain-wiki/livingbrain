@@ -37,12 +37,15 @@ import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
 import { icon } from "./shell.js";
 import {
   pageAccessRequest,
-  grantCreateRequest,
+  grantPlan,
+  grantBatchRequest,
   grantDeleteRequest,
+  principalOptions,
   renderReaders,
   agentViews,
   accessErrorMessage,
 } from "./access.js";
+import { createMultiSelect } from "./multiselect.js";
 
 /** Where the per-browser list of pinned `scope/slug` keys lives. */
 const PIN_KEY = "lb-wiki-pinned";
@@ -1686,6 +1689,8 @@ export async function wikiPage(api) {
     pageAccessStatus: $("#page-access-status"),
     pageShareForm: $("#page-share-form"),
     pageShareWho: $("#page-share-who"),
+    pageShareSubmit: $("#page-share-submit"),
+    pageShareError: $("#err-pageShareWho"),
     pageSharePermission: $("#page-share-permission"),
     pageFacts: $("#page-facts"),
     pageFactsAsOf: $("#page-facts-as-of"),
@@ -3156,23 +3161,38 @@ export async function wikiPage(api) {
 
   let pageAccess = null;
   let sharePeople = null;
+  let sharePicker = null;
 
   function resetPageAccess() {
     pageAccess = null;
     if (!els.pageAccessList) return;
     els.pageAccessList.replaceChildren();
     els.pageShareForm.hidden = true;
+    if (sharePicker) sharePicker.clear();
     notice(els.pageAccessStatus, "");
   }
 
   async function sharePrincipals() {
     if (sharePeople) return sharePeople;
-    const [members, agents] = await Promise.all([
+    const [members, agents, me] = await Promise.all([
       api("/v1/workspaces/members").catch(() => []),
       api("/v1/agents").then(agentViews).catch(() => []),
+      api("/v1/workspaces/me").catch(() => null),
     ]);
-    sharePeople = { members: Array.isArray(members) ? members : [], agents };
+    sharePeople = {
+      members: Array.isArray(members) ? members : [],
+      agents,
+      self: me && me.member ? me.member.user_id : "",
+    };
     return sharePeople;
+  }
+
+  /** The Share button says how many it shares with. */
+  function paintShareCount(values) {
+    if (!els.pageShareSubmit) return;
+    const n = values.length;
+    els.pageShareSubmit.textContent = n > 1 ? `Share with ${n}` : "Share this page";
+    if (els.pageShareError && n) els.pageShareError.textContent = "";
   }
 
   async function loadPageAccess() {
@@ -3185,19 +3205,21 @@ export async function wikiPage(api) {
       renderReaders(els.pageAccessList, pageAccess, people.members, people.agents);
       els.pageShareForm.hidden = !pageAccess.you_can_share;
       if (pageAccess.you_can_share) {
-        els.pageShareWho.replaceChildren();
-        for (const agent of people.agents) {
-          const option = document.createElement("option");
-          option.value = `agent:${agent.id}`;
-          option.textContent = `${agent.name} (agent)`;
-          els.pageShareWho.appendChild(option);
+        if (!sharePicker) {
+          sharePicker = createMultiSelect(els.pageShareWho, {
+            label: "who to share with",
+            placeholder: "Search people and agents…",
+            onChange: paintShareCount,
+          });
         }
-        for (const member of people.members) {
-          const option = document.createElement("option");
-          option.value = `member:${member.user_id}`;
-          option.textContent = member.name || member.user_id;
-          els.pageShareWho.appendChild(option);
-        }
+        // People and agent accounts: a page is shared with somebody, not a
+        // role (roles are set on the space, under Settings → Access).
+        sharePicker.setOptions(
+          principalOptions(people.members, people.agents, people.self).filter(
+            (option) => !option.value.startsWith("role:"),
+          ),
+        );
+        paintShareCount(sharePicker.values());
       }
       notice(els.pageAccessStatus, "");
     } catch (error) {
@@ -3207,19 +3229,29 @@ export async function wikiPage(api) {
 
   async function sharePage(event) {
     event.preventDefault();
-    if (!pageAccess) return;
+    if (!pageAccess || !sharePicker) return;
     const page = state.page || {};
+    const who = sharePicker.values();
+    if (!who.length) {
+      if (els.pageShareError) els.pageShareError.textContent = "Choose who to share it with.";
+      sharePicker.search.focus();
+      return;
+    }
     try {
-      const request = grantCreateRequest({
-        principal: els.pageShareWho.value,
-        space: pageAccess.space,
-        // The page itself, as its folder path: a slug's `--` segments.
-        folder: String(page.slug || "").split("--").join("/"),
-        kind: "pages",
+      // The page itself, as its folder path: a slug's `--` segments. One
+      // permission for everybody chosen, created in one all-or-none batch.
+      const plan = grantPlan({
+        principals: who,
+        spaces: [pageAccess.space],
+        folders: [String(page.slug || "").split("--").join("/")],
+        kinds: ["pages"],
         permission: els.pageSharePermission.value,
       });
+      const request = grantBatchRequest(plan.grants);
       await api(request.path, { method: request.method, body: request.body });
+      sharePicker.clear();
       await loadPageAccess();
+      notice(els.pageAccessStatus, who.length === 1 ? "Shared." : `Shared with ${who.length}.`, "ok");
     } catch (error) {
       notice(els.pageAccessStatus, accessErrorMessage(error, "share this page"), "warn");
     }

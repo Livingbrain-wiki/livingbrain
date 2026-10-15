@@ -5,6 +5,7 @@
 //! | `GET /` | admins see every agent; a member sees the ones they own |
 //! | `POST /` | any member, for themselves; an admin may name another owner |
 //! | `GET/PATCH/DELETE /{id}` | the owner, or an admin; only an admin hands one over |
+//! | `POST /batch {ids, disabled}` | the same rule, per agent; up to 100, all or none |
 //! | `GET/POST /{id}/keys`, `POST /{id}/keys/{prefix}/rotate`, `DELETE /{id}/keys/{prefix}` | the owner, or an admin |
 //!
 //! An agent account has no access until a grant gives it some, and it can
@@ -20,6 +21,7 @@ use cratefield_core::axum::routing::{get, post};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{
     Config, ConfigError, IdGen, Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem,
+    Statement,
 };
 use cratefield_module_orgs::grants;
 use cratefield_module_orgs::service_accounts::{
@@ -31,7 +33,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use time::Duration;
 
-use crate::audit::{Event, record};
+use crate::audit::{Event, iso, record, statement as audit_statement};
 use crate::common::{State, database, forbidden, invalid, not_found, port};
 
 /// The longest a key may live, in days, when one asks for an expiry.
@@ -82,6 +84,7 @@ impl Module for Agents {
     fn router(&self, ctx: ModuleContext) -> axum::Router {
         axum::Router::new()
             .route("/", get(list).post(create))
+            .route("/batch", post(batch))
             .route("/{id}", get(one).patch(update).delete(remove))
             .route("/{id}/keys", get(keys).post(mint))
             .route("/{id}/keys/{prefix}", axum::routing::delete(revoke))
@@ -345,6 +348,112 @@ async fn update(
         .map_err(database)?
         .ok_or_else(not_found)?;
     Ok(Json(agent_json(&agent)).into_response())
+}
+
+/// The most agent accounts one batch changes.
+const MAX_BATCH: usize = 100;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchBody {
+    ids: Vec<String>,
+    disabled: bool,
+}
+
+/// `POST /batch {ids, disabled}` — disable or enable up to [`MAX_BATCH`]
+/// agent accounts, all or none.
+///
+/// Each id is held to `PATCH /{id}`'s rule: its owner, or an admin; an id
+/// the caller may not manage answers the 404 an unknown one does and refuses
+/// the batch. Enabling needs the agent's owner to still be a member, as one
+/// at a time. Accounts already in the asked state are left alone. The
+/// updates and one `agent.disable`/`agent.enable` audit line each are one
+/// atomic batch. Keys are untouched: a disabled account's keys stop
+/// verifying, and enabling brings back the ones neither revoked nor expired.
+async fn batch(
+    AxumState(state): AxumState<Arc<State>>,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<BatchBody>,
+) -> Result<Response, Problem> {
+    let caller = state.caller(&method, &headers).await?;
+    let mut ids: Vec<String> = Vec::with_capacity(body.ids.len());
+    for id in body.ids {
+        let id = id.trim().to_owned();
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty()
+        || ids.len() > MAX_BATCH
+        || ids.iter().any(|id| id.is_empty() || id.len() > 64)
+    {
+        return Err(invalid(format!("`ids` is 1 to {MAX_BATCH} agent ids")));
+    }
+    let mut changing: Vec<ServiceAccount> = Vec::with_capacity(ids.len());
+    for (index, id) in ids.iter().enumerate() {
+        let agent = managed(&state, &caller, id).await?;
+        if !body.disabled {
+            live_member(&state, &caller.workspace_id, &agent.owner_sub)
+                .await
+                .map_err(|_| {
+                    invalid(format!(
+                        "ids[{index}]: its owner is no longer a member; hand it over first"
+                    ))
+                })?;
+        }
+        if agent.disabled_at.is_some() != body.disabled {
+            changing.push(agent);
+        }
+    }
+    let db = state.db()?;
+    let now = state.now()?;
+    let id_gen = port::<dyn IdGen>(state.ctx.ports.id_gen.clone())?;
+    let action = if body.disabled {
+        "agent.disable"
+    } else {
+        "agent.enable"
+    };
+    let at: Option<String> = body.disabled.then(|| iso(now));
+    let mut statements = Vec::with_capacity(changing.len() * 2);
+    for agent in &changing {
+        statements.push(Statement::with_values(
+            "UPDATE org_service_accounts SET disabled_at = ? WHERE org_id = ? AND id = ?",
+            vec![
+                at.clone().into(),
+                caller.workspace_id.as_str().into(),
+                agent.id.as_str().into(),
+            ],
+        ));
+        let resource = format!("agent:{}", agent.id);
+        statements.push(audit_statement(
+            &id_gen.ulid(),
+            now,
+            &Event {
+                workspace_id: &caller.workspace_id,
+                actor_kind: "member",
+                actor_id: &caller.user_id,
+                on_behalf_of: None,
+                credential: "session",
+                action,
+                resource: &resource,
+                detail: "batch",
+            },
+        ));
+    }
+    if !statements.is_empty() {
+        db.batch_atomic(&statements).await.map_err(database)?;
+    }
+    let mut answer = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if let Some(agent) = accounts::get(&*db, &caller.workspace_id, id)
+            .await
+            .map_err(database)?
+        {
+            answer.push(agent_json(&agent));
+        }
+    }
+    Ok(Json(json!({ "changed": changing.len(), "agents": answer })).into_response())
 }
 
 /// `DELETE /{id}` — the account, its keys and every grant naming it.

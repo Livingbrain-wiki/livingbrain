@@ -106,8 +106,21 @@ import {
   agentKeyRotateRequest,
   agentKeyRevokeRequest,
   grantListRequest,
-  grantCreateRequest,
   grantDeleteRequest,
+  grantPlan,
+  parseFolder,
+  grantPreview,
+  grantBatchRequest,
+  grantRevokeBatchRequest,
+  agentBatchRequest,
+  needsConfirm,
+  principalOptions,
+  folderOptions,
+  grantFilterOptions,
+  filterGrants,
+  keepSelected,
+  selectionText,
+  MAX_BATCH,
   auditRequest,
   agentViews,
   keyViews,
@@ -131,7 +144,8 @@ import {
   SLOTS,
   MCP_PATH,
 } from "./session.js";
-import { wikiPage } from "./wiki.js";
+import { wikiPage, projectSegment } from "./wiki.js";
+import { createMultiSelect } from "./multiselect.js";
 import { mountShell } from "./shell.js";
 import { brainPage } from "./brain.js";
 import { settingsTab, SETTINGS_TABS } from "./nav.js";
@@ -2322,7 +2336,18 @@ async function wireAccess() {
   const accessStatus = $("#access-status");
   const grantRows = $("#grant-rows");
   const grantForm = $("#grant-form");
-  const principal = $("#grant-principal");
+  const grantPreviewLine = $("#grant-preview");
+  const grantSubmit = $("#grant-submit");
+  const grantFilterWho = $("#grant-filter-who");
+  const grantFilterWhere = $("#grant-filter-where");
+  const grantFilterWhat = $("#grant-filter-what");
+  const grantSelectAll = $("#grant-select-all");
+  const grantSelectedLine = $("#grant-selected");
+  const grantRevokeSelected = $("#grant-revoke-selected");
+  const agentSelectAll = $("#agent-select-all");
+  const agentSelectedLine = $("#agent-selected");
+  const agentDisableSelected = $("#agent-disable-selected");
+  const agentEnableSelected = $("#agent-enable-selected");
   const auditSection = $("#audit");
   const auditRows = $("#audit-rows");
   const auditMore = $("#audit-more");
@@ -2331,6 +2356,11 @@ async function wireAccess() {
   let agents = [];
   let openAgent = null;
   let auditCursor = "";
+  let grants = [];
+  let grantsShown = [];
+  let grantSelection = new Set();
+  let agentSelection = new Set();
+  const grantFilter = { who: "", where: "", what: "" };
 
   const forget = () => {
     clearAgentKey(keyValue);
@@ -2343,20 +2373,121 @@ async function wireAccess() {
     toast("Key created. Copy it now.", "ok");
   };
 
+  const whoPicker = createMultiSelect($("#grant-who"), {
+    label: "who gets access",
+    placeholder: "Search people, agents and roles…",
+    onChange: () => previewGrants(),
+  });
+  const folderPicker = createMultiSelect($("#grant-folders"), {
+    label: "folders and projects",
+    placeholder: "Search folders, or type one…",
+    noneText: "The whole space",
+    custom: (text) => parseFolder(text),
+    onChange: () => previewGrants(),
+  });
+  const boxesOf = (name) => [...grantForm.querySelectorAll(`input[name="${name}"]`)];
+  const checkedOf = (name) => boxesOf(name).filter((box) => box.checked).map((box) => box.value);
+
+  /** The form as grants, or the reason it is not yet. */
+  const currentPlan = () => {
+    try {
+      return {
+        plan: grantPlan({
+          principals: whoPicker.values(),
+          spaces: checkedOf("grant-space"),
+          folders: folderPicker.values(),
+          kinds: checkedOf("grant-kind"),
+          permission: $("#grant-permission").value,
+          expires: $("#grant-expires").value,
+        }),
+      };
+    } catch (error) {
+      return { error: error.message };
+    }
+  };
+
+  function previewGrants() {
+    const { plan } = currentPlan();
+    grantPreviewLine.textContent = plan ? grantPreview(plan) : "";
+    grantSubmit.textContent = plan && plan.count > 1 ? `Create ${plan.count} grants` : "Grant";
+    grantSubmit.disabled = Boolean(plan && plan.count > MAX_BATCH);
+  }
+
   const fillPrincipals = () => {
-    principal.replaceChildren();
-    const add = (value, label) => {
+    whoPicker.setOptions(principalOptions(members, agents, me && me.member && me.member.user_id));
+  };
+
+  const loadFolders = async () => {
+    // Bounded reads the wiki already makes, each filtered to what this
+    // member may see: no folder name reaches the list that they could not.
+    const [tree, pages, projects] = await Promise.all([
+      api("/v1/coding-agents/tree").catch(() => null),
+      api("/v1/pages?limit=200").catch(() => null),
+      api("/v1/sources/projects").catch(() => null),
+    ]);
+    folderPicker.setOptions(folderOptions({ tree, pages, projects }, projectSegment));
+  };
+
+  // Everything is exclusive in *What*: ticking it clears the kinds, ticking
+  // a kind clears it.
+  grantForm.addEventListener("change", (event) => {
+    const box = event.target;
+    if (box && box.name === "grant-kind" && box.checked) {
+      for (const other of boxesOf("grant-kind")) {
+        if (other !== box && (box.value === "*" || other.value === "*")) other.checked = false;
+      }
+    }
+    previewGrants();
+  });
+
+  const paintAgentSelection = () => {
+    agentSelection = keepSelected(agentSelection, agents);
+    const n = agentSelection.size;
+    agentSelectedLine.textContent = selectionText(n, "agent");
+    agentDisableSelected.disabled = n === 0;
+    agentEnableSelected.disabled = n === 0;
+    agentSelectAll.checked = n > 0 && n === agents.length;
+    agentSelectAll.indeterminate = n > 0 && n < agents.length;
+  };
+
+  const paintGrantSelection = () => {
+    const n = [...grantSelection].filter((id) => grantsShown.some((g) => g.id === id)).length;
+    grantSelectedLine.textContent = selectionText(n, "grant");
+    grantRevokeSelected.disabled = n === 0;
+    grantRevokeSelected.textContent = n ? `Revoke ${n} selected` : "Revoke selected";
+    grantSelectAll.checked = n > 0 && n === grantsShown.length;
+    grantSelectAll.indeterminate = n > 0 && n < grantsShown.length;
+  };
+
+  const fillFilter = (select, all, choices, current) => {
+    select.replaceChildren();
+    for (const { value, label } of [{ value: "", label: all }, ...choices]) {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
-      principal.appendChild(option);
-    };
-    for (const agent of agents) add(`agent:${agent.id}`, `${agent.name} (agent)`);
-    for (const member of members) {
-      if (me && me.member && member.user_id === me.member.user_id) continue;
-      add(`member:${member.user_id}`, member.name || member.user_id);
+      select.appendChild(option);
     }
-    for (const role of ["member", "admin", "viewer"]) add(`role:${role}`, `Everyone with the ${role} role`);
+    select.value = choices.some((c) => c.value === current) ? current : "";
+    return select.value;
+  };
+
+  const paintGrants = () => {
+    const choices = grantFilterOptions(grants, members, agents);
+    grantFilter.who = fillFilter(grantFilterWho, "Anyone", choices.who, grantFilter.who);
+    grantFilter.where = fillFilter(grantFilterWhere, "Anywhere", choices.where, grantFilter.where);
+    grantFilter.what = fillFilter(grantFilterWhat, "Anything", choices.what, grantFilter.what);
+    grantsShown = filterGrants(grants, grantFilter);
+    grantSelection = keepSelected(grantSelection, grantsShown);
+    renderGrantRows(
+      grantRows,
+      grantsShown,
+      members,
+      agents,
+      document,
+      grantSelection,
+      grants.length ? "No grants match the filter." : undefined,
+    );
+    paintGrantSelection();
   };
 
   const loadKeys = async () => {
@@ -2371,7 +2502,9 @@ async function wireAccess() {
   const loadAgents = async () => {
     try {
       agents = agentViews(await send(agentListRequest()));
-      renderAgentRows(agentRows, agents);
+      agentSelection = keepSelected(agentSelection, agents);
+      renderAgentRows(agentRows, agents, document, agentSelection);
+      paintAgentSelection();
       notice(agentsStatus, "");
     } catch (error) {
       notice(agentsStatus, accessErrorMessage(error, "load agent accounts"), "warn");
@@ -2380,7 +2513,8 @@ async function wireAccess() {
 
   const loadGrants = async () => {
     try {
-      renderGrantRows(grantRows, grantViews(await send(grantListRequest())), members, agents);
+      grants = grantViews(await send(grantListRequest()));
+      paintGrants();
       notice(accessStatus, "");
     } catch (error) {
       notice(accessStatus, accessErrorMessage(error, "load access"), "warn");
@@ -2417,10 +2551,56 @@ async function wireAccess() {
       toast("Agent account created. It has no access until you grant some.", "ok");
       await loadAgents();
       fillPrincipals();
+      paintGrants();
     } catch (error) {
       toast(accessErrorMessage(error, "create the agent account"), "bad");
     }
   });
+
+  agentRows.addEventListener("change", (event) => {
+    const box = event.target.closest("[data-agent-select]");
+    if (!box) return;
+    const id = box.getAttribute("data-agent-select");
+    if (box.checked) agentSelection.add(id);
+    else agentSelection.delete(id);
+    paintAgentSelection();
+  });
+
+  agentSelectAll.addEventListener("change", () => {
+    agentSelection = new Set(agentSelectAll.checked ? agents.map((a) => a.id) : []);
+    renderAgentRows(agentRows, agents, document, agentSelection);
+    paintAgentSelection();
+  });
+
+  const bulkAgents = async (disabled) => {
+    const ids = [...agentSelection];
+    if (!ids.length) return;
+    try {
+      if (ids.length > MAX_BATCH) throw new Error(`choose at most ${MAX_BATCH}`);
+      if (disabled) {
+        const ok = await confirmAction({
+          title: `Disable ${selectionText(ids.length, "agent account").replace(" selected", "")}?`,
+          body: "Their keys stop working at once. Enabling them again brings back every key that is not revoked or expired.",
+          confirm: "Disable",
+        });
+        if (!ok) return;
+      }
+      const done = await send(agentBatchRequest(ids, disabled));
+      const n = Number(done && done.changed) || 0;
+      toast(
+        disabled
+          ? `Disabled ${n}: their keys stop working now.`
+          : `Enabled ${n}.`,
+        "ok",
+      );
+      agentSelection = new Set();
+      await loadAgents();
+    } catch (error) {
+      toast(accessErrorMessage(error, disabled ? "disable those agent accounts" : "enable those agent accounts"), "bad");
+    }
+  };
+  agentDisableSelected.addEventListener("click", () => bulkAgents(true));
+  agentEnableSelected.addEventListener("click", () => bulkAgents(false));
 
   agentRows.addEventListener("click", async (event) => {
     const keys = event.target.closest("[data-agent-keys]");
@@ -2497,28 +2677,101 @@ async function wireAccess() {
 
   grantForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const permission = $("#grant-permission").value;
-    let request;
-    try {
-      request = grantCreateRequest({
-        principal: principal.value,
-        space: $("#grant-space").value,
-        folder: $("#grant-folder").value,
-        kind: $("#grant-kind").value,
-        permission: permission === "deny" ? "read" : permission,
-        effect: permission === "deny" ? "deny" : "allow",
-      });
-    } catch (error) {
-      fieldError("grantFolder", error.message, $("#grant-folder"));
+    for (const id of ["grantWho", "grantSpaces", "grantKinds", "grantExpires"]) fieldError(id, "");
+    const { plan, error } = currentPlan();
+    if (!plan) {
+      const where = /who/.test(error)
+        ? ["grantWho", whoPicker.search]
+        : /space/.test(error)
+          ? ["grantSpaces", boxesOf("grant-space")[0]]
+          : /covers/.test(error)
+            ? ["grantKinds", boxesOf("grant-kind")[0]]
+            : /expiry/.test(error)
+              ? ["grantExpires", $("#grant-expires")]
+              : ["grantWho", whoPicker.search];
+      fieldError(where[0], `Please ${error}.`.replace("Please the", "The"));
+      if (where[1]) where[1].focus();
       return;
     }
+    let request;
     try {
-      await send(request);
-      toast(`Granted to ${principalLabel(request.body.principal, members, agents)}.`, "ok");
+      request = grantBatchRequest(plan.grants);
+    } catch (reason) {
+      toast(reason.message, "warn");
+      return;
+    }
+    if (needsConfirm(plan.count)) {
+      const ok = await confirmAction({
+        title: `Create ${plan.count} grants?`,
+        body: grantPreview(plan),
+        confirm: `Create ${plan.count}`,
+      });
+      if (!ok) return;
+    }
+    try {
+      const done = await send(request);
+      const n = Number(done && done.created) || plan.count;
+      toast(n === 1 ? `Granted to ${principalLabel(plan.grants[0].principal, members, agents)}.` : `Created ${n} grants.`, "ok");
+      whoPicker.clear();
+      folderPicker.clear();
       grantForm.reset();
+      previewGrants();
       await loadGrants();
-    } catch (error) {
-      toast(accessErrorMessage(error, "grant that"), "bad");
+    } catch (reason) {
+      toast(accessErrorMessage(reason, "grant that"), "bad");
+    }
+  });
+
+  for (const [select, key] of [
+    [grantFilterWho, "who"],
+    [grantFilterWhere, "where"],
+    [grantFilterWhat, "what"],
+  ]) {
+    select.addEventListener("change", () => {
+      grantFilter[key] = select.value;
+      paintGrants();
+    });
+  }
+
+  grantRows.addEventListener("change", (event) => {
+    const box = event.target.closest("[data-grant-select]");
+    if (!box) return;
+    const id = box.getAttribute("data-grant-select");
+    if (box.checked) grantSelection.add(id);
+    else grantSelection.delete(id);
+    paintGrantSelection();
+  });
+
+  grantSelectAll.addEventListener("change", () => {
+    // "All" is all the filter shows: a hidden row is never revoked by it.
+    grantSelection = new Set(grantSelectAll.checked ? grantsShown.map((g) => g.id) : []);
+    renderGrantRows(grantRows, grantsShown, members, agents, document, grantSelection);
+    paintGrantSelection();
+  });
+
+  grantRevokeSelected.addEventListener("click", async () => {
+    const ids = [...grantSelection].filter((id) => grantsShown.some((g) => g.id === id));
+    if (!ids.length) return;
+    let request;
+    try {
+      request = grantRevokeBatchRequest(ids);
+    } catch (reason) {
+      toast(reason.message, "warn");
+      return;
+    }
+    const ok = await confirmAction({
+      title: ids.length === 1 ? "Revoke this grant?" : `Revoke ${ids.length} grants?`,
+      body: "Whoever they name loses that access at once. Either all of them are revoked or none is.",
+      confirm: "Revoke",
+    });
+    if (!ok) return;
+    try {
+      const done = await send(request);
+      toast(`Revoked ${Number(done && done.revoked) || ids.length}.`, "ok");
+      grantSelection = new Set();
+      await loadGrants();
+    } catch (reason) {
+      toast(accessErrorMessage(reason, "revoke those grants"), "bad");
     }
   });
 
@@ -2544,7 +2797,9 @@ async function wireAccess() {
   }
   await loadAgents();
   fillPrincipals();
+  previewGrants();
   await loadGrants();
+  loadFolders();
   const admin = canManage(me);
   // The audit log is for owners and admins: the Access tab shows it only
   // when the section is marked allowed (`showSettingsTab`).

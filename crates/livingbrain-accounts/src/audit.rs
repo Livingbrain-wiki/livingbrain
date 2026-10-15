@@ -12,11 +12,12 @@ use cratefield_core::axum::routing::get;
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{
     Config, ConfigError, Database, IdGen, Migrations, Module, ModuleContext, PersonalDataSet, Port,
-    Problem,
+    Problem, Statement,
 };
 use cratefield_module_orgs::audit::{self, AuditEntry};
 use serde_json::json;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::common::{State, database, forbidden};
 
@@ -60,6 +61,50 @@ pub async fn record(db: &dyn Database, id_gen: &dyn IdGen, now: OffsetDateTime, 
     if audit::record(db, &entry, now).await.is_err() {
         eprintln!("an audit entry could not be written: {}", event.action);
     }
+}
+
+/// The most characters one stored audit field keeps — the harness's own cut.
+const MAX_FIELD: usize = 2000;
+
+fn cut(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .take(MAX_FIELD)
+        .collect()
+}
+
+/// The RFC 3339 spelling the harness stores, to the second.
+pub(crate) fn iso(at: OffsetDateTime) -> String {
+    at.replace_nanosecond(0)
+        .unwrap_or(at)
+        .format(&Rfc3339)
+        .unwrap_or_default()
+}
+
+/// `event` as the statement [`record`] would run, for a caller that writes
+/// it in the **same** atomic batch as the change it describes — a batch of
+/// grants and its audit lines commit together or not at all. The same row
+/// and the same cuts as the harness's `audit::record`.
+pub(crate) fn statement(id: &str, now: OffsetDateTime, event: &Event<'_>) -> Statement {
+    Statement::with_values(
+        "INSERT INTO org_audit \
+           (id, org_id, actor_kind, actor_id, on_behalf_of, credential, action, resource, \
+            detail, at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![
+            id.into(),
+            event.workspace_id.into(),
+            cut(event.actor_kind).into(),
+            cut(event.actor_id).into(),
+            event.on_behalf_of.map(cut).into(),
+            cut(event.credential).into(),
+            cut(event.action).into(),
+            cut(event.resource).into(),
+            cut(event.detail).into(),
+            iso(now).into(),
+        ],
+    )
 }
 
 /// The `audit` module: `GET /v1/audit`. Its table is applied by

@@ -370,6 +370,27 @@ All portable SQL (harness ADR 0004), one file per dialect, re-runnable.
   app and MCP. The Mac app shows nothing new yet; `GET /v1/me` is ready for
   its "connected as".
 
+## Implementation notes (multiselect, batch routes)
+
+- `POST /v1/access/grants/batch {grants:[…]}` creates up to 100 grants and
+  `POST /v1/access/grants/batch/revoke {ids:[…]}` removes up to 100. Each
+  entry is held to the single route's rule (who may create or delete a grant)
+  **before anything is written**; one refusal refuses the batch (a field error
+  names the entry, `grants[3]: …`; an id the caller may not remove answers the
+  same 404 a single delete does). The rows and one audit line per grant are
+  then one `batch_atomic`, so the grants and their audit trail commit together
+  or not at all.
+- `POST /v1/agents/batch {ids, disabled}` disables or enables up to 100 agent
+  accounts under `PATCH /v1/agents/{id}`'s rule, atomically and audited per
+  account; keys are untouched (a disabled account's keys stop verifying).
+- The web app's grant form is a multiselect of who × spaces × folders × kinds
+  with one permission and an optional expiry, previewed ("This creates 6
+  grants") and confirmed above 10; its folder choices come from reads already
+  filtered by the asker's access (`/v1/coding-agents/tree`, `/v1/pages`,
+  `/v1/sources/projects`), no new endpoint. The grants and agent lists take
+  row selection and bulk actions; a page's Share takes several people and
+  agents at once.
+
 ## Phases
 
 - **a. Members & invites** — Living Brain only.
