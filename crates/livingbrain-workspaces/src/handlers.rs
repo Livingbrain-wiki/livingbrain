@@ -1323,9 +1323,15 @@ fn sign_in_mail(from: &str, to: &str, link: &str) -> Message {
         html,
     )
     // A provider that retried the same send collapses it instead of
-    // mailing twice. The key is the SHA-256 of the address, not the
-    // address: an `Idempotency-Key` header is sent to a third party.
-    .idempotency_key(format!("workspaces-sign-in-{}", token_hash(to)))
+    // mailing twice. The key is per *link*, not per address: keyed on the
+    // address, every later sign-in to it reused the key with a new body and
+    // Owlpost refused it (409 idempotency-conflict), so an address could be
+    // mailed exactly once. It is a domain-separated SHA-256 of the link, so
+    // neither the token nor the stored token hash reaches a third party.
+    .idempotency_key(format!(
+        "workspaces-sign-in-{}",
+        token_hash(&format!("idempotency-key:{link}"))
+    ))
 }
 
 /// A mail the provider refused. The error's `Display` is already scrubbed
@@ -1711,6 +1717,30 @@ fn workspace_name(row: &store::SignInLinkRow) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two sign-ins to one address are two messages: each must carry its
+    /// own idempotency key, or the provider refuses the second as a reused
+    /// key (Owlpost: 409 idempotency-conflict) and the address can never
+    /// sign in again. The key must not carry the token or its stored hash.
+    #[test]
+    fn each_sign_in_mail_has_its_own_idempotency_key() {
+        let base = "https://app.example/v1/workspaces/email/verify?token=";
+        let first = sign_in_mail("from@x.test", "a@x.test", &format!("{base}t1"));
+        let again = sign_in_mail("from@x.test", "a@x.test", &format!("{base}t1"));
+        let second = sign_in_mail("from@x.test", "a@x.test", &format!("{base}t2"));
+        let key = first.idempotency_key.clone().expect("a key is set");
+        assert_eq!(
+            Some(key.clone()),
+            again.idempotency_key,
+            "a retry repeats it"
+        );
+        assert_ne!(
+            Some(key.clone()),
+            second.idempotency_key,
+            "a new link gets a new key"
+        );
+        assert!(!key.contains("t1") && !key.contains(&token_hash("t1")));
+    }
 
     /// The verify page carries a live token in its URL and in a hidden
     /// field, so the response that carries it must be uncacheable,
