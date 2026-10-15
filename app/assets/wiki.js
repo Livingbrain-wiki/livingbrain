@@ -382,6 +382,49 @@ export function queuePath(source = "") {
     : "/v1/coding-agents/queue?limit=100";
 }
 
+/**
+ * `POST /v1/ask`, waiting for the asker's own runner when they run their jobs
+ * on their device: the server answers `202 {status: "pending", poll,
+ * retry_after}`, the job is polled until it ends, and the same ask is sent
+ * again, which reads the runner's answer. `onWait` runs once, when the wait
+ * starts; after `maxWaitMs` the wait gives up with an error that says what it
+ * was waiting for. `apiFn` and `sleep` are parameters so a test can drive it.
+ */
+export async function askWithRunner(apiFn, body, options = {}) {
+  const {
+    onWait = () => {},
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    maxWaitMs = 300_000,
+  } = options;
+  const ask = () => apiFn("/v1/ask", { method: "POST", body });
+  const first = await ask();
+  if (!first || first.status !== "pending") return first;
+  const poll = typeof first.poll === "string" ? first.poll : "";
+  if (!poll.startsWith("/v1/model-jobs/")) {
+    throw new Error("the server named no job to wait for");
+  }
+  onWait();
+  const pause = Math.min(Math.max(Number(first.retry_after) || 2, 1), 30) * 1000;
+  let waited = 0;
+  for (;;) {
+    if (waited >= maxWaitMs) {
+      throw new Error(
+        "your device did not answer in time — is “Run brain jobs with my subscription” on, or `livingbrain jobs run` running?",
+      );
+    }
+    await sleep(pause);
+    waited += pause;
+    let job = null;
+    try {
+      job = await apiFn(poll);
+    } catch {
+      job = null;
+    }
+    const status = job && job.status;
+    if (status !== "queued" && status !== "claimed") return ask();
+  }
+}
+
 /** What each compile status says to a person. */
 export const JOB_LABELS = {
   queued: "Queued",
@@ -1762,7 +1805,18 @@ export async function wikiPage(api) {
     els.askSubmit.textContent = "Asking…";
     els.askStatus.textContent = "";
     try {
-      const answer = await api("/v1/ask", { method: "POST", body: { question } });
+      const answer = await askWithRunner(
+        api,
+        { question },
+        {
+          onWait: () => {
+            els.askSubmit.textContent = "Waiting for your device…";
+            els.askStatus.textContent =
+              "Your own Claude Code or Codex is answering this on your device.";
+          },
+        },
+      );
+      els.askStatus.textContent = "";
       renderInto(els.askAnswer, renderMarkdown((answer && answer.answer) || ""));
       renderInto(els.askCitations, askCitations(answer && answer.citations));
     } catch (error) {

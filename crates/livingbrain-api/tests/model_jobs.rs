@@ -317,3 +317,90 @@ fn without_a_runner_nothing_is_queued_for_one() {
         StatusCode::NO_CONTENT
     );
 }
+
+#[test]
+fn an_ask_with_a_runner_is_answered_on_the_asker_s_device() {
+    let fx = fixture();
+    common::seed(
+        &fx,
+        WORKSPACE,
+        &common::user("user-a"),
+        "kestrel",
+        "---\ntitle: Kestrel\n---\nKestrel stores its state in Postgres.\n",
+    );
+    runner_on(&fx, "user-a");
+    let ask = json!({"question": "kestrel state"});
+
+    let pending = post(&fx, TOKEN_A, "/v1/ask", ask.clone());
+    assert_eq!(
+        pending.status,
+        StatusCode::ACCEPTED,
+        "{}",
+        common::body_text(&pending)
+    );
+    let pending = pending.json();
+    assert_eq!(pending["status"], "pending");
+    let id = pending["job"].as_str().expect("a job id").to_owned();
+    assert_eq!(pending["poll"], format!("/v1/model-jobs/{id}"));
+    assert!(
+        pending["citations"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty())
+    );
+    // Asked again before the runner answered: the same job, still pending.
+    let again = post(&fx, TOKEN_A, "/v1/ask", ask.clone());
+    assert_eq!(again.status, StatusCode::ACCEPTED);
+    assert_eq!(again.json()["job"], id.as_str());
+
+    // Another member asking the same has no runner: no job, no 202.
+    let theirs = post(&fx, TOKEN_B, "/v1/ask", ask.clone());
+    assert_eq!(theirs.status, StatusCode::OK);
+    assert_eq!(
+        get(&fx, TOKEN_B, "/v1/model-jobs/next").status,
+        StatusCode::NO_CONTENT
+    );
+
+    let job = get(&fx, TOKEN_A, "/v1/model-jobs/next").json()["job"].clone();
+    assert_eq!(job["id"], id.as_str());
+    assert_eq!(job["kind"], "ask");
+    assert_eq!(job["json"], false);
+    assert!(
+        job["user"]
+            .as_str()
+            .expect("a prompt")
+            .contains("Kestrel stores its state")
+    );
+    let done = post(
+        &fx,
+        TOKEN_A,
+        &format!("/v1/model-jobs/{id}/result"),
+        json!({"text": "In Postgres [1]. Also see [9].", "prompt_tokens": 300, "completion_tokens": 12}),
+    );
+    assert_eq!(done.status, StatusCode::OK, "{}", common::body_text(&done));
+    assert!(done.json()["continued"].is_null());
+    assert_eq!(
+        get(&fx, TOKEN_A, &format!("/v1/model-jobs/{id}")).json()["status"],
+        "done"
+    );
+
+    // The client asks again and gets the runner's answer, citation-checked.
+    let answered = post(&fx, TOKEN_A, "/v1/ask", ask);
+    assert_eq!(
+        answered.status,
+        StatusCode::OK,
+        "{}",
+        common::body_text(&answered)
+    );
+    let answered = answered.json();
+    assert_eq!(answered["mode"], "model", "{answered}");
+    assert_eq!(answered["model"]["provider"], "local-runner:claude");
+    assert_eq!(answered["model"]["model"], "sonnet");
+    let text = answered["answer"].as_str().expect("an answer");
+    assert!(text.contains("In Postgres [1]"), "{text}");
+    assert!(!text.contains("see [9]"), "{text}");
+    assert_eq!(answered["dropped_citations"], json!(["9"]));
+    assert_eq!(
+        get(&fx, TOKEN_A, &format!("/v1/model-jobs/{id}")).json()["status"],
+        "consumed"
+    );
+}

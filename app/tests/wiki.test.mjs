@@ -380,6 +380,7 @@ const {
   queueSummary,
   jobsBySource,
   jobLabel,
+  askWithRunner,
 } = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
@@ -1944,4 +1945,56 @@ test("facts: signed out, the Facts view asks to sign in and fetches nothing", as
   assert.equal(el("facts-view").hidden, false);
   assert.ok(!calls.some((call) => call.url.startsWith("/v1/facts")));
   assert.match(el("wiki-notice").textContent, /Sign in/);
+});
+
+test("ask: a pending answer waits for the asker's own runner, then asks again", async () => {
+  const calls = [];
+  let asks = 0;
+  const statuses = ["claimed", "done"];
+  const fakeApi = async (path, options = {}) => {
+    calls.push(`${options.method || "GET"} ${path}`);
+    if (path === "/v1/ask") {
+      asks += 1;
+      return asks === 1
+        ? { status: "pending", job: "mj-1", poll: "/v1/model-jobs/mj-1", retry_after: 2 }
+        : { answer: "In Postgres [1].", citations: [], mode: "model" };
+    }
+    return { id: "mj-1", status: statuses.shift() };
+  };
+  let waits = 0;
+  const slept = [];
+  const answer = await askWithRunner(fakeApi, { question: "q" }, {
+    onWait: () => (waits += 1),
+    sleep: async (ms) => slept.push(ms),
+  });
+  assert.equal(answer.answer, "In Postgres [1].");
+  assert.equal(waits, 1);
+  assert.deepEqual(slept, [2000, 2000]);
+  assert.deepEqual(calls, [
+    "POST /v1/ask",
+    "GET /v1/model-jobs/mj-1",
+    "GET /v1/model-jobs/mj-1",
+    "POST /v1/ask",
+  ]);
+
+  // An answer that is not pending is returned as it is, with no wait.
+  const direct = await askWithRunner(async () => ({ answer: "a" }), { question: "q" }, {
+    onWait: () => assert.fail("no wait"),
+  });
+  assert.equal(direct.answer, "a");
+
+  // A runner that never answers gives up with a message naming it.
+  const stuck = async (path) =>
+    path === "/v1/ask"
+      ? { status: "pending", poll: "/v1/model-jobs/mj-2", retry_after: 1 }
+      : { status: "queued" };
+  await assert.rejects(
+    askWithRunner(stuck, { question: "q" }, { sleep: async () => {}, maxWaitMs: 3000 }),
+    /did not answer in time/,
+  );
+  // A poll path outside the jobs routes is never followed.
+  await assert.rejects(
+    askWithRunner(async () => ({ status: "pending", poll: "https://evil.example/x" }), {}),
+    /no job/,
+  );
 });

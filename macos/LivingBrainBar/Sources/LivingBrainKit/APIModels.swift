@@ -95,15 +95,30 @@ struct SearchEnvelope: Decodable { var results: [SearchResult] }
 public struct Answer: Decodable, Equatable, Sendable {
     public var answer: String
     public var citations: [Citation]
+    /// `pending` when the asker's own runner is answering (`202`).
+    public var status: String?
+    /// The runner job to poll, `/v1/model-jobs/<id>`, while pending.
+    public var poll: String?
+    /// Seconds to wait between polls.
+    public var retryAfter: Int?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         answer = try c.decodeIfPresent(String.self, forKey: .answer) ?? ""
         citations = try c.decodeIfPresent([Citation].self, forKey: .citations) ?? []
+        status = try c.decodeIfPresent(String.self, forKey: .status)
+        poll = try c.decodeIfPresent(String.self, forKey: .poll)
+        retryAfter = try c.decodeIfPresent(Int.self, forKey: .retryAfter)
     }
 
-    enum CodingKeys: String, CodingKey { case answer, citations }
+    enum CodingKeys: String, CodingKey {
+        case answer, citations, status, poll
+        case retryAfter = "retry_after"
+    }
 }
+
+/// `GET /v1/model-jobs/{id}`: only the status is read.
+struct JobState: Decodable { var status: String }
 
 /// `POST /v1/notes`.
 public struct NoteResult: Decodable, Equatable, Sendable {

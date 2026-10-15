@@ -26,12 +26,16 @@
 //! (RFC 8628 §3.5). Any other non-2xx is read as `{error}` or `{message}`, or as
 //! the RFC 9457 problem document the modules answer with (`title`, `detail`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use crate::auth::Token;
 use crate::{CliError, CliResult, err};
+
+/// How long `ask` waits for a member's own runner to answer before it gives
+/// up and says which runner it was waiting for.
+const ASK_RUNNER_WAIT: Duration = Duration::from_secs(300);
 
 /// A response body, already read.
 type Response = ureq::http::Response<ureq::Body>;
@@ -146,17 +150,67 @@ impl Client {
 
     /// `POST /v1/ask`. `as_of` asks for the answer as of that partial date
     /// (docs/temporal-facts.md §5); the server validates it.
+    ///
+    /// An asker who runs their jobs on their own device gets `202 {"status":
+    /// "pending", "poll", "retry_after"}`: their runner (`livingbrain jobs
+    /// run`, or the Mac app) makes the call. This polls the job until it
+    /// ends — `on_wait` runs once, so the caller can say what it waits for —
+    /// and asks again, which reads the runner's answer. After
+    /// [`ASK_RUNNER_WAIT`] it gives up with an error naming the runner.
     pub fn ask(
         &self,
         question: &str,
         project: Option<&str>,
         as_of: Option<&str>,
+        on_wait: impl FnOnce(),
     ) -> CliResult<Value> {
         let mut body = json!({ "question": question });
         if let Some(as_of) = as_of {
             body["as_of"] = Value::String(as_of.to_owned());
         }
-        self.post_json("/v1/ask", body, project)
+        let first = self.post_json("/v1/ask", body.clone(), project)?;
+        if first.get("status").and_then(Value::as_str) != Some("pending") {
+            return Ok(first);
+        }
+        on_wait();
+        let poll = first
+            .get("poll")
+            .and_then(Value::as_str)
+            .filter(|path| path.starts_with("/v1/model-jobs/"))
+            .ok_or_else(|| CliError::Api("the server named no job to wait for".to_owned()))?
+            .to_owned();
+        let pause = Duration::from_secs(
+            first
+                .get("retry_after")
+                .and_then(Value::as_u64)
+                .unwrap_or(2)
+                .clamp(1, 30),
+        );
+        let started = Instant::now();
+        loop {
+            if started.elapsed() > ASK_RUNNER_WAIT {
+                return Err(CliError::Api(
+                    "your runner did not answer in time — is `livingbrain jobs run` (or the \
+                     Mac app's \"Run brain jobs with my subscription\") running?"
+                        .to_owned(),
+                ));
+            }
+            std::thread::sleep(pause);
+            let (status, raw) = self.get_status(&poll)?;
+            if status == 401 {
+                return Err(CliError::NotLoggedIn(
+                    "not logged in — run `livingbrain login`".to_owned(),
+                ));
+            }
+            let state = serde_json::from_slice::<Value>(&raw)
+                .ok()
+                .and_then(|job| job.get("status").and_then(Value::as_str).map(str::to_owned));
+            match state.as_deref() {
+                Some("queued" | "claimed") => {}
+                // Done or failed (the ask reads either), or gone: ask again.
+                _ => return self.post_json("/v1/ask", body, project),
+            }
+        }
     }
 
     /// `GET /v1/search`.

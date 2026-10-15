@@ -11,17 +11,29 @@ func apiFixture(_ name: String) throws -> Data {
 final class MockTransport: HTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var routes: [String: (Int, Data)] = [:]
+    private var queued: [String: [(Int, Data)]] = [:]
     private(set) var requests: [URLRequest] = []
 
     func on(_ method: String, _ path: String, status: Int = 200, _ body: Data) {
         lock.lock(); routes["\(method) \(path)"] = (status, body); lock.unlock()
     }
 
+    /// Answers the next request to `METHOD path` once, before `on`'s answer.
+    func then(_ method: String, _ path: String, status: Int = 200, _ body: Data) {
+        lock.lock(); queued["\(method) \(path)", default: []].append((status, body)); lock.unlock()
+    }
+
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         lock.lock()
         requests.append(request)
         let key = "\(request.httpMethod ?? "GET") \(request.url!.path)"
-        let (status, body) = routes[key] ?? (404, Data(#"{"error":"no route"}"#.utf8))
+        let (status, body): (Int, Data)
+        if var waiting = queued[key], !waiting.isEmpty {
+            (status, body) = waiting.removeFirst()
+            queued[key] = waiting
+        } else {
+            (status, body) = routes[key] ?? (404, Data(#"{"error":"no route"}"#.utf8))
+        }
         lock.unlock()
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         return (body, response)
@@ -137,6 +149,31 @@ final class APIClientTests: XCTestCase {
         let noteBody = try mock.lastJSON()
         XCTAssertEqual(noteBody["project"] as? String, "atlas")
         XCTAssertEqual(mock.last?.value(forHTTPHeaderField: "Content-Type"), "application/json")
+    }
+
+    func testAskWaitsForTheMembersOwnRunner() async throws {
+        mock.then("POST", "/v1/ask", status: 202, Data(
+            #"{"status":"pending","job":"mj-1","poll":"/v1/model-jobs/mj-1","retry_after":2,"citations":[]}"#.utf8
+        ))
+        mock.on("POST", "/v1/ask", Data(#"{"answer":"In Postgres [1].","citations":[]}"#.utf8))
+        mock.then("GET", "/v1/model-jobs/mj-1", Data(#"{"id":"mj-1","status":"claimed"}"#.utf8))
+        mock.on("GET", "/v1/model-jobs/mj-1", Data(#"{"id":"mj-1","status":"done"}"#.utf8))
+        let waited = Waited()
+        let answer = try await client.ask("where?", onWait: { waited.mark() }, pollInterval: 0.01)
+        XCTAssertEqual(answer.answer, "In Postgres [1].")
+        XCTAssertEqual(waited.count, 1)
+        XCTAssertEqual(mock.requests.map { "\($0.httpMethod!) \($0.url!.path)" }, [
+            "POST /v1/ask", "GET /v1/model-jobs/mj-1", "GET /v1/model-jobs/mj-1", "POST /v1/ask",
+        ])
+    }
+
+    func testAskNeverFollowsAPollOutsideTheJobRoutes() async {
+        mock.on("POST", "/v1/ask", status: 202, Data(#"{"status":"pending","poll":"https://evil.example/x"}"#.utf8))
+        do {
+            _ = try await client.ask("where?", pollInterval: 0.01)
+            XCTFail("an off-route poll must be refused")
+        } catch {}
+        XCTAssertEqual(mock.requests.count, 1)
     }
 
     func testSources() async throws {
@@ -316,4 +353,12 @@ final class MarkdownTests: XCTestCase {
                        "see [kestrel](livingbrain://page/kestrel) and [the plan](livingbrain://page/q3-plan)")
         XCTAssertEqual(Markdown.linkWikilinks("[[Not A Slug]]"), "[[Not A Slug]]")
     }
+}
+
+/// Counts `onWait` calls across the `@Sendable` boundary.
+final class Waited: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    func mark() { lock.lock(); calls += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
 }

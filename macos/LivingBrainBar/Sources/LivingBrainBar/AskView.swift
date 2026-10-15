@@ -10,6 +10,8 @@ struct AskView: View {
     @State private var asked: String?
     @State private var answer: Answer?
     @State private var asking = false
+    /// The asker's own runner is answering on this device.
+    @State private var waitingForRunner = false
     @State private var error: String?
     @FocusState private var focused: Bool
 
@@ -41,7 +43,9 @@ struct AskView: View {
 
     @ViewBuilder private var content: some View {
         if asking {
-            StatePlaceholder(kind: .loading, title: "Reading the pages you can see…")
+            StatePlaceholder(kind: .loading, title: waitingForRunner
+                ? "Waiting for your device — your own Claude Code or Codex is answering…"
+                : "Reading the pages you can see…")
         } else if let error {
             StatePlaceholder(kind: .error, title: "Could not ask", message: error, retry: ask)
         } else if let answer {
@@ -74,16 +78,22 @@ struct AskView: View {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !asking else { return }
         asking = true
+        waitingForRunner = false
         error = nil
         let scope = project
         Task {
             do {
-                answer = try await workspace.call { try await $0.ask(q, project: scope) }
+                answer = try await workspace.call {
+                    try await $0.ask(q, project: scope, onWait: {
+                        Task { @MainActor in waitingForRunner = true }
+                    })
+                }
                 asked = q
             } catch {
                 self.error = error.localizedDescription
             }
             asking = false
+            waitingForRunner = false
         }
     }
 }
