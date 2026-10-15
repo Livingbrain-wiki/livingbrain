@@ -85,16 +85,21 @@ pub const MODEL_ROLE: &str = "main";
 /// calls inside the request.
 const MAX_PROCESS_NOW: usize = 3;
 /// How long one compile call may take. A forced-thinking model (GLM-5.3)
-/// answered a full-size compile in 55–100 s when measured (2026-10-15), so
-/// the bound sits well past that. The `HttpClient` port clamps a deadline
-/// to 30 s (and the Workers runtime enforces the clamp); this holds because
-/// the venture wires `livingbrain_models::deadline::ModelDeadlineHttpClient`
-/// on the coding-agents routes and the cron tick, which honours it.
-const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(300);
-// The venture's client honours a model call's deadline only up to this
-// ceiling; one past it would be cut silently.
+/// answered a full-size compile in 55–100 s when measured (2026-10-15), and
+/// streams at roughly 35 tokens a second thinking included (a 21.6k-token
+/// stream took 622 s), so a 12k-token ceiling can take ~6 minutes. The call
+/// streams (`livingbrain_models::stream`), so a stalled one ends after 90 s
+/// without bytes, not here. Eight minutes, plus the cron tick's 5-minute
+/// budget checked before each job, stays inside a cron invocation's 15. The
+/// `HttpClient` port clamps a deadline to 30 s; this holds because the
+/// venture wires `livingbrain_models::deadline::ModelDeadlineHttpClient`
+/// (with its streaming seam) on the coding-agents routes and the cron tick.
+const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(480);
+// The venture's streaming client honours a model call's deadline only up to
+// this ceiling; one past it would be cut silently. (An unstreamed call is
+// held to `deadline::MAX_MODEL_DEADLINE`, five minutes.)
 const _: () =
-    assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::deadline::MAX_MODEL_DEADLINE.as_secs());
+    assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::stream::MAX_STREAM_DEADLINE.as_secs());
 /// The most jobs the status route lists.
 const MAX_LIST: usize = 100;
 
