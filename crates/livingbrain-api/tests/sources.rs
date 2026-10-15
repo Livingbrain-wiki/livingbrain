@@ -399,8 +399,8 @@ fn the_projects_are_the_ones_the_asker_can_list() {
     assert_eq!(
         response.json(),
         serde_json::json!({ "projects": [
-            { "project": "demo", "sources": 2 },
-            { "project": "other", "sources": 1 },
+            { "project": "demo", "key": "demo", "sources": 2 },
+            { "project": "other", "key": "other", "sources": 1 },
         ]}),
         "neither user-b's `b-private` nor the other workspace's `elsewhere`"
     );
@@ -409,14 +409,14 @@ fn the_projects_are_the_ones_the_asker_can_list() {
     assert_eq!(
         theirs,
         serde_json::json!({ "projects": [
-            { "project": "b-private", "sources": 1 },
-            { "project": "demo", "sources": 1 },
+            { "project": "b-private", "key": "b-private", "sources": 1 },
+            { "project": "demo", "key": "demo", "sources": 1 },
         ]})
     );
     let elsewhere = get(&fixture, common::TOKEN_A_ELSEWHERE, "/v1/sources/projects").json();
     assert_eq!(
         elsewhere,
-        serde_json::json!({ "projects": [{ "project": "elsewhere", "sources": 1 }] })
+        serde_json::json!({ "projects": [{ "project": "elsewhere", "key": "elsewhere", "sources": 1 }] })
     );
     let imports = get(&fixture, TOKEN_A, "/v1/sources/projects?kind=import").json();
     assert_eq!(imports, serde_json::json!({ "projects": [] }));

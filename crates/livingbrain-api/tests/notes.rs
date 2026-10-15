@@ -293,10 +293,14 @@ fn a_keyed_note_is_updated_in_place_and_an_identical_resend_writes_nothing() {
     let body = listed.json();
     let pages = body["pages"].as_array().expect("pages list");
     assert_eq!(pages.len(), 1, "{}", common::body_text(&listed));
+    // A session log is a session, not a decision, and the placeholder title
+    // the client sent is replaced by one read from the note.
+    assert_eq!(pages[0]["entity_type"], "session");
+    assert_eq!(pages[0]["title"], "atlas · Claude Code");
     let page = get(&fixture, TOKEN_A, "/v1/pages/agent-log-claude-code-abc");
     assert_eq!(
         page.json()["markdown"],
-        "---\ntitle: claude_code session abc\nproject: atlas\n---\n\nSession one, four turns now.\n",
+        "---\ntitle: atlas · Claude Code\nproject: atlas\n---\n\nSession one, four turns now.\n",
         "{}",
         common::body_text(&page)
     );
@@ -323,6 +327,239 @@ fn a_slug_outside_the_slug_rule_is_a_400() {
             400,
             "slug {slug:?}: {}",
             common::body_text(&response)
+        );
+    }
+}
+
+/// The body `livingbrain logs sync` writes for a session (its header, then
+/// the conversation), for `agent`.
+fn session_body(agent: &str, extra: &str) -> String {
+    format!(
+        "Coding agent session: {agent} in EarthOS.world.\n\n- Agent: {agent}\n- Session: a15fba01-77c2\n\
+         - Repo: World-360/EarthOS.world\n{extra}- When: 2026-10-15T08:01:02Z to 2026-10-15T09:00:00Z\n\
+         - Messages: 1 user, 1 assistant\n\n## Conversation\n\n**User** · 08:01\n\n\
+         Fix the login redirect loop\n\n**Assistant** · 08:02\n\nOn it.\n"
+    )
+}
+
+#[test]
+fn every_agents_session_is_named_from_its_note() {
+    let fixture = fixture();
+    for (agent, slug, extra, want) in [
+        (
+            "claude_code",
+            "agent-log-claude-code-a15fba01-77c2",
+            "",
+            "EarthOS.world · Claude Code · 2026-10-15 · Fix the login redirect loop",
+        ),
+        (
+            "codex",
+            "agent-log-codex-a15fba01-77c2",
+            "",
+            "EarthOS.world · Codex · 2026-10-15 · Fix the login redirect loop",
+        ),
+        (
+            "colonizer",
+            "agent-log-colonizer-a15fba01-77c2",
+            "- Issue: #123 Fix auth redirect\n- Outcome: merged\n",
+            "EarthOS.world · Colony a15fba01 · #123 Fix auth redirect",
+        ),
+    ] {
+        note(
+            &fixture,
+            TOKEN_A,
+            json!({
+                "body": session_body(agent, extra),
+                "title": format!("{agent} session a15fba01-77c2"),
+                "project": "EarthOS.world",
+                "slug": slug,
+            }),
+        );
+        let page = get(&fixture, TOKEN_A, &format!("/v1/pages/{slug}")).json();
+        assert_eq!(page["title"], want, "{agent}");
+        assert_eq!(page["entity_type"], "session", "{agent}");
+    }
+    // A client's own title is kept.
+    note(
+        &fixture,
+        TOKEN_A,
+        json!({
+            "body": session_body("codex", ""),
+            "title": "My own name for it",
+            "project": "EarthOS.world",
+            "slug": "agent-log-codex-mine",
+        }),
+    );
+    let page = get(&fixture, TOKEN_A, "/v1/pages/agent-log-codex-mine").json();
+    assert_eq!(page["title"], "My own name for it");
+}
+
+#[test]
+fn the_pages_list_can_leave_sessions_out_and_carries_titles() {
+    let fixture = fixture();
+    note(
+        &fixture,
+        TOKEN_A,
+        json!({
+            "body": session_body("colonizer", "- Issue: #9 Ship it\n"),
+            "title": "colonizer session a15fba01-77c2",
+            "project": "EarthOS.world",
+            "slug": "agent-log-colonizer-a15fba01-77c2",
+        }),
+    );
+    note(
+        &fixture,
+        TOKEN_A,
+        json!({ "body": "A plain note.", "title": "Plain" }),
+    );
+    let all = get(&fixture, TOKEN_A, "/v1/pages").json();
+    assert_eq!(all["pages"].as_array().unwrap().len(), 2);
+    let wiki = get(&fixture, TOKEN_A, "/v1/pages?exclude_type=session").json();
+    let wiki = wiki["pages"].as_array().unwrap();
+    assert_eq!(wiki.len(), 1, "{wiki:?}");
+    assert_eq!(wiki[0]["title"], "Plain");
+    let sessions = get(&fixture, TOKEN_A, "/v1/pages?type=session").json();
+    assert_eq!(
+        sessions["pages"][0]["title"],
+        "EarthOS.world · Colony a15fba01 · #9 Ship it"
+    );
+    let bad = get(&fixture, TOKEN_A, "/v1/pages?type=nope");
+    assert_eq!(bad.status, 400, "{}", common::body_text(&bad));
+}
+
+/// The production shape before this change: session logs written as
+/// decisions, titled with the placeholder, and no title on the row.
+fn legacy_session(fixture: &common::Fixture, slug: &str, body: &str) {
+    use livingbrain_pages::{Author, EntityType, PageWrite};
+    let scope = scope_of(WORKSPACE, "user-a");
+    let markdown = format!(
+        "---\ntitle: colonizer session a15fba01-77c2\nproject: EarthOS.world\n---\n\n{body}\n"
+    );
+    pollster::block_on(fixture.store.write(
+        &scope,
+        slug,
+        PageWrite {
+            entity_type: EntityType::Decision,
+            markdown,
+            author: Author::Brain { reconciles: None },
+            base_version: None,
+        },
+    ))
+    .expect("a write");
+    pollster::block_on(fixture.db().execute(&cratefield_core::Statement::with_values(
+        format!("UPDATE pages SET title_sealed = NULL, title_key_version = NULL WHERE slug = '{slug}'"),
+        vec![],
+    )))
+    .expect("the row predates titles");
+}
+
+#[test]
+fn a_legacy_decision_filed_session_moves_over_on_its_next_write() {
+    let fixture = fixture();
+    let slug = "agent-log-colonizer-a15fba01-77c2";
+    legacy_session(
+        &fixture,
+        slug,
+        &session_body("colonizer", "- Issue: #1 Old\n"),
+    );
+    let answer = note(
+        &fixture,
+        TOKEN_A,
+        json!({
+            "body": session_body("colonizer", "- Issue: #1 Old\n- Outcome: merged\n"),
+            "title": "colonizer session a15fba01-77c2",
+            "project": "EarthOS.world",
+            "slug": slug,
+        }),
+    );
+    assert_eq!(answer["version"], 2, "{answer}");
+    let page = get(&fixture, TOKEN_A, &format!("/v1/pages/{slug}")).json();
+    assert_eq!(page["entity_type"], "session");
+    assert_eq!(page["title"], "EarthOS.world · Colony a15fba01 · #1 Old");
+}
+
+#[test]
+fn the_backfill_retypes_and_retitles_legacy_sessions_once() {
+    let fixture = fixture();
+    let slug = "agent-log-colonizer-a15fba01-77c2";
+    legacy_session(
+        &fixture,
+        slug,
+        &session_body("colonizer", "- Issue: #123 Fix auth redirect\n"),
+    );
+    // An ordinary page from before titles were kept, too.
+    common::seed(
+        &fixture,
+        WORKSPACE,
+        &common::user("user-a"),
+        "ada",
+        "---\ntitle: Ada's notes\n---\n\nx\n",
+    );
+    pollster::block_on(
+        fixture
+            .db()
+            .execute(&cratefield_core::Statement::with_values(
+                "UPDATE pages SET title_sealed = NULL, title_key_version = NULL WHERE slug = 'ada'",
+                vec![],
+            )),
+    )
+    .unwrap();
+
+    let budget = cratefield_core::ScheduledBudget::default();
+    let clock = fixture.clock();
+    let first = pollster::block_on(livingbrain_api::backfill(
+        &fixture.store,
+        &budget,
+        clock.as_ref(),
+        25,
+    ))
+    .expect("a pass");
+    assert_eq!(first.retyped, 1, "{first:?}");
+    assert_eq!(first.retitled, 1, "{first:?}");
+    assert_eq!(first.titled, 1, "{first:?}");
+
+    let listed = get(&fixture, TOKEN_A, "/v1/pages").json();
+    let pages = listed["pages"].as_array().unwrap();
+    let find = |slug: &str| pages.iter().find(|p| p["slug"] == slug).cloned().unwrap();
+    assert_eq!(find(slug)["entity_type"], "session");
+    assert_eq!(
+        find(slug)["title"],
+        "EarthOS.world · Colony a15fba01 · #123 Fix auth redirect"
+    );
+    assert_eq!(find("ada")["title"], "Ada's notes");
+
+    // Idempotent: a second pass finds nothing, and writes nothing.
+    let second = pollster::block_on(livingbrain_api::backfill(
+        &fixture.store,
+        &budget,
+        clock.as_ref(),
+        25,
+    ))
+    .expect("a pass");
+    assert_eq!(second, livingbrain_api::Backfilled::default());
+    let page = get(&fixture, TOKEN_A, &format!("/v1/pages/{slug}")).json();
+    assert_eq!(page["version"], 2);
+}
+
+#[test]
+fn a_project_search_matches_every_spelling_of_the_project() {
+    let fixture = fixture();
+    note(
+        &fixture,
+        TOKEN_A,
+        json!({ "body": "The orbital migration is staged.", "project": "EarthOS.world" }),
+    );
+    for spelling in ["EarthOS.world", "earthos-world", "EARTHOS.WORLD"] {
+        let found = get(
+            &fixture,
+            TOKEN_A,
+            &format!("/v1/search?q=migration&project={spelling}"),
+        );
+        assert_eq!(
+            found.json()["results"].as_array().expect("results").len(),
+            1,
+            "{spelling}: {}",
+            common::body_text(&found)
         );
     }
 }

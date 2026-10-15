@@ -1,0 +1,26 @@
+-- A page's title beside its head row, sealed, so a listing can name every
+-- page without opening a single body.
+--
+-- Before this column `GET /v1/pages` answered slugs only — a title lives in
+-- the frontmatter of a sealed body, and opening two hundred bodies to list
+-- them is two hundred blob reads — so the web app's Pages list showed
+-- `agent-log-colonizer-a15fba01` where a person expected a name.
+--
+-- The title is page text, so it is sealed exactly as a temporal fact's
+-- payload is (0006): `title_sealed` is base64 of an envelope under the
+-- scope's data key, bound to the scope, the slug and `title_key_version`.
+-- Forgetting a scope destroys the key and with it every title, a rotation
+-- re-seals the titles with the bodies, and a key version a title still names
+-- is not retired.
+--
+-- Both nullable, no default: every row this migration finds has no title
+-- yet and NULL says exactly that. The notes module's cron backfills them
+-- (and moves session logs written as decisions to the `session` type); a
+-- page whose body cannot be opened is marked with an empty `title_sealed`
+-- and version 0, so the backfill passes it once and never again.
+--
+-- Same portable subset as 0001-0006 — TEXT, INTEGER, `ALTER TABLE ADD
+-- COLUMN` — so Postgres runs this file unchanged and no postgres override
+-- ships.
+ALTER TABLE pages ADD COLUMN title_sealed TEXT;
+ALTER TABLE pages ADD COLUMN title_key_version INTEGER;

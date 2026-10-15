@@ -254,7 +254,9 @@ async fn projects(
         .map_err(source_failed)?;
     let projects: Vec<Value> = found
         .iter()
-        .map(|entry| json!({ "project": entry.project, "sources": entry.sources }))
+        .map(
+            |entry| json!({ "project": entry.project, "key": entry.key, "sources": entry.sources }),
+        )
         .collect();
     Ok(Json(json!({ "projects": projects })))
 }

@@ -103,10 +103,98 @@ pub(super) fn plan(record: &SessionRecord) -> Option<Planned> {
     let project = project_of(&record.repo)?;
     Some(Planned {
         slug: slug_for(record.agent, &record.session_id),
+        title: title_for(record, &project),
         project,
-        title: format!("{} session {}", record.agent, record.session_id),
         outcome: None,
     })
+}
+
+/// The most characters of the first prompt a title quotes.
+const TITLE_PROMPT_CHARS: usize = 60;
+
+/// The note's title, the way a person would name the session: `EarthOS.world
+/// · Claude Code · 2026-10-15 · Fix the login redirect loop` — the project,
+/// the agent, the day it started and the first thing asked, cut to 60
+/// characters. The server names a session the same way from its note when a
+/// client sends only an id (`livingbrain_pages::session_title`), so a page
+/// synced by an older CLI reads alike.
+pub(super) fn title_for(record: &SessionRecord, project: &str) -> String {
+    let mut parts = vec![one_line(project), agent_label(record.agent).to_owned()];
+    if let Some(day) = record
+        .started_at
+        .as_deref()
+        .or(record.ended_at.as_deref())
+        .and_then(day_of)
+    {
+        parts.push(day);
+    }
+    if let Some(prompt) = first_prompt(&record.turns) {
+        parts.push(clip_title(&prompt, TITLE_PROMPT_CHARS));
+    }
+    parts.retain(|part| !part.is_empty());
+    parts.join(" · ")
+}
+
+/// What a person calls an agent.
+fn agent_label(agent: &str) -> &str {
+    match agent {
+        "claude_code" => "Claude Code",
+        "codex" => "Codex",
+        "colonizer" => "Colonizer",
+        other => other,
+    }
+}
+
+/// `2026-10-15` from an RFC 3339 stamp.
+fn day_of(at: &str) -> Option<String> {
+    let day: String = at.trim().chars().take(10).collect();
+    let bytes = day.as_bytes();
+    (bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && day
+            .chars()
+            .enumerate()
+            .all(|(at, ch)| at == 4 || at == 7 || ch.is_ascii_digit()))
+    .then_some(day)
+}
+
+/// The first line of the first user message that reads as prose: not a
+/// command wrapper (`<command-name>`), a quote or code.
+fn first_prompt(turns: &[Turn]) -> Option<String> {
+    let turn = turns
+        .iter()
+        .find(|turn| turn.role == Role::User && !turn.text.trim().is_empty())?;
+    let mut fenced = false;
+    for line in turn.text.lines() {
+        let text = line.trim();
+        if text.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced || text.is_empty() || text.starts_with('<') || text.starts_with('>') {
+            continue;
+        }
+        let prose = text.trim_start_matches(['#', '-', '*', ' ']).trim();
+        if !prose.is_empty() {
+            return Some(prose.to_owned());
+        }
+    }
+    None
+}
+
+/// At most `max` characters, cut at a word where one is near, with `…`.
+fn clip_title(value: &str, max: usize) -> String {
+    let value = one_line(value);
+    if value.chars().count() <= max {
+        return value;
+    }
+    let cut: String = value.chars().take(max).collect();
+    let cut = match cut.rfind(' ') {
+        Some(at) if at > max / 2 => cut[..at].to_owned(),
+        _ => cut,
+    };
+    format!("{}…", cut.trim_end_matches([' ', ',', '.', ':', ';', '-']))
 }
 
 /// The project a session is filed under: the basename of its repository,

@@ -28,7 +28,14 @@ splits on it:
 `<agent>` comes from the record's `agent` field. `claude_code` becomes
 `claude`, and any other agent gets its own folder under its own name.
 `<project>` is the repository basename the CLI filed the session under,
-folded to `[a-z0-9-]`. Every page in a project folder is one of `index`,
+folded to `[a-z0-9-]`. That fold is the **canonical project key** everywhere
+(`livingbrain_pages::project_key`): `EarthOS.world` (a repository, a GitHub
+item) and `earthos-world` (a local clone, this folder) are one project. The
+sources filter (`GET /v1/sources?project=`), its projects facet (one entry
+per key, `{project, key, sources}`, named by the repository's own spelling),
+the page listing (`GET /v1/pages?project=` — the project's compiled pages
+under every agent) and the brain map's project node all match on the key and
+show the original spelling. Every page in a project folder is one of `index`,
 `decisions`, `learnings`, `architecture` or `open-questions`, or a topic
 page the model names. Compiled pages use the `topic` entity type. Their
 frontmatter has `collection: coding-agents`, `agent`, `project`, `page`,

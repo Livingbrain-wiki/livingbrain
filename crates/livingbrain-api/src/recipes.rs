@@ -135,10 +135,12 @@ pub(crate) async fn find(
 /// rather than open-ended; it stops early as soon as `limit` pages match.
 pub(crate) const PROJECT_SCAN: usize = 250;
 
-/// [`find`], narrowed to the pages whose frontmatter names `project`
-/// exactly — the `project` a note carries in its fence, or a page written
-/// with one. A page with no `project` key is not a match: an unlabelled
-/// page answers no labelled question.
+/// [`find`], narrowed to the pages whose frontmatter names `project` — the
+/// `project` a note carries in its fence, or a page written with one —
+/// matched on the canonical project key ([`livingbrain_pages::project_key`]),
+/// so a session filed under `EarthOS.world` and a compiled page under
+/// `earthos-world` are one project. A page with no `project` key is not a
+/// match: an unlabelled page answers no labelled question.
 ///
 /// **The filter runs before the limit**, not after it: the search
 /// over-fetches up to [`PROJECT_SCAN`] hits and the reads stop as soon as
@@ -165,6 +167,12 @@ pub(crate) async fn find_in_project(
         .search(&names, query, PROJECT_SCAN.max(limit))
         .await
         .map_err(page_read_error)?;
+    let want = livingbrain_pages::project_key(project);
+    let same = |named: Option<&str>| match (&want, named) {
+        (Some(want), Some(named)) => livingbrain_pages::project_key(named).as_ref() == Some(want),
+        (None, Some(named)) => named == project,
+        (_, None) => false,
+    };
     let mut found = Vec::with_capacity(limit);
     for hit in hits {
         if found.len() >= limit {
@@ -172,7 +180,7 @@ pub(crate) async fn find_in_project(
         }
         match store.read(&hit.scope, &hit.slug).await {
             Ok(None) => {}
-            Ok(Some(page)) if page.frontmatter.get("project") == Some(project) => {
+            Ok(Some(page)) if same(page.frontmatter.get("project")) => {
                 found.push(Found::of(base, &page));
             }
             Ok(Some(_)) => {}

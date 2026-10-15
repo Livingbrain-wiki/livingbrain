@@ -739,9 +739,20 @@ fn each_uploaded_session_gets_a_note_filed_under_its_repo() {
         .iter()
         .find(|note| note["body"].as_str().unwrap().contains(CLAUDE_SESSION))
         .expect("the claude note");
+    // Named the way a person would name it, not by its id: the project,
+    // the agent, the day and the first thing asked.
     assert_eq!(
         claude["title"],
-        format!("claude_code session {CLAUDE_SESSION}")
+        "demo · Claude Code · 2026-10-01 · Where are my session files? I keep seeing a folder ~ under…"
+    );
+    let codex = notes
+        .iter()
+        .find(|note| note["body"].as_str().unwrap().contains(CODEX_SESSION))
+        .expect("the codex note");
+    assert!(
+        codex["title"].as_str().unwrap().contains(" · Codex · "),
+        "{}",
+        codex["title"]
     );
     let body = claude["body"].as_str().expect("a body");
     assert!(body.contains("- Branch: main"), "{body}");

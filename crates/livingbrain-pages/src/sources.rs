@@ -257,9 +257,17 @@ pub struct SourceFilter {
 
 /// One project a listing can be filtered by, and how many of the asker's
 /// sources are filed under it.
+///
+/// One project, however many spellings it was filed under: `EarthOS.world`
+/// (a repository) and `earthos-world` (a local clone, the compiler's
+/// folder) share a [`crate::project_key`] and are one entry, named by the
+/// spelling a person would recognise ([`crate::prefer_display`]) and
+/// counting both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectCount {
     pub project: String,
+    /// The canonical key every spelling of the project folds to.
+    pub key: String,
     pub sources: u64,
 }
 
@@ -728,8 +736,30 @@ impl SourceStore {
             values.push(text(kind.as_str()));
         }
         if let Some(project) = &filter.project {
-            sql.push_str(" AND project = ?");
-            values.push(text(project));
+            // Every spelling of the project the asker's rows use: the
+            // filter matches the project, not one way of writing it.
+            let key = crate::project_key(project);
+            let mut names: Vec<String> = match &key {
+                Some(key) => self
+                    .spellings(workspace, scopes)
+                    .await?
+                    .into_iter()
+                    .filter(|name| crate::project_key(name).as_ref() == Some(key))
+                    .collect(),
+                None => Vec::new(),
+            };
+            if names.is_empty() {
+                names.push(project.clone());
+            }
+            let marks = names
+                .iter()
+                .map(|name| {
+                    values.push(text(name));
+                    "?"
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND project IN ({marks})"));
         }
         if let Some(agent) = &filter.agent {
             // A prefix match on the path, escaped: `_` is a wildcard in
@@ -810,18 +840,55 @@ impl SourceStore {
             i64::try_from(MAX_PROJECTS).unwrap_or(i64::MAX),
         )));
         let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+        let mut merged: Vec<ProjectCount> = Vec::new();
+        for row in &rows.rows {
+            let Some(project) = row.get::<String>("project") else {
+                continue;
+            };
+            let sources = row
+                .get::<i64>("sources")
+                .and_then(|count| u64::try_from(count).ok())
+                .unwrap_or_default();
+            let key = crate::project_key(&project).unwrap_or_else(|| project.clone());
+            match merged.iter_mut().find(|entry| entry.key == key) {
+                Some(entry) => {
+                    entry.project = crate::prefer_display(&entry.project, &project).to_owned();
+                    entry.sources += sources;
+                }
+                None => merged.push(ProjectCount {
+                    project,
+                    key,
+                    sources,
+                }),
+            }
+        }
+        merged.sort_by(|a, b| {
+            a.project
+                .to_ascii_lowercase()
+                .cmp(&b.project.to_ascii_lowercase())
+                .then_with(|| a.project.cmp(&b.project))
+        });
+        Ok(merged)
+    }
+
+    /// Every distinct project name the asker's rows are filed under, as
+    /// written — what a project filter resolves its key against.
+    async fn spellings(
+        &self,
+        workspace: &str,
+        scopes: &[&str],
+    ) -> Result<Vec<String>, SourceError> {
+        let (mut sql, mut values) =
+            owned_by("SELECT DISTINCT project FROM sources", workspace, scopes);
+        sql.push_str(" AND project IS NOT NULL LIMIT ?");
+        values.push(SeaValue::BigInt(Some(
+            i64::try_from(MAX_PROJECTS * 4).unwrap_or(i64::MAX),
+        )));
+        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
         Ok(rows
             .rows
             .iter()
-            .filter_map(|row| {
-                Some(ProjectCount {
-                    project: row.get::<String>("project")?,
-                    sources: row
-                        .get::<i64>("sources")
-                        .and_then(|count| u64::try_from(count).ok())
-                        .unwrap_or_default(),
-                })
-            })
+            .filter_map(|row| row.get::<String>("project"))
             .collect())
     }
 

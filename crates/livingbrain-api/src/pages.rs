@@ -27,7 +27,8 @@ use cratefield_core::{ModuleContext, Problem};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_mcp::{Asker, page_scope};
 use livingbrain_pages::{
-    Author, EntityType, Page, PageStore, PageWrite, is_slug, parse_frontmatter,
+    Author, EntityType, Page, PageFilter, PageStore, PageWrite, is_project, is_slug,
+    parse_frontmatter, project_key,
 };
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
@@ -63,10 +64,24 @@ pub fn pages_routes(ctx: Arc<ModuleContext>, wiki: &Wiki) -> Router {
 }
 
 /// `GET /` — the heads of every page the asker can read, newest first, as
-/// the store orders them.
+/// the store orders them, each with its `title` (`null` while a page written
+/// before titles were kept waits for the backfill).
 ///
 /// `?limit` (default 100, capped at 200) bounds the list; a limit that does
 /// not parse is a 422, not a silently different page count.
+///
+/// The filters narrow the list in the query, before the limit:
+///
+/// - `?type=a,b` — only pages of these entity types;
+/// - `?exclude_type=session` — never these; the web app's Pages list leaves
+///   the coding-agent session logs out this way (they are sources, listed
+///   under Agent sessions);
+/// - `?project=` — the compiled coding-agents pages of one project, under
+///   every agent, by any spelling of its name (`EarthOS.world` and
+///   `earthos-world` are one project).
+///
+/// An unknown type or a project outside the project rule is a 400
+/// (`validation-failed`).
 ///
 /// # Errors
 ///
@@ -90,16 +105,34 @@ async fn list(
             })?
             .min(MAX_PAGE_LIMIT as u32) as usize,
     };
+    let filter = PageFilter {
+        types: types_param(&query, "type")?,
+        exclude: types_param(&query, "exclude_type")?,
+        project: match query.get("project").map(|raw| raw.trim()) {
+            None | Some("") => None,
+            Some(raw) if is_project(raw) => project_key(raw),
+            Some(raw) => {
+                return Err(Problem::validation_failed(format!(
+                    "`project` must be 1..=64 bytes of ascii letters, digits, `.`, `_` and `-`, \
+                     got {raw:?}"
+                )));
+            }
+        },
+    };
     let store = state.store()?;
     let scopes = state.scopes(&asker);
     let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let listed = store.list(&names, limit).await.map_err(page_read_error)?;
+    let listed = store
+        .list_filtered(&names, &filter, limit)
+        .await
+        .map_err(page_read_error)?;
     let pages: Vec<Value> = listed
         .iter()
         .map(|summary| {
             json!({
                 "scope": summary.scope,
                 "slug": summary.slug,
+                "title": summary.title,
                 "entity_type": summary.entity_type.as_str(),
                 "version": summary.version,
                 "updated_at": summary.updated_at,
@@ -108,6 +141,25 @@ async fn list(
         })
         .collect();
     Ok(Json(json!({ "pages": pages })))
+}
+
+/// A comma-separated list of entity types, or empty when the parameter is
+/// absent.
+fn types_param(query: &HashMap<String, String>, name: &str) -> Result<Vec<EntityType>, Problem> {
+    let Some(raw) = query.get(name) else {
+        return Ok(Vec::new());
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            EntityType::parse(part).ok_or_else(|| {
+                Problem::validation_failed(format!(
+                    "`{name}` names an unknown entity type {part:?}"
+                ))
+            })
+        })
+        .collect()
 }
 
 /// `GET /{slug}` — one page, in the shape the web app pins.
