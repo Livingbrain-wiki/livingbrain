@@ -65,7 +65,7 @@ crons = ["19 4 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "livingbrain"
-database_id = "placeholder-run-wrangler-d1-create-livingbrain"
+database_id = "0b313e30-6dce-424f-8e85-635f2fb24786"
 migrations_dir = "migrations"
 
 # R2 bucket `livingbrain-blobs`, simulated under `--local`.
@@ -76,7 +76,7 @@ bucket_name = "livingbrain-blobs"
 # KV namespace; the id is a PLACEHOLDER (`wrangler kv namespace create`).
 [[kv_namespaces]]
 binding = "KV"
-id = "placeholder-run-wrangler-kv-namespace-create"
+id = "c4a703198a1347c5b62d56f8ce86fd95"
 
 # The per-conversation turn coordinator (issue #7): one Durable Object per
 # conversation, keyed by `Message::conversation_key`. workerd runs one
