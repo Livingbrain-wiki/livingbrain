@@ -90,5 +90,13 @@
   "workspaces/0005": {
     "file": "0023_workspaces_0005_members.sql",
     "sha256": "ae6fc1ffa6eed6f2db27d527be294dfa3bd77cff6ed842036c0cf4a18cca1da4"
+  },
+  "models/0003": {
+    "file": "0024_models_0003_local_runner.sql",
+    "sha256": "3b69b0af7ac7149c00ac5a7b6ea1390b445589d7e560a735f077dc9302ab95bf"
+  },
+  "coding-agents/0002": {
+    "file": "0025_coding-agents_0002_waiting_runner.sql",
+    "sha256": "acc417c7c2ef7d655c54ccc7cd87b5a639729f36a3e1d7eba511170d71663d46"
   }
 }

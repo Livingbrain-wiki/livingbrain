@@ -76,6 +76,9 @@ pub struct ChatReply {
     pub role: String,
     pub provider: String,
     pub model: String,
+    /// Whether a member's own runner answered (see [`crate::jobs`]): its
+    /// tokens were spent on their subscription and cost the brain nothing.
+    pub runner: bool,
 }
 
 /// The connection a job for `role` would run on, without its key: the
@@ -108,6 +111,9 @@ pub enum InvokeError {
     BadResponse,
     /// The connections table could not be read.
     Store,
+    /// A member's runner reported a failure; the string is one of
+    /// [`crate::jobs::FAIL_REASONS`].
+    Runner(String),
 }
 
 impl InvokeError {
@@ -122,6 +128,7 @@ impl InvokeError {
             Self::Http(_) => "http",
             Self::BadResponse => "bad-response",
             Self::Store => "store",
+            Self::Runner(_) => "runner",
         }
     }
 }
@@ -137,6 +144,7 @@ impl std::fmt::Display for InvokeError {
             Self::Http(None) => write!(f, "the model endpoint could not be reached"),
             Self::BadResponse => write!(f, "the model endpoint answered with no completion"),
             Self::Store => write!(f, "the model connections could not be read"),
+            Self::Runner(reason) => write!(f, "your runner could not answer ({reason})"),
         }
     }
 }
@@ -203,7 +211,12 @@ pub async fn chat(
         .await
         .map_err(|_| InvokeError::Refused)?;
 
-    let body = request_body(wire, &connection.model, request);
+    let mut body = request_body(wire, &connection.model, request);
+    if wire == Wire::Anthropic && thinking_switch(&connection.provider, &url) {
+        // A thinking model spends its budget on a `thinking` block before
+        // the answer; a job wants the answer. Z.AI's GLM takes the switch.
+        body["thinking"] = json!({"type": "disabled"});
+    }
     let segments: &[&str] = match wire {
         Wire::Anthropic => &["v1", "messages"],
         Wire::Openai => &["v1", "chat", "completions"],
@@ -260,7 +273,22 @@ pub async fn chat(
         role: connection.role,
         provider: connection.provider,
         model: connection.model,
+        runner: false,
     })
+}
+
+/// Whether the provider takes Anthropic's `thinking` switch to turn a
+/// thinking model's reasoning off: Z.AI's GLM endpoints (`zhipu-glm*`, or a
+/// base URL on `z.ai` / `bigmodel.cn`). Never Anthropic itself, whose
+/// models only think when asked to.
+fn thinking_switch(provider: &str, base: &url::Url) -> bool {
+    provider.starts_with("zhipu-glm")
+        || base.host_str().is_some_and(|host| {
+            host == "api.z.ai"
+                || host.ends_with(".z.ai")
+                || host == "open.bigmodel.cn"
+                || host.ends_with(".bigmodel.cn")
+        })
 }
 
 /// The request body for one wire.
@@ -292,13 +320,19 @@ fn request_body(wire: Wire, model: &str, request: &ChatRequest<'_>) -> Value {
 /// The completion's text, per wire; `None` when the answer carries none.
 fn completion_text(parsed: &Value, wire: Wire) -> Option<String> {
     match wire {
+        // `content` only: a reasoning model's `reasoning_content` is its
+        // thinking, not its answer, and an empty `content` (the budget went
+        // on thinking) is no completion at all.
         Wire::Openai => parsed
             .get("choices")?
             .get(0)?
             .get("message")?
             .get("content")?
             .as_str()
+            .filter(|text| !text.trim().is_empty())
             .map(str::to_owned),
+        // Every `text` block, in order: `thinking` and `redacted_thinking`
+        // blocks (a GLM answer starts with one) are skipped.
         Wire::Anthropic => {
             let blocks = parsed.get("content")?.as_array()?;
             let text: String = blocks
@@ -306,7 +340,7 @@ fn completion_text(parsed: &Value, wire: Wire) -> Option<String> {
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
                 .filter_map(|b| b.get("text").and_then(Value::as_str))
                 .collect();
-            Some(text)
+            Some(text).filter(|text| !text.trim().is_empty())
         }
     }
 }
@@ -386,5 +420,61 @@ mod tests {
         );
         assert_eq!(usage(&anthropic, Wire::Anthropic), Some((5, 2)));
         assert_eq!(usage(&json!({}), Wire::Openai), None);
+    }
+
+    /// A GLM-style thinking model: the Anthropic-wire answer starts with a
+    /// `thinking` block, and the OpenAI-wire one carries the reasoning in
+    /// `reasoning_content`. Only the answer is read.
+    #[test]
+    fn a_thinking_block_is_not_the_answer() {
+        let anthropic = json!({
+            "content": [
+                {"type": "thinking", "thinking": "Let me think…", "signature": "s"},
+                {"type": "redacted_thinking", "data": "x"},
+                {"type": "text", "text": "{\"pages\":[]}"}
+            ]
+        });
+        assert_eq!(
+            completion_text(&anthropic, Wire::Anthropic).as_deref(),
+            Some("{\"pages\":[]}")
+        );
+        let only_thinking = json!({"content": [{"type": "thinking", "thinking": "…"}]});
+        assert_eq!(completion_text(&only_thinking, Wire::Anthropic), None);
+        let openai = json!({"choices": [{"message": {
+            "content": "", "reasoning_content": "thinking out loud"
+        }, "finish_reason": "length"}]});
+        assert_eq!(completion_text(&openai, Wire::Openai), None);
+        let answered = json!({"choices": [{"message": {
+            "content": "ok", "reasoning_content": "…"
+        }}]});
+        assert_eq!(
+            completion_text(&answered, Wire::Openai).as_deref(),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn only_glm_hosts_get_the_thinking_switch() {
+        let url = |s: &str| url::Url::parse(s).expect("url");
+        assert!(thinking_switch(
+            "zhipu-glm-en",
+            &url("https://api.z.ai/api/anthropic")
+        ));
+        assert!(thinking_switch(
+            "custom",
+            &url("https://api.z.ai/api/anthropic")
+        ));
+        assert!(thinking_switch(
+            "custom",
+            &url("https://open.bigmodel.cn/api/anthropic")
+        ));
+        assert!(!thinking_switch(
+            "anthropic",
+            &url("https://api.anthropic.com")
+        ));
+        assert!(!thinking_switch(
+            "custom",
+            &url("https://notz.ai.example.com")
+        ));
     }
 }

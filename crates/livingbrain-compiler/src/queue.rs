@@ -51,11 +51,14 @@ pub enum JobStatus {
     /// Nothing to compile: the body is not a session record, or its source
     /// is gone (its scope was forgotten).
     Skipped,
+    /// A model call is out on the owner's own runner (their subscription,
+    /// on their device); the compile carries on when the answer arrives.
+    WaitingRunner,
 }
 
 impl JobStatus {
     /// Every status, in the order a status card lists them.
-    pub const ALL: [JobStatus; 8] = [
+    pub const ALL: [JobStatus; 9] = [
         Self::Queued,
         Self::Processing,
         Self::Done,
@@ -64,6 +67,7 @@ impl JobStatus {
         Self::OverBudget,
         Self::Superseded,
         Self::Skipped,
+        Self::WaitingRunner,
     ];
 
     /// The stored and wire name.
@@ -78,6 +82,7 @@ impl JobStatus {
             Self::OverBudget => "over-budget",
             Self::Superseded => "superseded",
             Self::Skipped => "skipped",
+            Self::WaitingRunner => "waiting-runner",
         }
     }
 
@@ -114,6 +119,8 @@ pub struct Job {
     pub updated_at: String,
     pub lease_until: Option<String>,
     pub next_attempt_at: Option<String>,
+    /// Transcript chunks already applied by earlier runs of this job.
+    pub chunks_done: u32,
 }
 
 /// Which jobs a claim may take.
@@ -127,6 +134,9 @@ pub struct ClaimFilter {
     /// `skipped-no-model` or `over-budget` job at once, because the person
     /// pressing it may just have connected a model.
     pub ignore_backoff: bool,
+    /// Only this source's job — the runner's answer to one of its calls
+    /// arrived, and the compile carries on at once.
+    pub source_id: Option<String>,
 }
 
 /// How a compile ended, as the queue records it.
@@ -142,6 +152,11 @@ pub struct Finish {
     pub facts: u32,
     /// When a parked or failed job may be tried again.
     pub retry_at: Option<OffsetDateTime>,
+    /// How many transcript chunks are applied now, when this run moved it.
+    pub chunks_done: Option<u32>,
+    /// The run handed a call to the runner and only waits: it does not
+    /// count as one of the job's attempts.
+    pub refund_attempt: bool,
 }
 
 impl Finish {
@@ -157,6 +172,8 @@ impl Finish {
             rejected: 0,
             facts: 0,
             retry_at: None,
+            chunks_done: None,
+            refund_attempt: false,
         }
     }
 }
@@ -217,7 +234,8 @@ impl Queue {
             .execute(&Statement::with_values(
                 "UPDATE coding_agent_jobs SET status = 'superseded', updated_at = ?, \
                         lease_until = NULL, next_attempt_at = NULL \
-                 WHERE status IN ('queued', 'failed', 'skipped-no-model', 'over-budget') \
+                 WHERE status IN ('queued', 'failed', 'skipped-no-model', 'over-budget', \
+                                  'waiting-runner') \
                    AND session_key <> '' \
                    AND EXISTS (SELECT 1 FROM coding_agent_jobs newer \
                                WHERE newer.scope = coding_agent_jobs.scope \
@@ -243,10 +261,12 @@ impl Queue {
         let stamp = rfc3339(now);
         let mut values = Vec::new();
         let parked = if filter.ignore_backoff {
-            "status IN ('skipped-no-model', 'over-budget')".to_owned()
+            "status IN ('skipped-no-model', 'over-budget', 'waiting-runner')".to_owned()
         } else {
             values.push(text(&stamp));
-            "(status IN ('skipped-no-model', 'over-budget') AND next_attempt_at <= ?)".to_owned()
+            "(status IN ('skipped-no-model', 'over-budget', 'waiting-runner') \
+             AND next_attempt_at <= ?)"
+                .to_owned()
         };
         values.push(text(&stamp));
         values.push(SeaValue::BigInt(Some(i64::from(MAX_ATTEMPTS))));
@@ -259,6 +279,10 @@ impl Queue {
         if let Some(workspace) = &filter.workspace {
             sql.push_str(" AND workspace = ?");
             values.push(text(workspace));
+        }
+        if let Some(source_id) = &filter.source_id {
+            sql.push_str(" AND source_id = ?");
+            values.push(text(source_id));
         }
         if let Some(scopes) = &filter.scopes {
             if scopes.is_empty() {
@@ -366,12 +390,23 @@ impl Queue {
             }
         }
         let pages_json = serde_json::to_string(&pages).unwrap_or_else(|_| "[]".to_owned());
+        let attempts = current.as_ref().map_or(job.attempts, |j| j.attempts);
+        let attempts = if finish.refund_attempt {
+            attempts.saturating_sub(1)
+        } else {
+            attempts
+        };
+        let chunks_done = finish
+            .chunks_done
+            .or_else(|| current.as_ref().map(|j| j.chunks_done))
+            .unwrap_or(0);
         self.db
             .execute(&Statement::with_values(
                 "UPDATE coding_agent_jobs SET status = ?, last_error = ?, \
                         prompt_tokens = prompt_tokens + ?, completion_tokens = completion_tokens + ?, \
                         pages = ?, rejected = rejected + ?, facts = facts + ?, \
-                        lease_until = NULL, next_attempt_at = ?, updated_at = ? \
+                        lease_until = NULL, next_attempt_at = ?, updated_at = ?, \
+                        attempts = ?, chunks_done = ? \
                  WHERE scope = ? AND body_sha256 = ?",
                 vec![
                     text(finish.status.as_str()),
@@ -383,6 +418,8 @@ impl Queue {
                     big(u64::from(finish.facts)),
                     opt_text(finish.retry_at.map(rfc3339).as_deref()),
                     text(&rfc3339(now)),
+                    big(u64::from(attempts)),
+                    big(u64::from(chunks_done)),
                     text(&job.scope),
                     text(&job.body_sha256),
                 ],
@@ -573,7 +610,7 @@ impl Queue {
 /// The columns every job read selects, in [`job_from`]'s order.
 const COLUMNS: &str = "scope, body_sha256, source_id, workspace, owner, session_key, project, \
      source_created_at, status, attempts, last_error, prompt_tokens, completion_tokens, pages, \
-     rejected, facts, queued_at, updated_at, lease_until, next_attempt_at";
+     rejected, facts, queued_at, updated_at, lease_until, next_attempt_at, chunks_done";
 
 fn job_from(row: &Row) -> Option<Job> {
     let status = JobStatus::parse(&row.get::<String>("status")?)?;
@@ -606,6 +643,7 @@ fn job_from(row: &Row) -> Option<Job> {
         updated_at: row.get::<String>("updated_at").unwrap_or_default(),
         lease_until: row.get::<String>("lease_until"),
         next_attempt_at: row.get::<String>("next_attempt_at"),
+        chunks_done: u32::try_from(count("chunks_done")).unwrap_or(0),
     })
 }
 

@@ -1685,6 +1685,7 @@ test("coding-agents helpers: a slug splits into its folder, and a listing into a
   assert.equal(queueSummary({ queued: 2, done: 5, failed: 0 }), "2 queued · 5 compiled");
   assert.equal(queueSummary({}), "Nothing queued");
   assert.equal(jobLabel("skipped-no-model"), "No model");
+  assert.equal(jobLabel("waiting-runner"), "Waiting for your device");
   const jobs = jobsBySource([
     { source_id: "a", status: "done" },
     { source_id: "a", status: "queued" },

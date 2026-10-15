@@ -55,3 +55,5 @@ cratefield-testing = { workspace = true, features = ["postgres"] }
 async-trait = { workspace = true }
 # An executor for the async tests, the same one the sibling suites use.
 pollster = { workspace = true }
+# The instant a test seeds a runner row at.
+time = { workspace = true }

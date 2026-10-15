@@ -32,6 +32,9 @@
 mod catalog;
 mod crypto;
 mod handlers;
+// The local runner: a member's jobs run on their own device, under their own
+// subscription, through their own `claude` / `codex` CLI.
+pub mod jobs;
 // The job path: run a completion on a workspace's own connection.
 pub mod invoke;
 mod probe;
@@ -78,6 +81,21 @@ const MIGRATION_PROVIDER_WIRE_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0002_provider_wire.sql"),
 );
 
+/// The third migration: the local runner's two tables.
+const MIGRATION_LOCAL_RUNNER: SqlMigration = SqlMigration::new(
+    "0003",
+    "local_runner",
+    include_str!("../migrations/sqlite/0003_local_runner.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_LOCAL_RUNNER`]: `BYTEA` for the sealed
+/// prompt and answer.
+const MIGRATION_LOCAL_RUNNER_POSTGRES: SqlMigration = SqlMigration::new(
+    "0003",
+    "local_runner",
+    include_str!("../migrations/postgres/0003_local_runner.sql"),
+);
+
 /// Bring your own model, with a capability check.
 #[derive(Debug, Default)]
 pub struct Models;
@@ -115,31 +133,63 @@ impl Module for Models {
     }
 
     fn tables(&self) -> &'static [&'static str] {
-        &["model_connections"]
+        &["model_connections", "model_runners", "model_jobs"]
     }
 
     /// The ciphertext column holds a provider API key (a credential).
     fn personal_data(&self) -> &'static [PersonalDataSet] {
-        const SETS: &[PersonalDataSet] = &[PersonalDataSet {
-            table: "model_connections",
-            subject: "updated_by",
-            kind: DataKind::Identifier,
-            disposition: Disposition::Erase,
-            description: "For each model role a workspace connected: the provider, base URL, \
+        const SETS: &[PersonalDataSet] = &[
+            PersonalDataSet {
+                table: "model_connections",
+                subject: "updated_by",
+                kind: DataKind::Identifier,
+                disposition: Disposition::Erase,
+                description: "For each model role a workspace connected: the provider, base URL, \
                           model name, the encrypted API key (ciphertext), the key's last four \
                           characters, the capability check's result, and the Slack user id of \
                           the member who last changed it.",
-            redacted: &["key_ciphertext", "key_last4"],
-            subject_via: None,
-        }];
+                redacted: &["key_ciphertext", "key_last4"],
+                subject_via: None,
+            },
+            PersonalDataSet {
+                table: "model_runners",
+                subject: "user_id",
+                kind: DataKind::Identifier,
+                disposition: Disposition::Erase,
+                description: "For each job slot a member chose to run on their own device: the CLI \
+                          (Claude Code or Codex), the model alias, whether it loads their own \
+                          CLI settings, and when their runner last asked for work.",
+                redacted: &[],
+                subject_via: None,
+            },
+            PersonalDataSet {
+                table: "model_jobs",
+                subject: "owner",
+                kind: DataKind::Identifier,
+                disposition: Disposition::Erase,
+                description: "Model calls handed to a member's own runner: the kind of job, its \
+                          status, attempts and token counts, and — only while it waits or until \
+                          its caller reads the answer — the prompt and answer, sealed under the \
+                          deployment key and wiped after.",
+                redacted: &["payload", "result"],
+                subject_via: None,
+            },
+        ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_PROVIDER_WIRE];
+        const MIGRATIONS: [SqlMigration; 3] = [
+            MIGRATION_INIT,
+            MIGRATION_PROVIDER_WIRE,
+            MIGRATION_LOCAL_RUNNER,
+        ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
-            [MIGRATION_INIT_POSTGRES, MIGRATION_PROVIDER_WIRE_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+            MIGRATION_INIT_POSTGRES,
+            MIGRATION_PROVIDER_WIRE_POSTGRES,
+            MIGRATION_LOCAL_RUNNER_POSTGRES,
+        ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,

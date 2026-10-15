@@ -7,7 +7,7 @@
 //! - **A queue feeds the compiler** ([`queue`]): one job per source body,
 //!   idempotent on the ledger's own key, with a status the person can see —
 //!   `queued`, `processing`, `done`, `failed`, `skipped-no-model`,
-//!   `over-budget`, `superseded`, `skipped`.
+//!   `over-budget`, `superseded`, `skipped`, `waiting-runner`.
 //! - **The compiler maintains pages incrementally** ([`compile`]): it shows
 //!   the workspace's own model the conventions page, the pages the session
 //!   may touch and one transcript chunk, and applies the model's answer —
@@ -33,7 +33,7 @@ pub mod prompt;
 pub mod queue;
 pub mod record;
 
-pub use compile::{Compiler, Gate, Model, ModelFailure, NoGate, Processed, Reply, Settings};
+pub use compile::{Call, Compiler, Gate, Model, ModelFailure, NoGate, Processed, Reply, Settings};
 pub use facts::{Emitted, Fact, FactSink, NoFacts};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, Queue};
 
@@ -51,6 +51,20 @@ pub const MIGRATION_INIT_POSTGRES: SqlMigration = SqlMigration::new(
     "0001",
     "init",
     include_str!("../migrations/postgres/0001_init.sql"),
+);
+
+/// The second migration: a compile can wait on a member's own runner.
+pub const MIGRATION_WAITING_RUNNER: SqlMigration = SqlMigration::new(
+    "0002",
+    "waiting_runner",
+    include_str!("../migrations/sqlite/0002_waiting_runner.sql"),
+);
+
+/// The Postgres form: the counter is `BIGINT`, like the others.
+pub const MIGRATION_WAITING_RUNNER_POSTGRES: SqlMigration = SqlMigration::new(
+    "0002",
+    "waiting_runner",
+    include_str!("../migrations/postgres/0002_waiting_runner.sql"),
 );
 
 /// The tables the module that mounts the compiler owns.

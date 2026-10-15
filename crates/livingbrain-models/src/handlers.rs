@@ -17,7 +17,7 @@ use std::sync::Arc;
 use cratefield_core::axum::extract::{Path, State};
 use cratefield_core::axum::http::{HeaderMap, StatusCode};
 use cratefield_core::axum::response::{IntoResponse, Response};
-use cratefield_core::axum::routing::{get, post};
+use cratefield_core::axum::routing::{get, post, put};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{DbError, ModuleContext, Problem, ProblemDef};
 // The one "who is calling" every route in this venture answers with: a
@@ -29,6 +29,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::catalog::{self, Auth, Wire};
 use crate::crypto;
+use crate::jobs;
 use crate::probe;
 use crate::selection;
 use crate::ssrf;
@@ -91,6 +92,10 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
     axum::Router::new()
         .route("/", get(list))
         .route("/discover", post(discover))
+        // A member's own runner (`crate::jobs`): static segments, so they win
+        // over `/{role}` the way `/discover` does.
+        .route("/mine", get(mine))
+        .route("/mine/{role}", put(set_mine).delete(remove_mine))
         // `/discover` above is a static segment, so it wins the match: a
         // `GET /v1/models/discover` is the method router's 405, and every
         // other non-role path reaches `effective`'s role check.
@@ -465,4 +470,137 @@ fn unreachable_error(error: probe::Unreachable) -> Problem {
         None => "the endpoint did not respond or the request failed".to_owned(),
     };
     Problem::new(&UNREACHABLE).with_detail(detail)
+}
+
+/// The response view of a member's runner row.
+#[derive(Debug, Serialize)]
+struct RunnerView {
+    role: String,
+    kind: String,
+    agent: String,
+    model: String,
+    settings: String,
+    updated_at: String,
+    last_seen_at: Option<String>,
+}
+
+impl From<jobs::Runner> for RunnerView {
+    fn from(row: jobs::Runner) -> Self {
+        Self {
+            role: row.role,
+            kind: row.kind,
+            agent: row.agent,
+            model: row.model,
+            settings: row.settings,
+            updated_at: row.updated_at,
+            last_seen_at: row.last_seen_at,
+        }
+    }
+}
+
+/// `GET /mine` — the caller's own runner rows: which of their jobs run on
+/// their own device, and when that device last asked for work.
+async fn mine(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    let rows = jobs::runners(&*db, &c.workspace_id, &c.user_id)
+        .await
+        .map_err(database)?;
+    let runners: Vec<RunnerView> = rows.into_iter().map(RunnerView::from).collect();
+    Ok(Json(serde_json::json!({ "runners": runners })).into_response())
+}
+
+/// The request body for `PUT /mine/{role}`.
+#[derive(Debug, Deserialize)]
+struct RunnerRequest {
+    kind: String,
+    agent: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    settings: Option<String>,
+}
+
+/// `PUT /mine/{role}` — run the caller's own jobs for `role` on their own
+/// device. Any member may: it spends their subscription, not the
+/// workspace's key, and no credential travels — the body names a CLI and a
+/// model alias, nothing more.
+async fn set_mine(
+    State(state): State<Arc<ModuleState>>,
+    Path(role): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RunnerRequest>,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !ROLES.contains(&role.as_str()) {
+        return Err(Problem::validation_failed(format!(
+            "role must be one of triage|main|research, got {role:?}"
+        )));
+    }
+    if body.kind != jobs::LOCAL_RUNNER {
+        return Err(Problem::validation_failed("kind must be local_runner"));
+    }
+    if !jobs::AGENTS.contains(&body.agent.as_str()) {
+        return Err(Problem::validation_failed("agent must be claude or codex"));
+    }
+    let model = body.model.trim();
+    if model.len() > 128
+        || !model.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']')
+        })
+    {
+        return Err(Problem::validation_failed(
+            "model must be a model alias or id: letters, digits and - _ . : / [ ]",
+        ));
+    }
+    let settings = body.settings.as_deref().unwrap_or("isolated");
+    if !jobs::SETTINGS.contains(&settings) {
+        return Err(Problem::validation_failed(
+            "settings must be isolated or user",
+        ));
+    }
+    jobs::set_runner(
+        &*db,
+        clock.now(),
+        &c.workspace_id,
+        &c.user_id,
+        &role,
+        &body.agent,
+        model,
+        settings,
+    )
+    .await
+    .map_err(database)?;
+    let row = jobs::runners(&*db, &c.workspace_id, &c.user_id)
+        .await
+        .map_err(database)?
+        .into_iter()
+        .find(|row| row.role == role)
+        .ok_or_else(Problem::internal)?;
+    Ok(Json(RunnerView::from(row)).into_response())
+}
+
+/// `DELETE /mine/{role}` — the caller's jobs for `role` go back to the
+/// workspace's connection.
+async fn remove_mine(
+    State(state): State<Arc<ModuleState>>,
+    Path(role): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !ROLES.contains(&role.as_str()) {
+        return Err(Problem::validation_failed(format!(
+            "role must be one of triage|main|research, got {role:?}"
+        )));
+    }
+    jobs::delete_runner(&*db, &c.workspace_id, &c.user_id, &role)
+        .await
+        .map_err(database)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
