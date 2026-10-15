@@ -26,6 +26,13 @@ token in the keychain (see below); no token is ever logged or shown.
   (`logs status --json`, falling back to `~/.config/livingbrain/logs-allow.json`),
   each with **Reveal in Finder** and **Remove** (`logs deny`).
 - **Add Project…** — a folder picker, then `logs allow <path>`.
+- **Run Brain Jobs with My Subscription** — see [Brain jobs on this Mac](#brain-jobs-on-this-mac).
+  While on, the lines under it say what the runner is doing ("Running a
+  compile job with Claude Code…", "Last job done 2 min ago · 1,234 tokens",
+  or the last error).
+- **Brain Jobs Agent: …** — Claude Code or Codex, the model (Claude Code's
+  `sonnet`/`opus`/`haiku`/`fable` aliases; Codex's `gpt-5.6-sol`/`-terra`/`-luna`,
+  `gpt-5.5`, `gpt-5.4-mini`), and whether each agent is installed and signed in.
 - **Open Living Brain** and **Agent Sessions** — open app.livingbrain.wiki.
 - **Open Living Brain Window…** (⌘0) — the main window (below).
 - **Pause Syncing** — stops live and scheduled sync; Sync Now still works.
@@ -38,6 +45,35 @@ token in the keychain (see below); no token is ever logged or shown.
 
 The icon is the `brain.head.profile` symbol with a small dot: none when idle,
 a ring while syncing, a filled dot after an error.
+
+## Brain jobs on this Mac
+
+Anthropic and OpenAI only allow a Claude Pro/Max or ChatGPT Plus/Pro
+subscription inside their own clients, so Living Brain never holds those
+credentials. Instead, **Run brain jobs with my subscription** (menu, or
+Settings → Brain jobs on this Mac) lets your own Claude Code or Codex on this
+Mac answer your brain's model jobs — compiling your synced sessions into the
+coding-agents wiki, and your Ask questions:
+
+- On: the app sends `PUT /v1/models/mine/main {kind: "local_runner", agent, model}`
+  so the server hands *your* jobs to this device, and keeps one
+  `livingbrain --json jobs run --agent <claude|codex>` child running. The CLI
+  claims a job, runs the agent with tools off and a read-only sandbox (never a
+  permission bypass), answers it, and prints one JSON event per line, which
+  is all the app reads. It restarts the child with backoff (5 s doubling to
+  5 min) if it exits.
+- Off: the child stops and the app sends `DELETE /v1/models/mine/main`, so
+  your jobs go back to the workspace's model instead of waiting for a device
+  that is not answering.
+- **Pause Syncing** also stops the child but keeps the route: jobs wait and
+  run when you resume. Quitting stops the child the same way.
+- `livingbrain --json jobs agents` says which agent is installed and signed in
+  (no email, no org). The app never reads or sends the agents' own
+  credentials, and never logs a prompt or an answer.
+
+Changing the model here updates the server route; a model id that is not in
+the list can be typed as a custom one in Settings. Headless machines run the
+same thing with `livingbrain jobs run`.
 
 ## Live sync
 
@@ -216,7 +252,8 @@ and signs it.
 Package.swift
 Sources/LivingBrainKit/    # testable: CLI JSON models, SyncState, CLI locator/runner, opt-in file,
                            #   idle debouncer, notification throttle, FSEvents watcher, session ledger,
-                           #   API client + models, keychain token store, Markdown blocks
+                           #   API client + models, keychain token store, Markdown blocks,
+                           #   the brain-jobs runner (jobs run/agents, events, activity)
 Sources/LivingBrainBar/    # the SwiftUI menu bar extra, the window, and AppKit glue
 Tests/LivingBrainKitTests/ # XCTest + recorded CLI JSON fixtures
 scripts/build-app.sh

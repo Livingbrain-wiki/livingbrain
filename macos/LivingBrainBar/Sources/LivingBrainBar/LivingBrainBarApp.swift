@@ -7,8 +7,17 @@ import SwiftUI
 final class AppState: ObservableObject {
     let bar = BarModel()
     lazy var sessions = SessionsModel(bar: bar)
-    lazy var workspace = WorkspaceModel(bar: bar)
+    let workspace: WorkspaceModel
+    /// Built at launch, not on first use: a runner left on must start with
+    /// the app, before the menu is ever opened.
+    let runner: RunnerModel
     let router = Router()
+
+    init() {
+        let workspace = WorkspaceModel(bar: bar)
+        self.workspace = workspace
+        runner = RunnerModel(bar: bar, workspace: workspace)
+    }
 }
 
 @main
@@ -17,14 +26,14 @@ struct LivingBrainBarApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            BarMenu(model: app.bar)
+            BarMenu(model: app.bar, runner: app.runner)
         } label: {
             MenuBarLabel(model: app.bar)
         }
         .menuBarExtraStyle(.menu)
 
         Window("Living Brain", id: "main") {
-            MainWindow(bar: app.bar, sessions: app.sessions, workspace: app.workspace, router: app.router)
+            MainWindow(bar: app.bar, sessions: app.sessions, workspace: app.workspace, runner: app.runner, router: app.router)
         }
         .defaultSize(width: 1180, height: 740)
         .commands {
@@ -73,6 +82,7 @@ struct MenuBarLabel: View {
 
 struct BarMenu: View {
     @ObservedObject var model: BarModel
+    @ObservedObject var runner: RunnerModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -126,6 +136,10 @@ struct BarMenu: View {
             }
         }
         Button("Add Project…") { model.addProject() }
+
+        Divider()
+
+        RunnerMenu(runner: runner)
 
         Divider()
 
@@ -201,6 +215,42 @@ enum MenuIcon {
         case .idle: return "Living Brain"
         case .syncing: return "Living Brain — syncing"
         case .error: return "Living Brain — sync error"
+        }
+    }
+}
+
+/// The menu's "brain jobs" block: the toggle, what the runner is doing, and
+/// the agent and model it uses.
+struct RunnerMenu: View {
+    @ObservedObject var runner: RunnerModel
+
+    var body: some View {
+        Toggle("Run Brain Jobs with My Subscription", isOn: $runner.enabled)
+        if runner.enabled {
+            ForEach(runner.lines(), id: \.self) { Text($0) }
+            if let error = runner.routeError { Text("⚠︎ " + error) }
+        }
+        Menu("Brain Jobs Agent: \(runner.agent.title) · \(runner.model.isEmpty ? "default" : runner.model)") {
+            Picker("Agent", selection: $runner.agent) {
+                ForEach(RunnerAgent.allCases) { agent in
+                    Text("\(agent.title) (\(agent.subscription))").tag(agent)
+                }
+            }
+            .pickerStyle(.inline)
+            Picker("Model", selection: $runner.model) {
+                ForEach(runner.agent.models, id: \.self) { Text($0).tag($0) }
+                if !runner.agent.models.contains(runner.model) {
+                    Text("\(runner.model.isEmpty ? "CLI default" : runner.model) (custom)").tag(runner.model)
+                }
+            }
+            .pickerStyle(.inline)
+            Divider()
+            if let status = runner.agentStatus {
+                Text("\(runner.agent.title): \(status.summary)")
+            } else if let error = runner.agentsError {
+                Text("⚠︎ " + error)
+            }
+            Button("Check Agents Again") { Task { await runner.refreshAgents() } }
         }
     }
 }
