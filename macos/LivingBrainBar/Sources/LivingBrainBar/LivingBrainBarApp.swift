@@ -7,6 +7,8 @@ import SwiftUI
 final class AppState: ObservableObject {
     let bar = BarModel()
     lazy var sessions = SessionsModel(bar: bar)
+    lazy var workspace = WorkspaceModel(bar: bar)
+    let router = Router()
 }
 
 @main
@@ -22,13 +24,31 @@ struct LivingBrainBarApp: App {
         .menuBarExtraStyle(.menu)
 
         Window("Living Brain", id: "main") {
-            MainWindow(bar: app.bar, sessions: app.sessions)
+            MainWindow(bar: app.bar, sessions: app.sessions, workspace: app.workspace, router: app.router)
         }
-        .defaultSize(width: 1100, height: 700)
+        .defaultSize(width: 1180, height: 740)
         .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Note") {
+                    app.router.destination = .wiki
+                    app.router.newNoteRequest += 1
+                }
+                .keyboardShortcut("n")
+            }
             CommandGroup(after: .newItem) {
+                Button("Search") {
+                    app.router.destination = .wiki
+                    app.router.searchRequest += 1
+                }
+                .keyboardShortcut("k")
                 Button("Sync Now") { app.bar.syncNow() }
                     .keyboardShortcut("r")
+            }
+            CommandMenu("Go") {
+                ForEach(Array((Destination.workspace + Destination.local + [.settings]).enumerated()), id: \.offset) { index, destination in
+                    Button(destination.title) { app.router.destination = destination }
+                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                }
             }
         }
     }

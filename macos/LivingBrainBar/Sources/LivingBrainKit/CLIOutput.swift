@@ -317,7 +317,8 @@ public enum CLIOutput {
 public enum Scrub {
     static let patterns: [NSRegularExpression] = [
         // `Bearer abc…`, `token=abc…`, `token: abc…`
-        try! NSRegularExpression(pattern: #"(?i)(bearer\s+|token\s*[=:]\s*)[^\s"']+"#),
+        // (Eight characters or more, so prose like "Bearer token required" survives.)
+        try! NSRegularExpression(pattern: #"(?i)(bearer\s+)[^\s"']{8,}|(?i)(token\s*[=:]\s*)[^\s"']+"#),
         // Living Brain PATs (`lbp_…`) and any long opaque run.
         try! NSRegularExpression(pattern: #"\blbp_[A-Za-z0-9_\-]+"#),
         try! NSRegularExpression(pattern: #"(?<![/\w.-])[A-Za-z0-9_\-]{40,}(?![/\w.-])"#),
@@ -327,7 +328,7 @@ public enum Scrub {
         var out = input
         for (index, pattern) in patterns.enumerated() {
             let range = NSRange(out.startIndex..., in: out)
-            let template = index == 0 ? "$1•••" : "•••"
+            let template = index == 0 ? "$1$2•••" : "•••"
             out = pattern.stringByReplacingMatches(in: out, range: range, withTemplate: template)
         }
         return out
