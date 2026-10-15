@@ -233,8 +233,19 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             as_of,
             question,
         } => {
-            let value =
-                client(cli)?.ask(&question.join(" "), project.as_deref(), as_of.as_deref())?;
+            let json = out.json;
+            let value = client(cli)?.ask(
+                &question.join(" "),
+                project.as_deref(),
+                as_of.as_deref(),
+                || {
+                    if !json {
+                        eprintln!(
+                            "Waiting for your runner to answer on your device (`livingbrain jobs run` or the Mac app)…"
+                        );
+                    }
+                },
+            )?;
             out.json_or(&value, || render_ask(&value));
             Ok(())
         }

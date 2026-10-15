@@ -23,6 +23,16 @@
 //!   against the citations, and one that names no source is removed and
 //!   flagged.
 //!
+//! **Your own subscription (the local runner).** An asker who runs their
+//! jobs on their own device (`livingbrain_models::jobs`) is not answered by
+//! the workspace's model: the same redacted prompt is queued for *their*
+//! runner, and the route answers `202 {"status": "pending", "job", "poll",
+//! "retry_after"}` with the citations it already has. The client polls
+//! `GET /v1/model-jobs/{job}` until it is `done` (or `failed`) and sends the
+//! same ask again, which then reads the runner's answer — redacted and
+//! citation-checked exactly like a model's. It costs the workspace nothing,
+//! so the budget does not gate it.
+//!
 //! **No model, no call.** With nothing connected, over budget, or a model
 //! that failed, the answer is today's brief under a label that says so
 //! ([`NO_MODEL`] and its siblings), and with nothing found at all it is
@@ -36,13 +46,16 @@ use std::time::Duration;
 
 use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::State;
-use cratefield_core::axum::http::{HeaderMap, Method};
+use cratefield_core::axum::http::{HeaderMap, Method, StatusCode};
+use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::post;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use livingbrain_models::invoke::{self, ChatReply, ChatRequest, InvokeError, Serving};
+use livingbrain_models::jobs::{self, Dispatch, JobCall};
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::Wiki;
 use crate::facts::{as_of, brief_lines, brief_section, relevant};
@@ -126,6 +139,39 @@ pub trait AskModel: Send + Sync {
         workspace: &str,
         request: &ChatRequest<'_>,
     ) -> Result<ChatReply, InvokeError>;
+
+    /// The asker's own runner for [`ASK_ROLE`], when they run their jobs on
+    /// their device: `(agent, model)`. The default is none.
+    ///
+    /// # Errors
+    ///
+    /// [`InvokeError::Store`] when the runners cannot be read.
+    async fn runner(
+        &self,
+        _ctx: &ModuleContext,
+        _workspace: &str,
+        _owner: &str,
+    ) -> Result<Option<(String, String)>, InvokeError> {
+        Ok(None)
+    }
+
+    /// One call for `call.owner` handed to their runner, or answered from
+    /// it ([`jobs::dispatch`]). The default answers through [`Self::chat`].
+    ///
+    /// # Errors
+    ///
+    /// [`InvokeError`].
+    async fn dispatch(
+        &self,
+        ctx: &ModuleContext,
+        workspace: &str,
+        _call: &JobCall<'_>,
+        request: &ChatRequest<'_>,
+    ) -> Result<Dispatch, InvokeError> {
+        self.chat(ctx, workspace, request)
+            .await
+            .map(Dispatch::Reply)
+    }
 }
 
 /// The workspace's own connected model, through [`invoke`].
@@ -166,7 +212,48 @@ impl AskModel for WorkspaceModel {
         )
         .await
     }
+
+    async fn runner(
+        &self,
+        ctx: &ModuleContext,
+        workspace: &str,
+        owner: &str,
+    ) -> Result<Option<(String, String)>, InvokeError> {
+        let db = ctx.ports.db.clone().ok_or(InvokeError::Store)?;
+        Ok(jobs::runner_for(&*db, workspace, owner, ASK_ROLE)
+            .await
+            .map_err(|_| InvokeError::Store)?
+            .map(|runner| (runner.agent, runner.model)))
+    }
+
+    async fn dispatch(
+        &self,
+        ctx: &ModuleContext,
+        workspace: &str,
+        call: &JobCall<'_>,
+        request: &ChatRequest<'_>,
+    ) -> Result<Dispatch, InvokeError> {
+        let (Some(db), Some(http), Some(clock), Some(id_gen)) = (
+            ctx.ports.db.clone(),
+            ctx.ports.http.clone(),
+            ctx.ports.clock.clone(),
+            ctx.ports.id_gen.clone(),
+        ) else {
+            return Err(InvokeError::Http(None));
+        };
+        let ports = jobs::Ports {
+            db: &*db,
+            http: &*http,
+            config: &*ctx.config,
+            clock: &*clock,
+            id_gen: &*id_gen,
+        };
+        jobs::dispatch(&ports, workspace, ASK_ROLE, call, request).await
+    }
 }
+
+/// How long a client waits before polling a pending answer, in seconds.
+const RETRY_AFTER_SECONDS: u64 = 2;
 
 /// The `ask` module, constructed with the pages access the venture
 /// injected.
@@ -258,6 +345,11 @@ struct AskRequest {
     /// than now. Without it, a time the question names is used.
     #[serde(default)]
     as_of: Option<String>,
+    /// The runner job a client polled (see the module docs). Accepted and
+    /// not needed: the same ask finds its own job again.
+    #[serde(default)]
+    #[allow(dead_code)]
+    job: Option<String>,
 }
 
 /// `POST /` — a cited answer from the asker's own pages and facts.
@@ -273,7 +365,7 @@ async fn ask(
     method: Method,
     headers: HeaderMap,
     Json(request): Json<AskRequest>,
-) -> Result<Json<Value>, Problem> {
+) -> Result<Response, Problem> {
     let service = &state.service;
     let asker = service.asker(&method, &headers).await?;
     let question = request.question.trim();
@@ -350,13 +442,23 @@ async fn ask(
         body["answer"] = json!(NOTHING_FOUND);
         body["mode"] = json!("sources");
         body["model"] = Value::Null;
-        return Ok(Json(body));
+        return Ok(Json(body).into_response());
     }
 
     let context = model_context(&lines, at, &found);
+    // The handle the asker's runner job is found again by: the question in
+    // its project, so asking it again with fresher pages replaces the job.
+    let ref_key = format!(
+        "ask:{}",
+        hex(&Sha256::digest(
+            format!("{}\0{}", request.project.as_deref().unwrap_or(""), question).as_bytes()
+        ))
+    );
     let outcome = answer_with_model(
         &state,
         &asker.workspace_id,
+        &asker.user_id,
+        &ref_key,
         question,
         &at_text,
         &context,
@@ -382,8 +484,22 @@ async fn ask(
             body["mode"] = json!("sources");
             body["model"] = Value::Null;
         }
+        Outcome::Pending { job_id } => {
+            body["status"] = json!("pending");
+            body["poll"] = json!(format!("/v1/model-jobs/{job_id}"));
+            body["job"] = json!(job_id);
+            body["retry_after"] = json!(RETRY_AFTER_SECONDS);
+            body["mode"] = json!("runner");
+            body["model"] = Value::Null;
+            return Ok((StatusCode::ACCEPTED, Json(body)).into_response());
+        }
     }
-    Ok(Json(body))
+    Ok(Json(body).into_response())
+}
+
+/// Lower-case hex of a digest.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One numbered page section of a brief.
@@ -438,31 +554,55 @@ enum Outcome {
     },
     /// It was not asked, or did not answer: the brief, under this label.
     Sources(&'static str),
+    /// Handed to the asker's own runner; ask again once the job is done.
+    Pending { job_id: String },
 }
 
 /// Asks the workspace's model, if it has one and the budget allows.
+#[allow(clippy::too_many_arguments)]
 async fn answer_with_model(
     state: &AskState,
     workspace: &str,
+    asker: &str,
+    ref_key: &str,
     question: &str,
     at: &str,
     context: &str,
     labels: Labels,
 ) -> Outcome {
     let ctx = state.service.ctx();
-    let serving = match state.model.serving(ctx, workspace).await {
-        Ok(Some(serving)) => serving,
-        Ok(None) => return Outcome::Sources(NO_MODEL),
+    // The asker's own runner first: their subscription, on their device, so
+    // the workspace's model and budget are not consulted.
+    let serving = match state.model.runner(ctx, workspace, asker).await {
+        Ok(Some((agent, model))) => Serving {
+            role: ASK_ROLE.to_owned(),
+            provider: format!("local-runner:{agent}"),
+            model,
+        },
+        Ok(None) => {
+            let serving = match state.model.serving(ctx, workspace).await {
+                Ok(Some(serving)) => serving,
+                Ok(None) => return Outcome::Sources(NO_MODEL),
+                Err(_) => return Outcome::Sources(MODEL_FAILED),
+            };
+            let (Some(db), Some(clock)) = (ctx.ports.db.clone(), ctx.ports.clock.clone()) else {
+                return Outcome::Sources(MODEL_FAILED);
+            };
+            if crate::coding_agents::over_budget(
+                &*db,
+                &*ctx.config,
+                &*clock,
+                workspace,
+                Some(&serving),
+            )
+            .await
+            {
+                return Outcome::Sources(OVER_BUDGET);
+            }
+            serving
+        }
         Err(_) => return Outcome::Sources(MODEL_FAILED),
     };
-    let (Some(db), Some(clock)) = (ctx.ports.db.clone(), ctx.ports.clock.clone()) else {
-        return Outcome::Sources(MODEL_FAILED);
-    };
-    if crate::coding_agents::over_budget(&*db, &*ctx.config, &*clock, workspace, Some(&serving))
-        .await
-    {
-        return Outcome::Sources(OVER_BUDGET);
-    }
 
     // Redacted on the way out: pages and facts were redacted when they were
     // written, but a page a person typed need not have been, and the
@@ -481,8 +621,14 @@ async fn answer_with_model(
         json: false,
         timeout: CALL_TIMEOUT,
     };
-    let reply = match state.model.chat(ctx, workspace, &request).await {
-        Ok(reply) => reply,
+    let call = JobCall {
+        owner: asker,
+        kind: "ask",
+        ref_key,
+    };
+    let reply = match state.model.dispatch(ctx, workspace, &call, &request).await {
+        Ok(Dispatch::Reply(reply)) => reply,
+        Ok(Dispatch::Pending { job_id }) => return Outcome::Pending { job_id },
         Err(InvokeError::NoModel) => return Outcome::Sources(NO_MODEL),
         Err(_) => return Outcome::Sources(MODEL_FAILED),
     };

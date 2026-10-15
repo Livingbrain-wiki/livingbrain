@@ -211,10 +211,41 @@ public struct APIClient: Sendable {
                       query: [("q", query), ("project", project?.nilIfEmpty), ("limit", String(limit))]).results
     }
 
-    public func ask(_ question: String, project: String? = nil) async throws -> Answer {
+    /// `POST /v1/ask`. A member who runs their brain jobs on their own device
+    /// (Settings → "Run brain jobs with my subscription") gets `202 pending`:
+    /// their runner answers. This polls the job until it ends, then asks
+    /// again, which reads the runner's answer. `onWait` runs once when the
+    /// wait starts; after `maxWait` seconds it gives up with an error naming
+    /// the runner. `pollInterval` overrides the server's `retry_after` (tests).
+    public func ask(
+        _ question: String,
+        project: String? = nil,
+        onWait: (@Sendable () -> Void)? = nil,
+        maxWait: TimeInterval = 300,
+        pollInterval: TimeInterval? = nil
+    ) async throws -> Answer {
         struct Body: Encodable { var question: String; var project: String? }
-        let request = try request("POST", "/v1/ask", json: Body(question: question, project: project?.nilIfEmpty))
-        return try decode(Answer.self, await send(request))
+        let body = Body(question: question, project: project?.nilIfEmpty)
+        let first = try decode(Answer.self, await send(request("POST", "/v1/ask", json: body)))
+        guard first.status == "pending" else { return first }
+        guard let poll = first.poll, poll.hasPrefix("/v1/model-jobs/") else {
+            throw APIError.decoding("The server named no job to wait for.")
+        }
+        onWait?()
+        let pause = pollInterval ?? TimeInterval(min(max(first.retryAfter ?? 2, 1), 30))
+        let started = Date()
+        while true {
+            if Date().timeIntervalSince(started) > maxWait {
+                throw APIError.transport(
+                    "Your device did not answer in time — is “Run Brain Jobs with My Subscription” on?"
+                )
+            }
+            try await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000))
+            let job = try? decode(JobState.self, await send(request("GET", poll)))
+            if job?.status != "queued" && job?.status != "claimed" {
+                return try decode(Answer.self, await send(request("POST", "/v1/ask", json: body)))
+            }
+        }
     }
 
     public func createNote(body: String, title: String? = nil, project: String? = nil, slug: String? = nil) async throws -> NoteResult {

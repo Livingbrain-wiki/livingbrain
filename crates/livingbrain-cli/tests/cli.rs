@@ -412,3 +412,49 @@ fn sources_lists_with_filters_and_projects() {
     assert!(projects.status.success(), "stderr: {}", projects.stderr);
     assert_eq!(json_of(&projects)["projects"][0]["project"], "demo");
 }
+
+/// An asker whose jobs run on their own device gets `202 pending`: `ask`
+/// polls the job, then asks again and prints the runner's answer.
+#[test]
+fn ask_waits_for_the_member_s_own_runner() {
+    let asks = Arc::new(AtomicUsize::new(0));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let (seen_asks, seen_polls) = (Arc::clone(&asks), Arc::clone(&polls));
+    let mock = Mock::start(move |request| match request.path.as_str() {
+        "/v1/ask" => {
+            if seen_asks.fetch_add(1, Ordering::SeqCst) == 0 {
+                Reply::json(
+                    202,
+                    r#"{"status":"pending","job":"mj-1","poll":"/v1/model-jobs/mj-1","retry_after":1,"citations":[]}"#,
+                )
+            } else {
+                Reply::ok_json(r#"{"answer":"In Postgres [1].","citations":[],"mode":"model"}"#)
+            }
+        }
+        "/v1/model-jobs/mj-1" => {
+            let status = if seen_polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                "claimed"
+            } else {
+                "done"
+            };
+            Reply::ok_json(&format!(r#"{{"id":"mj-1","status":"{status}"}}"#))
+        }
+        _ => Reply::json(404, r#"{"error":"no such route"}"#),
+    });
+    let (cwd, home) = (temp_dir("ask-runner-cwd"), temp_dir("ask-runner-home"));
+    let out = run(
+        &cwd,
+        &home,
+        &["ask", "where", "--json"],
+        &api_envs(&mock.base),
+        None,
+    );
+    assert!(out.status.success(), "stderr: {}", out.stderr);
+    assert_eq!(json_of(&out)["answer"], "In Postgres [1].");
+    assert_eq!(
+        asks.load(Ordering::SeqCst),
+        2,
+        "asked again once the job ended"
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+}

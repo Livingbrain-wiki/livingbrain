@@ -25,6 +25,25 @@ Only the job's owner can claim it; a claim is a lease, and a job whose runner
 went away becomes claimable again when the lease lapses. Tokens the CLI
 reports are recorded as usage at no cost to the workspace.
 
+## Which jobs, and how they wait
+
+- **Compiling your coding-agent sessions** (`docs/coding-agents.md`): each
+  model call becomes a job and the compile shows `waiting-runner`. When your
+  runner posts the answer, it must parse as the compile's closed edit list or
+  the job fails (`model-runner-bad-output`) and the compile retries. A valid
+  answer continues the compile in the same request, from the chunk where it
+  stopped.
+- **Ask** (`POST /v1/ask`): retrieval runs as always, over your own scopes.
+  The answer is then written by your runner instead of the workspace's model,
+  and the route returns `202 {"status": "pending", "job", "poll",
+  "retry_after", "citations", …}`. The client polls
+  `GET /v1/model-jobs/{job}` until it leaves `queued`/`claimed`, then sends
+  the same ask again. That second ask reads the runner's answer, redacted and
+  citation-checked exactly like a model's (`mode: "model"`, `model.provider:
+  "local-runner:claude"`). `livingbrain ask`, the web app and the Mac app all
+  wait up to 5 minutes and say what they are waiting for. Because the answer
+  costs the workspace nothing, the monthly model budget does not gate it.
+
 ## What runs
 
 The prompt (the job's user turn) goes on **stdin**. Each job runs in a fresh,
