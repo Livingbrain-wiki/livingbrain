@@ -114,6 +114,10 @@ enum Command {
         /// Scope the question to one project
         #[arg(long)]
         project: Option<String>,
+        /// Answer as the brain knew things on this date (YYYY, YYYY-MM,
+        /// YYYY-MM-DD or an RFC 3339 time) rather than now
+        #[arg(long, value_name = "DATE")]
+        as_of: Option<String>,
         /// The question
         #[arg(required = true)]
         question: Vec<String>,
@@ -218,8 +222,13 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             out.json_or(&value, || print!("{}", livingbrain_stack::stack().text()));
             Ok(())
         }
-        Command::Ask { project, question } => {
-            let value = client(cli)?.ask(&question.join(" "), project.as_deref())?;
+        Command::Ask {
+            project,
+            as_of,
+            question,
+        } => {
+            let value =
+                client(cli)?.ask(&question.join(" "), project.as_deref(), as_of.as_deref())?;
             out.json_or(&value, || render_ask(&value));
             Ok(())
         }

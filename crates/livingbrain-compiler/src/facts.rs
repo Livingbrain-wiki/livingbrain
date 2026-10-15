@@ -10,13 +10,14 @@
 //! v1 emitter shape, [`Fact`], which is validated here against the spec's
 //! JSON Schema rules before anything is handed on.
 //!
-//! **The one dependency this module isolates.** The facts store is being
-//! built beside this compiler (branch `feat/temporal-facts`); until it is on
-//! main there is no store API to call. So the hand-off is a port,
-//! [`FactSink`], and the only sink wired today is [`NoFacts`], which accepts
-//! nothing and says so (`emitted: 0`, the facts are counted as pending in
-//! the log line). When the store lands, the composition wires a sink over
-//! it — one adapter, no change to the compiler or its model schema.
+//! **The one dependency this module isolates.** The hand-off is a port,
+//! [`FactSink`]: the composition (`livingbrain-api`'s `coding-agents`
+//! module) wires a sink over the facts store, which records each fact in
+//! the session's own scope. A fact the store refuses (a cardinality
+//! conflict, a field redaction will not let through) is a per-fact skip the
+//! log line names, never a failed job: the pages are the primary output and
+//! carry the same history in prose. [`NoFacts`] is the sink for a
+//! composition with no store; it records nothing.
 
 use serde::{Deserialize, Serialize};
 
@@ -112,27 +113,43 @@ fn partial_date(value: &str) -> bool {
     }
 }
 
+/// What a sink did with one batch of facts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Emitted {
+    /// How many the store holds now: stored, or a repeat of a live fact.
+    pub recorded: usize,
+    /// One short, log-safe reason per fact the store refused. A refusal is
+    /// that fact's alone; the rest of the batch is still recorded.
+    pub skipped: Vec<String>,
+}
+
 /// Where the compiler hands the facts a session produced.
 #[async_trait::async_trait]
 pub trait FactSink: Send + Sync {
-    /// Stores `facts` in `scope` (the session's own), answering how many
-    /// were accepted.
+    /// Stores `facts` in `scope` (the session's own), one at a time, and
+    /// answers what became of them.
     ///
     /// # Errors
     ///
-    /// A short reason; the compile still succeeds — the pages are the
-    /// primary output and carry the same history in prose.
-    async fn emit(&self, workspace: &str, scope: &str, facts: &[Fact]) -> Result<usize, String>;
+    /// A short reason when the sink could not try at all (no store). The
+    /// compile still succeeds — the pages are the primary output and carry
+    /// the same history in prose.
+    async fn emit(&self, workspace: &str, scope: &str, facts: &[Fact]) -> Result<Emitted, String>;
 }
 
-/// The sink while the facts layer is not on main: accepts nothing.
+/// The sink for a composition with no facts store: records nothing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoFacts;
 
 #[async_trait::async_trait]
 impl FactSink for NoFacts {
-    async fn emit(&self, _workspace: &str, _scope: &str, _facts: &[Fact]) -> Result<usize, String> {
-        Ok(0)
+    async fn emit(
+        &self,
+        _workspace: &str,
+        _scope: &str,
+        _facts: &[Fact],
+    ) -> Result<Emitted, String> {
+        Ok(Emitted::default())
     }
 }
 

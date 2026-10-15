@@ -79,6 +79,50 @@ fn ask_cites_and_sends_the_token() {
     );
 }
 
+/// `ask --as-of <date>` sends `as_of` to `/v1/ask`; without the flag the
+/// body carries no `as_of`, so the server answers as of now.
+#[test]
+fn ask_as_of_sends_the_date() {
+    let mock = Mock::start(|request| match request.path.as_str() {
+        "/v1/ask" => Reply::ok_json(r#"{"answer":"Supabase","citations":[]}"#),
+        _ => Reply::json(404, r#"{"error":"no such route"}"#),
+    });
+    let (cwd, home) = (temp_dir("ask-asof-cwd"), temp_dir("ask-asof-home"));
+    let envs = api_envs(&mock.base);
+
+    let dated = run(
+        &cwd,
+        &home,
+        &[
+            "ask",
+            "--as-of",
+            "2026-09",
+            "--project",
+            "demo",
+            "which",
+            "database?",
+            "--json",
+        ],
+        &envs,
+        None,
+    );
+    assert!(dated.status.success(), "stderr: {}", dated.stderr);
+    let undated = run(&cwd, &home, &["ask", "which", "database?"], &envs, None);
+    assert!(undated.status.success(), "stderr: {}", undated.stderr);
+
+    let bodies: Vec<Value> = mock
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/v1/ask")
+        .map(|r| serde_json::from_slice(&r.body).expect("a JSON body"))
+        .collect();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["as_of"], "2026-09", "{}", bodies[0]);
+    assert_eq!(bodies[0]["question"], "which database?");
+    assert_eq!(bodies[0]["project"], "demo");
+    assert!(bodies[1].get("as_of").is_none(), "{}", bodies[1]);
+}
+
 /// (2) Every subcommand accepts `--json` and emits valid JSON on stdout.
 #[test]
 fn every_command_supports_json() {

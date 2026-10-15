@@ -243,7 +243,8 @@ answers `facts` and `as_of` beside `answer`, and the page view
 (`GET /v1/pages/{slug}`) carries `subject`, `facts` and `facts_markdown`.
 Which timelines a question is about is decided on the plaintext index alone
 (attribute words, subject slug, `my`/`me` for the asker's own person) before
-anything is decrypted. `ask` takes an `as_of` field. Without one, a question that names a time — "in 2025", "as of
+anything is decrypted. `ask` takes an `as_of` field (`livingbrain ask --as-of 2025 …`
+on the CLI). Without one, a question that names a time — "in 2025", "as of
 2025-06", "in June 2025", "last month" — is asked as of the end of that time.
 
 ## 6. Scope, privacy, storage

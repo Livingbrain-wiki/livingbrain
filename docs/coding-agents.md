@@ -114,13 +114,29 @@ superseded, never deleted. Learnings carry `first_seen` and
 
 The model also returns **temporal facts** in the
 `docs/temporal-facts.md` v1 emitter shape. Subjects are
-`project/<project>` and `system/<agent>`. The v1 subject types have no
-`agent`, so a coding agent is recorded as a system. Facts are validated
-against the v1 schema rules. They go to the facts layer through one port,
-`livingbrain_compiler::FactSink`. **That layer is not on main yet**, so the
-wired sink is `NoFacts`: it accepts nothing, and the log line counts the
-facts as pending. Once the facts store merges, wiring a sink over it is a
-one-adapter change.
+`project/<project>` and `system/<agent>` (and `me`, which becomes the
+syncing person's own `person/<id>`). The v1 subject types have no `agent`,
+so a coding agent is recorded as a system. Facts are validated against the
+v1 schema rules, then handed to the facts store through one port,
+`livingbrain_compiler::FactSink`; the composition wires `StoreFacts`
+(`livingbrain-api`), a sink over `FactStore::record`. Each fact is recorded:
+
+- in the **same scope as the session's source** — the person's own memory —
+  and nowhere else, so nobody else can read it;
+- citing the session's source (`source:<id>`);
+- with `observed_at` = the compile time (when the brain learned it), and
+  `valid_from` = the session's day when the model gave no time;
+- with the store's usual ordering: a later session that changes an
+  attribute supersedes the earlier fact, which is kept as history (for
+  example `project/demo` `database` = Supabase from September, then D1 from
+  October).
+
+A fact the store refuses — a cardinality conflict
+(`422 facts/cardinality-mismatch` over HTTP), a subject or attribute
+redaction will not let through, anything outside the format — is skipped on
+its own. The log line counts what was recorded and names each skip
+(`facts recorded: 1 · facts skipped: 2 (cardinality conflict: …)`); the job
+still finishes `done`.
 
 ## Safety and cost
 
