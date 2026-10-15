@@ -55,6 +55,7 @@ use livingbrain_api::{
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
+use livingbrain_models::deadline::ModelDeadlineHttpClient;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_tokens::{DevicePorts, Me, Tokens};
 use livingbrain_tools::Tools;
@@ -969,6 +970,7 @@ async fn serve_cli(
 ) -> worker::Result<Response> {
     install_tracing();
     let mut ports = runtime.ports(&env, Arc::new(ContextDefer(ctx)));
+    model_deadlines(&mut ports);
     // The port-layer planting: the four scopes land on the pages key space,
     // through handles derived this request. Keys outside the four prefixes
     // — the pages module's own — pass through unchanged.
@@ -1063,6 +1065,29 @@ fn copy_headers(worker_headers: &mut worker::Headers, headers: &HeaderMap) {
     }
 }
 
+/// Swaps the runtime's outbound client for one that honours a model call's
+/// own deadline ([`ModelDeadlineHttpClient`]).
+///
+/// The runtime wires `ports.http` as `BoundedHttpClient` over `FetchClient`,
+/// and `cratefield-core` 0.8.0 clamps every deadline to 30 s
+/// (`MAX_RESPONSE_TIMEOUT`) over the whole buffered exchange — so a
+/// forced-thinking compile (55–100 s) failed as `deadline exceeded after
+/// 30s` whatever it asked for. The replacement is the same `FetchClient`
+/// under the same clock; it differs only for a request marked with
+/// `livingbrain_models::deadline::ModelDeadline`, which it gives up to
+/// five minutes. Applied where the venture derives the ports itself: the
+/// CLI routes (`/v1/coding-agents/process`, `/v1/ask`, …) and the cron tick.
+fn model_deadlines(ports: &mut Ports) {
+    let clock: Arc<dyn cratefield_core::Clock> = ports
+        .clock
+        .clone()
+        .unwrap_or_else(|| Arc::new(WorkersClock));
+    ports.http = Some(Arc::new(ModelDeadlineHttpClient::new(
+        Arc::new(FetchClient),
+        clock,
+    )));
+}
+
 #[event(scheduled)]
 /// Worker scheduled (cron) entry point: fans a firing out over the same
 /// composed harness's modules — the `waitlist` module prunes expired
@@ -1085,6 +1110,7 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
     install_tracing();
     let cron = event.cron();
     let mut ports = runtime.ports(&env, Arc::new(ScheduleDefer(ctx)));
+    model_deadlines(&mut ports);
     ports.blob = ports
         .blob
         .take()

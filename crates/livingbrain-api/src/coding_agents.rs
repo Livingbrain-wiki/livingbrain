@@ -80,9 +80,15 @@ pub const MODEL_ROLE: &str = "main";
 const MAX_PROCESS_NOW: usize = 3;
 /// How long one compile call may take. A forced-thinking model (GLM-5.3)
 /// answered a full-size compile in 55–100 s when measured (2026-10-15), so
-/// the bound sits well past that. Workers sets no deadline on a subrequest
-/// of its own; this is what the native runtime enforces.
+/// the bound sits well past that. The `HttpClient` port clamps a deadline
+/// to 30 s (and the Workers runtime enforces the clamp); this holds because
+/// the venture wires `livingbrain_models::deadline::ModelDeadlineHttpClient`
+/// on the coding-agents routes and the cron tick, which honours it.
 const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(300);
+// The venture's client honours a model call's deadline only up to this
+// ceiling; one past it would be cut silently.
+const _: () =
+    assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::deadline::MAX_MODEL_DEADLINE.as_secs());
 /// The most jobs the status route lists.
 const MAX_LIST: usize = 100;
 

@@ -59,8 +59,12 @@ const LIST_MAX_RESPONSE: usize = 1024 * 1024;
 
 /// The maximum response body for a probe reply (well under the port ceiling).
 const PROBE_MAX_RESPONSE: usize = 64 * 1024;
-/// The timeout for a probe request.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// The timeout for a probe request. A probe is a real completion, and a
+/// forced-thinking model (GLM-5.3) reasons before it answers even a small
+/// one, so this is a minute rather than the 15 s a plain model needs. Past
+/// the port's 30 s ceiling it holds only where the venture's
+/// [`crate::deadline::ModelDeadlineHttpClient`] is wired.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The `max_tokens` for a probe completion. Room for a thinking model's
 /// reasoning before its tool call or its JSON (see the module docs): the
 /// reply is still small, and the usage the provider reports — not this
@@ -143,13 +147,11 @@ impl Target<'_> {
         body: Option<&Value>,
     ) -> Result<http::Request<Bytes>, Unreachable> {
         let url = catalog::join(self.base, segments).ok_or(Unreachable(None))?;
-        let mut builder = http::Request::builder()
-            .method(method)
-            .uri(url.as_str())
-            .extension(HttpPolicy {
-                max_response_bytes: PROBE_MAX_RESPONSE,
-                timeout: PROBE_TIMEOUT,
-            });
+        let mut builder = crate::deadline::policy(
+            http::Request::builder().method(method).uri(url.as_str()),
+            PROBE_MAX_RESPONSE,
+            PROBE_TIMEOUT,
+        );
         builder = match self.auth {
             Auth::Bearer => builder.header(
                 http::header::AUTHORIZATION,
@@ -173,13 +175,13 @@ impl Target<'_> {
     /// A `GET` to `url` itself — a provider's own list URL — signed the way
     /// [`Target::request`] signs a request under the base.
     fn get(&self, url: &Url) -> Result<http::Request<Bytes>, Unreachable> {
-        let builder = http::Request::builder()
-            .method(http::Method::GET)
-            .uri(url.as_str())
-            .extension(HttpPolicy {
-                max_response_bytes: LIST_MAX_RESPONSE,
-                timeout: PROBE_TIMEOUT,
-            });
+        let builder = crate::deadline::policy(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri(url.as_str()),
+            LIST_MAX_RESPONSE,
+            PROBE_TIMEOUT,
+        );
         let builder = match self.auth {
             Auth::Bearer => builder.header(
                 http::header::AUTHORIZATION,

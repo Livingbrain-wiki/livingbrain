@@ -24,6 +24,9 @@ workspace = true
 # arrive through `cratefield_core::axum`, so neither is named directly.
 cratefield-core = { workspace = true }
 
+# `deadline::ModelDeadlineHttpClient` implements the `HttpClient` port, whose
+# trait is declared with `#[async_trait]`. Already in the graph through core.
+async-trait = { workspace = true }
 # The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
 bytes = { workspace = true }
 # Percent-encoding for the DoH query string. Pure Rust, wasm-safe, and the
@@ -67,9 +70,6 @@ livingbrain-redact = { path = "../livingbrain-redact" }
 # (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
 # sqlx and tokio never reach the module's wasm graph.
 cratefield-testing = { workspace = true, features = ["postgres"] }
-# Only so a test fake can implement the `HttpClient` port, whose trait is
-# declared with `#[async_trait]`.
-async-trait = { workspace = true }
 # The module whose tables a test seeds and whose session it seals. Dev-only:
 # the module itself reaches the session through `livingbrain-tokens`.
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
