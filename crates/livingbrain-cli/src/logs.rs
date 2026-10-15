@@ -111,6 +111,22 @@ pub enum Command {
         /// Parse, normalise and report, but never touch the network
         #[arg(long)]
         dry_run: bool,
+        /// Sync only this session file (repeatable). It must sit under the
+        /// Claude Code or Codex directory, and its repo must still be opted in
+        #[arg(long = "session", value_name = "FILE")]
+        sessions: Vec<PathBuf>,
+    },
+    /// Print the redacted record `logs sync` would send for one session file,
+    /// opted in or not. Local only: never touches the network
+    Show {
+        /// The session's `.jsonl` file
+        file: PathBuf,
+        /// Read Claude Code sessions from here instead of ~/.claude/projects
+        #[arg(long, value_name = "DIR")]
+        claude_dir: Option<PathBuf>,
+        /// Read Codex sessions from here instead of ~/.codex/sessions
+        #[arg(long, value_name = "DIR")]
+        codex_dir: Option<PathBuf>,
     },
 }
 
@@ -124,13 +140,20 @@ pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
             claude_dir,
             codex_dir,
             dry_run,
+            sessions,
         } => sync(
             claude_dir.as_deref(),
             codex_dir.as_deref(),
             *dry_run,
+            sessions,
             api_url,
             out,
         ),
+        Command::Show {
+            file,
+            claude_dir,
+            codex_dir,
+        } => show(file, claude_dir.as_deref(), codex_dir.as_deref(), out),
     }
 }
 
@@ -909,6 +932,8 @@ fn status(out: &Out) -> CliResult<()> {
 /// for opted-in sessions — a skipped session never produces bytes.
 struct Prepared {
     record: SessionRecord,
+    /// The session file, for the local report only — it never travels.
+    file: PathBuf,
     opted_in: bool,
     body: Option<String>,
     /// Secrets redacted out of `body`.
@@ -931,9 +956,33 @@ fn sync(
     claude_dir: Option<&Path>,
     codex_dir: Option<&Path>,
     dry_run: bool,
+    only: &[PathBuf],
     api_url: &str,
     out: &Out,
 ) -> CliResult<()> {
+    let (home, claude_dir, codex_dir) = session_dirs(claude_dir, codex_dir)?;
+    let only = resolve_only(only)?;
+    let allowed = read_allowlist()?;
+    let (mut sessions, unreadable, unparsed) =
+        collect_sessions(&claude_dir, &codex_dir, &allowed, &home, only.as_ref())?;
+    upload(&mut sessions, dry_run, api_url)?;
+    report(
+        &sessions,
+        unreadable,
+        unparsed,
+        dry_run,
+        (&claude_dir, &codex_dir),
+        out,
+    );
+    Ok(())
+}
+
+/// `$HOME` and the two agents' session directories: the flags when given,
+/// the defaults under `$HOME` otherwise.
+fn session_dirs(
+    claude_dir: Option<&Path>,
+    codex_dir: Option<&Path>,
+) -> CliResult<(Option<PathBuf>, PathBuf, PathBuf)> {
     let home: Option<PathBuf> = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| !home.as_os_str().is_empty());
@@ -949,17 +998,61 @@ fn sync(
             .map(|home| home.join(".codex").join("sessions")),
         "--codex-dir",
     )?;
+    Ok((home, claude_dir, codex_dir))
+}
+
+/// The `--session` files, resolved through the filesystem so they compare
+/// with the walk's paths however they were spelled. `None` when no file was
+/// named: the whole tree is scanned.
+fn resolve_only(files: &[PathBuf]) -> CliResult<Option<BTreeSet<PathBuf>>> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    files
+        .iter()
+        .map(|file| {
+            std::fs::canonicalize(file)
+                .map_err(|error| err(format!("--session {}: {error}", file.display())))
+        })
+        .collect::<CliResult<BTreeSet<PathBuf>>>()
+        .map(Some)
+}
+
+/// `livingbrain logs show <file>`: the record exactly as `logs sync` would
+/// build it — parsed, home-elided, capped and redacted — printed locally so a
+/// reader can see what would leave the machine. Nothing is sent, and no
+/// token is read.
+fn show(
+    file: &Path,
+    claude_dir: Option<&Path>,
+    codex_dir: Option<&Path>,
+    out: &Out,
+) -> CliResult<()> {
+    let (home, claude_dir, codex_dir) = session_dirs(claude_dir, codex_dir)?;
+    let only = resolve_only(&[file.to_path_buf()])?;
     let allowed = read_allowlist()?;
-    let (mut sessions, unreadable, unparsed) =
-        collect_sessions(&claude_dir, &codex_dir, &allowed, &home)?;
-    upload(&mut sessions, dry_run, api_url)?;
-    report(
-        &sessions,
-        unreadable,
-        unparsed,
-        dry_run,
-        (&claude_dir, &codex_dir),
-        out,
+    let (sessions, _, _) =
+        collect_sessions(&claude_dir, &codex_dir, &allowed, &home, only.as_ref())?;
+    let Some(session) = sessions.into_iter().next() else {
+        return Err(err(format!(
+            "{}: no agent session in this file",
+            file.display()
+        )));
+    };
+    let (body, redacted) = match session.body {
+        Some(body) => (body, session.redacted),
+        None => build_body(&session.record, &session.file)?,
+    };
+    let record: Value =
+        serde_json::from_str(&body).map_err(|error| err(format!("{}: {error}", file.display())))?;
+    out.json_or(
+        &json!({
+            "file": session.file.display().to_string(),
+            "opted_in": session.opted_in,
+            "redacted": redacted,
+            "record": record,
+        }),
+        || println!("{body}"),
     );
     Ok(())
 }
@@ -974,9 +1067,11 @@ fn collect_sessions(
     codex_dir: &Path,
     allowed: &BTreeSet<String>,
     home: &Option<PathBuf>,
+    only: Option<&BTreeSet<PathBuf>>,
 ) -> CliResult<(Vec<Prepared>, usize, usize)> {
     let mut sessions = Vec::new();
     let (mut unreadable, mut unparsed) = (0usize, 0usize);
+    let mut matched: BTreeSet<PathBuf> = BTreeSet::new();
     for (agent, dir, levels) in [
         // Claude Code lays sessions out one directory per project — walk into
         // exactly that one level; Codex nests them by date, so its walk goes
@@ -985,6 +1080,15 @@ fn collect_sessions(
         (Agent::Codex, codex_dir, None),
     ] {
         for file in session_files(dir, levels) {
+            // `--session`: only the named files, matched on their resolved
+            // path. The agent is still decided by which tree the file is in.
+            if let Some(only) = only {
+                let resolved = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+                if !only.contains(&resolved) {
+                    continue;
+                }
+                matched.insert(resolved);
+            }
             let text = match std::fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(_) => {
@@ -1011,6 +1115,7 @@ fn collect_sessions(
             let planned_note = if opted { note::plan(&record) } else { None };
             sessions.push(Prepared {
                 record,
+                file,
                 opted_in: opted,
                 body,
                 redacted,
@@ -1020,6 +1125,14 @@ fn collect_sessions(
                 note: planned_note,
             });
         }
+    }
+    if let Some(stray) = only.and_then(|only| only.difference(&matched).next()) {
+        return Err(err(format!(
+            "--session {}: not a session file under {} or {}",
+            stray.display(),
+            claude_dir.display(),
+            codex_dir.display()
+        )));
     }
     Ok((sessions, unreadable, unparsed))
 }
@@ -1138,6 +1251,10 @@ fn report(
                 .expect("totals always serialise"),
             "truncated": session.record.truncated,
             "status": status,
+            "branch": session.record.branch,
+            "started_at": session.record.started_at,
+            "ended_at": session.record.ended_at,
+            "file": session.file.display().to_string(),
         });
         if status == "skipped" {
             entry["reason"] = json!("repo not opted in");

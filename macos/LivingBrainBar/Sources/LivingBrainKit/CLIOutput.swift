@@ -88,6 +88,43 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     public var status: String
     public var id: String?
     public var totals: Totals?
+    /// Added with `logs sync --session`; absent from older CLIs.
+    public var branch: String?
+    public var startedAt: String?
+    public var endedAt: String?
+    /// The local log file (never sent).
+    public var file: String?
+    public var note: Note?
+
+    /// The searchable note a synced session gets (logs/note.rs).
+    public struct Note: Decodable, Equatable, Sendable {
+        public var slug: String?
+        public var project: String?
+        /// `written`, `unchanged`, `failed`, `would_write`, `not_written`.
+        public var status: String?
+        public var url: String?
+        public var error: String?
+    }
+
+    /// Stable across runs: one session of one agent.
+    public var key: String { "\(agent)/\(sessionId)" }
+
+    public var isOptedIn: Bool { status != "skipped" }
+
+    /// Every token the session's own log counted.
+    public var totalTokens: Int {
+        guard let t = totals else { return 0 }
+        return t.inputTokens + t.outputTokens + t.cacheReadTokens + t.cacheCreationTokens + t.reasoningTokens
+    }
+
+    public var startedDate: Date? { startedAt.flatMap(ISODate.parse) }
+    public var endedDate: Date? { endedAt.flatMap(ISODate.parse) }
+
+    /// The repo's folder name: what the server files the session under.
+    public var projectName: String {
+        let base = (repo as NSString).lastPathComponent
+        return base == "~" || base.isEmpty ? "(home)" : base
+    }
 
     public struct Totals: Decodable, Equatable, Sendable {
         public var inputTokens: Int
@@ -118,9 +155,11 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case agent, repo, models, turns, truncated, status, id, totals
+        case agent, repo, models, turns, truncated, status, id, totals, branch, file, note
         case sessionId = "session_id"
         case toolCalls = "tool_calls"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
     }
 
     public init(from decoder: Decoder) throws {
@@ -135,6 +174,11 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? ""
         id = try c.decodeIfPresent(String.self, forKey: .id)
         totals = try c.decodeIfPresent(Totals.self, forKey: .totals)
+        branch = try c.decodeIfPresent(String.self, forKey: .branch)
+        startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
+        endedAt = try c.decodeIfPresent(String.self, forKey: .endedAt)
+        file = try c.decodeIfPresent(String.self, forKey: .file)
+        note = try c.decodeIfPresent(Note.self, forKey: .note)
     }
 }
 
@@ -203,6 +247,18 @@ public enum CLIOutput {
 
     public static func syncReport(_ stdout: Data) throws -> SyncReport {
         try decoder.decode(SyncReport.self, from: lastJSONLine(stdout))
+    }
+
+    public static func sessionShow(_ stdout: Data) throws -> SessionShow {
+        try decoder.decode(SessionShow.self, from: lastJSONLine(stdout))
+    }
+
+    /// Whether a CLI run failed because this build of the CLI does not know
+    /// a flag or subcommand (clap's wording) — the app then falls back.
+    public static func isUnsupported(_ stderr: String) -> Bool {
+        let lower = stderr.lowercased()
+        return lower.contains("unexpected argument") || lower.contains("unrecognized subcommand")
+            || lower.contains("unknown argument")
     }
 
     public static func allowStatus(_ stdout: Data) throws -> AllowStatus {
