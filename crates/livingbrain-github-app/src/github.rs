@@ -9,7 +9,12 @@
 //!   (`GET /app/installations/{id}`) and minting an installation token
 //!   (`POST /app/installations/{id}/access_tokens`);
 //! - installation-level reads with that **installation token**: the
-//!   repository list at install time, and the history the cron drain walks.
+//!   repository list at install time, and the history the cron drain walks;
+//! - for the shared app only, one OAuth hop at install time: the `code` is
+//!   exchanged for a **user token** (`POST github.com/login/oauth/access_token`),
+//!   which reads `GET /user` and `GET /user/installations` once and is then
+//!   dropped. It proves which GitHub user is finishing the install; it is
+//!   never cached, stored, logged or returned.
 //!
 //! No credential is ever logged, put in an error, stored in a table or
 //! returned to a caller. An installation token lives in the per-isolate
@@ -235,6 +240,8 @@ pub(crate) struct AccountWire {
     pub login: String,
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 /// Confirms with GitHub that `installation_id` is an installation of the
@@ -387,4 +394,166 @@ pub(crate) async fn installation_repositories(
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// The shared app's OAuth hop
+
+/// `application/x-www-form-urlencoded` / query-component encoding: every
+/// byte but the unreserved set is percent-encoded.
+pub(crate) fn url_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+/// GitHub's authorize page for the shared app, sending the browser back to
+/// `redirect_uri` with `code` and `state`.
+pub(crate) fn authorize_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
+    format!(
+        "{WEB}/login/oauth/authorize?client_id={}&redirect_uri={}&state={}",
+        url_encode(client_id),
+        url_encode(redirect_uri),
+        url_encode(state),
+    )
+}
+
+#[derive(Deserialize)]
+struct OAuthWire {
+    access_token: Option<String>,
+}
+
+/// Exchanges an OAuth `code` for a user token. The request carries the
+/// client secret, so neither it nor the answer is ever logged; a refusal
+/// (`{"error": …}`) is [`GhError::Shape`], a fixed text.
+pub(crate) async fn exchange_oauth_code(
+    http: &dyn HttpClient,
+    client_id: &str,
+    client_secret: &Secret,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<Secret, GhError> {
+    // The standard OAuth form body; the answer is asked for as JSON.
+    let body = Secret::new(format!(
+        "client_id={}&client_secret={}&code={}&redirect_uri={}",
+        url_encode(client_id),
+        url_encode(client_secret.expose()),
+        url_encode(code),
+        url_encode(redirect_uri),
+    ));
+    let request = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("{WEB}/login/oauth/access_token"))
+        .header("accept", "application/json")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("user-agent", USER_AGENT)
+        .body(Bytes::from(body.expose().to_owned()))
+        .map_err(|_| GhError::Transport)?;
+    drop(body);
+    let response = http.send(request).await.map_err(|_| GhError::Transport)?;
+    if !response.status().is_success() {
+        return Err(GhError::Status(response.status().as_u16()));
+    }
+    let wire: OAuthWire = serde_json::from_slice(response.body()).map_err(|_| GhError::Shape)?;
+    match wire.access_token {
+        Some(token) if !token.is_empty() => Ok(Secret::new(token)),
+        _ => Err(GhError::Shape),
+    }
+}
+
+#[derive(Deserialize)]
+struct UserWire {
+    id: i64,
+}
+
+/// The GitHub user a user token belongs to (`GET /user`): their numeric id.
+pub(crate) async fn user_id(http: &dyn HttpClient, token: &Secret) -> Result<i64, GhError> {
+    let response = call(
+        http,
+        Method::GET,
+        "/user",
+        Auth::Bearer(token.expose()),
+        None,
+    )
+    .await?;
+    if !response.ok() {
+        return Err(GhError::Status(response.status));
+    }
+    let wire: UserWire = response.json()?;
+    if wire.id > 0 {
+        Ok(wire.id)
+    } else {
+        Err(GhError::Shape)
+    }
+}
+
+#[derive(Deserialize)]
+struct UserInstallationsWire {
+    installations: Vec<InstallationWire>,
+}
+
+/// Whether `GET /user/installations` (the installations of this app the
+/// user token can reach) lists `installation_id` under `app_id` — GitHub's
+/// own check that the person is associated with the installation. At most
+/// `max_pages` pages of 100.
+pub(crate) async fn user_sees_installation(
+    http: &dyn HttpClient,
+    token: &Secret,
+    app_id: i64,
+    installation_id: i64,
+    max_pages: u32,
+) -> Result<bool, GhError> {
+    let mut page = 1;
+    while page <= max_pages {
+        let response = call(
+            http,
+            Method::GET,
+            &format!("/user/installations?per_page=100&page={page}"),
+            Auth::Bearer(token.expose()),
+            None,
+        )
+        .await?;
+        if !response.ok() {
+            return Err(GhError::Status(response.status));
+        }
+        let wire: UserInstallationsWire = response.json()?;
+        if wire
+            .installations
+            .iter()
+            .any(|i| i.id == installation_id && i.app_id == app_id)
+        {
+            return Ok(true);
+        }
+        match response.next_page() {
+            Some(next) if next > page => page = next,
+            _ => break,
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_authorize_url_encodes_every_part() {
+        let url = authorize_url(
+            "Iv23li.x",
+            "https://app.livingbrain.wiki/v1/github/oauth/callback",
+            "a&b=c",
+        );
+        assert_eq!(
+            url,
+            "https://github.com/login/oauth/authorize?client_id=Iv23li.x&redirect_uri=\
+             https%3A%2F%2Fapp.livingbrain.wiki%2Fv1%2Fgithub%2Foauth%2Fcallback&state=a%26b%3Dc"
+        );
+    }
 }

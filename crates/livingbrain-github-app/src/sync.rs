@@ -82,7 +82,15 @@ use crate::common::{StoreError, unix};
 use crate::drain::{self, BackfillProgress, Claimed, Drain};
 use crate::github::{self, Auth, GhResponse, TokenCache};
 use crate::seal::Secret;
-use crate::{AppCredentials, BackfillPhase, Repo, Shared};
+use crate::{AppKind, BackfillPhase, Repo, Shared, SharedApp};
+
+/// The key an installation's tokens are minted with: its app's id and
+/// private key — the shared app's (a Worker secret) or the workspace's own
+/// (unsealed from its row). Wiped when the tick drops it.
+pub(crate) struct AppKey {
+    pub app_id: i64,
+    pub private_key_pem: Secret,
+}
 
 /// A listing waits while its queue holds this many entries.
 pub(crate) const LIST_THROTTLE: usize = 200;
@@ -190,7 +198,8 @@ pub(crate) async fn run(
         tokens: &shared.tokens,
         ingestor: &ingestor,
         drain,
-        creds: HashMap::new(),
+        shared_app: SharedApp::from_config(ctx.config.as_ref()),
+        keys: HashMap::new(),
         importers: HashMap::new(),
         waits: HashMap::new(),
     };
@@ -302,9 +311,12 @@ struct Tick<'a> {
     tokens: &'a TokenCache,
     ingestor: &'a Ingestor,
     drain: &'a Drain,
-    /// Per workspace: its unsealed app credentials, `None` when it has no
-    /// app or they would not open. Dropped (and wiped) with the tick.
-    creds: HashMap<String, Option<Arc<AppCredentials>>>,
+    /// The shared app, when this deployment's secrets configure it.
+    shared_app: Option<SharedApp>,
+    /// Per installation: the key of the app it belongs to, `None` when
+    /// that app is gone, not configured or would not open. Dropped (and
+    /// wiped) with the tick.
+    keys: HashMap<i64, Option<Arc<AppKey>>>,
     /// Per installation: the member who bound it.
     importers: HashMap<i64, String>,
     /// Per installation: no call before this unix second (this tick).
@@ -350,20 +362,45 @@ impl Tick<'_> {
         *slot = (*slot).max(until);
     }
 
-    async fn credentials(
-        &mut self,
-        workspace_id: &str,
-    ) -> Result<Option<Arc<AppCredentials>>, StoreError> {
-        if let Some(found) = self.creds.get(workspace_id) {
+    /// The key for the repository's installation: the shared app's when
+    /// the installation is held under the shared app (and that app is
+    /// still the configured one), the workspace's own when it is held
+    /// under that workspace's app. Never one app's key for another app's
+    /// installation.
+    async fn credentials(&mut self, repo: &Repo) -> Result<Option<Arc<AppKey>>, StoreError> {
+        let installation_id = repo.installation_id;
+        if let Some(found) = self.keys.get(&installation_id) {
             return Ok(found.clone());
         }
-        let opened = match crate::app_credentials(self.kms, self.db, workspace_id).await {
-            Ok(creds) => creds.map(Arc::new),
-            Err(StoreError::Kms(_)) => None,
-            Err(other) => return Err(other),
+        let row = crate::installations::read(self.db, installation_id).await?;
+        let key = match row {
+            Some(row) if row.workspace_id.as_deref() == Some(repo.workspace_id.as_str()) => {
+                match row.app_kind {
+                    AppKind::Shared => self
+                        .shared_app
+                        .as_ref()
+                        .filter(|app| app.app_id == row.app_id)
+                        .map(|app| AppKey {
+                            app_id: app.app_id,
+                            private_key_pem: Secret::new(app.private_key_pem.expose().to_owned()),
+                        }),
+                    AppKind::Workspace => {
+                        match crate::app_credentials(self.kms, self.db, &repo.workspace_id).await {
+                            Ok(Some(creds)) if creds.app_id == row.app_id => Some(AppKey {
+                                app_id: creds.app_id,
+                                private_key_pem: creds.private_key_pem,
+                            }),
+                            Ok(_) | Err(StoreError::Kms(_)) => None,
+                            Err(other) => return Err(other),
+                        }
+                    }
+                }
+            }
+            _ => None,
         };
-        self.creds.insert(workspace_id.to_owned(), opened.clone());
-        Ok(opened)
+        let key = key.map(Arc::new);
+        self.keys.insert(installation_id, key.clone());
+        Ok(key)
     }
 
     async fn importer(
@@ -385,7 +422,7 @@ impl Tick<'_> {
     }
 
     /// The installation token, minting one (one call) when none is cached.
-    async fn token(&mut self, creds: &AppCredentials, installation_id: i64) -> Result<Secret, Got> {
+    async fn token(&mut self, creds: &AppKey, installation_id: i64) -> Result<Secret, Got> {
         let now = self.now();
         // A cached token costs nothing; only a mint spends a step.
         if let Some(token) = self.tokens.cached(creds.app_id, installation_id, now) {
@@ -586,7 +623,7 @@ impl Tick<'_> {
         let Some(filing) = self.filing(repo).await? else {
             return Ok(ItemOutcome::Done);
         };
-        let Some(creds) = self.credentials(&repo.workspace_id).await? else {
+        let Some(creds) = self.credentials(repo).await? else {
             return Ok(ItemOutcome::Done);
         };
         let token = match self.token(&creds, repo.installation_id).await {
@@ -780,9 +817,12 @@ impl Tick<'_> {
                 .record_error(repo, "the repository's scope is not a page scope")
                 .await;
         };
-        let Some(creds) = self.credentials(&repo.workspace_id).await? else {
+        let Some(creds) = self.credentials(repo).await? else {
             return self
-                .record_error(repo, "the workspace's GitHub App credentials are missing")
+                .record_error(
+                    repo,
+                    "the GitHub App credentials for this installation are missing",
+                )
                 .await;
         };
         let mut cursor = DrainCursor::parse(repo.backfill_cursor.as_deref());
@@ -847,7 +887,7 @@ impl Tick<'_> {
         repo: &Repo,
         gh_repo: &GhRepo,
         filing: &Filing,
-        creds: &AppCredentials,
+        creds: &AppKey,
         token: &Secret,
         cursor: &mut DrainCursor,
         listed: &mut HashMap<u64, Item>,

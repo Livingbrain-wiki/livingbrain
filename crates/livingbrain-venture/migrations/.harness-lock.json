@@ -122,5 +122,9 @@
   "pages/0007": {
     "file": "0031_pages_0007_page_titles.sql",
     "sha256": "0818fa65d741d39c58b6cd2bde120c78d27834f727c2282ba0fd1a197ab8c52d"
+  },
+  "github/0002": {
+    "file": "0032_github_0002_shared_app.sql",
+    "sha256": "5bd3235d2478f5ed3117bb003cc8d8c3341cc708137b236e07ec90f4dbb81551"
   }
 }

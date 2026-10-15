@@ -98,6 +98,12 @@ type Scripted = (String, u16, Vec<(String, String)>);
 struct GhState {
     /// manifest code → app id.
     codes: HashMap<String, i64>,
+    /// OAuth code → the GitHub user id it authorizes (shared app only).
+    oauth_codes: HashMap<String, i64>,
+    /// GitHub user id → installations `GET /user/installations` lists.
+    visible: HashMap<i64, Vec<i64>>,
+    /// installation → (account type, account id), when not an organization.
+    accounts: HashMap<i64, (String, i64)>,
     /// installation → (app id, account login).
     installations: HashMap<i64, (i64, String)>,
     repos: Vec<FakeRepo>,
@@ -122,6 +128,32 @@ impl FakeGithub {
             .unwrap()
             .installations
             .insert(installation_id, (app_id, login.to_owned()));
+    }
+
+    fn add_oauth_code(&self, code: &str, user: i64) {
+        self.0
+            .lock()
+            .unwrap()
+            .oauth_codes
+            .insert(code.to_owned(), user);
+    }
+
+    fn let_see(&self, user: i64, installation_id: i64) {
+        self.0
+            .lock()
+            .unwrap()
+            .visible
+            .entry(user)
+            .or_default()
+            .push(installation_id);
+    }
+
+    fn set_account(&self, installation_id: i64, kind: &str, id: i64) {
+        self.0
+            .lock()
+            .unwrap()
+            .accounts
+            .insert(installation_id, (kind.to_owned(), id));
     }
 
     fn add_repo(&self, repo: FakeRepo) {
@@ -250,12 +282,17 @@ impl GhState {
             },
             ("GET", ["app", "installations", id]) => {
                 let id: i64 = id.parse().unwrap_or_default();
+                let (kind, account_id) = self
+                    .accounts
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| ("Organization".to_owned(), 90_000 + id));
                 match (self.installations.get(&id), jwt_issuer(auth)) {
                     (Some((app_id, login)), Some(iss)) if *app_id == iss => reply(
                         200,
                         &json!({
                             "id": id, "app_id": app_id,
-                            "account": {"login": login, "type": "Organization"},
+                            "account": {"login": login, "type": kind, "id": account_id},
                             "suspended_at": null,
                         }),
                     ),
@@ -270,6 +307,31 @@ impl GhState {
                     }
                     _ => reply(404, &json!({"message": "Not Found"})),
                 }
+            }
+            ("GET", ["user"]) => match user_of(auth) {
+                Some(user) => reply(200, &json!({"id": user, "login": format!("user{user}")})),
+                None => reply(401, &json!({"message": "Bad credentials"})),
+            },
+            ("GET", ["user", "installations"]) => {
+                let Some(user) = user_of(auth) else {
+                    return reply(401, &json!({"message": "Bad credentials"}));
+                };
+                let list: Vec<Value> = self
+                    .visible
+                    .get(&user)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|inst| {
+                        let (app_id, login) = self.installations.get(&inst)?;
+                        Some(json!({"id": inst, "app_id": app_id,
+                                    "account": {"login": login, "type": "Organization"}}))
+                    })
+                    .collect();
+                reply(
+                    200,
+                    &json!({"total_count": list.len(), "installations": list}),
+                )
             }
             ("GET", ["installation", "repositories"]) => {
                 let Some(inst) = self.installation_of(auth) else {
@@ -389,6 +451,9 @@ impl HttpClient for FakeGithub {
         request: http::Request<Bytes>,
     ) -> Result<http::Response<Bytes>, HttpError> {
         let uri = request.uri().to_string();
+        if uri == "https://github.com/login/oauth/access_token" {
+            return Ok(self.oauth_exchange(request.body()));
+        }
         let Some(path) = uri.strip_prefix("https://api.github.com") else {
             return Err(HttpError::Transport("not GitHub".to_owned()));
         };
@@ -423,11 +488,86 @@ impl HttpClient for FakeGithub {
     }
 }
 
+/// `%XX` decoding for the fake's form parser.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// The GitHub user a fake user token (`gho_USER_<id>`) stands for.
+fn user_of(auth: &str) -> Option<i64> {
+    auth.strip_prefix("Bearer gho_USER_")?.parse().ok()
+}
+
+impl FakeGithub {
+    /// `POST github.com/login/oauth/access_token`: the shared app's client
+    /// id and secret, a known code (single use), the registered redirect.
+    fn oauth_exchange(&self, body: &Bytes) -> http::Response<Bytes> {
+        let mut state = self.0.lock().unwrap();
+        state.log.push("POST /login/oauth/access_token".to_owned());
+        let form: HashMap<String, String> = String::from_utf8_lossy(body)
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(k, v)| (k.to_owned(), percent_decode(v)))
+            .collect();
+        let field = |name: &str| form.get(name).map(String::as_str).unwrap_or_default();
+        let good = field("client_id") == SHARED_CLIENT_ID
+            && field("client_secret") == SHARED_CLIENT_SECRET
+            && field("redirect_uri") == format!("{BASE}/v1/github/oauth/callback");
+        let code = field("code").to_owned();
+        let user = state.oauth_codes.remove(&code);
+        match (good, user) {
+            (true, Some(user)) => reply(
+                200,
+                &json!({"access_token": format!("gho_USER_{user}"), "token_type": "bearer"}),
+            ),
+            _ => reply(200, &json!({"error": "bad_verification_code"})),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The shared app
+
+const SHARED: i64 = 4242;
+const SHARED_SLUG: &str = "living-brain";
+const SHARED_CLIENT_ID: &str = "Iv23liSHARED";
+const SHARED_CLIENT_SECRET: &str = "SHARED-CLIENT-SECRET-abcdef0123";
+const SHARED_HOOK_SECRET: &str = "SHARED-HOOK-SECRET-0123456789";
+
+fn shared_config() -> Vec<(String, String)> {
+    [
+        ("GITHUB_APP_ID", SHARED.to_string()),
+        ("GITHUB_APP_SLUG", SHARED_SLUG.to_owned()),
+        ("GITHUB_APP_CLIENT_ID", SHARED_CLIENT_ID.to_owned()),
+        ("GITHUB_APP_PRIVATE_KEY", pem()),
+        ("GITHUB_WEBHOOK_SECRET", SHARED_HOOK_SECRET.to_owned()),
+        ("GITHUB_APP_CLIENT_SECRET", SHARED_CLIENT_SECRET.to_owned()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The kit
 
 struct Kit {
     kit: TestHarness,
+    /// The config every port set sees (the routes' and the drain's).
+    config: Vec<(String, String)>,
     gh: FakeGithub,
     blob: Arc<MemoryBlob>,
     /// Every response body and `Location` this test saw, for the
@@ -448,9 +588,17 @@ impl Res {
 }
 
 fn kit() -> Kit {
+    kit_with(Vec::new())
+}
+
+/// A kit whose config also carries `extra` (the shared app's secrets).
+fn kit_with(extra: Vec<(String, String)>) -> Kit {
     let gh = FakeGithub::default();
     let blob = Arc::new(MemoryBlob::new());
     let (http, store) = (gh.clone(), blob.clone());
+    let mut config = vec![("WORKSPACES_REDIRECT_BASE".to_owned(), BASE.to_owned())];
+    config.extend(extra);
+    let ports_config = config.clone();
     let kit = TestHarness::with_ports(
         vec![
             Box::new(Workspaces::new()),
@@ -460,11 +608,12 @@ fn kit() -> Kit {
         move |ports| {
             ports.http = Some(Arc::new(http));
             ports.blob = Some(store);
-            ports.config = Arc::new(MapConfig::from_pairs([("WORKSPACES_REDIRECT_BASE", BASE)]));
+            ports.config = Arc::new(MapConfig::from_pairs(ports_config));
         },
     );
     Kit {
         kit,
+        config,
         gh,
         blob,
         seen: Mutex::new(Vec::new()),
@@ -582,6 +731,12 @@ impl Kit {
 
     /// Runs the module's cron entry point with a budget of `steps` calls.
     async fn tick(&self, steps: u32) {
+        self.tick_at(steps, None).await;
+    }
+
+    /// [`Kit::tick`] at another instant (past the token cache's reuse
+    /// window, so the tick must mint its own installation tokens).
+    async fn tick_at(&self, steps: u32, at: Option<i64>) {
         let module: Arc<dyn Module> = self
             .kit
             .modules
@@ -589,12 +744,14 @@ impl Kit {
             .find(|m| m.name() == "github")
             .cloned()
             .unwrap();
-        let mut ports = Ports::with_config(Arc::new(MapConfig::from_pairs([(
-            "WORKSPACES_REDIRECT_BASE",
-            BASE,
-        )])));
+        let mut ports = Ports::with_config(Arc::new(MapConfig::from_pairs(self.config.clone())));
         ports.db = Some(self.kit.db.clone());
-        ports.clock = Some(Arc::new(self.kit.clock.clone()));
+        ports.clock = Some(match at {
+            Some(at) => Arc::new(cratefield_testing::FixedClock(
+                time::OffsetDateTime::from_unix_timestamp(at).unwrap(),
+            )),
+            None => Arc::new(self.kit.clock.clone()),
+        });
         ports.http = Some(Arc::new(self.gh.clone()));
         ports.blob = Some(self.blob.clone());
         ports.id_gen = Some(Arc::new(UlidIdGen));
@@ -762,6 +919,11 @@ impl Kit {
                 &client_secret(APP2),
                 &token_for(INST1),
                 &token_for(INST2),
+                &token_for(INST_S),
+                &token_for(INST_S2),
+                SHARED_CLIENT_SECRET,
+                SHARED_HOOK_SECRET,
+                "gho_USER_",
                 "BEGIN RSA",
             ] {
                 assert!(
@@ -1624,4 +1786,759 @@ fn no_route_can_trigger_a_backfill() {
     }
     let drain = include_str!("drain.rs");
     assert_eq!(drain.matches("crate::sync::run(").count(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// The shared app (docs/github.md, "The shared app")
+
+const INST_S: i64 = 7001;
+const INST_S2: i64 = 7002;
+const REPO_S: i64 = 99_001;
+const INSTALLER: i64 = 777;
+const ORG_MEMBER: i64 = 888;
+
+fn shared_kit() -> Kit {
+    kit_with(shared_config())
+}
+
+fn shared_repo() -> FakeRepo {
+    FakeRepo {
+        id: REPO_S,
+        full_name: "World-360/EarthOS.world".to_owned(),
+        installation: INST_S,
+        commits: 2,
+        items: vec![FakeItem {
+            number: 1,
+            pr: false,
+            comments: 1,
+            reviews: 0,
+        }],
+    }
+}
+
+fn state_of(url: &str) -> String {
+    let raw = url.split_once("state=").unwrap().1;
+    raw.split('&').next().unwrap().to_owned()
+}
+
+impl Kit {
+    /// `POST /v1/github/shared/install` → the install URL's state.
+    async fn shared_install_state(&self, cookie: &str) -> String {
+        let started = self
+            .write(Method::POST, "/v1/github/shared/install", cookie, json!({}))
+            .await;
+        assert_eq!(
+            started.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&started.body)
+        );
+        let url = started.json()["url"].as_str().unwrap().to_owned();
+        assert!(
+            url.starts_with(&format!(
+                "https://github.com/apps/{SHARED_SLUG}/installations/new?state="
+            )),
+            "{url}"
+        );
+        state_of(&url)
+    }
+
+    /// The signed `installation` `created` delivery GitHub sends when
+    /// `installer` installs the shared app.
+    async fn shared_installed_by(&self, installation_id: i64, installer: i64, delivery: &str) {
+        let created = self
+            .deliver(
+                SHARED,
+                "installation",
+                delivery,
+                &json!({
+                    "action": "created",
+                    "installation": {"id": installation_id,
+                                     "account": {"login": "World-360", "type": "Organization", "id": 90_000 + installation_id}},
+                    "repositories": [],
+                    "sender": {"id": installer, "login": format!("user{installer}")},
+                }),
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(
+            created.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+    }
+
+    /// The setup-URL hop: answers the OAuth authorize URL (or the redirect).
+    async fn shared_setup(&self, cookie: &str, installation_id: i64, state: &str) -> Res {
+        self.get(
+            &format!(
+                "/v1/github/install/callback?installation_id={installation_id}&setup_action=install&state={state}"
+            ),
+            Some(cookie),
+        )
+        .await
+    }
+
+    /// The OAuth hop for `user`.
+    async fn shared_oauth(&self, cookie: &str, authorize: &str, user: i64) -> Res {
+        let code = format!("oauth-{user}-{}", self.gh.log().len());
+        self.gh.add_oauth_code(&code, user);
+        self.get(
+            &format!(
+                "/v1/github/oauth/callback?code={code}&state={}",
+                state_of(authorize)
+            ),
+            Some(cookie),
+        )
+        .await
+    }
+
+    /// The whole shared flow, by the installer, for `ws`.
+    async fn connect_shared(&self, ws: &str, member: &str, installation_id: i64) -> Res {
+        let cookie = self.cookie(ws, member);
+        let state = self.shared_install_state(&cookie).await;
+        let setup = self.shared_setup(&cookie, installation_id, &state).await;
+        assert_eq!(setup.status, StatusCode::FOUND);
+        let authorize = setup.location.unwrap();
+        assert!(
+            authorize.starts_with(&format!(
+                "https://github.com/login/oauth/authorize?client_id={SHARED_CLIENT_ID}&redirect_uri=https%3A%2F%2Fapp.livingbrain.wiki%2Fv1%2Fgithub%2Foauth%2Fcallback&state="
+            )),
+            "{authorize}"
+        );
+        self.shared_oauth(&cookie, &authorize, INSTALLER).await
+    }
+
+    async fn installation(&self, installation_id: i64) -> Option<crate::Installation> {
+        crate::installations::read(self.db(), installation_id)
+            .await
+            .unwrap()
+    }
+}
+
+const INSTALLED: &str = "/settings.html?github=installed#github";
+
+#[test]
+fn shared_install_binds_after_github_confirms_and_the_installer_proves_it() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        k.gh.add_installation(INST_S, SHARED, "World-360");
+        k.gh.add_repo(shared_repo());
+        k.gh.let_see(INSTALLER, INST_S);
+        k.shared_installed_by(INST_S, INSTALLER, "dddd-0001").await;
+        // The webhook alone never binds.
+        let seen = k.installation(INST_S).await.unwrap();
+        assert_eq!(seen.workspace_id, None);
+        assert_eq!(seen.app_kind, crate::AppKind::Shared);
+        assert_eq!(seen.installer_id, Some(INSTALLER));
+
+        let done = k.connect_shared(W1, OWNER, INST_S).await;
+        assert_eq!(done.location.as_deref(), Some(INSTALLED));
+        let bound = k.installation(INST_S).await.unwrap();
+        assert_eq!(bound.workspace_id.as_deref(), Some(W1));
+        assert_eq!(bound.bound_by.as_deref(), Some(OWNER));
+        assert_eq!(bound.app_id, SHARED);
+
+        // The settings read: shared on, the installation and its repository,
+        // and no secret anywhere.
+        let summary = k.get("/v1/github", Some(&k.cookie(W1, OWNER))).await.json();
+        assert_eq!(summary["shared"]["configured"], true);
+        assert_eq!(summary["shared"]["slug"], SHARED_SLUG);
+        assert_eq!(summary["app"], Value::Null);
+        assert_eq!(summary["installations"][0]["app_kind"], "shared");
+        assert_eq!(
+            summary["installations"][0]["manage_url"],
+            format!("https://github.com/organizations/World-360/settings/installations/{INST_S}")
+        );
+        assert_eq!(summary["repos"][0]["full_name"], "World-360/EarthOS.world");
+        assert_eq!(summary["repos"][0]["project"], "EarthOS.world");
+
+        // The confirmation and the token were the shared app's (the fake
+        // refuses a JWT from another issuer); the user token read only
+        // /user/installations and /user.
+        let log = k.gh.log();
+        for call in [
+            format!("GET /app/installations/{INST_S}"),
+            "POST /login/oauth/access_token".to_owned(),
+            "GET /user/installations?per_page=100&page=1".to_owned(),
+            "GET /user".to_owned(),
+            format!("POST /app/installations/{INST_S}/access_tokens"),
+        ] {
+            assert!(log.contains(&call), "{call} missing from {log:?}");
+        }
+
+        // A content webhook for it, signed with the shared secret, queues
+        // work in W1; the drain then backfills it with the shared key.
+        let queued = k
+            .deliver(
+                SHARED,
+                "issues",
+                "dddd-0002",
+                &issue_event(INST_S, REPO_S, "World-360/EarthOS.world", 1),
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(queued.json()["handled"], "queued");
+        for _ in 0..4 {
+            k.tick(45).await;
+        }
+        let repo = crate::get_repo(k.db(), W1, INST_S, REPO_S)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.backfill_state, BackfillPhase::Done, "{repo:?}");
+        assert!(repo.last_error.is_none(), "{repo:?}");
+        let w1_scope = livingbrain_pages::page_scope(W1, &livingbrain_access::Scope::Shared);
+        assert!(
+            k.sources()
+                .await
+                .iter()
+                .any(|s| s.1 == w1_scope && s.2 == "github/World-360/EarthOS.world/issue/1")
+        );
+        k.assert_no_secrets();
+    });
+}
+
+#[test]
+fn a_forged_replayed_expired_or_foreign_shared_state_is_refused() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        k.gh.add_installation(INST_S, SHARED, "World-360");
+        k.gh.let_see(INSTALLER, INST_S);
+        k.shared_installed_by(INST_S, INSTALLER, "dddd-0001").await;
+        let cookie = k.cookie(W1, OWNER);
+        let error = |reason: &str| format!("/settings.html?github=error&reason={reason}#github");
+
+        // Forged.
+        let forged = k.shared_setup(&cookie, INST_S, "forged-state").await;
+        assert_eq!(forged.location, Some(error("state")));
+
+        // Expired.
+        let now = time::OffsetDateTime::from_unix_timestamp(NOW).unwrap();
+        let old = crate::create_state(
+            k.db(),
+            now - time::Duration::hours(2),
+            StatePurpose::SharedInstall,
+            W1,
+            OWNER,
+            60,
+        )
+        .await
+        .unwrap();
+        let expired = k.shared_setup(&cookie, INST_S, &old).await;
+        assert_eq!(expired.location, Some(error("state")));
+
+        // Another workspace's owner cannot spend W1's state, and the misuse
+        // burns it.
+        let state = k.shared_install_state(&cookie).await;
+        let foreign = k.shared_setup(&k.cookie(W2, OWNER2), INST_S, &state).await;
+        assert_eq!(foreign.location, Some(error("state")));
+        let reused = k.shared_setup(&cookie, INST_S, &state).await;
+        assert_eq!(reused.location, Some(error("state")));
+
+        // The verify hop: replayed, and presented by another member.
+        let state = k.shared_install_state(&cookie).await;
+        let authorize = k
+            .shared_setup(&cookie, INST_S, &state)
+            .await
+            .location
+            .unwrap();
+        let foreign = k
+            .shared_oauth(&k.cookie(W2, OWNER2), &authorize, INSTALLER)
+            .await;
+        assert_eq!(foreign.location, Some(error("state")));
+        let replayed = k.shared_oauth(&cookie, &authorize, INSTALLER).await;
+        assert_eq!(replayed.location, Some(error("state")));
+
+        // A shared-install state is no verify state, and a verify state is
+        // no install state.
+        let state = k.shared_install_state(&cookie).await;
+        k.gh.add_oauth_code("oc-x", INSTALLER);
+        let wrong = k
+            .get(
+                &format!("/v1/github/oauth/callback?code=oc-x&state={state}"),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(wrong.location, Some(error("state")));
+
+        // Declined on GitHub: the state is spent and nothing binds.
+        let state = k.shared_install_state(&cookie).await;
+        let authorize = k
+            .shared_setup(&cookie, INST_S, &state)
+            .await
+            .location
+            .unwrap();
+        let declined = k
+            .get(
+                &format!(
+                    "/v1/github/oauth/callback?error=access_denied&state={}",
+                    state_of(&authorize)
+                ),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(declined.location, Some(error("not-verified")));
+
+        assert_eq!(k.installation(INST_S).await.unwrap().workspace_id, None);
+        // A member who is not an owner or admin cannot even start.
+        let plain = k
+            .write(
+                Method::POST,
+                "/v1/github/shared/install",
+                &k.cookie(W1, PLAIN),
+                json!({}),
+            )
+            .await;
+        assert_eq!(plain.status, StatusCode::FORBIDDEN);
+        k.assert_no_secrets();
+    });
+}
+
+#[test]
+fn an_unconfirmed_or_foreign_app_installation_is_never_bound() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        let cookie = k.cookie(W1, OWNER);
+        let error = |reason: &str| format!("/settings.html?github=error&reason={reason}#github");
+
+        // An id GitHub does not know for the shared app.
+        let state = k.shared_install_state(&cookie).await;
+        let unknown = k.shared_setup(&cookie, 999_999, &state).await;
+        assert_eq!(unknown.location, Some(error("not-confirmed")));
+        assert!(k.installation(999_999).await.is_none());
+
+        // An installation of some other app: GitHub answers 404 to the
+        // shared JWT.
+        k.gh.add_installation(INST_S2, APP1, "World-360");
+        let state = k.shared_install_state(&cookie).await;
+        let other = k.shared_setup(&cookie, INST_S2, &state).await;
+        assert_eq!(other.location, Some(error("not-confirmed")));
+        assert!(k.installation(INST_S2).await.is_none());
+
+        // No OAuth exchange happened for either.
+        assert!(
+            k.gh.log().iter().all(|c| !c.contains("oauth")),
+            "{:?}",
+            k.gh.log()
+        );
+    });
+}
+
+#[test]
+fn a_shared_installation_bound_elsewhere_or_claimed_by_a_non_installer_is_refused() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        k.gh.add_installation(INST_S, SHARED, "World-360");
+        k.gh.add_repo(shared_repo());
+        k.gh.let_see(INSTALLER, INST_S);
+        k.gh.let_see(ORG_MEMBER, INST_S);
+        k.shared_installed_by(INST_S, INSTALLER, "dddd-0001").await;
+        let error = |reason: &str| format!("/settings.html?github=error&reason={reason}#github");
+
+        // W2's owner signs in to GitHub as an org member who can see the
+        // installation, but did not install it: refused, unbound.
+        let cookie2 = k.cookie(W2, OWNER2);
+        let state = k.shared_install_state(&cookie2).await;
+        let authorize = k
+            .shared_setup(&cookie2, INST_S, &state)
+            .await
+            .location
+            .unwrap();
+        let member = k.shared_oauth(&cookie2, &authorize, ORG_MEMBER).await;
+        assert_eq!(member.location, Some(error("not-installer")));
+        assert_eq!(k.installation(INST_S).await.unwrap().workspace_id, None);
+
+        // A GitHub user who cannot see it at all: not verified.
+        let state = k.shared_install_state(&cookie2).await;
+        let authorize = k
+            .shared_setup(&cookie2, INST_S, &state)
+            .await
+            .location
+            .unwrap();
+        let stranger = k.shared_oauth(&cookie2, &authorize, 31_337).await;
+        assert_eq!(stranger.location, Some(error("not-verified")));
+
+        // The installer connects it to W1.
+        let done = k.connect_shared(W1, OWNER, INST_S).await;
+        assert_eq!(done.location.as_deref(), Some(INSTALLED));
+
+        // Now W2 — even as the installer — is refused at the first hop: it
+        // is bound elsewhere, and never moves.
+        let state = k.shared_install_state(&cookie2).await;
+        let elsewhere = k.shared_setup(&cookie2, INST_S, &state).await;
+        assert_eq!(elsewhere.location, Some(error("bound-elsewhere")));
+        assert_eq!(
+            k.installation(INST_S)
+                .await
+                .unwrap()
+                .workspace_id
+                .as_deref(),
+            Some(W1)
+        );
+
+        // W1 going through the button again (to add repositories) re-reads
+        // them without another OAuth hop.
+        k.gh.clear_log();
+        let again = k
+            .shared_setup(
+                &k.cookie(W1, OWNER),
+                INST_S,
+                &k.shared_install_state(&k.cookie(W1, OWNER)).await,
+            )
+            .await;
+        assert_eq!(again.location.as_deref(), Some(INSTALLED));
+        assert!(k.gh.log().iter().all(|c| !c.contains("oauth")));
+
+        // No state at all (configured on GitHub directly): re-read for the
+        // bound workspace's admin, unclaimed for anyone else.
+        let k = &k;
+        let update = |cookie: String| async move {
+            k.get(
+                &format!(
+                    "/v1/github/install/callback?installation_id={INST_S}&setup_action=update"
+                ),
+                Some(&cookie),
+            )
+            .await
+        };
+        assert_eq!(
+            update(k.cookie(W1, OWNER)).await.location.as_deref(),
+            Some(INSTALLED)
+        );
+        assert_eq!(
+            update(k.cookie(W2, OWNER2)).await.location,
+            Some(error("unclaimed"))
+        );
+        k.assert_no_secrets();
+    });
+}
+
+#[test]
+fn an_installation_made_on_github_directly_is_observed_but_never_bound_by_a_webhook() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        k.gh.add_installation(INST_S, SHARED, "World-360");
+        k.shared_installed_by(INST_S, INSTALLER, "dddd-0001").await;
+        // GitHub's setup redirect without our state.
+        let direct = k
+            .get(
+                &format!(
+                    "/v1/github/install/callback?installation_id={INST_S}&setup_action=install"
+                ),
+                Some(&k.cookie(W1, OWNER)),
+            )
+            .await;
+        assert_eq!(
+            direct.location.as_deref(),
+            Some("/settings.html?github=error&reason=unclaimed#github")
+        );
+        // Webhooks for it are accepted and do nothing.
+        let ignored = k
+            .deliver(
+                SHARED,
+                "issues",
+                "dddd-0002",
+                &issue_event(INST_S, REPO_S, "World-360/EarthOS.world", 1),
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(ignored.json()["handled"], "unbound");
+        assert_eq!(k.queue_len().await, 0);
+        assert_eq!(k.installation(INST_S).await.unwrap().workspace_id, None);
+        // Nobody sees it in their settings.
+        for (ws, user) in [(W1, OWNER), (W2, OWNER2)] {
+            let summary = k.get("/v1/github", Some(&k.cookie(ws, user))).await.json();
+            assert_eq!(summary["installations"], json!([]));
+        }
+    });
+}
+
+#[test]
+fn the_installer_unknown_case_retries_and_a_personal_account_proves_itself() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        k.gh.add_installation(INST_S, SHARED, "World-360");
+        k.gh.add_repo(shared_repo());
+        k.gh.let_see(INSTALLER, INST_S);
+        let cookie = k.cookie(W1, OWNER);
+
+        // No `created` delivery yet: the installer is unknown, so an
+        // organization installation cannot bind — the page offers a retry.
+        let early = k.connect_shared(W1, OWNER, INST_S).await;
+        assert_eq!(
+            early.location,
+            Some(format!(
+                "/settings.html?github=error&reason=installer-unknown&installation={INST_S}#github"
+            ))
+        );
+        assert_eq!(k.installation(INST_S).await.unwrap().workspace_id, None);
+
+        // The delivery arrives; the retry route mints a new hop.
+        k.shared_installed_by(INST_S, INSTALLER, "dddd-0001").await;
+        let retry = k
+            .write(
+                Method::POST,
+                "/v1/github/shared/verify",
+                &cookie,
+                json!({"installation_id": INST_S}),
+            )
+            .await;
+        assert_eq!(retry.status, StatusCode::OK);
+        let authorize = retry.json()["url"].as_str().unwrap().to_owned();
+        let done = k.shared_oauth(&cookie, &authorize, INSTALLER).await;
+        assert_eq!(done.location.as_deref(), Some(INSTALLED));
+        // ... and once bound there is nothing left to verify.
+        let after = k
+            .write(
+                Method::POST,
+                "/v1/github/shared/verify",
+                &cookie,
+                json!({"installation_id": INST_S}),
+            )
+            .await;
+        assert_eq!(after.status, StatusCode::NOT_FOUND);
+
+        // A personal account: the account itself proves it, webhook or not.
+        k.gh.add_installation(INST_S2, SHARED, "someone");
+        k.gh.set_account(INST_S2, "User", 4444);
+        k.gh.let_see(4444, INST_S2);
+        let cookie2 = k.cookie(W2, OWNER2);
+        let state = k.shared_install_state(&cookie2).await;
+        let authorize = k
+            .shared_setup(&cookie2, INST_S2, &state)
+            .await
+            .location
+            .unwrap();
+        let personal = k.shared_oauth(&cookie2, &authorize, 4444).await;
+        assert_eq!(personal.location.as_deref(), Some(INSTALLED));
+        let summary = k.get("/v1/github", Some(&cookie2)).await.json();
+        assert_eq!(
+            summary["installations"][0]["manage_url"],
+            format!("https://github.com/settings/installations/{INST_S2}")
+        );
+    });
+}
+
+#[test]
+fn webhooks_route_by_target_id_and_never_cross_secrets_or_kinds() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.connected().await;
+        k.gh.add_installation(INST_S, SHARED, "World-360");
+        k.gh.add_repo(shared_repo());
+        k.gh.let_see(INSTALLER, INST_S);
+        k.shared_installed_by(INST_S, INSTALLER, "dddd-0001").await;
+        assert_eq!(
+            k.connect_shared(W2, OWNER2, INST_S)
+                .await
+                .location
+                .as_deref(),
+            Some(INSTALLED)
+        );
+        let shared_issue = issue_event(INST_S, REPO_S, "World-360/EarthOS.world", 1);
+        let own_issue = issue_event(INST1, REPO1, "EarthOS-world/EarthOS.world", 1);
+
+        // The shared app's id with the shared secret: accepted, routed to
+        // the workspace that claimed it.
+        let ok = k
+            .deliver(
+                SHARED,
+                "issues",
+                "eeee-0001",
+                &shared_issue,
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(ok.json()["handled"], "queued");
+        // Replay: a no-op.
+        let replay = k
+            .deliver(
+                SHARED,
+                "issues",
+                "eeee-0001",
+                &shared_issue,
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(replay.json()["handled"], "replay");
+        // The shared id with a workspace app's secret, a workspace app's id
+        // with the shared secret, a wrong secret, an unknown id: one 401.
+        for (app, secret) in [
+            (SHARED, webhook_secret(APP1)),
+            (APP1, SHARED_HOOK_SECRET.to_owned()),
+            (SHARED, "wrong".to_owned()),
+            (31_337, SHARED_HOOK_SECRET.to_owned()),
+        ] {
+            let refused = k
+                .deliver(app, "issues", "eeee-0002", &shared_issue, &secret)
+                .await;
+            assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{app}");
+        }
+        // The shared app cannot speak for a workspace app's installation,
+        // nor a workspace app for the shared app's.
+        let cross = k
+            .deliver(
+                SHARED,
+                "issues",
+                "eeee-0003",
+                &own_issue,
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(cross.json()["handled"], "unbound");
+        let cross = k
+            .deliver(
+                APP1,
+                "issues",
+                "eeee-0004",
+                &shared_issue,
+                &webhook_secret(APP1),
+            )
+            .await;
+        assert_eq!(cross.json()["handled"], "unbound");
+        // A shared lifecycle event cannot suspend a workspace app's
+        // installation.
+        k.deliver(
+            SHARED,
+            "installation",
+            "eeee-0005",
+            &json!({"action": "suspend", "installation": {"id": INST1, "account": {"login": "x", "type": "Organization"}}}),
+            SHARED_HOOK_SECRET,
+        )
+        .await;
+        assert_eq!(
+            k.installation(INST1).await.unwrap().status,
+            InstallationStatus::Active
+        );
+        // The workspace app's own path still works.
+        let own = k
+            .deliver(
+                APP1,
+                "issues",
+                "eeee-0006",
+                &own_issue,
+                &webhook_secret(APP1),
+            )
+            .await;
+        assert_eq!(own.json()["handled"], "queued");
+
+        // The drain: both kinds side by side, each token minted with its
+        // own app's key (the fake answers 404 to any other issuer).
+        k.gh.clear_log();
+        // An hour on: every cached installation token is stale, so the
+        // drain mints each one itself.
+        for _ in 0..8 {
+            k.tick_at(45, Some(NOW + 3600)).await;
+        }
+        for (ws, inst, repo) in [(W1, INST1, REPO1), (W2, INST2, REPO2), (W2, INST_S, REPO_S)] {
+            let repo = crate::get_repo(k.db(), ws, inst, repo)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(repo.backfill_state, BackfillPhase::Done, "{repo:?}");
+            assert!(repo.last_error.is_none(), "{repo:?}");
+        }
+        let log = k.gh.log();
+        for inst in [INST1, INST2, INST_S] {
+            assert!(
+                log.contains(&format!("POST /app/installations/{inst}/access_tokens")),
+                "{inst}: {log:?}"
+            );
+        }
+        k.assert_no_secrets();
+    });
+}
+
+#[test]
+fn with_the_shared_secrets_unset_shared_mode_is_off_and_the_advanced_flow_remains() {
+    pollster::block_on(async {
+        let k = kit();
+        k.seed().await;
+        let cookie = k.cookie(W1, OWNER);
+        let summary = k.get("/v1/github", Some(&cookie)).await.json();
+        assert_eq!(summary["shared"]["configured"], false);
+        assert_eq!(summary["advanced"]["configured"], true);
+        assert_eq!(summary["configured"], true);
+        let start = k
+            .write(
+                Method::POST,
+                "/v1/github/shared/install",
+                &cookie,
+                json!({}),
+            )
+            .await;
+        assert_eq!(start.status, StatusCode::SERVICE_UNAVAILABLE);
+        // A delivery naming the would-be shared id is an unknown app.
+        let unknown = k
+            .deliver(
+                SHARED,
+                "issues",
+                "ffff-0001",
+                &issue_event(INST_S, REPO_S, "a/b", 1),
+                SHARED_HOOK_SECRET,
+            )
+            .await;
+        assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
+        // The manifest flow still works.
+        k.connect(W1, OWNER, APP1, INST1, earthos()).await;
+    });
+}
+
+#[test]
+fn a_workspace_app_can_never_take_the_shared_apps_id() {
+    pollster::block_on(async {
+        let k = shared_kit();
+        k.seed().await;
+        let cookie = k.cookie(W1, OWNER);
+        let started = k
+            .write(Method::POST, "/v1/github/app/manifest", &cookie, json!({}))
+            .await
+            .json();
+        let state = state_of(started["action"].as_str().unwrap());
+        k.gh.add_code("code-shared", SHARED);
+        let back = k
+            .get(
+                &format!("/v1/github/app/callback?code=code-shared&state={state}"),
+                Some(&cookie),
+            )
+            .await;
+        assert_eq!(
+            back.location.as_deref(),
+            Some("/settings.html?github=error&reason=app-id-taken#github")
+        );
+        assert!(crate::app_summary(k.db(), W1).await.unwrap().is_none());
+    });
+}
+
+/// No credential can reach a log line from this crate because nothing in
+/// it logs: no `tracing`, `log` or print macro outside the tests.
+#[test]
+fn the_crate_never_logs() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.contains("tests") {
+            continue;
+        }
+        let code = std::fs::read_to_string(&path).unwrap();
+        for forbidden in [
+            "tracing::",
+            "log::",
+            "println!",
+            "eprintln!",
+            "dbg!",
+            "console_log!",
+        ] {
+            assert!(!code.contains(forbidden), "{name} uses {forbidden}");
+        }
+    }
 }

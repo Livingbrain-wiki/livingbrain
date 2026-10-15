@@ -20,6 +20,9 @@ import {
   backfillText,
   githubView,
   mountGithub,
+  sharedInstallRequest,
+  sharedVerifyRequest,
+  retryInstallation,
 } from "../assets/github.js";
 
 /* ------------------------------------------------------------ a recording DOM */
@@ -112,6 +115,12 @@ function githubDocument() {
   }
   add("github-setup");
   add("github-connected");
+  add("github-shared");
+  add("github-shared-off", "p");
+  add("github-shared-install", "button");
+  add("github-advanced", "details");
+  add("github-own");
+  add("github-retry", "button");
   add("github-org", "input");
   add("github-create", "button");
   add("github-add", "button");
@@ -282,6 +291,10 @@ test("the outcome banner: every outcome and reason in docs/github.md has a plain
     "not-confirmed",
     "bound-elsewhere",
     "refused",
+    "unclaimed",
+    "not-verified",
+    "not-installer",
+    "installer-unknown",
   ]) {
     const banner = outcomeBanner(`?github=error&reason=${reason}`);
     assert.equal(banner.tone, "bad", reason);
@@ -547,7 +560,154 @@ test("a configured-off server says so and paints no GitHub block", async () => {
   const doc = githubDocument();
   const { deps: d } = deps(doc, { answers: { "GET /v1/github": { configured: false, can_manage: true, queue: {} } } });
   await mountGithub(d);
-  assert.match(doc.registry.get("github-status").textContent, /not set up on this server/);
+  assert.match(doc.registry.get("github-status").textContent, /isn't configured on this deployment/);
   assert.equal(doc.registry.get("github-setup").hidden, true);
   assert.equal(doc.registry.get("github-connected").hidden, true);
+});
+
+/* ------------------------------------------------------- the shared app */
+
+const SHARED_EMPTY = {
+  configured: true,
+  can_manage: true,
+  shared: { configured: true, slug: "living-brain", html_url: "https://github.com/apps/living-brain" },
+  advanced: { configured: true },
+  app: null,
+  installations: [],
+  repos: [],
+  queue: { queued: 0, dead: 0 },
+};
+
+const SHARED_CONNECTED = {
+  ...SHARED_EMPTY,
+  installations: [
+    {
+      installation_id: 7001,
+      app_kind: "shared",
+      manage_url: "https://github.com/organizations/World-360/settings/installations/7001",
+      account: { login: "World-360", type: "Organization" },
+      status: "active",
+      bound_by: "m1",
+    },
+  ],
+  repos: [CONNECTED.repos[0]],
+};
+
+test("the shared requests and the retry address read only what they should", () => {
+  assert.deepEqual(sharedInstallRequest(), { method: "POST", path: "/v1/github/shared/install" });
+  assert.deepEqual(sharedVerifyRequest(7001), {
+    method: "POST",
+    path: "/v1/github/shared/verify",
+    body: { installation_id: 7001 },
+  });
+  assert.equal(retryInstallation("?github=error&reason=installer-unknown&installation=7001"), 7001);
+  assert.equal(retryInstallation("?github=error&reason=installer-unknown&installation=7001x"), null);
+  assert.equal(retryInstallation("?github=error&reason=installer-unknown"), null);
+  assert.equal(retryInstallation("?github=error&reason=state&installation=7001"), null);
+  assert.equal(retryInstallation(""), null);
+});
+
+test("default view: the shared install button is up, and the own-app flow waits under Advanced", async () => {
+  const doc = githubDocument();
+  const { deps: d, calls } = deps(doc, { answers: { "GET /v1/github": SHARED_EMPTY } });
+  const view = await mountGithub(d);
+  assert.equal(view.shared.configured, true);
+  assert.equal(doc.registry.get("github-shared").hidden, false);
+  assert.equal(doc.registry.get("github-shared-install").disabled, false);
+  assert.equal(doc.registry.get("github-shared-off").hidden, true);
+  assert.equal(doc.registry.get("github-connected").hidden, true);
+  // Advanced is there, closed, with the manifest form inside it.
+  assert.equal(doc.registry.get("github-advanced").hidden, false);
+  assert.notEqual(doc.registry.get("github-advanced").open, true);
+  assert.equal(doc.registry.get("github-setup").hidden, false);
+  assert.equal(doc.registry.get("github-own").hidden, true);
+  assert.equal(doc.registry.get("github-retry").hidden, true);
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /v1/github"]);
+});
+
+test("Install Living Brain on GitHub follows the server's link to github.com, never a form", async () => {
+  const doc = githubDocument();
+  const url = "https://github.com/apps/living-brain/installations/new?state=s1";
+  const { deps: d, calls, location } = deps(doc, {
+    answers: { "GET /v1/github": SHARED_EMPTY, "POST /v1/github/shared/install": { url } },
+  });
+  await mountGithub(d);
+  await doc.registry.get("github-shared-install").dispatch("click");
+  assert.ok(calls.some((c) => c.method === "POST" && c.path === "/v1/github/shared/install"));
+  assert.deepEqual(location.assigned, [url]);
+  assert.equal(doc.body.children.length, 0, "no form is built for the shared app");
+
+  const other = githubDocument();
+  const bad = deps(other, {
+    answers: { "GET /v1/github": SHARED_EMPTY, "POST /v1/github/shared/install": { url: "https://evil.example/x" } },
+  });
+  await mountGithub(bad.deps);
+  await other.registry.get("github-shared-install").dispatch("click");
+  assert.deepEqual(bad.location.assigned, [], "a link off GitHub is not followed");
+  assert.equal(bad.notes.at(-1).tone, "bad");
+});
+
+test("without the shared secrets: the page says GitHub isn't configured, and Advanced remains", async () => {
+  const doc = githubDocument();
+  const payload = { ...SHARED_EMPTY, shared: { configured: false, slug: null } };
+  const { deps: d } = deps(doc, { answers: { "GET /v1/github": payload } });
+  await mountGithub(d);
+  assert.equal(doc.registry.get("github-shared").hidden, true);
+  assert.equal(doc.registry.get("github-shared-off").hidden, false);
+  assert.match(doc.registry.get("github-shared-off").textContent, /isn't configured on this deployment/);
+  assert.equal(doc.registry.get("github-advanced").hidden, false);
+  assert.equal(doc.registry.get("github-setup").hidden, false);
+});
+
+test("connected through the shared app: accounts with a Manage on GitHub link, repositories, no own-app controls", async () => {
+  const doc = githubDocument();
+  const { deps: d } = deps(doc, { answers: { "GET /v1/github": SHARED_CONNECTED } });
+  await mountGithub(d);
+  assert.equal(doc.registry.get("github-connected").hidden, false);
+  assert.equal(doc.registry.get("github-own").hidden, true);
+  const [li] = doc.registry.get("github-installs").children;
+  assert.match(li.textContent, /World-360 · Organization · active/);
+  assert.doesNotMatch(li.textContent, /your own app/);
+  const link = li.children.find((child) => child.tag === "a");
+  assert.equal(link.getAttribute("href"), "https://github.com/organizations/World-360/settings/installations/7001");
+  assert.equal(doc.registry.get("github-repos").children.length, 1);
+
+  // A manage link off GitHub is dropped.
+  const odd = githubView({
+    ...SHARED_CONNECTED,
+    installations: [{ ...SHARED_CONNECTED.installations[0], manage_url: "javascript:alert(1)" }],
+  });
+  assert.equal(odd.installations[0].manageUrl, "");
+});
+
+test("a member who is not an owner or admin cannot press Install", async () => {
+  const doc = githubDocument();
+  const { deps: d } = deps(doc, { answers: { "GET /v1/github": { ...SHARED_EMPTY, can_manage: false } } });
+  await mountGithub(d);
+  assert.equal(doc.registry.get("github-shared-install").disabled, true);
+  assert.equal(doc.registry.get("github-readonly").hidden, false);
+});
+
+test("installer-unknown: the banner explains, and Finish connecting starts another OAuth hop", async () => {
+  const doc = githubDocument();
+  const url = "https://github.com/login/oauth/authorize?client_id=Iv23li&state=v2";
+  const { deps: d, calls, location } = deps(doc, {
+    search: "?github=error&reason=installer-unknown&installation=7001",
+    answers: { "GET /v1/github": SHARED_EMPTY, "POST /v1/github/shared/verify": { url } },
+  });
+  await mountGithub(d);
+  assert.match(doc.registry.get("github-banner").textContent, /who installed the app/);
+  const retry = doc.registry.get("github-retry");
+  assert.equal(retry.hidden, false);
+  await retry.dispatch("click");
+  const post = calls.find((c) => c.method === "POST");
+  assert.equal(post.path, "/v1/github/shared/verify");
+  assert.deepEqual(post.body, { installation_id: 7001 });
+  assert.deepEqual(location.assigned, [url]);
+
+  // Any other address: no retry button.
+  const plain = githubDocument();
+  const other = deps(plain, { search: "?github=installed", answers: { "GET /v1/github": SHARED_EMPTY } });
+  await mountGithub(other.deps);
+  assert.equal(plain.registry.get("github-retry").hidden, true);
 });

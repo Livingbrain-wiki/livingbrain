@@ -41,7 +41,10 @@ Staging secrets: `HARNESS_SECRET`, `HARNESS_KEK_CURRENT` + `HARNESS_KEK_V1`
 (the page and Slack-token key ring; without it `/v1/pages/mcp` is not mounted
 and the Slack install answers 503), `MODEL_KEYS_SECRET`, `OWLPOST_API_KEY`,
 `ADMIN_TOKEN`, and for Slack `WORKSPACES_SLACK_CLIENT_SECRET` and
-`WORKSPACES_SLACK_SIGNING_SECRET`.
+`WORKSPACES_SLACK_SIGNING_SECRET`. For the shared GitHub app ("Living Brain
+Staging"), the six `GITHUB_*` secrets set by
+`python3 scripts/github-shared-app/setup.py --env staging` (docs/github.md,
+"The shared app").
 
 ## Production
 
@@ -75,6 +78,13 @@ npx wrangler secret put TURNSTILE_SECRET --env production                 # capt
 npx wrangler secret put ADMIN_TOKEN --env production                      # the waitlist CSV export
 npx wrangler secret put TYPESAFE_API_KEY --env production                 # optional: Jev triage for the coding-agents compiler
 ```
+
+The shared GitHub App's six secrets (`GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
+`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`,
+`GITHUB_APP_CLIENT_SECRET`) are not typed in by hand: `python3
+scripts/github-shared-app/setup.py --env production` creates the app in the
+`Livingbrain-wiki` organization and pipes each key into `wrangler secret put`
+(docs/github.md, "The shared app"). Without them, GitHub's shared mode is off.
 
 `TYPESAFE_API_KEY` is optional. Without it the compiler triages with its own
 free rule and nothing goes to TypeSafe. With it, one Jev call per compiled
