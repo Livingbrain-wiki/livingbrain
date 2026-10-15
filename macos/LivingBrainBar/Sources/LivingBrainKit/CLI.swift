@@ -18,16 +18,26 @@ public enum CLILocator {
         candidates(home: home).first(where: isExecutable)
     }
 
-    /// The configured path when set and executable, else the default.
+    /// The copy shipped inside the app bundle (`Contents/Resources/livingbrain`,
+    /// put there by `scripts/release.sh`), or nil when running from a plain
+    /// `swift build`.
+    public static func bundledPath(bundle: Bundle = .main) -> String? {
+        bundle.resourceURL?.appendingPathComponent("livingbrain").path
+    }
+
+    /// The configured path when set and executable, else the CLI bundled with
+    /// the app, else the first executable default location.
     public static func resolve(
         configured: String?,
         home: String = NSHomeDirectory(),
+        bundled: String? = bundledPath(),
         isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
     ) -> String? {
         if let configured, !configured.isEmpty {
             let expanded = (configured as NSString).expandingTildeInPath
             if isExecutable(expanded) { return expanded }
         }
+        if let bundled, isExecutable(bundled) { return bundled }
         return defaultPath(home: home, isExecutable: isExecutable)
     }
 }

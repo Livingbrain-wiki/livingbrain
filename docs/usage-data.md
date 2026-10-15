@@ -289,7 +289,7 @@ Commands:
 
 Options:
       --json               Print a machine-readable JSON result (accepted by every command)
-      --api-url <API_URL>  Living Brain API base URL [env: LIVINGBRAIN_API_URL=] [default: https://api.livingbrain.wiki]
+      --api-url <API_URL>  Living Brain API base URL [env: LIVINGBRAIN_API_URL=] [default: https://app.livingbrain.wiki]
   -h, --help               Print help
 ```
 
