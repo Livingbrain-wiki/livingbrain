@@ -69,6 +69,7 @@ struct MainWindow: View {
     @ObservedObject var bar: BarModel
     @ObservedObject var sessions: SessionsModel
     @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var runner: RunnerModel
     @ObservedObject var router: Router
 
     var body: some View {
@@ -117,7 +118,7 @@ struct MainWindow: View {
         switch router.destination {
         case .sessions: SessionsView(model: sessions)
         case .projects: ProjectsView(bar: bar, model: sessions)
-        case .settings: SettingsView(workspace: workspace, bar: bar, router: router)
+        case .settings: SettingsView(workspace: workspace, bar: bar, runner: runner, router: router)
         case .wiki, .ask, .timeline, .usage:
             if workspace.signedIn {
                 switch router.destination {

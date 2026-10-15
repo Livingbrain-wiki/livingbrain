@@ -5,6 +5,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var bar: BarModel
+    @ObservedObject var runner: RunnerModel
     @ObservedObject var router: Router
     @State private var models: [ModelConnection] = []
     @State private var modelsError: String?
@@ -13,6 +14,7 @@ struct SettingsView: View {
     @State private var editingRole: ModelRole?
     @State private var catalog: ProviderCatalog?
     @State private var serverDraft = ""
+    @State private var customModel = ""
 
     private var webSettings: URL { workspace.baseURL.appendingPathComponent("settings.html") }
 
@@ -24,6 +26,7 @@ struct SettingsView: View {
                 modelsSection
                 tokensSection
             }
+            runnerSection
             slackSection
             syncSection
         }
@@ -149,6 +152,77 @@ struct SettingsView: View {
             Text("New tokens are minted from the web sign-in only, so a token can never create another; create them in the browser.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    /// "Run brain jobs with my subscription": the subscription stays in
+    /// Claude Code or Codex on this Mac; the brain only hands it the prompt.
+    private var runnerSection: some View {
+        Section {
+            Toggle("Run brain jobs with my subscription", isOn: $runner.enabled)
+            Picker("Agent", selection: $runner.agent) {
+                ForEach(RunnerAgent.allCases) { agent in
+                    Text("\(agent.title) — \(agent.subscription)").tag(agent)
+                }
+            }
+            LabeledContent("Model") {
+                HStack {
+                    Picker("Model", selection: $runner.model) {
+                        ForEach(runner.agent.models, id: \.self) { Text($0).tag($0) }
+                        if !runner.agent.models.contains(runner.model) {
+                            Text(runner.model.isEmpty ? "CLI default" : "\(runner.model) (custom)").tag(runner.model)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    TextField("Custom model id", text: $customModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 140)
+                        .onSubmit { useCustomModel() }
+                    Button("Use") { useCustomModel() }
+                        .disabled(customModel.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            ForEach(RunnerAgent.allCases) { agent in
+                LabeledContent(agent.title) {
+                    if let status = runner.agents?.status(agent) {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(status.summary)
+                                .foregroundStyle(status.loggedIn ? Theme.accent : .secondary)
+                            if let path = status.path {
+                                Text([SyncedProject(path: path).displayPath(), status.version].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                    } else {
+                        Text(runner.agentsError ?? "Checking…").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if runner.enabled {
+                ForEach(runner.lines(), id: \.self) { Text($0).font(.callout) }
+                if let server = runner.server {
+                    Text("Main jobs route to this device: \(server.agent) · \(server.model.isEmpty ? "default model" : server.model)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let error = runner.routeError {
+                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            }
+            Button("Check Agents Again") { Task { await runner.refreshAgents() } }
+        } header: {
+            Text("Brain jobs on this Mac")
+        } footer: {
+            Text("Your Claude or ChatGPT subscription can only be used inside Claude Code or Codex, so the brain never holds it: while this is on, your own CLI on this Mac answers your brain's model jobs (one at a time, with tools off and a read-only sandbox). Turning it off sends your jobs back to the workspace's model. Prompts and answers are never logged.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .task { await runner.refreshServer() }
+    }
+
+    private func useCustomModel() {
+        let id = customModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { return }
+        runner.model = id
+        customModel = ""
     }
 
     private var slackSection: some View {
