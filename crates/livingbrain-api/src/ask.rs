@@ -514,6 +514,13 @@ async fn ask(
             body["model"] = json!({ "provider": serving.provider, "model": serving.model });
             body["dropped_citations"] = json!(dropped);
         }
+        Outcome::Failed(reason) => {
+            eprintln!("ask: the model did not answer: {reason}");
+            body["answer"] = json!(format!("{MODEL_FAILED}\n\n{brief}"));
+            body["mode"] = json!("sources");
+            body["model"] = Value::Null;
+            body["fallback_reason"] = json!(reason);
+        }
         Outcome::Sources(label) => {
             body["answer"] = json!(format!("{label}\n\n{brief}"));
             body["mode"] = json!("sources");
@@ -765,6 +772,9 @@ enum Outcome {
     },
     /// It was not asked, or did not answer: the brief, under this label.
     Sources(&'static str),
+    /// It was asked and failed: the brief under [`MODEL_FAILED`], and why
+    /// ([`InvokeError::reason`], already safe to show) as `fallback_reason`.
+    Failed(String),
     /// Handed to the asker's own runner; ask again once the job is done.
     Pending { job_id: String },
 }
@@ -857,7 +867,7 @@ async fn answer_with_model(
         Ok(Dispatch::Reply(reply)) => reply,
         Ok(Dispatch::Pending { job_id }) => return Outcome::Pending { job_id },
         Err(InvokeError::NoModel) => return Outcome::Sources(NO_MODEL),
-        Err(_) => return Outcome::Sources(MODEL_FAILED),
+        Err(error) => return Outcome::Failed(format!("model-{}", error.reason())),
     };
     // Redacted on the way back: a model can echo or invent a secret-shaped
     // string, and the answer is shown, logged and pasted on.

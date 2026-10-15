@@ -143,7 +143,8 @@ pub struct ClaimFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finish {
     pub status: JobStatus,
-    /// A short, fixed-vocabulary reason. Never model output or source text.
+    /// A short, fixed-vocabulary reason, and for a model failure what the
+    /// provider said, made safe to show. Never model output or source text.
     pub error: Option<String>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
@@ -524,6 +525,40 @@ impl Queue {
             }
         }
         Ok(counts)
+    }
+
+    /// Puts every `failed` job in these scopes of `workspace` back to
+    /// `queued` with its attempts reset — the "Retry failed" button, for a
+    /// job that ran out of attempts (or is waiting out a backoff) on a
+    /// failure that is fixed now. The tokens and pages it already recorded
+    /// stay, and so does `last_error`, until the next run says otherwise.
+    /// Answers how many were requeued.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn requeue_failed(
+        &self,
+        workspace: &str,
+        scopes: &[String],
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        if scopes.is_empty() {
+            return Ok(0);
+        }
+        let mut values = vec![text(&rfc3339(now)), text(workspace)];
+        values.extend(scopes.iter().map(|scope| text(scope)));
+        self.db
+            .execute(&Statement::with_values(
+                format!(
+                    "UPDATE coding_agent_jobs SET status = 'queued', attempts = 0, \
+                            next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
+                     WHERE status = 'failed' AND workspace = ? AND scope IN ({})",
+                    placeholders(scopes.len())
+                ),
+                values,
+            ))
+            .await
     }
 
     /// When this session last compiled, if an earlier body of it did: the

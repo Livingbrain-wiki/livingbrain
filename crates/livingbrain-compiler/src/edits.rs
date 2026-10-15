@@ -53,20 +53,22 @@ struct Raw {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BadOutput;
 
-/// Parses the model's reply: the first JSON object in it (a model that
-/// wraps the object in a code fence or a sentence still parses), then the
-/// closed schema, then the caps.
+/// Parses the model's reply: the JSON object in it, then the closed
+/// schema, then the caps.
+///
+/// Extraction is tolerant, validation is not. A ```` ```json ```` fence, a
+/// sentence before or after, a stray `{` in that sentence, or a thinking
+/// model's leftover reasoning in the text (the transport already drops
+/// `thinking` blocks) do not lose the answer: every `{` is tried in turn as
+/// the start of one complete JSON value, and the first that is an object
+/// with a `pages` or `summary` member is the answer. What is in it then
+/// goes through the closed schema field by field.
 ///
 /// # Errors
 ///
 /// [`BadOutput`] when no JSON object of the expected shape is there.
 pub fn parse(reply: &str) -> Result<Output, BadOutput> {
-    let start = reply.find('{').ok_or(BadOutput)?;
-    let end = reply.rfind('}').ok_or(BadOutput)?;
-    if end < start {
-        return Err(BadOutput);
-    }
-    let raw: Raw = serde_json::from_str(&reply[start..=end]).map_err(|_| BadOutput)?;
+    let raw = extract(reply).ok_or(BadOutput)?;
     let mut refused = 0u32;
     let mut pages = Vec::new();
     for value in raw.pages {
@@ -100,6 +102,36 @@ pub fn parse(reply: &str) -> Result<Output, BadOutput> {
     })
 }
 
+/// The first JSON object in `reply` that has the answer's shape.
+fn extract(reply: &str) -> Option<Raw> {
+    let text = strip_fence(reply);
+    for (start, _) in text.match_indices('{') {
+        let mut values = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
+        let Some(Ok(Value::Object(object))) = values.next() else {
+            continue;
+        };
+        if !object.contains_key("pages") && !object.contains_key("summary") {
+            continue;
+        }
+        if let Ok(raw) = serde_json::from_value::<Raw>(Value::Object(object)) {
+            return Some(raw);
+        }
+    }
+    None
+}
+
+/// The body of a Markdown code fence around the whole reply, when there is
+/// one; the reply otherwise.
+fn strip_fence(reply: &str) -> &str {
+    let trimmed = reply.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    // The info string (`json`, `JSON`, nothing) runs to the first newline.
+    let body = rest.split_once('\n').map_or("", |(_, body)| body);
+    body.trim_end().strip_suffix("```").unwrap_or(body).trim()
+}
+
 /// Text on one line, trimmed and capped: what goes into a frontmatter
 /// value or a log line, where a newline would end the field.
 #[must_use]
@@ -123,6 +155,22 @@ mod tests {
         assert_eq!(output.summary, "did it");
         assert_eq!(output.pages[0].slug, "coding-agents--index");
         assert_eq!(output.refused, 0);
+    }
+
+    #[test]
+    fn prose_braces_and_fences_do_not_lose_the_answer() {
+        let reply = "Here is the {edit} you asked for:\n```JSON\n{\"summary\":\"s\",\"pages\":[]}\n```\nDone {ok}.";
+        assert_eq!(parse(reply).expect("parses").summary, "s");
+        let thinking_left_over = "Let me check {the pages}… {\"draft\": 1}\n{\"summary\":\"t\",\"pages\":[],\"facts\":[]}";
+        assert_eq!(parse(thinking_left_over).expect("parses").summary, "t");
+        assert_eq!(strip_fence("```\n{}\n```"), "{}");
+    }
+
+    #[test]
+    fn the_schema_stays_strict() {
+        // An object of the wrong shape is not an answer, even if it parses.
+        assert_eq!(parse("{\"pages\": \"all of them\"}"), Err(BadOutput));
+        assert_eq!(parse("{\"other\": 1}"), Err(BadOutput));
     }
 
     #[test]

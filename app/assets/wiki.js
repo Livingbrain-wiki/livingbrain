@@ -733,6 +733,7 @@ export async function wikiPage(api) {
     caSummary: $("#ca-summary"),
     caModel: $("#ca-model"),
     caProcess: $("#ca-process"),
+    caRetry: $("#ca-retry"),
     caResult: $("#ca-result"),
     caSection: $("#coding-agents-section"),
     caTree: $("#coding-agents-tree"),
@@ -1108,6 +1109,7 @@ export async function wikiPage(api) {
     }
     els.caCard.hidden = false;
     els.caSummary.textContent = queueSummary(data.counts);
+    if (els.caRetry) els.caRetry.hidden = !((data.counts && data.counts.failed) > 0);
     els.caModel.replaceChildren();
     const model = data.model || {};
     if (model.connected) {
@@ -1165,13 +1167,35 @@ export async function wikiPage(api) {
     try {
       const data = await api("/v1/coding-agents/process", { method: "POST", body: { max: 1 } });
       const done = data && Array.isArray(data.processed) ? data.processed : [];
+      // A failure names its reason — what the provider said, e.g.
+      // `model-http 429: {"error":…}` — so the cause is on screen.
       els.caResult.textContent = done.length
-        ? done.map((job) => jobLabel(job.status)).join(", ")
+        ? done
+            .map((job) => `${jobLabel(job.status)}${job.error ? ` (${job.error})` : ""}`)
+            .join(", ")
         : "Nothing waiting.";
     } catch (error) {
       els.caResult.textContent = `Could not compile: ${error.message}`;
     } finally {
       els.caProcess.disabled = false;
+    }
+    await loadQueue();
+    renderSessions();
+  }
+
+  /** `Retry failed`: put the asker's failed jobs back in the queue with
+   * their attempts reset, then refresh the card and the list. */
+  async function retryFailed() {
+    if (!els.caRetry) return;
+    els.caRetry.disabled = true;
+    try {
+      const data = await api("/v1/coding-agents/retry", { method: "POST", body: {} });
+      const n = (data && data.requeued) || 0;
+      els.caResult.textContent = n === 1 ? "1 session requeued." : `${n} sessions requeued.`;
+    } catch (error) {
+      els.caResult.textContent = `Could not requeue: ${error.message}`;
+    } finally {
+      els.caRetry.disabled = false;
     }
     await loadQueue();
     renderSessions();
@@ -1996,6 +2020,7 @@ export async function wikiPage(api) {
     els.sessionsMore.addEventListener("click", () => loadSessions({ more: true }));
   }
   if (els.caProcess) els.caProcess.addEventListener("click", processNow);
+  if (els.caRetry) els.caRetry.addEventListener("click", retryFailed);
 
   els.listFilter.addEventListener("input", () => {
     state.filter = els.listFilter.value;

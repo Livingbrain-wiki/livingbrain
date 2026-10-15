@@ -66,6 +66,7 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/sources?kind=agent_log&limit=50&project=&cursor=` | `wiki.html?view=sessions` | **yes** — `{sources:[{id, kind, scope, path, project, held, created_at}], next_cursor}`, newest first; "Load more" sends the cursor, and the chosen project is kept in the address (`&project=`) |
 | `GET /v1/coding-agents/queue?limit=100` / `?source=` | `wiki.html?view=sessions` | **yes** — `{counts, model, budget, jobs:[{source_id, status, error, pages, …}]}`; the queue card above the sessions and a status pill plus "Wrote …" links on each session, and the compile line above a transcript. Any failure hides the card and leaves the list |
 | `POST /v1/coding-agents/process` | `wiki.html?view=sessions` | **yes** — body `{max: 1}`; the card's **Process now** compiles the next of your sessions and refreshes the list |
+| `POST /v1/coding-agents/retry` | `wiki.html?view=sessions` | **yes** — the card's **Retry failed** (shown when something failed) requeues your failed sessions with their attempts reset |
 
 ## What is NOT wired to a backend yet
 

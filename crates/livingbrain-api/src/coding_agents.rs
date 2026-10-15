@@ -12,6 +12,11 @@
 //!   re-checked at once, since the person pressing the button may just have
 //!   connected a model. Cookie writes must be same-origin, like every cookie
 //!   write on this surface.
+//! - `POST /v1/coding-agents/retry` — puts the asker's own `failed` jobs
+//!   back to `queued` with their attempts reset (the queue card's "Retry
+//!   failed"), and answers how many. A failed job's `error` names what the
+//!   provider said (`model-http 429: {…}`), so the person can see the cause
+//!   is fixed before pressing it.
 //!
 //! Both answer only for the asker's own scopes — the same two clauses the
 //! source listing applies — so a member sees and spends nothing of anybody
@@ -68,8 +73,11 @@ pub const MODEL_ROLE: &str = "main";
 /// The most jobs one `Process now` compiles: each is one to a few model
 /// calls inside the request.
 const MAX_PROCESS_NOW: usize = 3;
-/// How long one compile call may take.
-const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(120);
+/// How long one compile call may take. A forced-thinking model (GLM-5.3)
+/// answered a full-size compile in 55–100 s when measured (2026-10-15), so
+/// the bound sits well past that. Workers sets no deadline on a subrequest
+/// of its own; this is what the native runtime enforces.
+const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(300);
 /// The most jobs the status route lists.
 const MAX_LIST: usize = 100;
 
@@ -190,6 +198,7 @@ impl Module for CodingAgents {
         cratefield_core::axum::Router::new()
             .route("/queue", get(queue))
             .route("/process", post(process))
+            .route("/retry", post(retry))
             .with_state(state)
     }
 
@@ -416,10 +425,11 @@ impl Model for WorkspaceModel {
             }),
             Ok(Dispatch::Pending { .. }) => Err(ModelFailure::Pending),
             Err(InvokeError::NoModel) => Err(ModelFailure::NoModel),
-            Err(InvokeError::Runner(reason)) => {
-                Err(ModelFailure::Failed(format!("runner-{reason}")))
-            }
-            Err(error) => Err(ModelFailure::Failed(error.variant().to_owned())),
+            Err(error) if error.rate_limited() => Err(ModelFailure::Busy {
+                reason: error.reason(),
+                retry_after_secs: error.retry_after_secs(),
+            }),
+            Err(error) => Err(ModelFailure::Failed(error.reason())),
         }
     }
 }
@@ -651,6 +661,40 @@ async fn process(
             "pages": p.pages,
             "error": p.error,
         })).collect::<Vec<_>>(),
+        "counts": counts
+            .iter()
+            .map(|(status, n)| (status.as_str().to_owned(), json!(n)))
+            .collect::<serde_json::Map<String, Value>>(),
+    })))
+}
+
+/// `POST /retry` — requeue the asker's own failed jobs.
+async fn retry(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Problem> {
+    let asker = service.asker(&Method::POST, &headers).await?;
+    let scopes = service.scopes(&asker);
+    // The asker's own memory only, as for `Process now`.
+    let own: Vec<String> = scopes
+        .iter()
+        .filter(|scope| scope.starts_with("user-"))
+        .cloned()
+        .collect();
+    let ctx = service.ctx();
+    let db = port(ctx.ports.db.clone())?;
+    let clock = port(ctx.ports.clock.clone())?;
+    let queue = Queue::new(db);
+    let requeued = queue
+        .requeue_failed(&asker.workspace_id, &own, clock.now())
+        .await
+        .map_err(|_| Problem::internal())?;
+    let counts = queue
+        .counts(&asker.workspace_id, &scopes)
+        .await
+        .map_err(|_| Problem::internal())?;
+    Ok(Json(json!({
+        "requeued": requeued,
         "counts": counts
             .iter()
             .map(|(status, n)| (status.as_str().to_owned(), json!(n)))

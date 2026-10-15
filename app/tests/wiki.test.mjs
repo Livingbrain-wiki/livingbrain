@@ -1736,7 +1736,14 @@ test("coding-agents: the sessions view shows each session's status, its pages, a
     if (url === "/v1/coding-agents/queue?limit=100") return json(queue);
     if (url === "/v1/coding-agents/process" && method === "POST") {
       queue = { ...queue, counts: { done: 1, failed: 1 } };
-      return json({ processed: [{ source_id: "x", status: "failed", pages: [] }], counts: {} });
+      return json({
+        processed: [{ source_id: "x", status: "failed", pages: [], error: "model-http 429: busy" }],
+        counts: {},
+      });
+    }
+    if (url === "/v1/coding-agents/retry" && method === "POST") {
+      queue = { ...queue, counts: { done: 1, queued: 1 } };
+      return json({ requeued: 1, counts: queue.counts });
     }
     return json({ title: "not found" }, 404);
   };
@@ -1744,6 +1751,7 @@ test("coding-agents: the sessions view shows each session's status, its pages, a
   await drain();
   assert.equal(el("ca-card").hidden, false);
   assert.equal(el("ca-summary").textContent, "1 compiled");
+  assert.equal(el("ca-retry").hidden, true, "nothing failed, nothing to retry");
   assert.match(el("ca-model").textContent, /No model connected/);
   assert.match(el("ca-model").textContent, /Settings → Models/);
   const status = walk(el("sessions-list"), ".ca-status")[0];
@@ -1757,9 +1765,17 @@ test("coding-agents: the sessions view shows each session's status, its pages, a
   const post = calls.find((call) => call.url === "/v1/coding-agents/process");
   assert.equal(post.method, "POST");
   assert.deepEqual(JSON.parse(post.init.body), { max: 1 });
-  assert.equal(el("ca-result").textContent, "Failed");
+  assert.equal(el("ca-result").textContent, "Failed (model-http 429: busy)");
   assert.equal(el("ca-summary").textContent, "1 compiled · 1 failed");
   assert.equal(el("ca-process").disabled, false);
+  assert.equal(el("ca-retry").hidden, false);
+
+  await el("ca-retry").click();
+  await drain();
+  const retry = calls.find((call) => call.url === "/v1/coding-agents/retry");
+  assert.equal(retry.method, "POST");
+  assert.equal(el("ca-result").textContent, "1 session requeued.");
+  assert.equal(el("ca-retry").hidden, true);
 });
 
 test("coding-agents: a queue the API cannot answer hides the card, never the sessions", async () => {

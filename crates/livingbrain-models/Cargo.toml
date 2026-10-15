@@ -57,6 +57,10 @@ livingbrain-tokens = { path = "../livingbrain-tokens" }
 # The edge is safe against cycles — the usage module reads this module's
 # `model_connections` by a read-only SELECT, never by a dependency.
 livingbrain-usage = { path = "../livingbrain-usage" }
+# A provider's error body is shown to the member (a job's `last_error`, an
+# Ask's fallback reason) only after it is redacted: a body can echo a
+# credential or quote the prompt back. A plain library, no ports.
+livingbrain-redact = { path = "../livingbrain-redact" }
 
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
