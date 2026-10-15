@@ -53,6 +53,7 @@ use livingbrain_api::{
     SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
+use livingbrain_github_app::GithubApp;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_models::deadline::ModelDeadlineHttpClient;
@@ -374,7 +375,11 @@ fn build(
             // ask route's numbers and the spend limit, over the usage
             // module's `usage_budgets` row. No blob, so it is served like
             // `usage` rather than through the CLI divert.
-            .module(BudgetSettings::new());
+            .module(BudgetSettings::new())
+            // The GitHub connection (Part B: storage and sealed secrets).
+            // No routes yet; mounted so its tables are migrated and its
+            // cron housekeeping runs. Part C adds the routes and the drain.
+            .module(GithubApp::new());
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
         let builder = cli_modules(kms)
@@ -1205,6 +1210,7 @@ mod tests {
         // The budgets and limits, beside the ledger they are read against.
         assert!(names.contains(&"settings"), "{names:?}");
         assert!(names.contains(&"usage"), "{names:?}");
+        assert!(names.contains(&"github"), "{names:?}");
     }
 
     /// A migration's SQL without its `--` comments, its words joined by

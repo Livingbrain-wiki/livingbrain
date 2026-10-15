@@ -106,5 +106,9 @@
   "workspaces/0004": {
     "file": "0027_workspaces_0004_turn.sql",
     "sha256": "59203b60ca937e502972dab8dbf4d7f04526c886147cd4927a5ba15883cf2151"
+  },
+  "github/0001": {
+    "file": "0028_github_0001_init.sql",
+    "sha256": "ca01e020082913bc302ef21d87940c15904755376bd16bdcf9633a2243d96706"
   }
 }

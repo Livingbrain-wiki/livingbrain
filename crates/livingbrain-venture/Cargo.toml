@@ -45,6 +45,9 @@ async-trait = { workspace = true }
 # router itself (see `serve_cli` below).
 livingbrain-api = { path = "../livingbrain-api" }
 livingbrain-canary = { path = "../livingbrain-canary" }
+# The GitHub connection's storage (Part B): its tables, collected below as
+# `github/0001`, and the scheduled housekeeping. Routes arrive with Part C.
+livingbrain-github-app = { path = "../livingbrain-github-app" }
 livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }

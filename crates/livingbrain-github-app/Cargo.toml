@@ -1,0 +1,53 @@
+# Living Brain module: the GitHub connection's storage. One GitHub App per
+# workspace with its credentials sealed under a KMS-wrapped data key, the
+# single-use states of the manifest and install flows, the installation ->
+# workspace binding, the repositories an installation reaches with their
+# backfill progress, delivery replay protection and the work queue the
+# in-Worker cron drain consumes. Routes and the drain body arrive in Part C
+# on top of this crate's store API (docs/github.md, "Storage & secrets").
+
+[package]
+name = "livingbrain-github-app"
+description = "Living Brain module: GitHub App credentials (sealed), installation binding, repositories, backfill progress and webhook replay protection"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The ports, and the KMS port beside them (`cratefield-kms` names no
+# `cratefield-core`, so it cannot split the ports in two).
+cratefield-core = { workspace = true }
+cratefield-kms = { workspace = true }
+
+# The credential envelope: XChaCha20-Poly1305 under a KMS-wrapped data key,
+# the cipher the Slack bot token and the page store already use.
+chacha20poly1305 = { workspace = true }
+base64 = { workspace = true }
+# Nonces, state tokens and queue ids, from the OS random source.
+getrandom = { workspace = true }
+# A state token is stored as its SHA-256, never in the clear.
+sha2 = { workspace = true }
+# Unsealed credentials are wiped when the value holding them drops.
+zeroize = { workspace = true }
+sea-query = { workspace = true }
+serde = { workspace = true }
+# A backfill cursor is opaque JSON; the store only checks it parses.
+serde_json = { workspace = true }
+time = { workspace = true }
+
+# Who may bind an installation or save an app is decided by the workspaces
+# module's own membership read (`caller_for`), re-read at the moment of the
+# write rather than trusted from a flag the caller passes in.
+livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the parity suite.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+pollster = { workspace = true }

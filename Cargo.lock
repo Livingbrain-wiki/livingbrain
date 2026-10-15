@@ -1789,6 +1789,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-github-app"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chacha20poly1305",
+ "cratefield-core",
+ "cratefield-kms",
+ "cratefield-testing",
+ "getrandom 0.4.3",
+ "livingbrain-workspaces",
+ "pollster",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "zeroize",
+]
+
+[[package]]
 name = "livingbrain-judge"
 version = "0.1.0"
 dependencies = [
@@ -1997,6 +2017,7 @@ dependencies = [
  "insta",
  "livingbrain-api",
  "livingbrain-canary",
+ "livingbrain-github-app",
  "livingbrain-mcp",
  "livingbrain-models",
  "livingbrain-pages",
