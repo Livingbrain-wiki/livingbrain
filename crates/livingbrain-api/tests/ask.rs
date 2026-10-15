@@ -1,6 +1,7 @@
-//! The ask route: a retrieval brief, not a conversation. The answer is the
+//! The ask route's retrieval, with no model connected: the brief is the
 //! pages that mention the question — full text, numbered sections, each
-//! section also a structured citation — and nothing calls a model anywhere.
+//! section also a structured citation — under the "no model connected"
+//! label. `ask_model.rs` covers the answer a connected model writes.
 
 mod common;
 

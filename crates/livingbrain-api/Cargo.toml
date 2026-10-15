@@ -57,3 +57,6 @@ async-trait = { workspace = true }
 pollster = { workspace = true }
 # The instant a test seeds a runner row at.
 time = { workspace = true }
+# `oneshot` for the one test that sends a request with cookie and origin
+# headers, which the kit's request helpers do not set.
+tower = { workspace = true }
