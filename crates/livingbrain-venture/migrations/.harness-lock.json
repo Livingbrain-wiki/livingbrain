@@ -82,5 +82,9 @@
   "coding-agents/0001": {
     "file": "0021_coding-agents_0001_init.sql",
     "sha256": "950a2cbca645ab8c41d9559e8fd4a53548627291b50135952c9697ed884199b2"
+  },
+  "pages/0006": {
+    "file": "0022_pages_0006_facts.sql",
+    "sha256": "7eb6480af9e61e81e876a16e85e67cfd1742f6b2a87e74780ccab75905725533"
   }
 }
