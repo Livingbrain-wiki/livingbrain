@@ -454,10 +454,18 @@ async fn process(
             .clamp(1, MAX_PROCESS_NOW)
     };
     let scopes = service.scopes(&asker);
+    // Only the asker's own memory is compiled on their say-so: a shared
+    // session (if one ever exists) is the cron's to drain, on the
+    // workspace's schedule, not any one member's button.
+    let own: Vec<String> = scopes
+        .iter()
+        .filter(|scope| scope.starts_with("user-"))
+        .cloned()
+        .collect();
     let compiler = compiler(service.ctx(), &service.wiki()).ok_or_else(Problem::internal)?;
     let filter = ClaimFilter {
         workspace: Some(asker.workspace_id.clone()),
-        scopes: Some(scopes.clone()),
+        scopes: Some(own),
         ignore_backoff: true,
     };
     let processed = compiler
