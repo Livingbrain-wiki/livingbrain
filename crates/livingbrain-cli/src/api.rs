@@ -17,6 +17,9 @@
 //! | `POST /v1/pages/sources` | `{kind:"import"\|"agent_log", path, body, scope, project?}` | `{id, kind, scope, path, project, sha256, wikilinks:[], redacted, created, created_at}` (issues #81, #45) |
 //! | `GET /v1/sources` | `?kind=&project=&limit=&cursor=` | `{sources:[{id, kind, scope, path, project, held, created_at}], next_cursor}` |
 //! | `GET /v1/sources/projects` | `?kind=` | `{projects:[{project, sources}]}` |
+//! | `GET /v1/model-jobs/next` | — | `{job:{id, kind, agent, model, settings, system, user, max_tokens, json, lease_until}}`, or `204` with no job (the local runner, `jobs run`) |
+//! | `POST /v1/model-jobs/{id}/result` | `{text, prompt_tokens, completion_tokens}` | `{status:"done"}`; `422` when the server's validation refuses the text |
+//! | `POST /v1/model-jobs/{id}/fail` | `{reason}` | `{status:"failed"}` |
 //!
 //! `POST /v1/device-auth/token` answers `400 {error}` with one of
 //! `authorization_pending`, `slow_down`, `expired_token`, `access_denied`
@@ -270,6 +273,25 @@ impl Client {
         read_json(request.call().map_err(transport)?)
     }
 
+    /// `GET <path>`, answered as its status and body without reading a
+    /// non-2xx as an error: the local runner (`jobs run`) tells a `204` (no
+    /// job), a `401` (signed out) and a `404` (a job that is gone) apart
+    /// itself. Only a transport failure is an `Err`.
+    pub fn get_status(&self, path: &str) -> CliResult<(u16, Vec<u8>)> {
+        let response = self.get(path).call().map_err(transport)?;
+        let status = response.status().as_u16();
+        let body = response.into_body().read_to_vec().map_err(transport)?;
+        Ok((status, body))
+    }
+
+    /// `POST <path>` with a JSON body, answered as in [`Client::get_status`].
+    pub fn post_status(&self, path: &str, body: &Value) -> CliResult<(u16, Vec<u8>)> {
+        let response = self.post(path).send_json(body).map_err(transport)?;
+        let status = response.status().as_u16();
+        let body = response.into_body().read_to_vec().map_err(transport)?;
+        Ok((status, body))
+    }
+
     /// POST one JSON body (plus `project`) and read the JSON answer.
     fn post_json(&self, path: &str, mut body: Value, project: Option<&str>) -> CliResult<Value> {
         if let Some(project) = project {
@@ -280,7 +302,7 @@ impl Client {
 }
 
 /// Percent-encode one path segment (RFC 3986 unreserved characters kept).
-fn encode_segment(segment: &str) -> String {
+pub(crate) fn encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for byte in segment.bytes() {
         match byte {

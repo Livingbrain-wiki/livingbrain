@@ -19,6 +19,7 @@ mod api;
 mod auth;
 mod chat_export;
 mod import;
+mod jobs;
 mod logs;
 mod mcp;
 mod telemetry;
@@ -189,6 +190,11 @@ enum Command {
         #[command(subcommand)]
         command: logs::Command,
     },
+    /// Run the brain's model jobs with your own Claude Code or Codex subscription
+    Jobs {
+        #[command(subcommand)]
+        command: jobs::Command,
+    },
     /// Turn anonymous usage data on or off, and show what would be sent
     Telemetry {
         #[command(subcommand)]
@@ -296,6 +302,10 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         // the per-repo opt-in decision and the redaction. Nothing opted in,
         // nothing sent — the auth request included (see `logs`).
         Command::Logs { command } => logs::run(command, &cli.api_url, out),
+        // The local runner: the person's own `claude` / `codex` answers the
+        // brain's queued model calls, so a subscription's credentials never
+        // leave this machine (see `jobs`).
+        Command::Jobs { command } => jobs::run(command, &cli.api_url, out),
         // The only command that neither needs a token nor opens a socket: it
         // reads and writes the stored preference and prints the local view.
         Command::Telemetry { action } => telemetry::run(
