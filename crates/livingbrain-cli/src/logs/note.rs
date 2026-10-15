@@ -276,6 +276,27 @@ fn header(record: &SessionRecord, source: Option<&str>) -> String {
             .count(),
     ));
     out.push_str(&format!("- Tool calls: {}\n", tool_summary(&record.turns)));
+    let subagents: Vec<&super::Subagent> = record
+        .turns
+        .iter()
+        .flat_map(|turn| &turn.tool_calls)
+        .filter_map(|call| call.subagent.as_deref())
+        .collect();
+    if !subagents.is_empty() {
+        let mut names: BTreeMap<&str, usize> = BTreeMap::new();
+        for subagent in &subagents {
+            *names.entry(subagent.name.as_str()).or_default() += 1;
+        }
+        let names: Vec<String> = names
+            .iter()
+            .map(|(name, count)| format!("{} ×{count}", one_line(name)))
+            .collect();
+        out.push_str(&format!(
+            "- Subagents: {} ({})\n",
+            subagents.len(),
+            names.join(", ")
+        ));
+    }
     let totals = &record.totals;
     out.push_str(&format!(
         "- Tokens: {} in, {} out, {} cache read, {} cache write, {} reasoning\n",
@@ -300,6 +321,12 @@ fn header(record: &SessionRecord, source: Option<&str>) -> String {
             "- Truncated: {} turn(s) removed to fit the upload size cap\n",
             record.omitted_turns
         ));
+        if record.omitted_subagent_turns > 0 {
+            out.push_str(&format!(
+                "- Subagent turns removed to fit: {}\n",
+                record.omitted_subagent_turns
+            ));
+        }
     }
     out
 }
@@ -377,6 +404,12 @@ fn call_block(call: &super::ToolCall, limits: Limits) -> String {
         line.push_str(&format!(" · exit {code}"));
     }
     let mut out = format!("{line}\n\n");
+    if let Some(subagent) = &call.subagent {
+        // The launch's prompt is the subagent's to tell; its answer is
+        // quoted under its header instead of as the call's result.
+        out.push_str(&subagent_block(subagent, limits));
+        return out;
+    }
     if let Some(input) = &call.input {
         let lang = match call.format {
             Some("shell") => "sh",
@@ -389,6 +422,119 @@ fn call_block(call: &super::ToolCall, limits: Limits) -> String {
         out.push_str(&fenced("text", &clip(output, limits.output)));
     }
     out
+}
+
+/// A subagent under the call that launched it: one header line — who, on
+/// what, how long, at what cost, how it ended — its task, how much it did,
+/// and its final answer quoted. Its own steps are in the transcript.
+fn subagent_block(subagent: &super::Subagent, limits: Limits) -> String {
+    let mut out = format!("> 🤖 {}\n", subagent_header(subagent));
+    if let Some(description) = &subagent.description {
+        out.push_str(&format!(
+            "> _{}_\n",
+            one_line(description).replace('_', "\\_")
+        ));
+    }
+    let calls: usize = subagent
+        .turns
+        .iter()
+        .map(|turn| turn.tool_calls.len())
+        .sum();
+    let mut shape = format!("{} turn(s), {calls} tool call(s)", subagent.turns.len());
+    if subagent.truncated {
+        shape.push_str(&format!(
+            ", {} more left out to fit the upload size cap",
+            subagent.omitted_turns
+        ));
+    }
+    out.push_str(&format!("> {shape}\n"));
+    if let Some(answer) = subagent.final_answer() {
+        out.push_str(">\n");
+        let answer = clip(answer.trim(), limits.input.max(256));
+        let mut fence_open = false;
+        for line in answer.lines() {
+            if line.trim_start().starts_with("```") {
+                fence_open = !fence_open;
+            }
+            out.push_str(&format!("> {line}\n"));
+        }
+        if fence_open {
+            out.push_str("> ```\n");
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// `**name** · model · duration · tokens · cost · status`, what is known of
+/// each.
+pub(super) fn subagent_header(subagent: &super::Subagent) -> String {
+    let mut parts = vec![format!("**{}**", one_line(&subagent.name).replace('*', ""))];
+    if !subagent.models.is_empty() {
+        parts.push(subagent.models.join(", "));
+    }
+    if let (Some(start), Some(end)) = (&subagent.started_at, &subagent.ended_at)
+        && let Some(duration) = duration(start, end)
+    {
+        parts.push(duration);
+    }
+    let totals = &subagent.totals;
+    let tokens = totals.input_tokens
+        + totals.output_tokens
+        + totals.cache_read_tokens
+        + totals.cache_creation_tokens;
+    if tokens > 0 {
+        parts.push(format!("{} tokens", grouped(tokens)));
+    }
+    if let Some(cost) = totals.cost_usd {
+        parts.push(format!("${cost:.4}"));
+    }
+    if let Some(status) = subagent.status {
+        parts.push(status.to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// `1234567` as `1,234,567`.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// How long between two RFC 3339 UTC stamps, as `45s`, `3m 05s` or
+/// `1h 02m`; `None` when either does not read or the end is first.
+fn duration(start: &str, end: &str) -> Option<String> {
+    let seconds = epoch_seconds(end)? - epoch_seconds(start)?;
+    if seconds < 0 {
+        return None;
+    }
+    Some(match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m {:02}s", s / 60, s % 60),
+        s => format!("{}h {:02}m", s / 3600, (s % 3600) / 60),
+    })
+}
+
+/// `YYYY-MM-DDTHH:MM:SS…` (UTC) as seconds since the epoch.
+fn epoch_seconds(at: &str) -> Option<i64> {
+    let number = |range: std::ops::Range<usize>| at.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// `body` in a fence, every line of it that could close the fence defused

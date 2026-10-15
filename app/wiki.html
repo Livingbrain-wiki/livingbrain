@@ -125,8 +125,9 @@
         <section id="coding-agents-section" class="ca-section" hidden>
           <h2>Coding agents</h2>
           <p class="tiny">
-            Compiled from your synced agent sessions, one session at a time,
-            every entry dated and cited.
+            Your synced agent sessions, by agent and project, and the pages
+            compiled from them — one session at a time, every entry dated and
+            cited.
           </p>
           <div id="coding-agents-tree" class="ca-tree"></div>
         </section>
@@ -157,6 +158,12 @@
       <section id="sessions-view" hidden>
         <h1>Agent sessions</h1>
         <div class="wiki-toolbar">
+          <select
+            id="sessions-agent"
+            class="wiki-filter"
+            aria-label="Show sessions from one agent"
+            hidden
+          ></select>
           <select
             id="sessions-project"
             class="wiki-filter"

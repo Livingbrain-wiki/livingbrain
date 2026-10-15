@@ -77,7 +77,12 @@ Workers Logs (`coding-agents: job for source … failed …`).
 
 `GET /v1/coding-agents/queue?limit=&source=` returns your jobs, a count per
 status, whether a model is connected, and the budget with what has been
-spent. Both routes only return jobs in your own scopes.
+spent. `GET /v1/coding-agents/tree` returns your synced sessions grouped by
+agent and project — `{agents: [{agent, folder, sessions, compiled, projects:
+[{project, sessions, compiled, statuses, latest_at}]}], truncated}`, a session
+counted once (its newest body), compiled when any of its bodies compiled,
+`folder` the wiki folder its pages land in. All three routes only return
+jobs in your own scopes.
 
 ## The model
 
@@ -229,7 +234,14 @@ the Mac app's Usage view.
 
 - **Wiki home**: the compiled pages are a `coding-agents/` folder (agent →
   project, plus `projects/` for the rollups) instead of rows under Recent.
-  A compiled page's meta line shows its path.
+  Every agent and project you synced sessions under is a folder there from
+  the first sync, before anything compiles (`colonizer/`, `claude/`,
+  `codex/`), with a line — `489 sessions · 12 compiled · 470 queued` —
+  linking to those sessions in Agent sessions; compiled pages appear inside
+  as they are written. A compiled page's meta line shows its path.
+- **Agent sessions** filter by agent (Claude Code, Codex, Colonizer) beside
+  the project filter; `wiki.html?view=sessions&agent=colonizer&project=x`
+  names both.
 - **Agent sessions**: a queue card shows the counts, which model compiles (or
   a link to **Settings → Models** when none is connected), the day's budget,
   and **Process now**. Each session shows its compile status and links to

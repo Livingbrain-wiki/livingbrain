@@ -112,11 +112,12 @@ const MAX_LIST_LIMIT: usize = 100;
 /// last id, a 26-character ULID; anything much longer is not one.
 const MAX_CURSOR_LEN: usize = 64;
 
-/// `GET /?kind=&project=&limit=&cursor=` — the asker's sources, newest
-/// first, without their bodies.
+/// `GET /?kind=&project=&agent=&limit=&cursor=` — the asker's sources,
+/// newest first, without their bodies.
 ///
 /// `kind` is one of the ledger's kinds (`agent_log`, `import`, …) and
-/// `project` a project name; either narrows the list, and a value outside
+/// `project` a project name, `agent` the agent an `agent_log` session was
+/// written by (`claude_code`, `codex`, `colonizer`); each narrows the list, and a value outside
 /// its rule is a 400 (`validation-failed`) rather than an empty list, so a typo is told apart from
 /// "nothing filed there". `limit` defaults to 50 and is clamped to 100.
 /// `next_cursor` is the last row's id when the page was full, and `null`
@@ -141,6 +142,23 @@ async fn list(
         Some(raw) => {
             return Err(Problem::validation_failed(format!(
                 "`project` must be 1..=64 bytes of ascii letters, digits, `.`, `_` and `-`, \
+                 got {raw:?}"
+            )));
+        }
+    };
+    let agent = match query.get("agent").map(|raw| raw.trim()) {
+        None | Some("") => None,
+        Some(raw)
+            if raw.len() <= 32
+                && raw.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                }) =>
+        {
+            Some(raw.to_owned())
+        }
+        Some(raw) => {
+            return Err(Problem::validation_failed(format!(
+                "`agent` must be 1..=32 bytes of lowercase ascii letters, digits, `_` and `-`, \
                  got {raw:?}"
             )));
         }
@@ -176,6 +194,7 @@ async fn list(
             &SourceFilter {
                 kind,
                 project,
+                agent,
                 before,
             },
             limit,

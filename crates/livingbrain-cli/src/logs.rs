@@ -47,9 +47,12 @@ use crate::{CliResult, Out, err};
 /// The version of the normalised session schema this build writes: adding a
 /// field is a bump of this number, not an edit in place. 2: tool calls carry
 /// their input and result, `reasoning` and `event` turns, `detail`,
-/// `omitted_turns`. A version-1 record still reads: every field it has kept
-/// its name and meaning.
-pub(crate) const LOG_SCHEMA_VERSION: u32 = 2;
+/// `omitted_turns`. 3: a tool call that launched a subagent carries the
+/// subagent's own session (`subagent`, recursively), an assistant turn names
+/// its `model` where it changes, and `omitted_subagent_turns`. A version-1 or
+/// version-2 record still reads: every field it has kept its name and
+/// meaning.
+pub(crate) const LOG_SCHEMA_VERSION: u32 = 3;
 
 /// The most text one turn keeps under `summary`, in characters — the cut
 /// every turn took before detail levels existed.
@@ -249,6 +252,22 @@ struct SessionRecord {
     truncated: bool,
     /// How many turns the size cap removed; an `event` turn marks where.
     omitted_turns: usize,
+    /// How many turns inside subagents the size cap removed — the cap trims
+    /// subagents' inner turns before it touches the main conversation.
+    omitted_subagent_turns: usize,
+    /// Which tool call launched which subagent, as the log links them: the
+    /// subagent's id (Claude Code's `agentId`, Codex's agent path) to the
+    /// launching call's id. Local only.
+    #[serde(skip)]
+    agent_links: BTreeMap<String, String>,
+    /// How each launched subagent ended, by its launching call's id, as the
+    /// log says (a result, a task notification). Local only.
+    #[serde(skip)]
+    subagent_status: BTreeMap<String, &'static str>,
+    /// How the session itself ended, when its log says (Codex's
+    /// `task_complete`): what a subagent's status falls back to. Local only.
+    #[serde(skip)]
+    final_status: Option<&'static str>,
 }
 
 /// Who a turn is.
@@ -271,6 +290,11 @@ enum Role {
 struct Turn {
     role: Role,
     at: Option<String>,
+    /// The model that wrote an assistant turn — named only where it changes
+    /// from the turn list's previous assistant turn ([`mark_model_changes`]),
+    /// so a session on one model names it once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     text: String,
     tool_calls: Vec<ToolCall>,
 }
@@ -280,16 +304,159 @@ impl Turn {
         Self {
             role,
             at: present(at),
+            model: None,
             text: text.to_owned(),
             tool_calls: Vec::new(),
         }
     }
 }
 
+/// A subagent's own session, nested in the tool call that launched it: who
+/// it was, what it ran on, how it ended, what it cost, and its turns — the
+/// same turn shape as the session's, recursively, so a subagent that
+/// launched one carries it too. Every field is always present, in this
+/// order: the wire order.
+#[derive(Debug, Default, Serialize)]
+struct Subagent {
+    /// Claude Code's `agentId`, Codex's thread id.
+    id: String,
+    /// The kind of agent: Claude Code's `subagent_type`, Codex's role.
+    name: String,
+    /// What it was asked to do, as the launch described it.
+    description: Option<String>,
+    /// Distinct, in first-seen order.
+    models: Vec<String>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    /// `completed`, `failed`, `stopped` or `running`, when the log says.
+    status: Option<&'static str>,
+    totals: Totals,
+    turns: Vec<Turn>,
+    /// Whether the size cap trimmed this subagent's turns.
+    truncated: bool,
+    /// How many of its turns the size cap removed.
+    omitted_turns: usize,
+}
+
+impl Subagent {
+    /// A collected record as the subagent of the call that launched it.
+    fn from_record(record: SessionRecord, id: &str, name: &str, description: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: if name.trim().is_empty() {
+                "subagent".to_owned()
+            } else {
+                name.trim().to_owned()
+            },
+            description: present(description.trim()),
+            models: record.models,
+            started_at: record.started_at,
+            ended_at: record.ended_at,
+            status: record.final_status,
+            totals: record.totals,
+            turns: record.turns,
+            truncated: false,
+            omitted_turns: 0,
+        }
+    }
+
+    /// Its last word: the last assistant turn that said something.
+    fn final_answer(&self) -> Option<&str> {
+        self.turns
+            .iter()
+            .rev()
+            .find(|turn| turn.role == Role::Assistant && !turn.text.trim().is_empty())
+            .map(|turn| turn.text.as_str())
+    }
+}
+
+/// Name each assistant turn's model only where it differs from the previous
+/// assistant turn's in the same list (each subagent's list on its own): the
+/// collectors set it on every one. Run after the size cap, so the first
+/// assistant turn that survives the cap names its model.
+fn mark_model_changes(turns: &mut [Turn]) {
+    let mut previous: Option<String> = None;
+    for turn in turns.iter_mut() {
+        for call in &mut turn.tool_calls {
+            if let Some(subagent) = call.subagent.as_mut() {
+                mark_model_changes(&mut subagent.turns);
+            }
+        }
+        if turn.role != Role::Assistant {
+            continue;
+        }
+        match turn.model.take() {
+            Some(model) if previous.as_deref() != Some(model.as_str()) => {
+                previous = Some(model.clone());
+                turn.model = Some(model);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The tool call with this id, anywhere in `turns` (subagents included).
+fn call_by_id<'a>(turns: &'a mut [Turn], id: &str) -> Option<&'a mut ToolCall> {
+    for turn in turns {
+        for call in &mut turn.tool_calls {
+            if call.id.as_deref() == Some(id) {
+                return Some(call);
+            }
+            if let Some(found) = call
+                .subagent
+                .as_mut()
+                .and_then(|subagent| call_by_id(&mut subagent.turns, id))
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Nest `subagent` in the call it was launched by: its status from what the
+/// launching log said (else its own), and — when the call's result was only
+/// a background launch's acknowledgement — its last words as that result,
+/// the way a foreground call's result already is.
+fn attach_subagent(call: &mut ToolCall, mut subagent: Subagent, status: Option<&'static str>) {
+    if let Some(status) = status {
+        subagent.status = Some(status);
+    }
+    // Claude Code's background launch answers with a receipt, Codex's
+    // spawn with the agent's path: neither is what the subagent said.
+    let acknowledged = call.output.as_deref().is_none_or(|output| {
+        output.starts_with("Async agent launched")
+            || output.trim().is_empty()
+            || serde_json::from_str::<Value>(output)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|map| map.len() == 1 && map.contains_key("task_name"))
+                })
+                .unwrap_or(false)
+    });
+    if acknowledged && let Some(answer) = subagent.final_answer() {
+        call.output = Some(clean::clip(answer, tools::MAX_TOOL_OUTPUT_BYTES));
+    }
+    if call.status.is_none() || call.status == Some("ok") {
+        call.status = match subagent.status {
+            Some("failed") => Some("error"),
+            Some("stopped") => Some("interrupted"),
+            _ => call.status.or(Some("ok")),
+        };
+    }
+    call.subagent = Some(Box::new(subagent));
+}
+
 /// A tool the agent called. Under `full`, what it was called with and what
 /// came back ([`tools`]); under the other levels, its name and nothing else.
 #[derive(Debug, Default, Serialize)]
 struct ToolCall {
+    /// The call's id in its log, to pair its result and its subagent with
+    /// it. Local only.
+    #[serde(skip)]
+    id: Option<String>,
     name: String,
     /// How to show `input`: `shell`, `diff`, `json` or `text`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -308,6 +475,9 @@ struct ToolCall {
     status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
+    /// The subagent this call launched, with its whole session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subagent: Option<Box<Subagent>>,
 }
 
 /// What the session cost, as its own log reports it: a collector that reads a
@@ -342,6 +512,10 @@ fn empty_record(agent: Agent, collector_version: u32) -> SessionRecord {
         outcome: None,
         truncated: false,
         omitted_turns: 0,
+        omitted_subagent_turns: 0,
+        agent_links: BTreeMap::new(),
+        subagent_status: BTreeMap::new(),
+        final_status: None,
     }
 }
 
@@ -437,11 +611,29 @@ fn apply_detail(record: &mut SessionRecord, detail: Detail) {
     if detail == Detail::Full {
         return;
     }
-    record.turns.retain(|turn| turn.role != Role::Reasoning);
-    for turn in &mut record.turns {
+    detail_turns(&mut record.turns, detail);
+}
+
+/// [`apply_detail`] over one turn list, and every subagent's inside it: a
+/// subagent keeps its header and its messages at the same level, its tool
+/// calls their names (and their own subagents).
+fn detail_turns(turns: &mut Vec<Turn>, detail: Detail) {
+    turns.retain(|turn| turn.role != Role::Reasoning);
+    for turn in turns {
         for call in &mut turn.tool_calls {
+            let mut subagent = call.subagent.take();
+            if let Some(subagent) = subagent.as_mut() {
+                detail_turns(&mut subagent.turns, detail);
+                if detail == Detail::Summary
+                    && let Some(description) = subagent.description.as_mut()
+                {
+                    truncate_text(description, SUMMARY_TURN_CHARS);
+                }
+            }
             *call = ToolCall {
+                id: call.id.take(),
                 name: std::mem::take(&mut call.name),
+                subagent,
                 ..ToolCall::default()
             };
         }
@@ -461,7 +653,13 @@ fn content_strings(record: &mut SessionRecord) -> Vec<&mut String> {
     if let Some(branch) = record.branch.as_mut() {
         strings.push(branch);
     }
-    for turn in &mut record.turns {
+    turn_strings(&mut record.turns, &mut strings);
+    strings
+}
+
+/// The content strings of one turn list, subagents' included.
+fn turn_strings<'a>(turns: &'a mut [Turn], strings: &mut Vec<&'a mut String>) {
+    for turn in turns {
         strings.push(&mut turn.text);
         for call in &mut turn.tool_calls {
             for field in [&mut call.path, &mut call.input, &mut call.output] {
@@ -469,9 +667,14 @@ fn content_strings(record: &mut SessionRecord) -> Vec<&mut String> {
                     strings.push(value);
                 }
             }
+            if let Some(subagent) = call.subagent.as_mut() {
+                if let Some(description) = subagent.description.as_mut() {
+                    strings.push(description);
+                }
+                turn_strings(&mut subagent.turns, strings);
+            }
         }
     }
-    strings
 }
 
 /// The record as bytes. Fields go out in declaration order and nothing in a
@@ -493,9 +696,18 @@ fn escaped_len(text: &str) -> usize {
 /// Clip every message to [`MAX_TEXT_BYTES`]: the one per-text bound every
 /// level shares, and the reason every string fits redaction's input.
 fn clip_texts(record: &mut SessionRecord) {
-    for turn in &mut record.turns {
+    clip_turns(&mut record.turns);
+}
+
+fn clip_turns(turns: &mut [Turn]) {
+    for turn in turns {
         if turn.text.len() > MAX_TEXT_BYTES {
             turn.text = clean::clip(&turn.text, MAX_TEXT_BYTES);
+        }
+        for call in &mut turn.tool_calls {
+            if let Some(subagent) = call.subagent.as_mut() {
+                clip_turns(&mut subagent.turns);
+            }
         }
     }
 }
@@ -516,6 +728,23 @@ fn cap(record: &mut SessionRecord) {
     }
     // Room for the marker turn the cut leaves behind.
     const MARKER_ROOM: usize = 256;
+    // Subagents first: their inner turns are the detail a reader can most
+    // spare, and each keeps its header and its final answer.
+    let mut excess = (
+        raw as isize - MAX_SESSION_BODY_BYTES as isize,
+        escaped as isize - MAX_ESCAPED_BODY_BYTES as isize,
+    );
+    let mut trimmed = 0usize;
+    trim_subagents(&mut record.turns, &mut excess, &mut trimmed);
+    if trimmed > 0 {
+        record.truncated = true;
+        record.omitted_subagent_turns += trimmed;
+    }
+    let full = serialise(record);
+    let (raw, escaped) = (full.len(), escaped_len(&full));
+    if raw <= MAX_SESSION_BODY_BYTES && escaped <= MAX_ESCAPED_BODY_BYTES {
+        return;
+    }
     let mut excess_raw = (raw + MARKER_ROOM) as isize - MAX_SESSION_BODY_BYTES as isize;
     let mut excess_escaped = (escaped + 2 * MARKER_ROOM) as isize - MAX_ESCAPED_BODY_BYTES as isize;
     // Keep the opening turn when there is more than one to shed from.
@@ -551,12 +780,86 @@ fn cap(record: &mut SessionRecord) {
     if serialise(record).len() > MAX_SESSION_BODY_BYTES
         || escaped_len(&serialise(record)) > MAX_ESCAPED_BODY_BYTES
     {
-        for turn in &mut record.turns {
-            truncate_text(&mut turn.text, SUMMARY_TURN_CHARS);
-            for call in &mut turn.tool_calls {
-                call.input = None;
-                call.output = None;
+        shrink_turns(&mut record.turns);
+    }
+}
+
+/// The size cap's last resort, recursively: texts cut to the summary length,
+/// tool inputs and results gone, the shape kept.
+fn shrink_turns(turns: &mut [Turn]) {
+    for turn in turns {
+        truncate_text(&mut turn.text, SUMMARY_TURN_CHARS);
+        for call in &mut turn.tool_calls {
+            call.input = None;
+            call.output = None;
+            if let Some(subagent) = call.subagent.as_mut() {
+                shrink_turns(&mut subagent.turns);
             }
+        }
+    }
+}
+
+/// The size cap's first pass: every subagent in `turns`, oldest first, loses
+/// its inner turns from the oldest on — never its final answer — until the
+/// `excess` (raw, escaped) is paid off; then the subagents among the turns
+/// it kept. The removed run becomes one `event` turn, and the subagent says
+/// how many went. A subagent nested inside a removed turn goes with it,
+/// counted as that one turn.
+fn trim_subagents(turns: &mut [Turn], excess: &mut (isize, isize), trimmed: &mut usize) {
+    const MARKER_ROOM: isize = 160;
+    for turn in turns {
+        for call in &mut turn.tool_calls {
+            if excess.0 <= 0 && excess.1 <= 0 {
+                return;
+            }
+            let Some(subagent) = call.subagent.as_mut() else {
+                continue;
+            };
+            if subagent.turns.len() < 2 {
+                continue;
+            }
+            let keep = subagent
+                .turns
+                .iter()
+                .rposition(|turn| turn.role == Role::Assistant && !turn.text.trim().is_empty())
+                .unwrap_or(subagent.turns.len() - 1);
+            let mut cut = 0usize;
+            excess.0 += MARKER_ROOM;
+            excess.1 += 2 * MARKER_ROOM;
+            while (excess.0 > 0 || excess.1 > 0) && cut < keep {
+                let turn =
+                    serde_json::to_string(&subagent.turns[cut]).expect("a turn always serialises");
+                excess.0 -= turn.len() as isize + 1;
+                excess.1 -= escaped_len(&turn) as isize + 1;
+                cut += 1;
+            }
+            if cut == 0 {
+                excess.0 -= MARKER_ROOM;
+                excess.1 -= 2 * MARKER_ROOM;
+                // Nothing of its own to spare: what it launched next.
+                trim_subagents(&mut subagent.turns, excess, trimmed);
+                continue;
+            }
+            let at = subagent.turns[..cut]
+                .iter()
+                .find_map(|turn| turn.at.clone())
+                .unwrap_or_default();
+            subagent.turns.drain(..cut);
+            subagent.turns.insert(
+                0,
+                Turn::new(
+                    Role::Event,
+                    &at,
+                    &format!(
+                        "{cut} earlier turn(s) of this subagent omitted to fit the upload size cap"
+                    ),
+                ),
+            );
+            subagent.truncated = true;
+            subagent.omitted_turns += cut;
+            *trimmed += cut;
+            // Still over: the subagents among the turns it kept.
+            trim_subagents(&mut subagent.turns, excess, trimmed);
         }
     }
 }
@@ -682,10 +985,12 @@ fn prepare(
     clip_texts(record);
     if !build {
         cap(record);
+        mark_model_changes(&mut record.turns);
         return Ok(None);
     }
     let findings = redact_record(record, file)?;
     cap(record);
+    mark_model_changes(&mut record.turns);
     let (body, more) = build_body(record, file)?;
     Ok(Some((body, findings + more)))
 }
@@ -1142,6 +1447,9 @@ fn collect_sessions(
     let mut sessions = Vec::new();
     let (mut unreadable, mut unparsed) = (0usize, 0usize);
     let mut matched: BTreeSet<PathBuf> = BTreeSet::new();
+    // Codex writes a spawned agent's rollout as a file of its own; it is
+    // read as part of the session that spawned it, not as one more.
+    let spawns = CodexSpawns::index(codex_dir);
     for (agent, dir, levels) in [
         // Claude Code lays sessions out one directory per project — walk into
         // exactly that one level; Codex nests them by date, so its walk goes
@@ -1152,12 +1460,20 @@ fn collect_sessions(
         for file in session_files(dir, levels) {
             // `--session`: only the named files, matched on their resolved
             // path. The agent is still decided by which tree the file is in.
+            let named = only.is_some_and(|only| {
+                only.contains(&std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone()))
+            });
             if let Some(only) = only {
                 let resolved = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
                 if !only.contains(&resolved) {
                     continue;
                 }
                 matched.insert(resolved);
+            }
+            // A spawned rollout whose spawner is here travels inside it —
+            // unless it was named on its own.
+            if matches!(agent, Agent::Codex) && spawns.nested.contains(&file) && !named {
+                continue;
             }
             let text = match std::fs::read_to_string(&file) {
                 Ok(text) => text,
@@ -1170,6 +1486,10 @@ fn collect_sessions(
                 unparsed += 1;
                 continue;
             };
+            match agent {
+                Agent::ClaudeCode => claude::attach(&mut record, claude::children(&file)),
+                Agent::Codex => spawns.attach(&mut record, 0),
+            }
             // Opt-in is decided on the cwds as the log recorded them, before
             // anything is rewritten for the wire.
             let opted = opted_in(&record, &allowlist.allowed);
@@ -1207,6 +1527,82 @@ fn collect_sessions(
         )));
     }
     Ok((sessions, unreadable, unparsed))
+}
+
+/// Which Codex rollouts were spawned by which: every rollout's first line,
+/// read once per run (the whole tree, whatever `--session` names — a named
+/// session's spawned agents are files of their own).
+struct CodexSpawns {
+    /// Spawned rollouts by the id of the thread that spawned them, in file
+    /// order.
+    children: BTreeMap<String, Vec<(PathBuf, codex::Spawned)>>,
+    /// The spawned rollouts whose spawner is in the tree: not sessions of
+    /// their own.
+    nested: BTreeSet<PathBuf>,
+}
+
+impl CodexSpawns {
+    fn index(dir: &Path) -> Self {
+        use std::io::BufRead;
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        let mut spawned: Vec<(PathBuf, codex::Spawned)> = Vec::new();
+        for file in session_files(dir, None) {
+            let Ok(handle) = std::fs::File::open(&file) else {
+                continue;
+            };
+            let mut first = String::new();
+            if std::io::BufReader::new(handle)
+                .read_line(&mut first)
+                .is_err()
+            {
+                continue;
+            }
+            if let Ok(line) = serde_json::from_str::<Value>(&first)
+                && let Some(id) = line
+                    .get("payload")
+                    .and_then(|payload| payload.get("id"))
+                    .and_then(Value::as_str)
+            {
+                ids.insert(id.to_owned());
+            }
+            if let Some(spawn) = codex::spawned(&first) {
+                spawned.push((file, spawn));
+            }
+        }
+        let mut children: BTreeMap<String, Vec<(PathBuf, codex::Spawned)>> = BTreeMap::new();
+        let mut nested = BTreeSet::new();
+        for (file, spawn) in spawned {
+            if ids.contains(&spawn.parent) {
+                nested.insert(file.clone());
+                children
+                    .entry(spawn.parent.clone())
+                    .or_default()
+                    .push((file, spawn));
+            }
+        }
+        Self { children, nested }
+    }
+
+    /// Nest every rollout `record`'s thread spawned, each with its own.
+    fn attach(&self, record: &mut SessionRecord, depth: usize) {
+        // Codex nests a handful deep; a loop in a corrupt tree stops here.
+        if depth > 8 {
+            return;
+        }
+        let Some(children) = self.children.get(&record.session_id) else {
+            return;
+        };
+        for (file, spawn) in children {
+            let Some(mut child) = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|text| codex::collect(&text))
+            else {
+                continue;
+            };
+            self.attach(&mut child, depth + 1);
+            codex::attach(record, child, spawn);
+        }
+    }
 }
 
 /// Upload the opted-in sessions, one POST each. This is the command's first
@@ -1564,7 +1960,7 @@ mod tests {
     #[test]
     fn claude_totals_count_a_split_message_once() {
         let record = collect(CLAUDE_SESSION, Agent::ClaudeCode).expect("a session");
-        assert_eq!(record.schema_version, 2);
+        assert_eq!(record.schema_version, 3);
         assert_eq!(record.agent, "claude_code");
         assert_eq!(record.session_id, "3f2a9c1e-5b7d-4e8a-9c1f-2a4b6d8e0f1a");
         assert_eq!(record.repo, "/home/alice/code/demo");
@@ -1771,7 +2167,7 @@ mod tests {
             assert!(!body.contains(secret), "{body}");
             assert!(!body.contains("/home/alice"), "{body}");
             let parsed: Value = serde_json::from_str(&body).expect("the body parses");
-            assert_eq!(parsed["schema_version"], 2);
+            assert_eq!(parsed["schema_version"], 3);
             assert_eq!(parsed["detail"], "full");
         }
         let (body, _) = body_of(CLAUDE_FULL, Agent::ClaudeCode, Detail::Full);
@@ -1868,7 +2264,7 @@ mod tests {
             let second = body_of(text, agent, Detail::Full).0;
             assert_eq!(first, second);
             assert!(
-                first.starts_with("{\"schema_version\":2,"),
+                first.starts_with("{\"schema_version\":3,"),
                 "schema_version must lead the body: {first}"
             );
         }
@@ -2029,12 +2425,12 @@ mod tests {
         assert_eq!(
             serialise(&record),
             concat!(
-                r#"{"schema_version":2,"agent":"claude_code","collector_version":2,"#,
+                r#"{"schema_version":3,"agent":"claude_code","collector_version":2,"#,
                 r#""detail":"full","session_id":"","repo":"","branch":null,"models":[],"#,
                 r#""started_at":null,"ended_at":null,"turns":[],"totals":{"input_tokens":0,"#,
                 r#""output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"#,
                 r#""reasoning_tokens":0,"cost_usd":null},"outcome":null,"truncated":false,"#,
-                r#""omitted_turns":0}"#
+                r#""omitted_turns":0,"omitted_subagent_turns":0}"#
             )
         );
     }
@@ -2076,5 +2472,241 @@ mod tests {
         assert_eq!(project_of("~"), None);
         assert_eq!(project_of("~/.."), None);
         assert_eq!(project_of("/"), None);
+    }
+
+    /// The subagent fixtures: a Claude Code session whose background
+    /// `Explore` agent launched a nested `general-purpose` one, and a Codex
+    /// rollout whose `spawn_agent` call started a rollout of its own.
+    const SUB_MAIN: &str = include_str!(
+        "../tests/fixtures/logs-sub/claude/projects/-home-alice-code-demo/9a8b7c6d-1e2f-4a3b-8c9d-0e1f2a3b4c5d.jsonl"
+    );
+    const SUB_A1: &str = include_str!(
+        "../tests/fixtures/logs-sub/claude/projects/-home-alice-code-demo/9a8b7c6d-1e2f-4a3b-8c9d-0e1f2a3b4c5d/subagents/agent-a1111.jsonl"
+    );
+    const SUB_A1_META: &str = include_str!(
+        "../tests/fixtures/logs-sub/claude/projects/-home-alice-code-demo/9a8b7c6d-1e2f-4a3b-8c9d-0e1f2a3b4c5d/subagents/agent-a1111.meta.json"
+    );
+    const SUB_A2: &str = include_str!(
+        "../tests/fixtures/logs-sub/claude/projects/-home-alice-code-demo/9a8b7c6d-1e2f-4a3b-8c9d-0e1f2a3b4c5d/subagents/agent-a2222.jsonl"
+    );
+    const SUB_A2_META: &str = include_str!(
+        "../tests/fixtures/logs-sub/claude/projects/-home-alice-code-demo/9a8b7c6d-1e2f-4a3b-8c9d-0e1f2a3b4c5d/subagents/agent-a2222.meta.json"
+    );
+    const CODEX_PARENT: &str = include_str!(
+        "../tests/fixtures/logs-sub/codex/sessions/2026/10/02/rollout-2026-10-02T11-00-00-01a00000-0000-7000-8000-000000000001.jsonl"
+    );
+    const CODEX_CHILD: &str = include_str!(
+        "../tests/fixtures/logs-sub/codex/sessions/2026/10/02/rollout-2026-10-02T11-00-02-01a00000-0000-7000-8000-000000000002.jsonl"
+    );
+
+    /// The Claude subagent session, its two transcripts nested — children
+    /// handed over in reverse, so the order of the files does not matter.
+    fn claude_with_subagents() -> super::SessionRecord {
+        let mut record = collect(&planted(SUB_MAIN), Agent::ClaudeCode).expect("a session");
+        let child = |id: &str, text: &str, meta: &str| super::claude::Child {
+            agent_id: id.to_owned(),
+            meta: serde_json::from_str(meta).expect("meta parses"),
+            text: planted(text),
+        };
+        super::claude::attach(
+            &mut record,
+            vec![
+                child("a2222", SUB_A2, SUB_A2_META),
+                child("a1111", SUB_A1, SUB_A1_META),
+            ],
+        );
+        record
+    }
+
+    /// A subagent's transcript lands in the call that launched it, with its
+    /// name, model, status (the last task notification's), totals and its
+    /// own turns — and the subagent it launched lands inside it.
+    #[test]
+    fn claude_subagents_nest_in_the_calls_that_launched_them() {
+        let mut record = claude_with_subagents();
+        prepare(&mut record, Detail::Full, &None, false, Path::new("x")).expect("prepares");
+        let call = &record.turns[1].tool_calls[0];
+        assert_eq!(call.name, "Agent");
+        assert_eq!(call.status, Some("ok"));
+        // The launch receipt gives way to what the subagent said.
+        assert_eq!(
+            call.output.as_deref(),
+            Some("Two loggers: src/a.rs and src/b.rs.")
+        );
+        let sub = call.subagent.as_deref().expect("the explorer");
+        assert_eq!(sub.id, "a1111");
+        assert_eq!(sub.name, "Explore");
+        assert_eq!(sub.description.as_deref(), Some("Survey logging"));
+        assert_eq!(sub.models, ["claude-haiku-4-5"]);
+        assert_eq!(sub.status, Some("completed"));
+        assert_eq!(sub.started_at.as_deref(), Some("2026-10-02T10:00:06.500Z"));
+        assert_eq!(sub.ended_at.as_deref(), Some("2026-10-02T10:01:30.000Z"));
+        assert_eq!(sub.totals.input_tokens, 180);
+        assert_eq!(sub.totals.output_tokens, 45);
+        assert_eq!(sub.turns.len(), 4);
+        assert_eq!(sub.turns[1].model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(sub.turns[2].model, None, "the same model is named once");
+        let nested = sub.turns[2].tool_calls[0]
+            .subagent
+            .as_deref()
+            .expect("the nested agent");
+        assert_eq!(nested.name, "general-purpose");
+        assert_eq!(nested.status, Some("completed"));
+        assert_eq!(nested.final_answer(), Some("a.rs is fine."));
+        // The main agent's model, named where it changes.
+        assert_eq!(record.turns[1].model.as_deref(), Some("claude-opus-4-5"));
+        assert_eq!(
+            record.turns.last().unwrap().model.as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        // The notification lines are machinery, not turns.
+        assert!(!serialise(&record).contains("task-notification"));
+        // The session totals are the main agent's own.
+        assert_eq!(record.totals.input_tokens, 300);
+    }
+
+    /// A secret inside a subagent's tool output is redacted like one in the
+    /// session's own, and the home prefix goes from a subagent's command.
+    #[test]
+    fn subagent_turns_are_redacted_and_home_elided() {
+        let mut record = claude_with_subagents();
+        let (body, findings) = prepare(
+            &mut record,
+            Detail::Full,
+            &Some("/home/alice".into()),
+            true,
+            Path::new("x"),
+        )
+        .expect("prepares")
+        .expect("a body");
+        assert!(findings >= 1, "{body}");
+        assert!(!body.contains(&["AKIA", "IOSFODNN7"].concat()), "{body}");
+        assert!(!body.contains("/home/alice"), "{body}");
+        let parsed: Value = serde_json::from_str(&body).expect("parses");
+        let sub = &parsed["turns"][1]["tool_calls"][0]["subagent"];
+        assert_eq!(
+            sub["turns"][1]["tool_calls"][0]["input"],
+            "rg -n logger ~/code/demo/src"
+        );
+        assert!(
+            sub["turns"][1]["tool_calls"][0]["output"]
+                .as_str()
+                .unwrap()
+                .contains("[REDACTED:")
+        );
+    }
+
+    /// Detail levels reach inside: under `messages` a subagent keeps its
+    /// header and messages, its calls their names and their own subagents.
+    #[test]
+    fn detail_levels_apply_inside_subagents() {
+        let mut record = claude_with_subagents();
+        let (body, _) = prepare(&mut record, Detail::Messages, &None, true, Path::new("x"))
+            .expect("prepares")
+            .expect("a body");
+        let parsed: Value = serde_json::from_str(&body).expect("parses");
+        let sub = &parsed["turns"][1]["tool_calls"][0]["subagent"];
+        assert_eq!(sub["name"], "Explore");
+        assert_eq!(
+            sub["turns"][1]["tool_calls"][0],
+            serde_json::json!({"name": "Bash"})
+        );
+        assert_eq!(
+            sub["turns"][2]["tool_calls"][0]["subagent"]["turns"][1]["text"],
+            "a.rs is fine."
+        );
+        assert!(!body.contains("rg -n logger"), "{body}");
+    }
+
+    /// Over the cap, subagents lose their inner turns first — oldest first,
+    /// each keeping its header and final answer — and the main conversation
+    /// keeps every turn while that is enough.
+    #[test]
+    fn the_size_cap_trims_subagents_first() {
+        let mut record = claude_with_subagents();
+        let sub = record.turns[1].tool_calls[0].subagent.as_mut().unwrap();
+        let filler = "w".repeat(8000);
+        let answer = sub.turns.pop().unwrap();
+        for index in 0..150 {
+            let mut turn = super::Turn::new(Role::Assistant, "", &format!("step {index}"));
+            turn.tool_calls.push(super::ToolCall {
+                name: "Bash".to_owned(),
+                output: Some(filler.clone()),
+                ..super::ToolCall::default()
+            });
+            sub.turns.push(turn);
+        }
+        sub.turns.push(answer);
+        let main_turns = record.turns.len();
+        cap(&mut record);
+        let body = serialise(&record);
+        assert!(body.len() <= MAX_SESSION_BODY_BYTES);
+        assert!(escaped_len(&body) <= MAX_ESCAPED_BODY_BYTES);
+        assert!(record.truncated);
+        assert_eq!(record.omitted_turns, 0, "the main conversation is whole");
+        assert_eq!(record.turns.len(), main_turns);
+        let sub = record.turns[1].tool_calls[0].subagent.as_deref().unwrap();
+        assert!(sub.truncated);
+        assert!(sub.omitted_turns > 0);
+        assert_eq!(record.omitted_subagent_turns, sub.omitted_turns);
+        assert_eq!(sub.turns[0].role, Role::Event);
+        assert!(sub.turns[0].text.contains("of this subagent omitted"));
+        assert_eq!(
+            sub.final_answer(),
+            Some("Two loggers: src/a.rs and src/b.rs.")
+        );
+        assert_eq!(sub.name, "Explore", "the header stays");
+        // The newest steps are what is left besides the answer.
+        assert!(sub.turns[sub.turns.len() - 2].text.starts_with("step 149"));
+    }
+
+    /// A spawned Codex rollout nests in its `spawn_agent` call, matched by
+    /// the path the call's result names; the call's result becomes what the
+    /// agent said.
+    #[test]
+    fn codex_spawned_rollouts_nest_in_their_spawn_call() {
+        let first = CODEX_CHILD.lines().next().unwrap();
+        let spawn = super::codex::spawned(first).expect("a spawned rollout");
+        assert_eq!(spawn.path, "/root/scan");
+        assert_eq!(spawn.role, "explorer");
+        assert!(super::codex::spawned(CODEX_PARENT.lines().next().unwrap()).is_none());
+        let mut record = collect(CODEX_PARENT, Agent::Codex).expect("a session");
+        let child = collect(CODEX_CHILD, Agent::Codex).expect("the child");
+        super::codex::attach(&mut record, child, &spawn);
+        prepare(&mut record, Detail::Full, &None, false, Path::new("x")).expect("prepares");
+        let call = &record.turns[1].tool_calls[0];
+        assert_eq!(call.name, "spawn_agent");
+        assert_eq!(call.output.as_deref(), Some("One TODO, in src/a.rs."));
+        let sub = call.subagent.as_deref().expect("the spawned agent");
+        assert_eq!(sub.name, "explorer");
+        assert_eq!(sub.description.as_deref(), Some("Gibbs: scan"));
+        assert_eq!(sub.models, ["gpt-5.1-codex-mini"]);
+        assert_eq!(sub.status, Some("completed"));
+        assert_eq!(sub.totals.input_tokens, 300);
+        assert_eq!(
+            sub.turns[1].tool_calls[0].input.as_deref(),
+            Some("rg -n TODO")
+        );
+        assert_eq!(record.turns[1].model.as_deref(), Some("gpt-5.1-codex"));
+    }
+
+    /// The first assistant turn that survives the cap names its model, even
+    /// when the one that named it first was cut.
+    #[test]
+    fn the_model_is_named_after_the_cap() {
+        let mut record = super::empty_record(Agent::ClaudeCode, 3);
+        for (index, model) in ["a", "a", "b", "b", "a"].iter().enumerate() {
+            let mut turn = super::Turn::new(Role::Assistant, "", &format!("t{index}"));
+            turn.model = Some((*model).to_owned());
+            record.turns.push(turn);
+        }
+        record.turns.remove(0);
+        super::mark_model_changes(&mut record.turns);
+        let models: Vec<Option<&str>> = record
+            .turns
+            .iter()
+            .map(|turn| turn.model.as_deref())
+            .collect();
+        assert_eq!(models, [Some("a"), Some("b"), None, Some("a")]);
     }
 }

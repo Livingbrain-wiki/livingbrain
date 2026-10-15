@@ -94,8 +94,14 @@ summaries folded, tool calls with their commands, patches and results, long
 results folded. Nothing is drawn with `innerHTML`: every node is built
 element by element, so nothing in a transcript can become markup.
 
+A subagent is a card inside the call that launched it — `🤖 name · model ·
+duration · tokens · status`, its task, its final answer — indented on a rule,
+with its other turns drawn only when **Show steps** is pressed (a subagent can
+run hundreds). The session's header names its main model and its subagents,
+and a turn names its model where it changed.
+
 The Mac app's Recent Sessions view shows the same record, built locally by
-`livingbrain logs show <file>`.
+`livingbrain logs show <file>`, subagents nested the same way.
 
 Notes are idempotent too. Each is keyed by agent and session —
 `agent-log-<agent>-<session-id>` — so a session that grew updates its one
@@ -145,11 +151,12 @@ exactly the sessions you meant to keep off the wire.
 
 ## What a session becomes
 
-Both formats normalise into one record, versioned with `schema_version` (2)
-and a per-collector `collector_version` (2): the agent, the `detail` level it
+Both formats normalise into one record, versioned with `schema_version` (3)
+and a per-collector `collector_version` (3): the agent, the `detail` level it
 was built at, session id, repository, branch, models, first and last
 timestamp, the turns, totals (tokens in/out, cache read/write, reasoning, cost
-when the log reports one), `truncated`, and `omitted_turns`.
+when the log reports one — the main agent's own; each subagent carries its
+own), `truncated`, `omitted_turns` and `omitted_subagent_turns`.
 
 The turns are the conversation in order. Each has a `role`, a timestamp, its
 `text` and its `tool_calls`:
@@ -160,8 +167,10 @@ The turns are the conversation in order. Each has a `role`, a timestamp, its
   output, task notifications and meta lines; Codex's `developer` messages,
   `<permissions instructions>`, `<environment_context>`, `<user_instructions>`,
   AGENTS.md dumps and the like. A user line that was only machinery is no turn.
-- `assistant` — the agent's text, and the tool calls of that step, each
-  `{name, format?, path?, input?, output?, status?, exit_code?}`: `input` is
+- `assistant` — the agent's text, the `model` that wrote it (named only where
+  it differs from the list's previous assistant turn, so a session on one
+  model names it once), and the tool calls of that step, each
+  `{name, format?, path?, input?, output?, status?, exit_code?, subagent?}`: `input` is
   the command (`exec_command`'s `cmd`, `Bash`'s `command`), the patch
   (`apply_patch`), the diff of an `Edit` under its `path`, or the arguments as
   compact JSON; `format` (`shell`, `diff`, `json`, `text`) says how to show
@@ -182,7 +191,50 @@ A message is kept whole up to 256 KiB (beyond that, its first and last
 
 A version-1 record (from a build before this one) reads the same way: its
 tool calls are names, it has no `reasoning` or `event` turns, and its text was
-cut to 2 000 characters.
+cut to 2 000 characters. A version-2 record has no `subagent`, no turn
+`model` and no `omitted_subagent_turns`; it reads the same way too.
+
+### Subagents
+
+A tool call that launched a subagent carries the subagent's whole session
+in `subagent`, every field always present, in this order:
+
+```json
+{"name": "Agent", "format": "text", "input": "Find every logger in src/",
+ "output": "Two loggers: src/a.rs and src/b.rs.", "status": "ok",
+ "subagent": {
+   "id": "a1111", "name": "Explore", "description": "Survey logging",
+   "models": ["claude-haiku-4-5"],
+   "started_at": "2026-10-02T10:00:06.500Z", "ended_at": "2026-10-02T10:01:30.000Z",
+   "status": "completed",
+   "totals": {"input_tokens": 180, "output_tokens": 45, "cache_read_tokens": 0,
+              "cache_creation_tokens": 0, "reasoning_tokens": 0, "cost_usd": null},
+   "turns": [ …the same turn shape, recursively: its own tool calls and subagents… ],
+   "truncated": false, "omitted_turns": 0}}
+```
+
+`name` is the kind of agent (Claude Code's `subagent_type`, Codex's agent
+role, Colonizer's subagent), `description` what the launch said it was for,
+`status` one of `completed`, `failed`, `stopped`, `running` (or `null` when
+the log does not say). The call's `output` is the subagent's last words, as
+a foreground call's result already is — a background launch's receipt is
+replaced by them. The detail level, home elision, redaction and the clips all
+apply inside a subagent exactly as outside it.
+
+- **Claude Code** writes each subagent's transcript beside the session:
+  `~/.claude/projects/<dir>/<session>/subagents/agent-<id>.jsonl`, and its
+  launch in `agent-<id>.meta.json` (`agentType`, `description`, the
+  launching `toolUseId`, `parentAgentId` for one a subagent launched). The
+  transcript nests in the call with that id — the session's own, or the
+  parent subagent's — and the status is the last `<task-notification>` for
+  that call (else the call's result). The subagent's working directories
+  count for the opt-in like the session's own.
+- **Codex** writes a spawned agent's rollout as a file of its own, whose
+  `session_meta` names `source.subagent.thread_spawn` (`parent_thread_id`,
+  `agent_path`, `agent_role`, `agent_nickname`). It nests in the
+  `spawn_agent` call whose result names that path, and is no longer synced as
+  a session of its own. Codex's own helpers (`source.subagent.other`) are
+  still sessions of their own.
 
 Two formats, two rules worth knowing:
 
@@ -218,9 +270,14 @@ socket sends. A secret in a tool's output is redacted like one in a message.
 | the record's body | 768 KiB (three quarters of redaction's 1 MiB input cap, which the server applies to the whole body on arrival) and 992 KiB once JSON-escaped (what `GET /v1/sources/{id}` answers it inside, under the edge's 1 MiB response buffer) |
 | the note | 48 KiB JSON-escaped (the notes route takes 64 KiB) |
 
-A session past the body cap keeps its opening turn and its most recent ones:
-the oldest turns after the opening are removed whole, an `event` turn says how
-many, `truncated` is `true` and `omitted_turns` counts them. One session is
+A session past the body cap loses its subagents' detail first: subagent by
+subagent, oldest first, each loses its inner turns from the oldest on — never
+its header or its final answer — until the body fits; the removed run becomes
+one `event` turn in the subagent, which says so in its own `truncated` and
+`omitted_turns`, and the record counts them in `omitted_subagent_turns`.
+Still past the cap, the session keeps its opening turn and its most recent
+ones: the oldest turns after the opening are removed whole, an `event` turn
+says how many, `truncated` is `true` and `omitted_turns` counts them. One session is
 one source either way, so the ledger's `(scope, sha256)` key still holds.
 
 ## Idempotency
@@ -272,8 +329,10 @@ workspace's shared ones — never another member's, never another workspace's.
 
 ### `GET /v1/sources`
 
-`?kind=&project=&limit=&cursor=`, bearer-authenticated exactly like
-`GET /v1/sources/{id}`. `limit` defaults to 50 and is clamped to 100; a
+`?kind=&project=&agent=&limit=&cursor=`, bearer-authenticated exactly like
+`GET /v1/sources/{id}`. `agent` narrows to the sessions one agent wrote
+(`claude_code`, `codex`, `colonizer`: the first word of the session's
+`path`). `limit` defaults to 50 and is clamped to 100; a
 `kind` or `project` outside its rule is a `400 validation-failed`, not an
 empty list. Rows are newest first (ULID order); `next_cursor` is the last
 id of a full page, `null` on the last one.

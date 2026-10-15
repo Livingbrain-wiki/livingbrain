@@ -204,6 +204,14 @@ struct SessionDetail: View {
                     Text("Models").foregroundStyle(.secondary)
                     Text(row.session.models.isEmpty ? "—" : row.session.models.joined(separator: ", "))
                 }
+                if case let .loaded(shown) = model.transcript, let record = shown.displayRecord,
+                   !record.subagents.isEmpty
+                {
+                    GridRow {
+                        Text("Subagents").foregroundStyle(.secondary)
+                        Text(SubagentList.summary(record.subagents))
+                    }
+                }
                 GridRow {
                     Text("Usage").foregroundStyle(.secondary)
                     Text(usage(row.session))
@@ -264,7 +272,8 @@ struct SessionDetail: View {
                     .font(.caption).foregroundStyle(.secondary)
                     if let record = shown.displayRecord {
                         if record.truncated { Text("Truncated to fit the upload limit.").font(.caption).foregroundStyle(.secondary) }
-                        ForEach(record.turns) { turn in TurnBubble(turn: turn) }
+                        let badges = SessionRecord.modelBadges(record.turns, startingWith: record.mainModel)
+                        ForEach(record.turns) { turn in TurnBubble(turn: turn, badge: badges[turn.id]) }
                     } else if let body = shown.body {
                         Text("Shown as the exact text sync sends (redaction left it unparseable as JSON).")
                             .font(.caption).foregroundStyle(.orange)
@@ -281,6 +290,8 @@ struct SessionDetail: View {
 
 struct TurnBubble: View {
     let turn: SessionRecord.Turn
+    /// The model to name on this turn, where it changed.
+    var badge: String? = nil
 
     var body: some View {
         switch turn.role {
@@ -308,6 +319,13 @@ struct TurnBubble: View {
                 Label(isUser ? "You" : "Agent", systemImage: isUser ? "person.fill" : "cpu")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(isUser ? Theme.accent : .secondary)
+                if let badge {
+                    Text(badge)
+                        .font(.caption2.monospaced())
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                        .help("The model changed here")
+                }
                 Spacer()
                 if let at = turn.at.flatMap(ISODate.parse) {
                     Text(at.formatted(date: .omitted, time: .shortened)).font(.caption2).foregroundStyle(.tertiary)
@@ -346,7 +364,17 @@ struct ToolCallBlock: View {
                     Text(status).font(.caption2).foregroundStyle(call.status == "error" ? .red : .secondary)
                 }
             }
-            if let input = call.input {
+            if let subagent = call.subagent {
+                if let input = call.input {
+                    DisclosureGroup {
+                        Text(input).font(.caption.monospaced()).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } label: {
+                        Text("Prompt").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                SubagentCard(subagent: subagent)
+            } else if let input = call.input {
                 Text(input)
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
@@ -354,7 +382,7 @@ struct ToolCallBlock: View {
                     .padding(6)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
             }
-            if let output = call.output {
+            if let output = call.output, call.subagent == nil {
                 let lines = ToolCallSummary.lineCount(output)
                 DisclosureGroup(isExpanded: $expanded) {
                     Text(output)
@@ -389,5 +417,64 @@ struct FlowTools: View {
             }
             if counted.count > 8 { Text("+\(counted.count - 8)").font(.caption2).foregroundStyle(.secondary) }
         }
+    }
+}
+
+/// A subagent nested under the call that launched it: its header (who, on
+/// what model, how long, at what cost, how it ended), its task, its final
+/// answer, and its other turns behind "Show steps" — built only when opened,
+/// since a subagent can run hundreds of turns.
+struct SubagentCard: View {
+    let subagent: SessionRecord.Subagent
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "person.2.wave.2").font(.caption).foregroundStyle(Theme.accent)
+                Text(subagent.header)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(subagent.status == "failed" ? .red : .primary)
+                    .textSelection(.enabled)
+            }
+            if let description = subagent.description {
+                Text(description).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if subagent.truncated {
+                Text("\(subagent.omittedTurns) of its turns were left out to fit the upload limit.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if let answer = subagent.finalAnswer {
+                Text(answer).font(.callout).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            let steps = subagent.steps
+            if !steps.isEmpty {
+                DisclosureGroup(isExpanded: $expanded) {
+                    if expanded {
+                        let badges = SessionRecord.modelBadges(steps, startingWith: subagent.models.first)
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(steps) { turn in AnyView(TurnBubble(turn: turn, badge: badges[turn.id])) }
+                        }
+                    }
+                } label: {
+                    Text(expanded ? "Hide steps" : "Show \(steps.count) step\(steps.count == 1 ? "" : "s")")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+        .overlay(alignment: .leading) { Rectangle().fill(Theme.accent.opacity(0.7)).frame(width: 3) }
+    }
+}
+
+/// The header's one-line count of a session's subagents, by kind.
+enum SubagentList {
+    static func summary(_ subagents: [SessionRecord.Subagent]) -> String {
+        var counts: [String: Int] = [:]
+        for sub in subagents { counts[sub.name, default: 0] += 1 }
+        let kinds = counts.sorted { $0.key < $1.key }.map { "\($0.key) ×\($0.value)" }
+        return "\(subagents.count) (\(kinds.joined(separator: ", ")))"
     }
 }

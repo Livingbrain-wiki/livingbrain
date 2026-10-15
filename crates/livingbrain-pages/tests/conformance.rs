@@ -169,6 +169,32 @@ fn the_source_listing_holds_on_every_dialect() {
             want.sort();
             assert_eq!(demo_ids, want, "{dialect}: only my and the shared `demo`");
 
+            let by_agent = |agent: &'static str| {
+                let store = &store;
+                async move {
+                    store
+                        .list(
+                            WS_ONE,
+                            &mine,
+                            &SourceFilter {
+                                agent: Some(agent.to_owned()),
+                                ..SourceFilter::default()
+                            },
+                            50,
+                        )
+                        .await
+                        .expect("a listing")
+                }
+            };
+            assert_eq!(
+                by_agent("claude-code").await.len(),
+                3,
+                "{dialect}: my two sessions and the shared one"
+            );
+            assert!(by_agent("codex").await.is_empty(), "{dialect}");
+            // `_` is literal, not a wildcard: `claude_code` is not `claude-code`.
+            assert!(by_agent("claude_code").await.is_empty(), "{dialect}");
+
             let imports = store
                 .list(
                     WS_ONE,
