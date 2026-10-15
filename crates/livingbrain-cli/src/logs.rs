@@ -1042,8 +1042,9 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
             "{} session {}",
             session.record.agent, session.record.session_id
         );
+        let project = project_of(&session.record.repo);
         let value = client
-            .post_source(SOURCE_KIND, &title, body, SCOPE)
+            .post_source(SOURCE_KIND, &title, body, SCOPE, project.as_deref())
             .map_err(|error| err(format!("{title}: {error}")))?;
         session.uploaded = Some(crate::text(&value, "id").to_owned());
         session.created = value
@@ -1062,6 +1063,33 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
         }
     }
     Ok(())
+}
+
+/// The project a session is filed under: the basename of its repository,
+/// cut down to the server's project rule (ASCII letters, digits, `.`, `_`
+/// and `-`, starting with a letter or digit, at most 64 bytes). Any other
+/// character becomes `-`. `None` when the session recorded no repository, or
+/// nothing of its name survives — the upload then simply names no project.
+///
+/// Only the basename travels in this field: the full (home-elided) path is
+/// already inside the record, and a project is a filter, not a location.
+fn project_of(repo: &str) -> Option<String> {
+    let base = repo
+        .rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty() && *segment != "~")?;
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+    let project: String = trimmed.chars().take(64).collect();
+    (!project.is_empty()).then_some(project)
 }
 
 /// The report, JSON or human: one line per session, then the counts.
@@ -1286,7 +1314,7 @@ fn short_id(id: &str) -> String {
 mod tests {
     use super::{
         Agent, MAX_SESSION_BODY_BYTES, MAX_TURN_TEXT_CHARS, cap, collect, elide_home, is_inside,
-        parse_allowlist, serialise, truncate_text,
+        parse_allowlist, project_of, serialise, truncate_text,
     };
 
     /// The fixtures, embedded at compile time: the same bytes the integration
@@ -1537,5 +1565,34 @@ mod tests {
                 r#""cost_usd":null},"outcome":null,"truncated":false}"#
             )
         );
+    }
+
+    /// The project a session uploads under is its repository's basename,
+    /// cut to the server's project rule — and nothing at all when there is
+    /// no repository to name.
+    #[test]
+    fn the_project_is_the_repository_basename_within_the_server_rule() {
+        assert_eq!(project_of("~/code/demo").as_deref(), Some("demo"));
+        assert_eq!(
+            project_of("/home/alice/code/demo/").as_deref(),
+            Some("demo")
+        );
+        assert_eq!(
+            project_of(r"C:\Users\alice\livingbrain").as_deref(),
+            Some("livingbrain")
+        );
+        assert_eq!(
+            project_of("~/My Repo (old)").as_deref(),
+            Some("My-Repo--old-")
+        );
+        assert_eq!(project_of("~/.dotfiles").as_deref(), Some("dotfiles"));
+        assert_eq!(
+            project_of(&format!("~/{}", "a".repeat(80))).map(|p| p.len()),
+            Some(64)
+        );
+        assert_eq!(project_of(""), None);
+        assert_eq!(project_of("~"), None);
+        assert_eq!(project_of("~/.."), None);
+        assert_eq!(project_of("/"), None);
     }
 }

@@ -721,3 +721,109 @@ fn a_body_past_the_route_ceiling_is_a_problem_not_a_crash() {
     );
     assert_eq!(row_count(&fixture), 0, "nothing was stored");
 }
+
+// ---------------------------------------------------------------------------
+// The project a source is filed under
+
+/// `project` files a source for the listing (`GET /v1/sources?project=`):
+/// it comes back in the answer, trimmed, and lands in the row's own column.
+/// An upload that names none leaves the column NULL, and a re-upload of that
+/// same body that does name one files the row it finds — the key is still
+/// `(scope, sha256)`, so it is never a second row.
+#[test]
+fn a_project_files_the_source_and_a_reupload_fills_it_in() {
+    let fixture = world();
+    let session = json!({ "kind": "agent_log", "path": "codex session p1", "body": "{\"p\":1}" });
+
+    let unfiled = post(&fixture, "token-a", session.clone());
+    assert_eq!(unfiled.status, StatusCode::CREATED, "{}", body_of(&unfiled));
+    assert_eq!(unfiled.json()["project"], Value::Null);
+
+    let mut with_project = session.clone();
+    with_project["project"] = json!("  livingbrain ");
+    let filed = post(&fixture, "token-a", with_project);
+    assert_eq!(filed.status, StatusCode::OK, "{}", body_of(&filed));
+    assert_eq!(filed.json()["id"], unfiled.json()["id"]);
+    assert_eq!(filed.json()["project"], "livingbrain", "trimmed and filed");
+    assert_eq!(row_count(&fixture), 1, "a re-upload is never a second row");
+
+    // A later upload naming another project does not move the row.
+    let mut moved = session;
+    moved["project"] = json!("elsewhere");
+    let kept = post(&fixture, "token-a", moved);
+    assert_eq!(kept.json()["project"], "livingbrain", "{}", body_of(&kept));
+
+    let stored = rows(&fixture, "SELECT project FROM sources");
+    assert_eq!(
+        stored[0].get::<String>("project").as_deref(),
+        Some("livingbrain")
+    );
+
+    // An empty project is no project, not a project called nothing.
+    let blank = post(
+        &fixture,
+        "token-a",
+        json!({ "kind": "agent_log", "path": "codex session p2", "body": "{\"p\":2}", "project": "" }),
+    );
+    assert_eq!(blank.status, StatusCode::CREATED, "{}", body_of(&blank));
+    assert_eq!(blank.json()["project"], Value::Null);
+}
+
+/// A project outside the rule is refused before anything is stored: it is a
+/// filter value and a column an index is built over, not free text.
+#[test]
+fn a_project_outside_the_rule_is_a_400() {
+    let fixture = world();
+    for project in [
+        json!("../etc"),
+        json!("has space"),
+        json!("-leading-dash"),
+        json!("x".repeat(65)),
+        json!(7),
+    ] {
+        let response = post(
+            &fixture,
+            "token-a",
+            json!({ "path": "one.md", "body": "# One\n", "project": project }),
+        );
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{project}: {}",
+            body_of(&response)
+        );
+        let slug = problem_of(&response);
+        assert!(
+            slug.ends_with("sources/invalid-project") || slug.ends_with("sources/bad-body"),
+            "{project}: {slug}"
+        );
+    }
+    assert_eq!(row_count(&fixture), 0, "nothing was stored");
+}
+
+/// A project name is free text the caller chose, so the pipeline redacts it
+/// like the path — and one redaction found anything in is dropped, not
+/// stored with a redaction token in it: the source is kept, unfiled.
+#[test]
+fn a_secret_shaped_project_is_dropped_not_stored() {
+    let fixture = world();
+    // Assembled from fragments so push protection does not read the fixture
+    // as a leaked key; the whole still matches the redactor's AWS shape.
+    let key = ["AKIA", "IOSFODNN7", "EXAMPLE"].concat();
+    let response = post(
+        &fixture,
+        "token-a",
+        json!({ "path": "one.md", "body": "# One\n", "project": key }),
+    );
+    assert_eq!(
+        response.status,
+        StatusCode::CREATED,
+        "{}",
+        body_of(&response)
+    );
+    let answer = response.json();
+    assert_eq!(answer["project"], Value::Null, "{answer}");
+    assert!(answer["redacted"].as_u64().unwrap_or(0) >= 1, "{answer}");
+    let stored = rows(&fixture, "SELECT project FROM sources");
+    assert_eq!(stored[0].get::<String>("project"), None);
+}

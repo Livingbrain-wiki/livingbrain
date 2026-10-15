@@ -60,6 +60,15 @@ const MAX_REL_PATH_LEN: usize = 1024;
 const MAX_WIKILINKS: usize = 256;
 /// The longest a single link target may be, in bytes.
 const MAX_LINK_LEN: usize = 512;
+/// The longest project name a source may be filed under, in bytes.
+///
+/// A project is a repository's basename or a short label, not prose: 64 bytes
+/// is past any real repository name, and it bounds what the column and the
+/// `sources_by_project` index add to a row.
+pub const MAX_PROJECT_LEN: usize = 64;
+/// The most distinct projects [`SourceStore::projects`] answers with: a
+/// filter dropdown, not an export. Past this the list is cut, alphabetically.
+const MAX_PROJECTS: usize = 500;
 /// How much of the body's hash the blob key carries, so two files whose bodies
 /// share a prefix still land on different keys.
 const BODY_KEY_SHA_PREFIX: usize = 12;
@@ -120,6 +129,25 @@ impl SourceKind {
     }
 }
 
+/// Whether `value` is a project name a source may be filed under: 1 to
+/// [`MAX_PROJECT_LEN`] bytes of ASCII letters, digits, `.`, `_` and `-`,
+/// starting with a letter or a digit.
+///
+/// The rule is narrow on purpose. A project travels as a query parameter, a
+/// `<select>` option and a column an index is built over, and a name made of
+/// these characters needs no escaping in any of them; it also cannot carry a
+/// path separator, so a repository's basename is the most it can say about
+/// where the session ran.
+#[must_use]
+pub fn is_project(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PROJECT_LEN
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// One write: where the source came from, what it says, and who sent it.
 ///
 /// The body is **already redacted**. Nothing here re-checks it: the hash is of
@@ -147,6 +175,11 @@ pub struct SourceWrite {
     /// Screening's verdict, landed as a flag: a held source is stored but
     /// never extracted until [`SourceStore::release`] clears it.
     pub held: bool,
+    /// The project the source is filed under, when the caller named one
+    /// ([`is_project`]). A re-upload of a body already in the ledger that
+    /// names a project fills in a row that had none; it never moves a row
+    /// from one project to another.
+    pub project: Option<String>,
 }
 
 /// One row of the ledger.
@@ -174,7 +207,43 @@ pub struct Source {
     /// Whether screening held this source: stored, never extracted, until
     /// [`SourceStore::release`] clears the flag.
     pub held: bool,
+    /// The project the source is filed under, when one was named.
+    pub project: Option<String>,
     pub created_at: String,
+}
+
+/// One row of a listing: what a source is and where it is filed, without
+/// its body or anything a body would have to be opened for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSummary {
+    pub id: String,
+    /// The folded page scope the row landed in.
+    pub scope: String,
+    pub kind: SourceKind,
+    pub rel_path: String,
+    pub project: Option<String>,
+    pub held: bool,
+    pub created_at: String,
+}
+
+/// What [`SourceStore::list`] narrows to, beyond the asker's own rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceFilter {
+    /// Only sources of this kind.
+    pub kind: Option<SourceKind>,
+    /// Only sources filed under this project.
+    pub project: Option<String>,
+    /// Only sources older than this id — the previous page's last id, which
+    /// is the listing's cursor. Ids are ULIDs, so id order is arrival order.
+    pub before: Option<String>,
+}
+
+/// One project a listing can be filtered by, and how many of the asker's
+/// sources are filed under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectCount {
+    pub project: String,
+    pub sources: u64,
 }
 
 /// Everything an import can be refused for.
@@ -189,6 +258,8 @@ pub enum SourceError {
     InvalidScope(String),
     /// A path that is not a relative name inside a vault.
     InvalidPath(String),
+    /// A project name outside [`is_project`]'s rule.
+    InvalidProject(String),
     /// A stored row that does not parse (a source kind, or the link JSON).
     Corrupt(String),
     /// The scope's key was shredded (`forget_scope`), so what it sealed is
@@ -216,6 +287,7 @@ impl SourceError {
         match self {
             Self::InvalidScope(_) => "invalid-scope",
             Self::InvalidPath(_) => "invalid-path",
+            Self::InvalidProject(_) => "invalid-project",
             Self::Corrupt(_) => "corrupt",
             Self::Shredded(_) => "shredded",
             Self::KeyUnavailable { .. } => "key-unavailable",
@@ -280,6 +352,11 @@ impl std::fmt::Display for SourceError {
                 )
             }
             Self::InvalidPath(value) => write!(f, "invalid source path `{value}`"),
+            Self::InvalidProject(value) => write!(
+                f,
+                "invalid project `{value}`: ascii alnum, `.`, `_` and `-`, 1..={MAX_PROJECT_LEN} \
+                 bytes, starting with a letter or digit"
+            ),
             Self::Corrupt(message) => write!(f, "corrupt source row: {message}"),
             Self::Shredded(scope) => write!(
                 f,
@@ -387,9 +464,15 @@ impl SourceStore {
         if write.kind == SourceKind::Import {
             check_rel_path(&write.rel_path)?;
         }
+        if let Some(project) = &write.project
+            && !is_project(project)
+        {
+            return Err(SourceError::InvalidProject(project.clone()));
+        }
 
         let digest = keys::hex(&Sha256::digest(write.markdown.as_bytes()));
         if let Some(existing) = self.row(scope, &digest).await? {
+            let existing = self.file_under(existing, write.project.as_deref()).await?;
             return Ok((existing, false));
         }
 
@@ -423,8 +506,8 @@ impl SourceStore {
             .execute(&Statement::with_values(
                 "INSERT INTO sources \
                  (scope, body_sha256, id, kind, rel_path, wikilinks, body_key, key_version, \
-                  imported_by, created_at, workspace, origin_ref, author, held) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                  imported_by, created_at, workspace, origin_ref, author, held, project) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (scope, body_sha256) DO NOTHING",
                 vec![
                     text(scope),
@@ -441,6 +524,7 @@ impl SourceStore {
                     opt_text(&write.origin_ref),
                     opt_text(&write.author),
                     int(u32::from(write.held)),
+                    opt_text(&write.project),
                 ],
             ))
             .await;
@@ -464,11 +548,40 @@ impl SourceStore {
         if row.id != id {
             // Somebody else committed the same body between the read above and
             // the insert. Their row is the one that counts; this envelope has
-            // no row pointing at it and is not kept.
+            // no row pointing at it and is not kept — but the project this
+            // write named still files the row, exactly as a later re-upload's
+            // would.
             self.discard(&body_key).await;
+            let row = self.file_under(row, write.project.as_deref()).await?;
+            return Ok((row, false));
         }
-        let created = row.id == id;
-        Ok((row, created))
+        Ok((row, true))
+    }
+
+    /// Files an existing row under `project` when it has none yet, and hands
+    /// the row back as it now stands.
+    ///
+    /// Only ever fills a NULL: a row that already names a project keeps it,
+    /// whatever a later upload says. The body is the identity, and the first
+    /// project anyone filed it under is as good an answer as the second; a
+    /// re-upload that could move a row would let two clients that disagree
+    /// flip it back and forth forever. The `project IS NULL` in the update is
+    /// what holds that under a race, too.
+    async fn file_under(&self, row: Source, project: Option<&str>) -> Result<Source, SourceError> {
+        let Some(project) = project else {
+            return Ok(row);
+        };
+        if row.project.is_some() {
+            return Ok(row);
+        }
+        self.db
+            .execute(&Statement::with_values(
+                "UPDATE sources SET project = ? \
+                 WHERE scope = ? AND body_sha256 = ? AND project IS NULL",
+                vec![text(project), text(&row.scope), text(&row.body_sha256)],
+            ))
+            .await?;
+        Ok(self.row(&row.scope, &row.body_sha256).await?.unwrap_or(row))
     }
 
     /// Unlinks a body nothing points at, ignoring whether it succeeds.
@@ -526,7 +639,7 @@ impl SourceStore {
             .query(&Statement::with_values(
                 "SELECT scope, body_sha256, id, kind, rel_path, wikilinks, body_key, \
                         key_version, imported_by, created_at, workspace, origin_ref, author, \
-                        held \
+                        held, project \
                  FROM sources WHERE scope = ? AND body_sha256 = ?",
                 vec![text(scope), text(digest)],
             ))
@@ -550,12 +663,136 @@ impl SourceStore {
             .query(&Statement::with_values(
                 "SELECT scope, body_sha256, id, kind, rel_path, wikilinks, body_key, \
                         key_version, imported_by, created_at, workspace, origin_ref, author, \
-                        held \
+                        held, project \
                  FROM sources WHERE id = ? LIMIT 1",
                 vec![text(id)],
             ))
             .await?;
         rows.first().map(Self::map_row).transpose()
+    }
+
+    /// The sources in `workspace` whose scope is one of `scopes`, newest
+    /// first, narrowed by `filter`, at most `limit` of them.
+    ///
+    /// The two clauses are the citation route's own, applied to many rows at
+    /// once: a row is listed only when its workspace is the asker's **and**
+    /// its scope is one the asker's grant names. `scopes` must come from the
+    /// credential, never from a client — the store has no way to tell.
+    ///
+    /// Newest first is id order, descending: ids are ULIDs, so their order is
+    /// the order the rows were created in, to the millisecond, and an id is
+    /// unique where a timestamp is not — which is what lets the previous
+    /// page's last id be the next page's cursor ([`SourceFilter::before`])
+    /// without a row ever appearing on two pages or on none.
+    ///
+    /// No body is opened: everything a listing answers is a column.
+    ///
+    /// # Errors
+    ///
+    /// [`SourceError::Corrupt`] for a row that does not parse, and whatever
+    /// the database path can fail with.
+    pub async fn list(
+        &self,
+        workspace: &str,
+        scopes: &[&str],
+        filter: &SourceFilter,
+        limit: usize,
+    ) -> Result<Vec<SourceSummary>, SourceError> {
+        if scopes.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (mut sql, mut values) = owned_by(
+            "SELECT id, scope, kind, rel_path, project, held, created_at FROM sources",
+            workspace,
+            scopes,
+        );
+        if let Some(kind) = filter.kind {
+            sql.push_str(" AND kind = ?");
+            values.push(text(kind.as_str()));
+        }
+        if let Some(project) = &filter.project {
+            sql.push_str(" AND project = ?");
+            values.push(text(project));
+        }
+        if let Some(before) = &filter.before {
+            sql.push_str(" AND id < ?");
+            values.push(text(before));
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        values.push(SeaValue::BigInt(Some(
+            i64::try_from(limit).unwrap_or(i64::MAX),
+        )));
+        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let raw = row
+                    .get::<String>("kind")
+                    .ok_or_else(|| SourceError::Corrupt("sources.kind is not text".to_owned()))?;
+                Ok(SourceSummary {
+                    id: row.get::<String>("id").unwrap_or_default(),
+                    scope: row.get::<String>("scope").unwrap_or_default(),
+                    kind: SourceKind::parse(&raw).ok_or_else(|| {
+                        SourceError::Corrupt(format!("unknown source kind `{raw}`"))
+                    })?,
+                    rel_path: row.get::<String>("rel_path").unwrap_or_default(),
+                    project: row.get::<String>("project"),
+                    held: row.get::<u32>("held").unwrap_or_default() != 0,
+                    created_at: row.get::<String>("created_at").unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    /// The distinct projects the sources in `workspace` and `scopes` are
+    /// filed under, alphabetically, each with how many sources it holds —
+    /// optionally only counting sources of one `kind`.
+    ///
+    /// The same two clauses as [`SourceStore::list`], so the names a filter
+    /// dropdown offers are exactly the names that filter can find: a project
+    /// only another member's private sources are filed under is not one of
+    /// them. Rows with no project are not a project and are not counted.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the database path can fail with.
+    pub async fn projects(
+        &self,
+        workspace: &str,
+        scopes: &[&str],
+        kind: Option<SourceKind>,
+    ) -> Result<Vec<ProjectCount>, SourceError> {
+        if scopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (mut sql, mut values) = owned_by(
+            "SELECT project, COUNT(*) AS sources FROM sources",
+            workspace,
+            scopes,
+        );
+        sql.push_str(" AND project IS NOT NULL");
+        if let Some(kind) = kind {
+            sql.push_str(" AND kind = ?");
+            values.push(text(kind.as_str()));
+        }
+        sql.push_str(" GROUP BY project ORDER BY project ASC LIMIT ?");
+        values.push(SeaValue::BigInt(Some(
+            i64::try_from(MAX_PROJECTS).unwrap_or(i64::MAX),
+        )));
+        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+        Ok(rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                Some(ProjectCount {
+                    project: row.get::<String>("project")?,
+                    sources: row
+                        .get::<i64>("sources")
+                        .and_then(|count| u64::try_from(count).ok())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     /// Clears a held source's flag in `scope`, and says what happened.
@@ -618,6 +855,7 @@ impl SourceStore {
             key_version: row.get::<u32>("key_version").unwrap_or_default(),
             imported_by: row.get::<String>("imported_by").unwrap_or_default(),
             held: row.get::<u32>("held").unwrap_or_default() != 0,
+            project: row.get::<String>("project"),
             created_at: row.get::<String>("created_at").unwrap_or_default(),
         })
     }
@@ -626,6 +864,25 @@ impl SourceStore {
     fn now(&self) -> String {
         self.clock.now().format(&Rfc3339).unwrap_or_default()
     }
+}
+
+/// The `FROM sources WHERE workspace = ? AND scope IN (…)` both listings
+/// start from, and the values it binds — the one place the asker's rows are
+/// decided, so the listing and the projects facet cannot drift apart.
+fn owned_by(select: &str, workspace: &str, scopes: &[&str]) -> (String, Vec<SeaValue>) {
+    let mut values = vec![text(workspace)];
+    let placeholders = scopes
+        .iter()
+        .map(|scope| {
+            values.push(text(scope));
+            "?"
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    (
+        format!("{select} WHERE workspace = ? AND scope IN ({placeholders})"),
+        values,
+    )
 }
 
 /// The path rule: a relative name inside a vault. It is checked before any

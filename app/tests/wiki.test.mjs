@@ -358,8 +358,16 @@ await drain();
 
 const { ApiError } = globalThis.LB;
 const wikiPage = globalThis.LB ? (await import("../assets/wiki.js")).wikiPage : null;
-const { slugify, parseBrainUrl, validSlug, highlightTerms, stripFrontmatter } =
-  await import("../assets/wiki.js");
+const {
+  slugify,
+  parseBrainUrl,
+  validSlug,
+  highlightTerms,
+  stripFrontmatter,
+  validProject,
+  searchPath,
+  sessionsPath,
+} = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
 
@@ -1253,4 +1261,181 @@ test("ApiError still carries status and message for the wiki's branching", () =>
   const error = new ApiError(409, { title: "conflict" }, "/v1/pages/hello");
   assert.equal(error.status, 409);
   assert.equal(error.message, "conflict");
+});
+
+/* ------------------------------------------------- projects and sessions */
+
+const PROJECTS = {
+  projects: [
+    { project: "demo", sources: 2 },
+    { project: "livingbrain", sources: 5 },
+  ],
+};
+
+const SESSIONS = {
+  sources: [
+    {
+      id: "01J0000000000000000000000B",
+      kind: "agent_log",
+      scope: "personal",
+      path: "claude-code session 3f2a9c1e",
+      project: "demo",
+      held: false,
+      created_at: "2026-10-02T10:00:00Z",
+    },
+  ],
+  next_cursor: "01J0000000000000000000000B",
+};
+
+const MORE_SESSIONS = {
+  sources: [
+    {
+      id: "01J0000000000000000000000A",
+      kind: "agent_log",
+      scope: "shared",
+      path: "codex session a1b2c3d4",
+      project: "demo",
+      held: false,
+      created_at: "2026-10-01T10:00:00Z",
+    },
+  ],
+  next_cursor: null,
+};
+
+test("pure helpers: the project rule and the two request paths", () => {
+  assert.equal(validProject("livingbrain"), true);
+  assert.equal(validProject("my-repo.v2_x"), true);
+  assert.equal(validProject(""), false);
+  assert.equal(validProject("-leading"), false);
+  assert.equal(validProject("has space"), false);
+  assert.equal(validProject("a".repeat(65)), false);
+  assert.equal(validProject(null), false);
+
+  // No project: the search URL is exactly the one it always was.
+  assert.equal(searchPath("kestrel", ""), "/v1/search?q=kestrel&limit=10");
+  assert.equal(searchPath("kestrel", "demo"), "/v1/search?q=kestrel&limit=10&project=demo");
+  // A value outside the rule is dropped, not sent.
+  assert.equal(searchPath("kestrel", "../etc"), "/v1/search?q=kestrel&limit=10");
+
+  assert.equal(sessionsPath(), "/v1/sources?kind=agent_log&limit=50");
+  assert.equal(
+    sessionsPath({ project: "demo", cursor: "01J0000000000000000000000B" }),
+    "/v1/sources?kind=agent_log&limit=50&project=demo&cursor=01J0000000000000000000000B",
+  );
+});
+
+test("search project filter: filled from /v1/sources/projects, sent as &project=", async () => {
+  reset();
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url.startsWith("/v1/search?")) return json({ results: [] });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+
+  const select = el("wiki-project");
+  assert.equal(select.hidden, false, "two projects: the filter shows");
+  assert.deepEqual(
+    select.children.map((option) => [option.value, option.textContent]),
+    [
+      ["", "All projects"],
+      ["demo", "demo (2)"],
+      ["livingbrain", "livingbrain (5)"],
+    ],
+  );
+  assert.equal(select.value, "", "every project until one is chosen");
+
+  el("wiki-search").value = "kestrel";
+  await el("wiki-search").fire("input");
+  await wait(260);
+  await drain();
+  assert.ok(calls.some((call) => call.url === "/v1/search?q=kestrel&limit=10"));
+
+  // Choosing a project re-asks the typed query at once, filtered.
+  select.value = "livingbrain";
+  await select.fire("change");
+  await drain();
+  assert.ok(
+    calls.some((call) => call.url === "/v1/search?q=kestrel&limit=10&project=livingbrain"),
+    "the filtered search went out",
+  );
+});
+
+test("search project filter: no projects, or a failed fetch, hides it", async () => {
+  reset();
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url === "/v1/sources/projects") return json({ title: "boom" }, 500);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("wiki-project").hidden, true);
+  assert.equal(el("home-view").hidden, false, "the page is unharmed");
+});
+
+test("agent sessions: ?view=sessions&project= lists, pages on, and refilters", async () => {
+  reset({ search: "?view=sessions&project=demo" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources?kind=agent_log&limit=50&project=demo") return json(SESSIONS);
+    if (url === "/v1/sources?kind=agent_log&limit=50&project=demo&cursor=01J0000000000000000000000B") {
+      return json(MORE_SESSIONS);
+    }
+    if (url === "/v1/sources?kind=agent_log&limit=50") return json({ sources: [], next_cursor: null });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+
+  assert.equal(el("sessions-view").hidden, false);
+  assert.equal(el("home-view").hidden, true);
+  assert.equal(el("sessions-project").value, "demo", "the address chose the filter");
+  assert.equal(el("sessions-project").hidden, false);
+  const rows = () => walk(el("sessions-list"), ".wiki-row__slug").map((n) => n.textContent);
+  assert.deepEqual(rows(), ["claude-code session 3f2a9c1e"]);
+  assert.match(walk(el("sessions-list"), ".pill")[0].textContent, /demo/);
+  assert.equal(el("sessions-more").hidden, false, "a full page has a next one");
+  assert.equal(el("sessions-status").textContent, "1+ session");
+
+  await el("sessions-more").click();
+  await drain();
+  assert.deepEqual(rows(), ["claude-code session 3f2a9c1e", "codex session a1b2c3d4"]);
+  assert.equal(el("sessions-more").hidden, true, "the last page");
+  assert.equal(el("sessions-status").textContent, "2 sessions");
+
+  // Back to every project: the address follows, the list reloads (empty).
+  el("sessions-project").value = "";
+  await el("sessions-project").fire("change");
+  await drain();
+  assert.deepEqual(replacedUrls.slice(-1), ["wiki.html?view=sessions"]);
+  assert.ok(calls.some((call) => call.url === "/v1/sources?kind=agent_log&limit=50"));
+  assert.equal(el("sessions-list").hidden, true);
+  assert.equal(el("sessions-empty").hidden, false, "no sessions explains where they come from");
+});
+
+test("agent sessions: signed out says sign in and sends no listing", async () => {
+  reset({ search: "?view=sessions" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json({ title: "unauthorized" }, 401);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("sessions-view").hidden, false);
+  assert.match(el("wiki-notice").textContent, /Sign in to see your agent sessions\./);
+  assert.equal(
+    calls.some((call) => call.url.startsWith("/v1/sources")),
+    false,
+    "nothing about sources is asked signed out",
+  );
 });

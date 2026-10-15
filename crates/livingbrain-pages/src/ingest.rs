@@ -111,6 +111,13 @@ pub struct SourceIngest {
     pub imported_by: String,
     /// The raw body.
     pub body: String,
+    /// The project the source is filed under, when the caller named one —
+    /// a repository's basename for an agent session. Checked against
+    /// [`crate::is_project`] by the store; redacted like the rest of the
+    /// free-text metadata first, and dropped rather than stored if
+    /// redaction found anything in it (a redaction token is not a project
+    /// name, and a secret is not one either).
+    pub project: Option<String>,
 }
 
 /// What one ingest did.
@@ -149,6 +156,8 @@ pub enum IngestError {
     InvalidScope(String),
     /// A path that is not a relative name inside a vault.
     InvalidPath(String),
+    /// A project name outside [`crate::is_project`]'s rule.
+    InvalidProject(String),
     /// The text is over what redaction will read.
     TooLarge,
     /// Text redaction refused to handle, and nothing was stored.
@@ -182,6 +191,7 @@ impl std::fmt::Display for IngestError {
                 )
             }
             Self::InvalidPath(value) => write!(f, "invalid source path `{value}`"),
+            Self::InvalidProject(value) => write!(f, "invalid project `{value}`"),
             Self::TooLarge => write!(f, "the text is over what redaction will read"),
             Self::Refused(message) => write!(f, "redaction refused the text: {message}"),
             Self::Store(error) => write!(f, "store error: {error}"),
@@ -208,6 +218,7 @@ impl IngestError {
         match self {
             Self::InvalidScope(_) => "invalid-scope",
             Self::InvalidPath(_) => "invalid-path",
+            Self::InvalidProject(_) => "invalid-project",
             Self::TooLarge => "too-large",
             Self::Refused(_) => "not-redactable",
             Self::Store(error) => error.variant(),
@@ -265,8 +276,8 @@ impl Ingestor {
     ///
     /// # Errors
     ///
-    /// [`IngestError::InvalidScope`], [`IngestError::InvalidPath`], the
-    /// redaction pair, and whatever the store can fail with.
+    /// [`IngestError::InvalidScope`], [`IngestError::InvalidPath`],
+    /// [`IngestError::InvalidProject`], the redaction pair, and whatever the store can fail with.
     pub async fn ingest(&self, mut source: SourceIngest) -> Result<Ingested, IngestError> {
         source.body = normalise(&source.body);
         let held = self.screen.screen(&source).await == Verdict::Hold;
@@ -282,6 +293,14 @@ impl Ingestor {
         };
         let (rel_path, found) = redacted(&source.rel_path)?;
         redactions += found;
+        let project = match &source.project {
+            Some(raw) => {
+                let (clean, found) = redacted(raw)?;
+                redactions += found;
+                (found == 0).then_some(clean)
+            }
+            None => None,
+        };
 
         let (stored, created) = self
             .store
@@ -296,6 +315,7 @@ impl Ingestor {
                     markdown,
                     imported_by: source.imported_by,
                     held,
+                    project,
                 },
             )
             .await
@@ -305,6 +325,7 @@ impl Ingestor {
             .map_err(|error| match error {
                 SourceError::InvalidScope(scope) => IngestError::InvalidScope(scope),
                 SourceError::InvalidPath(path) => IngestError::InvalidPath(path),
+                SourceError::InvalidProject(project) => IngestError::InvalidProject(project),
                 other => IngestError::Store(other),
             })?;
 

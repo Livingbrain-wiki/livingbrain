@@ -918,6 +918,7 @@ fn a_key_a_source_body_still_names_is_not_retired() {
                     markdown: "# One\n\nA note.\n".to_owned(),
                     imported_by: "u1".to_owned(),
                     held: false,
+                    project: None,
                 },
             )
             .await

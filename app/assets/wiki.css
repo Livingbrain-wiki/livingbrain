@@ -40,6 +40,27 @@ html {
   background: var(--bg);
 }
 
+/* The project filter sits beside the field, inside the same form, so the
+ * results panel still hangs under both. */
+.wiki-search {
+  display: flex;
+  gap: 6px;
+}
+
+.wiki-search > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wiki-project {
+  flex: 0 1 9rem;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 8px;
+  font-size: 14px;
+  background: var(--bg);
+}
+
 /* The results listbox hangs under the field, above the page. */
 .wiki-search__panel {
   position: absolute;
@@ -101,7 +122,8 @@ html {
 
 /* Touch: the field, like every control on this page, clears 44 px. */
 @media (pointer: coarse) {
-  .wiki-search > input {
+  .wiki-search > input,
+  .wiki-project {
     min-height: 44px;
   }
 }

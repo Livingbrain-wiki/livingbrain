@@ -38,6 +38,13 @@ pub const TOKEN_A: &str = "user-a";
 /// The bearer token that speaks for `user-b`.
 pub const TOKEN_B: &str = "user-b";
 
+/// A second workspace, for the tests that prove nothing crosses one.
+pub const OTHER_WORKSPACE: &str = "T1OTHERSPACE";
+
+/// The bearer token that speaks for `user-a` — the *same* user id — in
+/// [`OTHER_WORKSPACE`]: the case the workspace clause exists for.
+pub const TOKEN_A_ELSEWHERE: &str = "user-a-elsewhere";
+
 /// A bearer resolver over a fixed table: a known token names an asker, an
 /// unknown one names nobody. That is the whole of what #72 replaces.
 #[derive(Default)]
@@ -94,11 +101,13 @@ impl Fixture {
     }
 }
 
-/// One workspace, two people, nothing else.
+/// One workspace with two people, and the first person's id again in a
+/// second workspace.
 pub fn fixture() -> Fixture {
     let askers = [
         (TOKEN_A, WORKSPACE, "user-a"),
         (TOKEN_B, WORKSPACE, "user-b"),
+        (TOKEN_A_ELSEWHERE, OTHER_WORKSPACE, "user-a"),
     ]
     .into_iter()
     .map(|(token, workspace, user)| {

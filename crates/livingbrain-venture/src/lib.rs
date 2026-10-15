@@ -296,9 +296,10 @@ fn build(
 
 /// The five CLI modules (issues #121 and #77): the routes `livingbrain`'s
 /// client speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
-/// `GET /v1/export`, `GET /v1/sources/{id}` — each mounted at its own name
-/// under the harness rule, every one constructed with the same [`Wiki`] over
-/// the key custodian and the [`TokenBearer`].
+/// `GET /v1/export`, `GET /v1/sources` (with `/projects` and `/{id}`) —
+/// each mounted at its own name under the harness rule, every one
+/// constructed with the same [`Wiki`] over the key custodian and the
+/// [`TokenBearer`].
 ///
 /// The blob a module's store reads is not decided here — the composition
 /// roots the per-request port layer on the pages key space instead, so the
@@ -632,9 +633,10 @@ const CLI_ROUTES: [&str; 5] = [
 ///
 /// Four of the five are single endpoints and match exactly — a subroute
 /// under them is nobody's route, and exact matching keeps a future one from
-/// silently changing handler stack. The citation route is the exception: it
-/// carries the source id as its path segment, and matching only the bare
-/// `/v1/sources` would drop every real citation on the floor.
+/// silently changing handler stack. The sources module is the exception: the
+/// bare `/v1/sources` is its listing, `/v1/sources/projects` its projects
+/// facet, and `/v1/sources/{id}` the citation route, so the prefix diverts —
+/// matching only the bare path would drop every real citation on the floor.
 fn serves_cli(harness: &Harness, path: &str) -> bool {
     let diverted = CLI_ROUTES.iter().any(|route| {
         path == *route || (*route == "/v1/sources" && path.starts_with("/v1/sources/"))
@@ -866,7 +868,11 @@ mod tests {
         );
         assert!(
             serves_cli(&harness, "/v1/sources"),
-            "the bare path still diverts"
+            "the bare path still diverts: it is the listing (`GET /v1/sources`)"
+        );
+        assert!(
+            serves_cli(&harness, "/v1/sources/projects"),
+            "the projects facet diverts with the citation route"
         );
         assert!(
             !serves_cli(&harness, "/v1/notes/01HZZZBBBBBBBBBBBBBBBBBBB"),

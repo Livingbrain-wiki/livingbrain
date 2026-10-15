@@ -74,5 +74,9 @@
   "usage/0001": {
     "file": "0019_usage_0001_init.sql",
     "sha256": "cdb8adf5ba7ab4697f77d5b20b7e2e315589d165c0bcadee0771a233f814d8cd"
+  },
+  "pages/0005": {
+    "file": "0020_pages_0005_source_project.sql",
+    "sha256": "9c186496a70a760cf6c22ecaafd028fdaddf61188b2c3ba734c6d1d2f4732e61"
   }
 }

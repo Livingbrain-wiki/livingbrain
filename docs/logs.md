@@ -140,3 +140,69 @@ serialises deterministically: struct order is wire order, and nothing in it is
 read from the clock or the environment. The same session therefore always
 yields the same bytes, and re-running `logs sync` reads rows back (`200`,
 `unchanged`) instead of storing copies.
+
+## Projects, and listing what was synced
+
+Each upload also names a **project**: the basename of the session's
+repository (`~/code/livingbrain` files as `livingbrain`), cut to the server's
+project rule — ASCII letters, digits, `.`, `_` and `-`, starting with a letter
+or digit, at most 64 bytes; any other character becomes `-`. A session that
+recorded no repository names none. Only the basename travels in this field;
+the full home-elided path is already inside the record. The server redacts the
+project like any other free text and drops it, rather than storing it, if
+redaction finds anything in it.
+
+The project is a column of the ledger row, not part of the body, so it does
+not change the `(scope, sha256)` key: a session synced before projects
+existed is filed under its project the next time `logs sync` runs (`200`,
+`unchanged` — the existing row gains the project; a row that already has one
+keeps it).
+
+List what is there, newest first, without opening a single body:
+
+```sh
+livingbrain sources --kind agent_log                 # every synced session
+livingbrain sources --kind agent_log --project demo  # one repository's
+livingbrain sources --projects                       # the projects, with counts
+livingbrain sources --cursor <next_cursor>           # the next page
+```
+
+The same lists back the web app's **Agent sessions** view
+(`wiki.html?view=sessions`) and the project filter beside the wiki's search
+box. The listing is strictly yours: your personal sources, plus the
+workspace's shared ones — never another member's, never another workspace's.
+
+### `GET /v1/sources`
+
+`?kind=&project=&limit=&cursor=`, bearer-authenticated exactly like
+`GET /v1/sources/{id}`. `limit` defaults to 50 and is clamped to 100; a
+`kind` or `project` outside its rule is a `400 validation-failed`, not an
+empty list. Rows are newest first (ULID order); `next_cursor` is the last
+id of a full page, `null` on the last one.
+
+```json
+{
+  "sources": [
+    {
+      "id": "01JA7Q8ZK3T5V9X2B4N6M8P0RC",
+      "kind": "agent_log",
+      "scope": "personal",
+      "path": "claude-code session 3f2a9c1e-5b7d-4e8a-9c1f-2a4b6d8e0f1a",
+      "project": "livingbrain",
+      "held": false,
+      "created_at": "2026-10-15T04:32:12.801Z"
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+### `GET /v1/sources/projects`
+
+`?kind=` optional. The distinct projects your sources are filed under,
+alphabetically, with a count each — the names `GET /v1/sources?project=` can
+find something under, and no others (at most 500).
+
+```json
+{ "projects": [ { "project": "demo", "sources": 2 }, { "project": "livingbrain", "sources": 14 } ] }
+```

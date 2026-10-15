@@ -83,6 +83,15 @@ const INVALID_PATH: ProblemDef = ProblemDef {
                   at most 1024 bytes.",
 };
 
+/// A `project` outside the project rule ([`livingbrain_pages::is_project`]).
+const INVALID_PROJECT: ProblemDef = ProblemDef {
+    slug: "sources/invalid-project",
+    status: StatusCode::BAD_REQUEST,
+    title: "That is not a project name",
+    description: "A project is 1 to 64 bytes of ASCII letters, digits, `.`, `_` and `-`, \
+                  starting with a letter or a digit — a repository's basename, say.",
+};
+
 /// A folded scope the asker's own grant does not include. A 403 rather than a
 /// 404: the caller named a scope that exists, and this one is not theirs.
 const NOT_YOURS: ProblemDef = ProblemDef {
@@ -185,6 +194,20 @@ async fn create(
         Scope::User(_) => "personal",
         _ => "shared",
     };
+    // Trimmed, and an empty one read as absent: a client that sends `""`
+    // has said "no project", not named a project called nothing.
+    let project = request
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+        .map(str::to_owned);
+    if let Some(project) = &project
+        && !livingbrain_pages::is_project(project)
+    {
+        return Err(Problem::new(&INVALID_PROJECT)
+            .with_detail(format!("`{project}` is not a project name")));
+    }
     let folded = page_scope(&asker.workspace_id, &scope);
     if !page_scopes(&asker).contains(&folded) {
         return Err(Problem::new(&NOT_YOURS));
@@ -220,6 +243,10 @@ async fn create(
             imported_by: asker.user_id.clone(),
             rel_path: request.path,
             body: request.body,
+            // Optional: a re-upload of a body already in the ledger that
+            // names a project files a row that had none (the key stays
+            // `(scope, sha256)`, so it is never a second row).
+            project,
         })
         .await
         .map_err(ingest_failed)?;
@@ -245,6 +272,7 @@ async fn create(
             "kind": source.kind.as_str(),
             "scope": scope_name,
             "path": source.rel_path,
+            "project": source.project,
             "sha256": source.body_sha256,
             "wikilinks": source.wikilinks,
             "redacted": ingested.redactions,
@@ -255,8 +283,8 @@ async fn create(
         .into_response())
 }
 
-/// What a client sent. `path` and `body` are required; `scope` and `kind` are
-/// optional and defaulted. Anything else in the object is ignored: this is not
+/// What a client sent. `path` and `body` are required; `scope`, `kind` and
+/// `project` are optional (the first two defaulted, the last absent). Anything else in the object is ignored: this is not
 /// a place a client configures the store.
 #[derive(Debug, Default)]
 struct Request {
@@ -264,6 +292,7 @@ struct Request {
     body: String,
     scope: Option<String>,
     kind: Option<String>,
+    project: Option<String>,
 }
 
 fn parse(body: &[u8]) -> Result<Request, Problem> {
@@ -288,6 +317,7 @@ fn parse(body: &[u8]) -> Result<Request, Problem> {
         body: required("body")?,
         scope: optional("scope")?,
         kind: optional("kind")?,
+        project: optional("project")?,
     })
 }
 
@@ -299,6 +329,9 @@ fn ingest_failed(error: IngestError) -> Problem {
     match error {
         IngestError::InvalidPath(path) => {
             Problem::new(&INVALID_PATH).with_detail(format!("`{path}` is not a path in a vault"))
+        }
+        IngestError::InvalidProject(project) => {
+            Problem::new(&INVALID_PROJECT).with_detail(format!("`{project}` is not a project name"))
         }
         IngestError::TooLarge => Problem::new(&TOO_LARGE),
         IngestError::Refused(_) => Problem::new(&NOT_REDACTABLE),

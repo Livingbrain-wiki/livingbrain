@@ -48,8 +48,9 @@ pub use ingest::{
 pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
 pub use scope::{page_scope, page_scopes_for};
 pub use sources::{
-    MAX_SOURCE_BODY_BYTES, Released, Source, SourceError, SourceKind, SourceStore, SourceWrite,
-    extract_wikilinks,
+    MAX_PROJECT_LEN, MAX_SOURCE_BODY_BYTES, ProjectCount, Released, Source, SourceError,
+    SourceFilter, SourceKind, SourceStore, SourceSummary, SourceWrite, extract_wikilinks,
+    is_project,
 };
 pub use store::{
     Author, AuthorKind, Page, PageError, PageStore, PageSummary, PageWrite, ReencryptReport,
@@ -92,6 +93,14 @@ const MIGRATION_SOURCE_LEDGER: SqlMigration = SqlMigration::new(
     "0004",
     "source_ledger",
     include_str!("../migrations/sqlite/0004_source_ledger.sql"),
+);
+
+/// The ledger's optional `project` column and the index the listing reads
+/// (`GET /v1/sources?project=`), same portable subset.
+const MIGRATION_SOURCE_PROJECT: SqlMigration = SqlMigration::new(
+    "0005",
+    "source_project",
+    include_str!("../migrations/sqlite/0005_source_project.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -308,8 +317,8 @@ impl Module for Pages {
                 kind: DataKind::Content,
                 disposition: Disposition::Erase,
                 description: "For each source that arrived from outside: where it came \
-                              from (a path or an origin ref), the `[[wiki-links]]` it \
-                              names, and the sealed body. Erasing you deletes the row; the \
+                              from (a path or an origin ref), the project it was filed \
+                              under, the `[[wiki-links]]` it names, and the sealed body. Erasing you deletes the row; the \
                               sealed body stays in the blob store, unreadable to everybody \
                               once the scope's key is destroyed.",
                 redacted: &[],
@@ -320,11 +329,12 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 4] = [
+        const MIGRATIONS: [SqlMigration; 5] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
             MIGRATION_SOURCE_LEDGER,
+            MIGRATION_SOURCE_PROJECT,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

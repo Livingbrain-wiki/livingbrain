@@ -90,6 +90,7 @@ fn chat(body: &str) -> SourceIngest {
         imported_by: "u1".to_owned(),
         rel_path: String::new(),
         body: body.to_owned(),
+        project: None,
     }
 }
 

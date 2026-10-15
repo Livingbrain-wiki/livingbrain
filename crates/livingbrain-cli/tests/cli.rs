@@ -308,3 +308,63 @@ fn about_needs_no_credentials() {
     assert_eq!(value["uses"][8]["status"], "live");
     assert_eq!(value["uses"][0]["status"], "planned");
 }
+
+/// `sources` lists the caller's sources with the filters on the query
+/// string, prints the cursor for the next page, and `--projects` asks the
+/// facet route instead.
+#[test]
+fn sources_lists_with_filters_and_projects() {
+    let mock = Mock::start(|request| match request.path.as_str() {
+        "/v1/sources" => Reply::ok_json(
+            r#"{"sources":[{"id":"01J0000000000000000000000B","kind":"agent_log","scope":"personal","path":"claude-code session 3f2a","project":"demo","held":false,"created_at":"2026-10-01T10:15:00Z"}],"next_cursor":"01J0000000000000000000000B"}"#,
+        ),
+        "/v1/sources/projects" => {
+            Reply::ok_json(r#"{"projects":[{"project":"demo","sources":3}]}"#)
+        }
+        _ => Reply::json(404, r#"{"error":"no such route"}"#),
+    });
+    let (cwd, home) = (temp_dir("sources-cwd"), temp_dir("sources-home"));
+    let envs = api_envs(&mock.base);
+
+    let human = run(
+        &cwd,
+        &home,
+        &["sources", "--kind", "agent_log", "--project", "demo"],
+        &envs,
+        None,
+    );
+    assert!(human.status.success(), "stderr: {}", human.stderr);
+    assert!(
+        human
+            .stdout
+            .contains("agent_log  demo  claude-code session 3f2a"),
+        "{}",
+        human.stdout
+    );
+    assert!(
+        human
+            .stdout
+            .contains("More: --cursor 01J0000000000000000000000B"),
+        "{}",
+        human.stdout
+    );
+    let listed = mock
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/v1/sources")
+        .expect("the CLI called /v1/sources");
+    assert_eq!(listed.method, "GET");
+    assert_eq!(listed.bearer().as_deref(), Some(TOKEN));
+    assert!(listed.query.contains("kind=agent_log"), "{}", listed.query);
+    assert!(listed.query.contains("project=demo"), "{}", listed.query);
+
+    let projects = run(
+        &cwd,
+        &home,
+        &["sources", "--projects", "--json"],
+        &envs,
+        None,
+    );
+    assert!(projects.status.success(), "stderr: {}", projects.stderr);
+    assert_eq!(json_of(&projects)["projects"][0]["project"], "demo");
+}
