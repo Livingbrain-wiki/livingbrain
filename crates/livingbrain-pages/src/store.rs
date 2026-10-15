@@ -903,12 +903,15 @@ impl PageStore {
         from: EntityType,
         to: EntityType,
     ) -> Result<bool, PageError> {
+        // The head row first: a page already of another type (every write
+        // after the first) costs one indexed read, not a body.
+        match self.head_row(scope, slug).await? {
+            Some(row) if row.entity_type == from => {}
+            _ => return Ok(false),
+        }
         let Some(page) = self.read(scope, slug).await? else {
             return Ok(false);
         };
-        if page.entity_type != from {
-            return Ok(false);
-        }
         // The fence may name its own type; a `type: decision` line would
         // make the body invalid as `to`, which is a refusal, not a move.
         entity::parse_frontmatter(&page.markdown, to)?;
