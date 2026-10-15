@@ -14,8 +14,8 @@ use cratefield_testing::{FakeDefer, MemoryBlob, TestHarness};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_compiler::layout;
 use livingbrain_compiler::{
-    ClaimFilter, Compiler, Gate, JobStatus, Model, ModelFailure, NoFacts, NoGate, Queue, Reply,
-    Settings,
+    Call, ClaimFilter, Compiler, Gate, JobStatus, Model, ModelFailure, NoFacts, NoGate, Queue,
+    Reply, Settings,
 };
 use livingbrain_pages::{
     Author, EntityType, Ingestor, PageStore, PageWrite, Pages, SourceIngest, SourceKind,
@@ -46,7 +46,10 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 1] = [livingbrain_compiler::MIGRATION_INIT];
+        const SET: [cratefield_core::SqlMigration; 2] = [
+            livingbrain_compiler::MIGRATION_INIT,
+            livingbrain_compiler::MIGRATION_WAITING_RUNNER,
+        ];
         Migrations {
             sqlite: &SET,
             postgres: &[],
@@ -116,12 +119,12 @@ impl Fake {
 
 #[async_trait::async_trait]
 impl Model for Fake {
-    async fn available(&self, _workspace: &str) -> Result<bool, String> {
+    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
         Ok(self.available)
     }
     async fn complete(
         &self,
-        _workspace: &str,
+        _call: &Call<'_>,
         system: &str,
         user: &str,
         _max_tokens: u32,
@@ -148,6 +151,7 @@ fn reply(pages: &[(&str, Option<u32>, &str)]) -> Reply {
             .to_string(),
         prompt_tokens: 1_000,
         completion_tokens: 200,
+        runner: false,
     }
 }
 
@@ -706,6 +710,7 @@ fn bad_output_fails_the_job_without_writing() {
             text: "Sure! Here are your pages.".to_owned(),
             prompt_tokens: 10,
             completion_tokens: 5,
+            runner: false,
         })
     });
     let processed = world.drain(&world.compiler(&model));
@@ -754,4 +759,73 @@ fn the_lint_pass_reports_orphans_and_broken_links() {
     );
     // Unchanged, it is not rewritten.
     assert!(!pollster::block_on(compiler.lint(&scope)).expect("a lint"));
+}
+
+/// A compile whose owner runs their jobs on their own device: each call is
+/// handed to the runner (`Pending`), the job waits as `waiting-runner`
+/// without spending an attempt, and each run carries on from the chunk it
+/// stopped at — chunks already applied are never asked for again.
+#[test]
+fn a_runner_compile_waits_and_resumes_chunk_by_chunk() {
+    let world = world();
+    let long = "a decision about the demo. ".repeat(120);
+    world.sync(WORKSPACE, "u1", "s-1", &long);
+    let slug = decisions();
+    let model = Fake::answering(move |_, index| match index {
+        0 | 2 => Err(ModelFailure::Pending),
+        1 => Ok(reply(&[(&slug, None, "- first chunk")])),
+        _ => Ok(Reply {
+            runner: true,
+            ..reply(&[])
+        }),
+    });
+    let settings = Settings {
+        chunk_chars: 1_000,
+        ..Settings::default()
+    };
+    let compiler = world.compiler_with(&model, settings, Arc::new(NoGate));
+    let now = |compiler: &Compiler| {
+        pollster::block_on(compiler.drain(
+            &ClaimFilter {
+                ignore_backoff: true,
+                ..ClaimFilter::default()
+            },
+            1,
+            &ScheduledBudget::unbounded(),
+        ))
+        .expect("a drain")
+    };
+    let first = world.drain(&compiler);
+    assert_eq!(first[0].status, JobStatus::WaitingRunner);
+    let job = &world.jobs()[0];
+    assert_eq!(
+        (job.attempts, job.chunks_done),
+        (0, 0),
+        "a hand-off is not an attempt"
+    );
+    // Parked: an ordinary drain inside the hour leaves it to the runner.
+    assert!(world.drain(&compiler).is_empty());
+
+    // The answer to chunk 1 is in: it is applied, and chunk 2 goes out.
+    let second = now(&compiler);
+    assert_eq!(second[0].status, JobStatus::WaitingRunner);
+    assert_eq!(world.jobs()[0].chunks_done, 1);
+    assert!(
+        pollster::block_on(world.pages().read(&personal(WORKSPACE, "u1"), &decisions()))
+            .expect("a read")
+            .is_some()
+    );
+
+    // Chunk 2's answer: the job is done, and chunk 1 was never asked again.
+    let third = now(&compiler);
+    assert_eq!(third[0].status, JobStatus::Done);
+    assert_eq!(model.calls(), 4);
+    let job = &world.jobs()[0];
+    assert_eq!(job.attempts, 1);
+    assert!(job.chunks_done >= 2);
+    // A runner's tokens are its owner's, not the workspace's compile budget.
+    let queue = Queue::new(world.db.clone());
+    let today = livingbrain_compiler::queue::utc_day(world.clock.now());
+    let spent = pollster::block_on(queue.spent(WORKSPACE, &today, &today)).expect("spend");
+    assert_eq!(spent, 1_200, "only the API-shaped reply of chunk 1 counted");
 }

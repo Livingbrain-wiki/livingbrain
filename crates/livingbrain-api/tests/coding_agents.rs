@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use cratefield_core::ScheduledBudget;
 use cratefield_core::axum::http::StatusCode;
 use cratefield_testing::FakeDefer;
-use livingbrain_compiler::{ClaimFilter, JobStatus, Model, ModelFailure, Processed, Reply, layout};
+use livingbrain_compiler::{
+    Call, ClaimFilter, JobStatus, Model, ModelFailure, Processed, Reply, layout,
+};
 use livingbrain_pages::{SourceIngest, SourceKind};
 use serde_json::{Value, json};
 
@@ -140,12 +142,12 @@ impl Scripted {
 
 #[async_trait::async_trait]
 impl Model for Scripted {
-    async fn available(&self, _workspace: &str) -> Result<bool, String> {
+    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
         Ok(true)
     }
     async fn complete(
         &self,
-        _workspace: &str,
+        _call: &Call<'_>,
         _system: &str,
         _user: &str,
         _max_tokens: u32,
@@ -156,6 +158,7 @@ impl Model for Scripted {
             text: reply.to_string(),
             prompt_tokens: 100,
             completion_tokens: 20,
+            runner: false,
         })
     }
 }

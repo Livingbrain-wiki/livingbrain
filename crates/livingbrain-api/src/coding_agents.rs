@@ -22,7 +22,10 @@
 //! The model is the workspace's own, through `livingbrain_models::invoke`,
 //! on the **Main** job slot: there is no managed fallback, so a workspace
 //! with nothing connected parks its jobs as `skipped-no-model` and the
-//! status route says so.
+//! status route says so. A member who runs their jobs on their own device
+//! (`livingbrain_models::jobs`) has each call of their compiles handed to
+//! their runner instead; the job waits as `waiting-runner` and carries on
+//! when the answer arrives (`POST /v1/model-jobs/{id}/result`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -35,14 +38,15 @@ use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::{get, post};
 use cratefield_core::{
     AnyError, BoxFuture, Clock, Config, ConfigError, DataKind, Database, Disposition, HttpClient,
-    Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem, ScheduledBudget,
+    IdGen, Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem, ScheduledBudget,
     SqlMigration,
 };
 use livingbrain_compiler::{
-    ClaimFilter, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model, ModelFailure,
-    Queue, Reply, Settings,
+    Call, ClaimFilter, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model,
+    ModelFailure, Queue, Reply, Settings,
 };
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError};
+use livingbrain_models::jobs::{self, Dispatch, JobCall};
 use livingbrain_pages::{FactError, FactInput, FactStore};
 use serde_json::{Value, json};
 
@@ -132,9 +136,15 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 1] = [livingbrain_compiler::MIGRATION_INIT];
+        const SQLITE: [SqlMigration; 2] = [
+            livingbrain_compiler::MIGRATION_INIT,
+            livingbrain_compiler::MIGRATION_WAITING_RUNNER,
+        ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 1] = [livingbrain_compiler::MIGRATION_INIT_POSTGRES];
+        const POSTGRES: [SqlMigration; 2] = [
+            livingbrain_compiler::MIGRATION_INIT_POSTGRES,
+            livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
+        ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
             sqlite: &SQLITE,
@@ -222,7 +232,7 @@ fn sources(ctx: &ModuleContext, wiki: &Wiki) -> Option<livingbrain_pages::Source
 }
 
 /// A compiler over a context's ports, or `None` when a port is unwired.
-fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
+pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
     let db = ctx.ports.db.clone()?;
     let blob = ctx.ports.blob.clone()?;
     let clock = ctx.ports.clock.clone()?;
@@ -246,13 +256,14 @@ fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
         db.clone(),
         wiki.kms.clone(),
         clock.clone(),
-        id_gen,
+        id_gen.clone(),
     )));
     let model = Arc::new(WorkspaceModel {
         db: db.clone(),
         http,
         config: Arc::clone(&ctx.config),
         clock: clock.clone(),
+        id_gen,
     });
     let gate = Arc::new(UsageGate {
         db: db.clone(),
@@ -336,26 +347,27 @@ fn skip_reason(fact: &Fact, error: &FactError) -> String {
     }
 }
 
-/// The workspace's own connected model, on [`MODEL_ROLE`].
+/// The session owner's model on [`MODEL_ROLE`]: their own runner when they
+/// run their jobs on their device, else the workspace's connection.
 struct WorkspaceModel {
     db: Arc<dyn Database>,
     http: Arc<dyn HttpClient>,
     config: Arc<dyn Config>,
     clock: Arc<dyn Clock>,
+    id_gen: Arc<dyn IdGen>,
 }
 
 #[async_trait::async_trait]
 impl Model for WorkspaceModel {
-    async fn available(&self, workspace: &str) -> Result<bool, String> {
-        invoke::serving(&*self.db, workspace, MODEL_ROLE)
+    async fn available(&self, workspace: &str, owner: &str) -> Result<bool, String> {
+        jobs::available(&*self.db, workspace, owner, MODEL_ROLE)
             .await
-            .map(|serving| serving.is_some())
             .map_err(|error| error.variant().to_owned())
     }
 
     async fn complete(
         &self,
-        workspace: &str,
+        call: &Call<'_>,
         system: &str,
         user: &str,
         max_tokens: u32,
@@ -367,23 +379,30 @@ impl Model for WorkspaceModel {
             json: true,
             timeout: CALL_TIMEOUT,
         };
-        match invoke::chat(
-            &*self.db,
-            &*self.http,
-            &*self.config,
-            &*self.clock,
-            workspace,
-            MODEL_ROLE,
-            &request,
-        )
-        .await
-        {
-            Ok(reply) => Ok(Reply {
+        let ports = jobs::Ports {
+            db: &*self.db,
+            http: &*self.http,
+            config: &*self.config,
+            clock: &*self.clock,
+            id_gen: &*self.id_gen,
+        };
+        let job = JobCall {
+            owner: call.owner,
+            kind: "compile",
+            ref_key: call.ref_key,
+        };
+        match jobs::dispatch(&ports, call.workspace, MODEL_ROLE, &job, &request).await {
+            Ok(Dispatch::Reply(reply)) => Ok(Reply {
                 text: reply.text,
                 prompt_tokens: reply.prompt_tokens,
                 completion_tokens: reply.completion_tokens,
+                runner: reply.runner,
             }),
+            Ok(Dispatch::Pending { .. }) => Err(ModelFailure::Pending),
             Err(InvokeError::NoModel) => Err(ModelFailure::NoModel),
+            Err(InvokeError::Runner(reason)) => {
+                Err(ModelFailure::Failed(format!("runner-{reason}")))
+            }
             Err(error) => Err(ModelFailure::Failed(error.variant().to_owned())),
         }
     }
@@ -482,19 +501,32 @@ async fn queue(
     let serving = invoke::serving(&*db, &asker.workspace_id, MODEL_ROLE)
         .await
         .map_err(|_| Problem::internal())?;
+    // The asker's own runner serves their compiles ahead of the workspace's
+    // connection, so it is what the card names.
+    let runner = jobs::runner_for(&*db, &asker.workspace_id, &asker.user_id, MODEL_ROLE)
+        .await
+        .map_err(|_| Problem::internal())?;
     Ok(Json(json!({
         "counts": counts
             .iter()
             .map(|(status, n)| (status.as_str().to_owned(), json!(n)))
             .collect::<serde_json::Map<String, Value>>(),
-        "model": match serving {
-            Some(serving) => json!({
+        "model": match (runner, serving) {
+            (Some(runner), _) => json!({
+                "connected": true,
+                "role": runner.role,
+                "provider": format!("local-runner:{}", runner.agent),
+                "model": runner.model,
+                "runner": true,
+                "runner_last_seen_at": runner.last_seen_at,
+            }),
+            (None, Some(serving)) => json!({
                 "connected": true,
                 "role": serving.role,
                 "provider": serving.provider,
                 "model": serving.model,
             }),
-            None => json!({"connected": false, "role": MODEL_ROLE}),
+            (None, None) => json!({"connected": false, "role": MODEL_ROLE}),
         },
         "budget": {
             "daily_tokens": settings.daily_tokens,
@@ -539,6 +571,7 @@ async fn process(
         workspace: Some(asker.workspace_id.clone()),
         scopes: Some(own),
         ignore_backoff: true,
+        source_id: None,
     };
     let processed = compiler
         .drain(&filter, max, &ScheduledBudget::unbounded())

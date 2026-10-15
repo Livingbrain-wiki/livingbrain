@@ -53,6 +53,7 @@ hook.
 | `over-budget` | the compile budget is spent; checked again when it resets |
 | `superseded` | a newer body of the same session arrived before this one ran |
 | `skipped` | not a session record, empty, or its source is gone |
+| `waiting-runner` | a model call is out on your own device (the local runner, below); the compile carries on the moment the answer arrives, or is checked again within the hour. Waiting does not count as an attempt |
 
 A session that grew is re-synced as a new body. If an earlier body of it
 was already compiled, the model is told so and adds only what is new.
@@ -80,6 +81,23 @@ connected, jobs park as `skipped-no-model` and the status route reports
 `livingbrain_models::invoke::chat`, which re-runs the SSRF guard, decrypts
 the key for that one request only, and records the call's tokens in the
 usage ledger.
+
+**Your own subscription (the local runner).** If you chose to run your jobs
+on your own device (`PUT /v1/models/mine/main`, the Claude/ChatGPT
+subscription cards in Settings → Models, or the Mac app's "Run brain jobs
+with my subscription"), the compile of *your* sessions does not call the
+workspace's model at all. Each call — the same redacted prompt an API model
+would get — is queued as a job (`livingbrain_models::jobs`, sealed under
+`MODEL_KEYS_SECRET` while it waits), the compile parks as
+`waiting-runner`, and your `livingbrain jobs run` (or the Mac app) claims it
+from `GET /v1/model-jobs/next`, runs it with your own `claude` / `codex` CLI
+with tools off, and posts the answer to `POST /v1/model-jobs/{id}/result`.
+The answer is redacted again and must parse as the closed edit list, or the
+job fails (`model-runner-bad-output`) and the compile retries; a valid one
+continues the compile in the same request. A compile resumes after the
+chunks it already applied (`chunks_done`), so no chunk is asked twice. Your
+runner's tokens are recorded on the job and cost the workspace's compile
+budget nothing. Only you can claim, read or answer your jobs.
 
 Each call gets:
 

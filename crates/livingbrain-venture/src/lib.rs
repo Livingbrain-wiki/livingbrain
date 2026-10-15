@@ -49,7 +49,8 @@ use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Facts, Notes, PagesRebind, Search, SessionAuth, Sources, Wiki,
+    Ask, CodingAgents, Export, Facts, ModelJobs, Notes, PagesRebind, Search, SessionAuth, Sources,
+    Wiki,
 };
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
@@ -407,7 +408,10 @@ fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
         Arc::new(Sources::new(wiki.clone())),
         // The coding-agents compiler: its queue and status routes, and the
         // cron drain that compiles synced sessions into `coding-agents/`.
-        Arc::new(CodingAgents::new(wiki)),
+        Arc::new(CodingAgents::new(wiki.clone())),
+        // The local runner's job handoff: a member's own device claims the
+        // model calls of their jobs and hands the answers back.
+        Arc::new(ModelJobs::new(wiki)),
     ]
 }
 
@@ -771,7 +775,7 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
 /// The CLI paths `fetch` diverts to [`serve_cli`] — the routes the
 /// [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 7] = [
+const CLI_ROUTES: [&str; 8] = [
     "/v1/notes",
     "/v1/search",
     "/v1/ask",
@@ -779,13 +783,19 @@ const CLI_ROUTES: [&str; 7] = [
     "/v1/sources",
     "/v1/coding-agents",
     "/v1/facts",
+    "/v1/model-jobs",
 ];
 
 /// The diverted paths that have routes *under* them, so the divert matches
 /// the prefix: the sources listing, facet and citation route, the
 /// coding-agents queue and process routes, and a fact's retraction
 /// (`/v1/facts/{id}/retract`).
-const CLI_PREFIXES: [&str; 3] = ["/v1/sources", "/v1/coding-agents", "/v1/facts"];
+const CLI_PREFIXES: [&str; 4] = [
+    "/v1/sources",
+    "/v1/coding-agents",
+    "/v1/facts",
+    "/v1/model-jobs",
+];
 
 /// Whether this request is one of the CLI paths the venture diverts,
 /// and the surface is mounted at all. The mount is gated on the key ring
@@ -1152,6 +1162,10 @@ mod tests {
         assert!(serves_cli(&harness, "/v1/coding-agents/queue"));
         assert!(serves_cli(&harness, "/v1/coding-agents/process"));
         assert!(!serves_cli(&harness, "/v1/coding-agentsx/queue"));
+        assert!(names.contains(&"model-jobs"), "{names:?}");
+        assert!(serves_cli(&harness, "/v1/model-jobs"));
+        assert!(serves_cli(&harness, "/v1/model-jobs/next"));
+        assert!(serves_cli(&harness, "/v1/model-jobs/mj-1/result"));
         // Issue #72: the grant a CLI logs in through, and its credential.
         assert!(names.contains(&"device-auth"), "{names:?}");
         assert!(names.contains(&"tokens"), "{names:?}");

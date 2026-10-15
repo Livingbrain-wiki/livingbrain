@@ -117,11 +117,26 @@ impl Settings {
 }
 
 /// One model call's answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Reply {
     pub text: String,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// The owner's own runner answered, on their subscription: the tokens
+    /// are theirs, not the workspace's compile budget.
+    pub runner: bool,
+}
+
+/// Whose call a completion is, and the compile's handle for it: a model
+/// that hands calls to the owner's own runner needs both to route the call
+/// and to find its answer again.
+#[derive(Debug, Clone, Copy)]
+pub struct Call<'a> {
+    pub workspace: &'a str,
+    /// The member whose session this is.
+    pub owner: &'a str,
+    /// The compile job and chunk (`<scope>:<body_sha256>:<chunk>`).
+    pub ref_key: &'a str,
 }
 
 /// Why a model call did not answer.
@@ -131,18 +146,22 @@ pub enum ModelFailure {
     NoModel,
     /// The call failed; the string is a short fixed-vocabulary reason.
     Failed(String),
+    /// The call was handed to the owner's own runner; its answer arrives
+    /// later, and the compile waits for it.
+    Pending,
 }
 
 /// The workspace's model, as the compiler sees it. The composition wires
 /// it over `livingbrain_models::invoke`; the tests over a fake.
 #[async_trait::async_trait]
 pub trait Model: Send + Sync {
-    /// Whether a model would serve a compile in `workspace` — no call made.
-    async fn available(&self, workspace: &str) -> Result<bool, String>;
+    /// Whether a model would serve `owner`'s compile in `workspace` — their
+    /// own runner or the workspace's connection. No call made.
+    async fn available(&self, workspace: &str, owner: &str) -> Result<bool, String>;
     /// One completion.
     async fn complete(
         &self,
-        workspace: &str,
+        call: &Call<'_>,
         system: &str,
         user: &str,
         max_tokens: u32,
@@ -280,7 +299,7 @@ impl Compiler {
             .queue
             .ready(now, filter, max_jobs.saturating_mul(4).max(4))
             .await?;
-        let mut models: BTreeMap<String, bool> = BTreeMap::new();
+        let mut models: BTreeMap<(String, String), bool> = BTreeMap::new();
         let mut out = Vec::new();
         let mut compiled = 0usize;
         for job in ready {
@@ -288,11 +307,16 @@ impl Compiler {
                 break;
             }
             let now = self.clock.now();
-            let available = match models.get(&job.workspace) {
+            let who = (job.workspace.clone(), job.owner.clone());
+            let available = match models.get(&who) {
                 Some(known) => *known,
                 None => {
-                    let known = self.model.available(&job.workspace).await.unwrap_or(false);
-                    models.insert(job.workspace.clone(), known);
+                    let known = self
+                        .model
+                        .available(&job.workspace, &job.owner)
+                        .await
+                        .unwrap_or(false);
+                    models.insert(who, known);
                     known
                 }
             };
@@ -436,7 +460,11 @@ impl Compiler {
 
         let mut tally = Tally::default();
         let parts = chunks.len();
-        for (index, chunk) in chunks.iter().enumerate() {
+        // A compile that waited on the owner's runner resumes after the
+        // chunks it already applied; their tokens are on the row already.
+        let resumed = usize::try_from(job.chunks_done).unwrap_or(0).min(parts);
+        let spent_before = job.prompt_tokens.saturating_add(job.completion_tokens);
+        for (index, chunk) in chunks.iter().enumerate().skip(resumed) {
             let shown = match self.context(&job.scope, &allowed).await {
                 Ok(shown) => shown,
                 Err(_) => return self.failed(job, now, "store", tally),
@@ -458,14 +486,24 @@ impl Compiler {
             let estimate = prompt::estimate_tokens(prompt::SYSTEM)
                 + prompt::estimate_tokens(&user)
                 + u64::from(self.settings.max_output_tokens);
-            if tally.tokens().saturating_add(estimate) > self.settings.job_tokens {
+            if spent_before
+                .saturating_add(tally.tokens())
+                .saturating_add(estimate)
+                > self.settings.job_tokens
+            {
                 omitted = true;
                 break;
             }
+            let ref_key = format!("{}:{}:{index}", job.scope, job.body_sha256);
+            let call = Call {
+                workspace: &job.workspace,
+                owner: &job.owner,
+                ref_key: &ref_key,
+            };
             let reply = match self
                 .model
                 .complete(
-                    &job.workspace,
+                    &call,
                     prompt::SYSTEM,
                     &user,
                     self.settings.max_output_tokens,
@@ -483,14 +521,30 @@ impl Compiler {
                     let reason = format!("model-{reason}");
                     return self.failed(job, now, &reason, tally);
                 }
+                // Out on the owner's runner: what this run applied stays, and
+                // the job carries on from this chunk when the answer comes
+                // back (at once, through the result route; an hour from now
+                // at the latest, from the cron).
+                Err(ModelFailure::Pending) => {
+                    return Finish {
+                        retry_at: Some(now + Duration::hours(1)),
+                        chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                        refund_attempt: true,
+                        ..self.with_tally(JobStatus::WaitingRunner, Some("waiting-runner"), tally)
+                    };
+                }
             };
             tally.prompt = tally.prompt.saturating_add(reply.prompt_tokens);
             tally.completion = tally.completion.saturating_add(reply.completion_tokens);
-            let spent = reply.prompt_tokens + reply.completion_tokens;
-            let _ = self
-                .queue
-                .record_spend(self.clock.now(), &job.workspace, spent)
-                .await;
+            // A runner's tokens were the owner's subscription, not the
+            // workspace's compile budget.
+            if !reply.runner {
+                let spent = reply.prompt_tokens + reply.completion_tokens;
+                let _ = self
+                    .queue
+                    .record_spend(self.clock.now(), &job.workspace, spent)
+                    .await;
+            }
 
             let Ok(output) = edits::parse(&reply.text) else {
                 tally.rejected += 1;
@@ -554,7 +608,10 @@ impl Compiler {
                 Some(format!("partial: {conflicts} stale, {rejected} refused"))
             }
         };
-        self.with_tally(JobStatus::Done, error.as_deref(), tally)
+        Finish {
+            chunks_done: Some(u32::try_from(parts).unwrap_or(u32::MAX)),
+            ..self.with_tally(JobStatus::Done, error.as_deref(), tally)
+        }
     }
 
     /// A `failed` finish, with the retry time its attempt count earns: 15
@@ -578,6 +635,8 @@ impl Compiler {
             rejected: tally.rejected,
             facts: tally.facts,
             retry_at: None,
+            chunks_done: None,
+            refund_attempt: false,
         }
     }
 

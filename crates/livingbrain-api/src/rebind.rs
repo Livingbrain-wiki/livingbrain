@@ -123,7 +123,7 @@ impl Blob for RebindBlob {
 /// The whole port layer, rooted on the pages key space: every key one of
 /// this crate's modules writes arrives carrying that module's own scope
 /// (`notes/…`, `search/…`, `ask/…`, `export/…`, `sources/…`,
-/// `coding-agents/…` — the harness's
+/// `coding-agents/…`, `model-jobs/…` — the harness's
 /// [`ScopedBlob`] keyed it) and is rewritten to `pages/…`; every other key
 /// passes through untouched, so the `pages` module's own `pages/…` keys land
 /// exactly as they always did.
@@ -147,7 +147,7 @@ pub struct PagesRebind {
     /// store the runtime resolved, and the `pages` module's own path.
     inner: Arc<dyn Blob>,
     /// The per-module rebinds, one per name this crate mounts.
-    rebinds: [(&'static str, RebindBlob); 6],
+    rebinds: [(&'static str, RebindBlob); 7],
 }
 
 impl PagesRebind {
@@ -179,6 +179,12 @@ impl PagesRebind {
                 (
                     "coding-agents",
                     RebindBlob::new(Arc::clone(&inner), "coding-agents", "pages"),
+                ),
+                // A runner's answer carries a compile on, which reads and
+                // writes the same pages key space.
+                (
+                    "model-jobs",
+                    RebindBlob::new(Arc::clone(&inner), "model-jobs", "pages"),
                 ),
             ],
             inner,

@@ -392,6 +392,7 @@ export const JOB_LABELS = {
   "over-budget": "Over budget",
   superseded: "Superseded",
   skipped: "Skipped",
+  "waiting-runner": "Waiting for your device",
 };
 
 export function jobLabel(status) {

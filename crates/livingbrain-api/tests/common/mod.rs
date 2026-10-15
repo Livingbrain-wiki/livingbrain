@@ -24,7 +24,8 @@ use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Facts, Notes, PagesRebind, Search, Sources, Wiki, pages_routes,
+    Ask, CodingAgents, Export, Facts, ModelJobs, Notes, PagesRebind, Search, Sources, Wiki,
+    pages_routes,
 };
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
 use livingbrain_pages::{
@@ -46,6 +47,12 @@ pub const OTHER_WORKSPACE: &str = "T1OTHERSPACE";
 /// The bearer token that speaks for `user-a` — the *same* user id — in
 /// [`OTHER_WORKSPACE`]: the case the workspace clause exists for.
 pub const TOKEN_A_ELSEWHERE: &str = "user-a-elsewhere";
+
+/// A token for `user-a` narrowed to the shared scope only.
+pub const TOKEN_A_NARROW: &str = "user-a-narrow";
+
+/// The deployment key-encryption secret the models module seals with.
+pub const MODEL_KEYS_SECRET: &str = "a-test-encryption-secret-of-32-bytes";
 
 /// A bearer resolver over a fixed table: a known token names an asker, an
 /// unknown one names nobody. That is the whole of what #72 replaces.
@@ -81,6 +88,12 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    /// The database every module of this fixture reads.
+    #[must_use]
+    pub fn db(&self) -> Arc<dyn Database> {
+        self.db.clone()
+    }
+
     /// An ingest pipeline over this fixture's own ports, so a test can put a
     /// source through the real pipeline and read it back through the route.
     /// `defer` is the caller's — a test asserting on deferred work passes
@@ -182,6 +195,14 @@ pub fn fixture() -> Fixture {
             },
         )
     })
+    .chain(std::iter::once((
+        TOKEN_A_NARROW.to_owned(),
+        Asker {
+            workspace_id: WORKSPACE.to_owned(),
+            user_id: "user-a".to_owned(),
+            token_scopes: Some(vec!["shared".to_owned()]),
+        },
+    )))
     .collect::<BTreeMap<_, _>>();
 
     let auth: Arc<dyn BearerAuth> = Arc::new(Tokens(askers));
@@ -204,7 +225,8 @@ pub fn fixture() -> Fixture {
         Box::new(Export::new(wiki.clone())),
         Box::new(Facts::new(wiki.clone())),
         Box::new(Sources::new(wiki.clone())),
-        Box::new(CodingAgents::new(wiki)),
+        Box::new(CodingAgents::new(wiki.clone())),
+        Box::new(ModelJobs::new(wiki)),
         // The two tables the compiler reads beside its own: which model
         // serves the workspace, and the usage ledger its budget gate reads.
         Box::new(livingbrain_models::Models::new()),
@@ -213,11 +235,12 @@ pub fn fixture() -> Fixture {
 
     let kit = TestHarness::with_ports(modules, |ports| {
         ports.blob = Some(Arc::new(PagesRebind::new(Arc::clone(&memory))) as Arc<dyn Blob>);
-        // The deployment's own origin, which every page link is built under.
-        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
-            livingbrain_pages::APP_BASE_KEY,
-            APP_BASE,
-        )]));
+        // The deployment's own origin, which every page link is built under,
+        // and the key-encryption secret the model jobs are sealed with.
+        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([
+            (livingbrain_pages::APP_BASE_KEY, APP_BASE),
+            ("MODEL_KEYS_SECRET", MODEL_KEYS_SECRET),
+        ]));
     });
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
     Fixture {
