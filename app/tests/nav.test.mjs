@@ -55,6 +55,8 @@ test("every address published before the shell still resolves to a destination",
     "/settings.html#soon": "integrations",
     "/settings.html#stack": "integrations",
     "/brain.html": "map",
+    "/settings.html#github": "integrations",
+    "/wiki.html?view=github": "github",
   };
   for (const [url, id] of Object.entries(legacy)) {
     assert.equal(at(url), id, url);
@@ -73,7 +75,8 @@ test("the groups are Brain, Sources, Workspace, Settings, and reserved slots are
   assert.deepEqual(NAV.map((group) => group.label), ["Brain", "Sources", "Workspace", "Settings"]);
   const ids = navItems().map((item) => item.id);
   assert.equal(new Set(ids).size, ids.length, "ids are unique");
-  for (const id of ["github", "agents", "access"]) {
+  assert.equal(navItem("github").href, "wiki.html?view=github", "GitHub is a source, not a slot");
+  for (const id of ["agents", "access"]) {
     const item = navItem(id);
     assert.equal(item.href, undefined, `${id} is a slot`);
     assert.ok(item.soon, `${id} says what is coming`);

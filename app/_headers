@@ -27,7 +27,7 @@
 
 # Every route: the CSP and the security headers.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-GsRRMiFErXfPA/V4np3z0CtFFGhxjhelBLl+TjY8sYA='; style-src 'self'; img-src 'self' data:; connect-src 'self' https://api.livingbrain.wiki; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' https://api.livingbrain.wiki; frame-ancestors 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-GsRRMiFErXfPA/V4np3z0CtFFGhxjhelBLl+TjY8sYA='; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self' https://github.com; frame-ancestors 'none'; upgrade-insecure-requests
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   X-Frame-Options: DENY

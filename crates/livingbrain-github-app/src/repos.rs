@@ -106,20 +106,23 @@ pub struct RepoRef {
     pub full_name: String,
 }
 
-/// The default project for a repository: its name without the owner.
+/// The default project for a repository: its name without the owner, in the
+/// case GitHub spells it. Agent sessions file under the repository basename
+/// in its original case (`EarthOS.world`), so a GitHub repository must keep
+/// that case to merge with them.
 fn default_project(full_name: &str) -> String {
     let name = full_name.rsplit('/').next().unwrap_or(full_name);
-    project_slug(name)
+    project_name(name)
 }
 
-/// A project name: lowercase ASCII letters, digits, `-`, `_` and `.`,
-/// 1..=64 characters. Anything else becomes `-`.
-fn project_slug(value: &str) -> String {
-    let slug: String = value
+/// A project name: ASCII letters, digits, `-`, `_` and `.` in their original
+/// case, 1..=64 characters. Anything else becomes `-`. The case is kept on
+/// purpose: project matching is exact, and the session side never lowercases.
+fn project_name(value: &str) -> String {
+    let name: String = value
         .chars()
         .take(64)
         .map(|c| {
-            let c = c.to_ascii_lowercase();
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
                 c
             } else {
@@ -127,10 +130,10 @@ fn project_slug(value: &str) -> String {
             }
         })
         .collect();
-    if slug.is_empty() {
+    if name.is_empty() {
         "repo".to_owned()
     } else {
-        slug
+        name
     }
 }
 
@@ -303,7 +306,7 @@ pub async fn set_repo_settings(
     let project = settings
         .project
         .as_deref()
-        .map_or(current.project, project_slug);
+        .map_or(current.project, project_name);
     let scope = settings.scope.clone().unwrap_or(current.scope);
     let included = settings.included.unwrap_or(current.included);
     db.execute(&Statement::with_values(
@@ -369,4 +372,25 @@ pub async fn note_webhook(
     ))
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod project_name_tests {
+    use super::{default_project, project_name};
+
+    #[test]
+    fn a_repository_keeps_its_original_case_as_its_project() {
+        // The same spelling an agent session files under (its repo basename).
+        assert_eq!(default_project("World-360/EarthOS.world"), "EarthOS.world");
+        assert_eq!(default_project("World-360/Brain_Repo"), "Brain_Repo");
+        assert!(livingbrain_pages::is_project(&default_project(
+            "World-360/EarthOS.world"
+        )));
+    }
+
+    #[test]
+    fn a_user_chosen_project_keeps_its_case_and_loses_only_unsafe_characters() {
+        assert_eq!(project_name("Brain Repo!"), "Brain-Repo-");
+        assert_eq!(project_name("EarthOS.world"), "EarthOS.world");
+    }
 }

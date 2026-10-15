@@ -29,7 +29,7 @@ export const NAV = Object.freeze([
     items: [
       { id: "sessions", label: "Agent sessions", href: "wiki.html?view=sessions", icon: "sessions", hint: "Synced coding-agent sessions" },
       { id: "coding-agents", label: "Coding agents", href: "wiki.html?view=coding-agents", icon: "folder", hint: "Pages compiled from your sessions" },
-      { id: "github", label: "GitHub", soon: "Connecting GitHub is coming soon.", icon: "github" },
+      { id: "github", label: "GitHub", href: "wiki.html?view=github", icon: "github", hint: "Commits, issues and pull requests from included repositories" },
       { id: "imports", label: "Imports", href: "wiki.html?view=imports", icon: "import", hint: "Files imported into the brain" },
     ],
   },
@@ -76,7 +76,7 @@ export function navItem(id, nav = NAV) {
 export const SETTINGS_TABS = Object.freeze({
   models: ["models"],
   limits: ["limits"],
-  integrations: ["connect", "soon", "stack"],
+  integrations: ["connect", "github", "soon", "stack"],
   tokens: ["tokens"],
   members: ["members"],
   account: ["account"],
@@ -104,6 +104,7 @@ const WIKI_VIEWS = Object.freeze({
   transcript: "sessions",
   "coding-agents": "coding-agents",
   imports: "imports",
+  github: "github",
 });
 
 /** The file name of a path: `/`, `/index.html` and `` are `index.html`, and

@@ -470,7 +470,8 @@ Each record goes through `livingbrain_pages::Ingestor` as a `SourceIngest`:
 - `scope`: `page_scope(workspace, Shared)`, or the member's own scope for a
   repository set to `user:<member id>`.
 - `project`: the repository's project setting (default: the repository name,
-  lowercased). It is filed with no project if the ledger refuses the name.
+  in its original case, for example `EarthOS.world`). It is filed with no
+  project if the ledger refuses the name.
 - `origin_ref`: the GitHub permalink.
 - `rel_path`: `github/<owner>/<repo>/commit/<sha>`, `/issue/<n>` or `/pr/<n>`.
 - `body`: the canonical JSON.
@@ -490,30 +491,36 @@ physical `pages/…` objects every other ledger route reads.
 
 ### Connecting a workspace (owner click-path)
 
-These steps use World-360's `EarthOS.world` as the example. They assume Part D
-has built the settings UI on the routes above.
+These steps use the World-360 organization and its `EarthOS.world` repository
+as the example. The settings UI is in Settings → Integrations → GitHub (the
+`#github` section of `settings.html`, `app/assets/github.js`).
 
 1. Sign in to `https://app.livingbrain.wiki` as an owner or admin of the
-   workspace. Open Settings, then GitHub.
-2. Choose **Create the GitHub App**. For World-360, pick the organization owner
-   `EarthOS-world` (or whichever GitHub org owns the repository). Living Brain
-   calls `POST /v1/github/app/manifest` and posts the manifest form to GitHub.
+   workspace. Open Settings → Integrations, then GitHub.
+2. Choose **Create the GitHub App**, and pick the owner: the organization
+   **World-360**, or your own account for a personal app. Living Brain calls
+   `POST /v1/github/app/manifest` and posts the manifest form to GitHub.
 3. On GitHub's "Create GitHub App" page, the name, permissions (read only) and
-   events are filled in. Click **Create GitHub App for EarthOS-world**. GitHub
-   creates the app and sends you back to Living Brain, which stores its
-   credentials sealed and forwards you to the app's install page.
-4. On the install page, pick the account (`EarthOS-world`), choose **Only
-   select repositories**, select `EarthOS.world`, and click **Install**. GitHub
-   sends you back to Living Brain, which confirms the installation with GitHub,
-   binds it to the workspace and lists the repository.
-5. Back on Settings → GitHub, the repository shows as pending, shared, project
-   `earthos.world`. Change the scope or project here if needed. The backfill
-   starts on the next cron tick (every 15 minutes) and shows its progress on
-   this page. Nothing needs to be clicked to start it, and nothing can.
+   events are filled in. Click **Create GitHub App**. GitHub creates the app
+   and sends you back to Living Brain, which stores its credentials sealed and
+   forwards you to the app's install page.
+4. On the install page, pick **World-360**, choose **Only select
+   repositories**, select `EarthOS.world`, and click **Install**. GitHub sends
+   you back to Living Brain, which confirms the installation with GitHub, binds
+   it to the workspace and lists the repository.
+5. Back in Settings → GitHub, the repository shows as pending, shared, project
+   `EarthOS.world` (the repository's own name, in its own case, so agent
+   sessions from the same repository file under the same project). Change the
+   scope or project here if needed. The backfill starts on the next cron tick
+   (every 15 minutes) and shows its progress on this page. Nothing needs to be
+   clicked to start it, and nothing can.
 
-To disconnect, choose **Remove**. Living Brain forgets the credentials, and the
-answer links to the app on GitHub, which must be deleted there (Advanced, then
-Delete GitHub App).
+To add another account, use **Add another account**. To disconnect, choose
+**Remove**. Living Brain forgets the credentials, and the answer links to the
+app on GitHub, which must be deleted there (Advanced, then Delete GitHub App).
+
+The GitHub source filter is under Sources → GitHub. It lists commits, issues
+and pull requests by kind and project, each linked to its page on github.com.
 
 ### Deployment
 

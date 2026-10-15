@@ -271,6 +271,45 @@
         </div>
       </section>
 
+      <!-- github: the commits, issues and pull requests the included
+           repositories filed as sources (docs/github.md), newest first -->
+      <section id="github-view" hidden>
+        <div class="page-head">
+          <p class="eyebrow">Sources</p>
+          <h1>GitHub</h1>
+          <p class="lede">
+            Commits, issues and pull requests from the repositories you
+            included, each linked to its page on GitHub. Connect or change
+            repositories in <a href="settings.html#github">Settings</a>.
+          </p>
+        </div>
+        <div class="wiki-toolbar">
+          <select id="github-kind" class="wiki-filter" aria-label="Show one kind of GitHub item">
+            <option value="">All GitHub items</option>
+            <option value="github_commit">Commits</option>
+            <option value="github_issue">Issues</option>
+            <option value="github_pr">Pull requests</option>
+          </select>
+          <select
+            id="github-project"
+            class="wiki-filter"
+            aria-label="Show GitHub items from one project"
+            hidden
+          ></select>
+          <span class="status" id="github-status" role="status"></span>
+        </div>
+        <ul id="github-list" class="wiki-list imports" hidden></ul>
+        <button id="github-more" type="button" hidden>Load more</button>
+        <div id="github-empty" class="card wiki-empty" hidden>
+          <h2>No GitHub items yet</h2>
+          <p>
+            Connect GitHub in <a href="settings.html#github">Settings</a>, then
+            include a repository. Its history is read on the server's schedule,
+            and its items appear here as they arrive.
+          </p>
+        </div>
+      </section>
+
       <!-- imports: the files imported into the brain, each readable in place -->
       <section id="imports-view" hidden>
         <div class="page-head">
