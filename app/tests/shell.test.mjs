@@ -308,6 +308,53 @@ test("signed in: the switcher names the workspace and lists the others to switch
   assert.equal(manage.getAttribute("href"), "settings.html#members");
 });
 
+test("avatars: the workspace's and yours in the top bar, initials when there is none", async () => {
+  world();
+  const avatar = (id) => `/v1/avatars/av_01HZZZ${id.repeat(20)}`;
+  const { api } = fakeApi({
+    "/v1/workspaces": [
+      { id: "T0", name: "Acme", role: "owner", current: true, avatar_url: avatar("A") },
+      { id: "T1", name: "Side Project", role: "member", current: false, avatar_url: null },
+    ],
+  });
+  const shell = mountShell({ api, toggleTheme() {}, signOut() {} });
+  shell.applySession({
+    kind: "signed-in",
+    me: {
+      workspace: { id: "T0", name: "Acme", avatar_url: avatar("A") },
+      member: { user_id: "u1", name: "Ada Lovelace", avatar_url: avatar("B") },
+      is_owner: true,
+    },
+  });
+  // The switcher button gained one picture, kept beside the name.
+  const pics = all(byId.get("ws-button"), ".avatar");
+  assert.equal(pics.length, 1);
+  assert.equal(all(pics[0], "img")[0].getAttribute("src"), avatar("A"));
+  // The user button's slot shows the uploaded picture, not the initial.
+  const mine = all(byId.get("user-initial"), "img");
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].getAttribute("src"), avatar("B"));
+  assert.equal(mine[0].getAttribute("alt"), "");
+
+  // Painting again (a name or picture changed) reuses the slot.
+  shell.applySession({
+    kind: "signed-in",
+    me: { workspace: { id: "T0", name: "Acme" }, member: { user_id: "u1", name: "Ada Lovelace" }, is_owner: true },
+  });
+  assert.equal(all(byId.get("ws-button"), ".avatar").length, 1);
+  assert.equal(all(byId.get("ws-button"), "img").length, 0);
+  assert.equal(byId.get("user-initial").textContent, "AL");
+
+  // The switcher's rows carry each workspace's picture or initials.
+  await byId.get("ws-button").click();
+  const rows = all(byId.get("ws-menu"), "button");
+  assert.equal(all(rows[0], "img")[0].getAttribute("src"), avatar("A"));
+  assert.equal(all(rows[1], ".avatar")[0].textContent, "SP");
+  assert.ok(rows[1].textContent.includes("Side Project"));
+  const links = all(byId.get("ws-menu"), "a").map((a) => a.getAttribute("href"));
+  assert.deepEqual(links, ["settings.html#members", "settings.html#workspace"]);
+});
+
 test("the palette: ⌘K opens it, typing narrows, arrows move, Enter goes", async () => {
   world();
   const { api } = fakeApi();

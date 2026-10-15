@@ -1,3 +1,5 @@
+import { avatarNode } from "./profile.js";
+
 // Members, invitations and the workspace switcher — the pure half, next to
 // `tokens.js` (ADR 0004). Requests are described here and sent by `app.js`;
 // the rows are painted with elements and text nodes only, as everywhere in
@@ -100,7 +102,24 @@ export function memberView(entry) {
     userId: String((entry && entry.user_id) || ""),
     name: String((entry && entry.name) || "") || "Unnamed member",
     role: String((entry && entry.role) || "member"),
+    avatarUrl: String((entry && entry.avatar_url) || ""),
   };
+}
+
+/** The name cell: the member's picture (or initials) and their name, as text,
+ * in one wrapper so the cell itself stays a table cell. */
+function personCell(doc, view) {
+  const td = doc.createElement("td");
+  td.setAttribute("data-label", "Name");
+  const person = doc.createElement("span");
+  person.className = "person";
+  const pic = avatarNode(doc, { name: view.name, id: view.userId, url: view.avatarUrl }, "avatar--sm");
+  if (pic) person.appendChild(pic);
+  const name = doc.createElement("span");
+  name.textContent = view.name;
+  person.appendChild(name);
+  td.appendChild(person);
+  return td;
 }
 
 /** The roster, as views. A non-array answer is an empty roster. */
@@ -164,7 +183,7 @@ export function renderMemberRows(container, views, me, doc = typeof document ===
   const roles = assignableRoles(me);
   for (const view of Array.isArray(views) ? views : []) {
     const tr = doc.createElement("tr");
-    tr.appendChild(cell(doc, view.name, "Name"));
+    tr.appendChild(personCell(doc, view));
     const roleCell = doc.createElement("td");
     roleCell.setAttribute("data-label", "Role");
     const touchable = manage && (view.role !== "owner" || myRole === "owner");

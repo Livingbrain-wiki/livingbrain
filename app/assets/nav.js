@@ -71,14 +71,15 @@ export function navItem(id, nav = NAV) {
 
 /**
  * The settings tabs and the section ids each shows. The old anchors stay
- * addressable: `#connect`, `#soon` and `#stack` are inside Integrations.
+ * addressable: `#connect`, `#soon` and `#stack` are inside Integrations, and
+ * `#workspace` (its name and picture) heads the Members tab.
  */
 export const SETTINGS_TABS = Object.freeze({
   models: ["models"],
   limits: ["limits"],
   integrations: ["connect", "github", "soon", "stack"],
   tokens: ["tokens"],
-  members: ["members"],
+  members: ["workspace", "members"],
   account: ["account"],
 });
 

@@ -95,7 +95,11 @@ test("rows are text: a name full of markup stays text", () => {
   renderMemberRows(rows, views, admin, doc);
   assert.equal(rows.children.length, 2);
   const [aliceRow, evilRow] = rows.children;
-  assert.equal(evilRow.children[0].textContent, "<img src=x onerror=alert(1)>");
+  // The name cell is a picture and the name; the name is a text node's worth.
+  const [pic, evilName] = evilRow.children[0].children[0].children;
+  assert.equal(evilName.textContent, "<img src=x onerror=alert(1)>");
+  assert.equal(pic.textContent, "IO", "no avatar: the initials, as text");
+  assert.equal(aliceRow.children[0].children[0].children[1].textContent, "Alice");
   // An admin sees an owner's role as text, with no picker and no Remove.
   assert.equal(aliceRow.children[1].textContent, "Owner");
   assert.equal(aliceRow.children[2].children.length, 0);

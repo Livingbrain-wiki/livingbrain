@@ -104,6 +104,18 @@ import { wikiPage } from "./wiki.js";
 import { mountShell } from "./shell.js";
 import { brainPage } from "./brain.js";
 import { settingsTab, SETTINGS_TABS } from "./nav.js";
+import {
+  nameError,
+  displayNameRequest,
+  workspaceNameRequest,
+  avatarUploadRequest,
+  avatarRemoveRequest,
+  avatarFileError,
+  profileView,
+  profileErrorMessage,
+  paintAvatar,
+  cropToSquare,
+} from "./profile.js";
 import { mountGithub } from "./github.js";
 
 /**
@@ -169,7 +181,7 @@ export class ApiError extends Error {
  * retries and never handles a token.
  */
 export async function api(path, options = {}) {
-  const { method = "GET", body, headers = {} } = options;
+  const { method = "GET", body, raw, contentType, headers = {} } = options;
   const url = path.startsWith("http") ? path : `${apiBase()}${path}`;
   const init = {
     method,
@@ -183,7 +195,12 @@ export async function api(path, options = {}) {
         : "same-origin",
     headers: { Accept: "application/json", ...headers },
   };
-  if (body !== undefined) {
+  if (raw !== undefined) {
+    // A body that is not JSON — an avatar image — goes as it is, with its own
+    // type; the browser sets its length.
+    init.headers["Content-Type"] = contentType || (raw && raw.type) || "application/octet-stream";
+    init.body = raw;
+  } else if (body !== undefined) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(body);
   }
@@ -598,8 +615,8 @@ const TAB_HEADS = Object.freeze({
   limits: ["Settings", "Usage & limits", "How much the brain may spend on the workspace's model, and what it has spent."],
   integrations: ["Settings", "Integrations", "Connect your coding agent, GitHub, the CLI and the tools that read from the brain."],
   tokens: ["Settings", "API tokens", "Tokens let a coding agent or the CLI read your brain without a browser."],
-  members: ["Workspace", "Members", "Who is in this workspace and what they may do."],
-  account: ["Settings", "Account", "Who you are signed in as, your workspaces, and signing out."],
+  members: ["Workspace", "Members", "The workspace's name and picture, who is in it, and what they may do."],
+  account: ["Settings", "Account", "Your name and picture, your workspaces, and signing out."],
 });
 
 export function showSettingsTab(hash) {
@@ -655,6 +672,7 @@ pages.settings = async function settings() {
     wireModels(),
     wireTokens(),
     wireMembers(),
+    wireProfile(),
     wireBudgets(),
     mountGithub({
       api,
@@ -1687,6 +1705,11 @@ async function wireMembers() {
       ? { method: request.method }
       : { method: request.method, body: request.body });
 
+  // A changed name or picture (`wireProfile`) shows in the roster at once.
+  document.addEventListener("lb-profile", () => {
+    load();
+  });
+
   const load = async () => {
     try {
       me = await api("/v1/workspaces/me");
@@ -1794,6 +1817,227 @@ async function wireMembers() {
   });
 
   return load();
+}
+
+/* --- your profile and the workspace's -------------------------------- */
+
+/**
+ * One picture editor: a file input, a canvas that previews the centred
+ * square crop, and Use / Cancel / Remove. `target` is `"me"` or
+ * `"workspace"`; `after` runs once the server has the change.
+ */
+function wireAvatarEditor({ prefix, target, status, what, after }) {
+  const avatar = $(`#${prefix}-avatar`);
+  const preview = $(`#${prefix}-preview`);
+  const file = $(`#${prefix}-file`);
+  const save = $(`#${prefix}-avatar-save`);
+  const cancel = $(`#${prefix}-avatar-cancel`);
+  const remove = $(`#${prefix}-avatar-remove`);
+  if (!avatar || !preview || !file || !save || !cancel || !remove) return { paint() {}, enable() {} };
+  let pending = null;
+  let person = {};
+
+  const showPreview = (on) => {
+    preview.hidden = !on;
+    avatar.hidden = on;
+    save.hidden = !on;
+    cancel.hidden = !on;
+    remove.hidden = on || !person.url;
+  };
+  const reset = () => {
+    pending = null;
+    file.value = "";
+    fieldError(`${prefix}File`, "", file);
+    showPreview(false);
+  };
+
+  file.addEventListener("change", async () => {
+    const picked = file.files && file.files[0];
+    const problem = avatarFileError(picked);
+    if (problem) {
+      fieldError(`${prefix}File`, problem, file);
+      return;
+    }
+    try {
+      const { blob } = await cropToSquare(picked, preview);
+      avatarUploadRequest(blob, target);
+      pending = blob;
+      fieldError(`${prefix}File`, "", file);
+      showPreview(true);
+    } catch (error) {
+      pending = null;
+      fieldError(`${prefix}File`, error.message || "The image could not be read.", file);
+      showPreview(false);
+    }
+  });
+
+  save.addEventListener("click", async () => {
+    if (!pending) return;
+    save.disabled = true;
+    try {
+      const request = avatarUploadRequest(pending, target);
+      await api(request.path, { method: request.method, raw: request.raw, contentType: request.contentType });
+      reset();
+      toast("Picture saved.", "ok");
+      await after();
+    } catch (error) {
+      notice(status, profileErrorMessage(error, `save ${what} picture`), "bad");
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  cancel.addEventListener("click", reset);
+
+  remove.addEventListener("click", async () => {
+    const ok = await confirmAction({
+      title: "Remove the picture?",
+      body: "Initials take its place.",
+      confirm: "Remove",
+    });
+    if (!ok) return;
+    try {
+      const request = avatarRemoveRequest(target);
+      await api(request.path, { method: request.method });
+      toast("Picture removed.", "ok");
+      await after();
+    } catch (error) {
+      notice(status, profileErrorMessage(error, `remove ${what} picture`), "bad");
+    }
+  });
+
+  return {
+    /** Shows the stored picture (or initials) and whether Remove applies. */
+    paint(next) {
+      person = next;
+      paintAvatar(avatar, next);
+      if (preview.hidden) remove.hidden = !next.url;
+    },
+    /** Read-only for someone who may not change it. */
+    enable(on) {
+      file.disabled = !on;
+      if (!on) {
+        reset();
+        remove.hidden = true;
+      }
+    },
+  };
+}
+
+/**
+ * Settings → Account (your name and picture here) and the head of the
+ * Members tab (the workspace's, for owners and admins). Each change re-reads
+ * `/v1/workspaces/me` and repaints the top bar and the roster from it.
+ */
+async function wireProfile() {
+  const status = $("#profile-status");
+  const form = $("#profile-form");
+  const name = $("#profile-name");
+  const nameHint = $("#profile-name-hint");
+  const nameReset = $("#profile-name-reset");
+  const wsStatus = $("#workspace-status");
+  const wsForm = $("#workspace-form");
+  const wsName = $("#workspace-name");
+  const wsSave = $("#workspace-save");
+  const wsReadonly = $("#workspace-readonly");
+  if (!form || !name) return;
+  let view = null;
+
+  const refresh = async () => {
+    const me = await api("/v1/workspaces/me");
+    view = profileView(me);
+    name.value = view.displayName || view.name;
+    if (nameHint) {
+      nameHint.textContent = view.displayName
+        ? "The name you chose for this workspace. Each workspace keeps its own."
+        : "1 to 64 characters. Each workspace keeps its own.";
+    }
+    if (nameReset) nameReset.hidden = !view.displayName;
+    mine.paint({ name: view.name, id: view.userId, url: view.avatarUrl });
+    if (wsName) {
+      wsName.value = view.workspaceName;
+      wsName.readOnly = !view.canEditWorkspace;
+    }
+    if (wsSave) wsSave.hidden = !view.canEditWorkspace;
+    if (wsReadonly) wsReadonly.hidden = view.canEditWorkspace;
+    theirs.paint({ name: view.workspaceName, id: view.workspaceId, url: view.workspaceAvatarUrl });
+    theirs.enable(view.canEditWorkspace);
+    if (shell) shell.applySession({ kind: "signed-in", me });
+    return me;
+  };
+  const changed = async () => {
+    await refresh();
+    document.dispatchEvent(new CustomEvent("lb-profile"));
+  };
+
+  const mine = wireAvatarEditor({ prefix: "profile", target: "me", status, what: "your", after: changed });
+  const theirs = wireAvatarEditor({
+    prefix: "workspace",
+    target: "workspace",
+    status: wsStatus,
+    what: "the workspace's",
+    after: changed,
+  });
+
+  name.addEventListener("input", () => fieldError("profileName", "", name));
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const problem = nameError(name.value);
+    if (problem) {
+      fieldError("profileName", problem, name);
+      name.focus();
+      return;
+    }
+    try {
+      const request = displayNameRequest(name.value);
+      await api(request.path, { method: request.method, body: request.body });
+      toast("Name saved.", "ok");
+      await changed();
+    } catch (error) {
+      notice(status, profileErrorMessage(error, "save your name"), "bad");
+    }
+  });
+  if (nameReset) {
+    nameReset.addEventListener("click", async () => {
+      try {
+        const request = displayNameRequest(null);
+        await api(request.path, { method: request.method, body: request.body });
+        toast("Back to your sign-in name.", "ok");
+        await changed();
+      } catch (error) {
+        notice(status, profileErrorMessage(error, "reset your name"), "bad");
+      }
+    });
+  }
+
+  if (wsForm && wsName) {
+    wsName.addEventListener("input", () => fieldError("workspaceName", "", wsName));
+    wsForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!view || !view.canEditWorkspace) return;
+      const problem = nameError(wsName.value);
+      if (problem) {
+        fieldError("workspaceName", problem, wsName);
+        wsName.focus();
+        return;
+      }
+      try {
+        const request = workspaceNameRequest(wsName.value);
+        await api(request.path, { method: request.method, body: request.body });
+        toast("Workspace renamed.", "ok");
+        await changed();
+      } catch (error) {
+        notice(wsStatus, profileErrorMessage(error, "rename the workspace"), "bad");
+      }
+    });
+  }
+
+  try {
+    await refresh();
+    notice(status, "");
+  } catch (error) {
+    notice(status, profileErrorMessage(error, "load your profile"), "warn");
+  }
 }
 
 /* --- usage & limits --------------------------------------------------- */

@@ -13,9 +13,9 @@ use cratefield_core::axum::body::Body;
 use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use cratefield_core::{Kid, Payload, Ports, RandomBytes, RandomError, Signer, Statement};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
-use cratefield_testing::TestHarness;
-use livingbrain_tokens::{DevicePorts, Me, Tokens};
-use livingbrain_workspaces::Workspaces;
+use cratefield_testing::{MemoryBlob, TestHarness};
+use livingbrain_tokens::{Avatars, DevicePorts, Me, Tokens};
+use livingbrain_workspaces::{AvatarRebind, Workspaces};
 use serde_json::{Value, json};
 
 pub const WORKSPACE: &str = "T0SPACE";
@@ -53,6 +53,9 @@ impl RandomBytes for SeqRandom {
 pub struct Kit {
     pub harness: TestHarness,
     pub ports: Ports,
+    /// The raw store under the avatar rebind, as the venture plants it, so a
+    /// test can read the physical keys.
+    pub blob: MemoryBlob,
 }
 
 /// The kit, with [`OWNER`] and [`OTHER`] seeded.
@@ -110,11 +113,17 @@ fn kit() -> Kit {
         ),
         Box::new(Tokens::new().device_ports(device)),
         Box::new(Me::new()),
+        Box::new(Avatars::new()),
     ];
+    let blob = MemoryBlob::new();
+    let raw = blob.clone();
 
     // The ports the router was built with, captured so `authenticate` in a
     // test resolves a caller exactly as the routes do.
     let harness = TestHarness::with_ports(modules, move |ports| {
+        // The venture's avatar stack: the three modules' scoped views land on
+        // one `avatars/…` space.
+        ports.blob = Some(Arc::new(AvatarRebind::new(Arc::new(raw))));
         let mut copy = Ports::empty();
         copy.config = ports.config.clone();
         copy.db = ports.db.clone();
@@ -123,7 +132,11 @@ fn kit() -> Kit {
         *patch.lock().expect("lock") = Some(copy);
     });
     let ports = captured.lock().expect("lock").take().expect("ports");
-    Kit { harness, ports }
+    Kit {
+        harness,
+        ports,
+        blob,
+    }
 }
 
 impl Kit {
@@ -264,8 +277,56 @@ pub async fn post_json(kit: &Kit, path: &str, body: &Value, who: &Caller) -> Res
     send(kit, Method::POST, path, Some(body), &who.headers()).await
 }
 
+pub async fn patch_json(kit: &Kit, path: &str, body: &Value, who: &Caller) -> Res {
+    let body = ("application/json", body.to_string());
+    send(kit, Method::PATCH, path, Some(body), &who.headers()).await
+}
+
+/// A raw body with its own `Content-Type`: an image upload.
+pub async fn put_bytes(
+    kit: &Kit,
+    path: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+    who: &Caller,
+) -> Res {
+    send_bytes(kit, Method::PUT, path, content_type, bytes, &who.headers()).await
+}
+
 pub async fn delete(kit: &Kit, path: &str, who: &Caller) -> Res {
     send(kit, Method::DELETE, path, None, &who.headers()).await
+}
+
+async fn send_bytes(
+    kit: &Kit,
+    method: Method,
+    path: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+    headers: &HeaderMap,
+) -> Res {
+    use tower::ServiceExt;
+    let mut builder = Request::builder().method(method).uri(path);
+    for (name, header) in headers {
+        builder = builder.header(name, header.clone());
+    }
+    builder = builder.header(header::CONTENT_TYPE, content_type);
+    let response = kit
+        .harness
+        .router
+        .clone()
+        .oneshot(builder.body(Body::from(bytes)).expect("request builds"))
+        .await
+        .expect("router answers");
+    let (parts, body) = response.into_parts();
+    let bytes = cratefield_core::axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .expect("body reads");
+    Res {
+        status: parts.status,
+        headers: parts.headers,
+        body: bytes.to_vec(),
+    }
 }
 
 async fn send(

@@ -206,6 +206,69 @@
               </form>
             </section>
 
+            <!-- the workspace's name and picture: owners and admins change
+                 them, everyone else reads them. -->
+            <section class="card sect" id="workspace" aria-labelledby="workspace-h">
+              <header class="sect__head">
+                <h2 id="workspace-h">Workspace</h2>
+                <p class="muted">
+                  The name and picture everyone in this workspace sees in the
+                  top bar and the workspace switcher.
+                </p>
+              </header>
+              <div id="workspace-status" class="notice" role="status" aria-live="polite"></div>
+              <p id="workspace-readonly" class="hint" hidden>
+                Only owners and admins can change these.
+              </p>
+              <div class="profile">
+                <div class="profile__pic">
+                  <span id="workspace-avatar" class="avatar avatar--xl" aria-hidden="true"></span>
+                  <canvas
+                    id="workspace-preview"
+                    class="avatar avatar--xl avatar__preview"
+                    width="256"
+                    height="256"
+                    role="img"
+                    aria-label="Preview of the new picture"
+                    hidden
+                  ></canvas>
+                </div>
+                <div class="profile__pic-actions">
+                  <label for="workspace-file">Picture</label>
+                  <input
+                    id="workspace-file"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    aria-describedby="workspace-file-hint err-workspaceFile"
+                  />
+                  <p class="hint" id="workspace-file-hint">PNG, JPEG or WebP, cropped to a square. Everyone in the workspace sees it.</p>
+                  <p class="field-error" id="err-workspaceFile"></p>
+                  <div class="form-actions">
+                    <button type="button" data-variant="primary" id="workspace-avatar-save" hidden>Use this picture</button>
+                    <button type="button" id="workspace-avatar-cancel" hidden>Cancel</button>
+                    <button type="button" class="btn-danger" id="workspace-avatar-remove" hidden>Remove picture</button>
+                  </div>
+                </div>
+              </div>
+              <form id="workspace-form" class="profile__name" novalidate>
+                <div class="field">
+                  <label for="workspace-name">Workspace name</label>
+                  <input
+                    id="workspace-name"
+                    type="text"
+                    autocomplete="organization"
+                    maxlength="64"
+                    aria-describedby="workspace-name-hint err-workspaceName"
+                  />
+                  <p class="hint" id="workspace-name-hint">1 to 64 characters, shown in the top bar and the workspace switcher.</p>
+                  <p class="field-error" id="err-workspaceName"></p>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" data-variant="primary" id="workspace-save">Save name</button>
+                </div>
+              </form>
+            </section>
+
             <!-- members and invitations (ADR 0004). Painted by
                  `assets/members.js` with elements and text nodes only. -->
             <section class="card sect" id="members" aria-labelledby="members-h">
@@ -312,6 +375,63 @@
                 <h2 id="account-h">Account</h2>
                 <p class="muted">Who you are signed in as, and where.</p>
               </header>
+              <!-- your name and picture in this workspace. Painted and saved by
+                   `wireProfile` in `assets/app.js` with `assets/profile.js`;
+                   the preview is a canvas, so no `blob:` URL is needed. -->
+              <h3>Your profile</h3>
+              <p class="hint">
+                How you appear in this workspace: the top bar, the member list
+                and the people you work with.
+              </p>
+              <div id="profile-status" class="notice" role="status" aria-live="polite"></div>
+              <div class="profile">
+                <div class="profile__pic">
+                  <span id="profile-avatar" class="avatar avatar--xl" aria-hidden="true"></span>
+                  <canvas
+                    id="profile-preview"
+                    class="avatar avatar--xl avatar__preview"
+                    width="256"
+                    height="256"
+                    role="img"
+                    aria-label="Preview of the new picture"
+                    hidden
+                  ></canvas>
+                </div>
+                <div class="profile__pic-actions">
+                  <label for="profile-file">Picture</label>
+                  <input
+                    id="profile-file"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    aria-describedby="profile-file-hint err-profileFile"
+                  />
+                  <p class="hint" id="profile-file-hint">PNG, JPEG or WebP. It is cropped to a square here, and the original's location and camera data is never sent.</p>
+                  <p class="field-error" id="err-profileFile"></p>
+                  <div class="form-actions">
+                    <button type="button" data-variant="primary" id="profile-avatar-save" hidden>Use this picture</button>
+                    <button type="button" id="profile-avatar-cancel" hidden>Cancel</button>
+                    <button type="button" class="btn-danger" id="profile-avatar-remove" hidden>Remove picture</button>
+                  </div>
+                </div>
+              </div>
+              <form id="profile-form" class="profile__name" novalidate>
+                <div class="field">
+                  <label for="profile-name">Your name</label>
+                  <input
+                    id="profile-name"
+                    type="text"
+                    autocomplete="name"
+                    maxlength="64"
+                    aria-describedby="profile-name-hint err-profileName"
+                  />
+                  <p class="hint" id="profile-name-hint">1 to 64 characters. Each workspace keeps its own.</p>
+                  <p class="field-error" id="err-profileName"></p>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" data-variant="primary" id="profile-save">Save name</button>
+                  <button type="button" id="profile-name-reset" hidden>Use my sign-in name</button>
+                </div>
+              </form>
               <dl class="facts">
                 <div>
                   <dt>Signed in as</dt>

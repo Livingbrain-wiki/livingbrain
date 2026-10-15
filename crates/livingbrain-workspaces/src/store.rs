@@ -21,13 +21,21 @@ pub(crate) struct Workspace {
     pub id: String,
     pub name: String,
     pub owner_id: String,
+    /// The workspace's avatar id, if an owner or admin uploaded one.
+    pub avatar: Option<String>,
 }
 
 /// A member row: one person within one workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Member {
     pub user_id: String,
+    /// The name everybody reads: the one the member chose, else the one the
+    /// sign-in method reports (see `member_columns`).
     pub name: String,
+    /// The name the member chose, or `None` when they kept the reported one.
+    pub display_name: Option<String>,
+    /// The member's avatar id, if they uploaded one.
+    pub avatar: Option<String>,
     pub timezone: Option<String>,
     /// Slack's admin flag, mirrored. Not the member's role: see [`Role`].
     pub is_admin: bool,
@@ -133,7 +141,7 @@ pub(crate) async fn ensure_workspace(
 /// The workspace row, or `None` when there is no such workspace.
 pub(crate) async fn workspace(db: &dyn Database, id: &str) -> Result<Option<Workspace>, DbError> {
     let statement = Statement::with_values(
-        "SELECT id, name, owner_id FROM workspaces WHERE id = ?",
+        "SELECT id, name, owner_id, avatar FROM workspaces WHERE id = ?",
         vec![text(id)],
     );
     Ok(db.query(&statement).await?.first().map(workspace_from))
@@ -146,8 +154,11 @@ pub(crate) async fn member(
     user_id: &str,
 ) -> Result<Option<Member>, DbError> {
     let statement = Statement::with_values(
-        "SELECT user_id, name, timezone, is_admin, role FROM workspace_members \
-         WHERE workspace_id = ? AND user_id = ? AND removed_at IS NULL",
+        format!(
+            "SELECT {} FROM workspace_members \
+             WHERE workspace_id = ? AND user_id = ? AND removed_at IS NULL",
+            member_columns("")
+        ),
         vec![text(workspace_id), text(user_id)],
     );
     Ok(db.query(&statement).await?.first().map(member_from))
@@ -157,8 +168,11 @@ pub(crate) async fn member(
 /// stable across engines.
 pub(crate) async fn members(db: &dyn Database, workspace_id: &str) -> Result<Vec<Member>, DbError> {
     let statement = Statement::with_values(
-        "SELECT user_id, name, timezone, is_admin, role FROM workspace_members \
-         WHERE workspace_id = ? AND removed_at IS NULL ORDER BY user_id",
+        format!(
+            "SELECT {} FROM workspace_members \
+             WHERE workspace_id = ? AND removed_at IS NULL ORDER BY user_id",
+            member_columns("")
+        ),
         vec![text(workspace_id)],
     );
     Ok(db
@@ -356,11 +370,14 @@ pub(crate) async fn member_for_identity(
     external_id: &str,
 ) -> Result<Option<Member>, DbError> {
     let statement = Statement::with_values(
-        "SELECT m.user_id, m.name, m.timezone, m.is_admin, m.role FROM member_identities i \
-         JOIN workspace_members m \
-           ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
-         WHERE i.workspace_id = ? AND i.platform = ? AND i.external_id = ? \
-           AND m.removed_at IS NULL",
+        format!(
+            "SELECT {} FROM member_identities i \
+             JOIN workspace_members m \
+               ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
+             WHERE i.workspace_id = ? AND i.platform = ? AND i.external_id = ? \
+               AND m.removed_at IS NULL",
+            member_columns("m.")
+        ),
         vec![text(workspace_id), text(platform), text(external_id)],
     );
     Ok(db.query(&statement).await?.first().map(member_from))
@@ -602,13 +619,31 @@ fn workspace_from(row: &Row) -> Workspace {
         id: row.get::<String>("id").unwrap_or_default(),
         name: row.get::<String>("name").unwrap_or_default(),
         owner_id: row.get::<String>("owner_id").unwrap_or_default(),
+        avatar: row.get::<Option<String>>("avatar").flatten(),
     }
+}
+
+/// The member columns every member read selects, with the name everybody
+/// reads aliased as `name`. `prefix` is a table alias and its dot (`"m."`),
+/// or empty.
+fn member_columns(prefix: &str) -> String {
+    format!(
+        "{prefix}user_id AS user_id, \
+         COALESCE(NULLIF({prefix}display_name, ''), {prefix}name) AS name, \
+         {prefix}display_name AS display_name, {prefix}avatar AS avatar, \
+         {prefix}timezone AS timezone, {prefix}is_admin AS is_admin, {prefix}role AS role"
+    )
 }
 
 fn member_from(row: &Row) -> Member {
     Member {
         user_id: row.get::<String>("user_id").unwrap_or_default(),
         name: row.get::<String>("name").unwrap_or_default(),
+        display_name: row
+            .get::<Option<String>>("display_name")
+            .flatten()
+            .filter(|name| !name.is_empty()),
+        avatar: row.get::<Option<String>>("avatar").flatten(),
         timezone: row.get::<Option<String>>("timezone").flatten(),
         is_admin: row.get::<i64>("is_admin").unwrap_or_default() != 0,
         // An unreadable role reads as the least one, so a corrupt row fails
@@ -777,6 +812,7 @@ pub(crate) async fn email_identities(
 pub(crate) struct Membership {
     pub workspace_id: String,
     pub workspace_name: String,
+    pub workspace_avatar: Option<String>,
     pub user_id: String,
     pub role: Role,
 }
@@ -794,7 +830,7 @@ pub(crate) async fn memberships_for(
     let statement = Statement::with_values(
         format!(
             "SELECT DISTINCT w.id AS workspace_id, w.name AS workspace_name, \
-                    m.user_id AS user_id, m.role AS role \
+                    w.avatar AS workspace_avatar, m.user_id AS user_id, m.role AS role \
                FROM member_identities i \
                JOIN workspace_members m \
                  ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
@@ -813,6 +849,7 @@ pub(crate) async fn memberships_for(
         .map(|row| Membership {
             workspace_id: row.get::<String>("workspace_id").unwrap_or_default(),
             workspace_name: row.get::<String>("workspace_name").unwrap_or_default(),
+            workspace_avatar: row.get::<Option<String>>("workspace_avatar").flatten(),
             user_id: row.get::<String>("user_id").unwrap_or_default(),
             role: row
                 .get::<String>("role")

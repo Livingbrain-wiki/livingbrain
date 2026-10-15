@@ -279,6 +279,27 @@ final class APIClientTests: XCTestCase {
         let agent = try await client.me()
         XCTAssertEqual(agent.principalLabel, "CI bot (agent for Ada)")
         XCTAssertEqual(agent.workspaceLabel, "ws_1")
+        XCTAssertNil(agent.principal.avatarURL, "an older answer without the fields still decodes")
+        XCTAssertNil(agent.principal.displayName)
+    }
+
+    func testMeWithAChosenNameAndAvatars() async throws {
+        mock.on("GET", "/v1/me", Data(#"{"workspace":{"id":"ws_1","name":"Kestrel Labs","avatar_url":"/v1/avatars/av_01HZZZBBBBBBBBBBBBBBBBBBBB"},"principal":{"kind":"member","id":"usr_1","name":"Ada Lovelace","display_name":"Ada Lovelace","avatar_url":"/v1/avatars/av_01HZZZCCCCCCCCCCCCCCCCCCCC","role":"owner","is_admin":true},"credential":{"kind":"personal_access_token","prefix":"lbp_0123456789abcdef","scopes":null}}"#.utf8))
+        let me = try await client.me()
+        XCTAssertEqual(me.principalLabel, "Ada Lovelace · owner")
+        XCTAssertEqual(me.workspaceLabel, "Kestrel Labs (ws_1)")
+        XCTAssertEqual(me.principal.displayName, "Ada Lovelace")
+        XCTAssertEqual(me.workspace.avatarURL, "/v1/avatars/av_01HZZZBBBBBBBBBBBBBBBBBBBB")
+        XCTAssertEqual(
+            me.avatarURL(relativeTo: URL(string: "https://app.livingbrain.wiki")!)?.absoluteString,
+            "https://app.livingbrain.wiki/v1/avatars/av_01HZZZCCCCCCCCCCCCCCCCCCCC"
+        )
+
+        // A cleared name and no avatar arrive as nulls.
+        mock.on("GET", "/v1/me", Data(#"{"workspace":{"id":"ws_1","name":"Acme","avatar_url":null},"principal":{"kind":"member","id":"usr_1","name":"Ada","display_name":null,"avatar_url":null,"role":"member","is_admin":false},"credential":{"kind":"session"}}"#.utf8))
+        let plain = try await client.me()
+        XCTAssertNil(plain.principal.displayName)
+        XCTAssertNil(plain.avatarURL(relativeTo: URL(string: "https://app.livingbrain.wiki")!))
     }
 
     func testTokens() async throws {

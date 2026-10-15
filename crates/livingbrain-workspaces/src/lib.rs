@@ -50,6 +50,7 @@ mod flow;
 mod handlers;
 mod install;
 mod members;
+mod profile;
 mod reply;
 mod slack;
 mod store;
@@ -65,6 +66,13 @@ pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
 pub use handlers::{Caller, caller, caller_for};
 pub use install::{BotTokenError, bot_token};
 pub use livingbrain_pages::Answers;
+pub use profile::{
+    AVATAR_BODY_CEILING, AVATAR_CACHE_CONTROL, AVATAR_MAX_BYTES, AVATAR_MAX_SIDE, AVATAR_PREFIX,
+    AvatarRebind, AvatarRef, CleanImage, ImageError, ImageKind, NAME_MAX_CHARS, NameError,
+    avatar_key, avatar_url, avatars_unavailable, blob_failed, clean_image, clean_name,
+    forget_avatar, image_problem, is_avatar_id, member_avatar, name_problem, new_avatar_id,
+    nothing_to_change, readable_avatar, set_display_name, set_member_avatar, store_avatar,
+};
 pub use store::{LinkOutcome, Role, UserChange, apply_user_change, link_connection, link_identity};
 pub use turn::set_proactivity;
 
@@ -157,6 +165,21 @@ const MIGRATION_0005_POSTGRES: SqlMigration = SqlMigration::new(
     "0005",
     "members",
     include_str!("../migrations/postgres/0005_members.sql"),
+);
+
+/// Names and avatars (the profile change): `display_name` and `avatar` on a
+/// member, `avatar` on a workspace.
+const MIGRATION_0006: SqlMigration = SqlMigration::new(
+    "0006",
+    "profiles",
+    include_str!("../migrations/sqlite/0006_profiles.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_0006`], the same file byte for byte.
+const MIGRATION_0006_POSTGRES: SqlMigration = SqlMigration::new(
+    "0006",
+    "profiles",
+    include_str!("../migrations/postgres/0006_profiles.sql"),
 );
 
 /// What the composition does once a member has been removed (ADR 0004).
@@ -394,8 +417,21 @@ impl Module for Workspaces {
     /// (issue #112) and a deployment with no classifier has no judge — so it
     /// answers an @mention, which is a request, and stays out of a DM, which
     /// is a conversation. A deployment that wires one gets both gated by it.
+    ///
+    /// `Blob` is optional for the same reason again: it holds the workspace's
+    /// avatar image, and a deployment with no blob store answers `503` on the
+    /// avatar routes and keeps every name and every other route.
     fn optional(&self) -> &'static [Port] {
-        &[Port::Mailer, Port::Classifier]
+        &[Port::Mailer, Port::Classifier, Port::Blob]
+    }
+
+    /// The avatar upload is the one route here that takes more than the
+    /// harness's 64 KiB: an image up to [`AVATAR_MAX_BYTES`], plus room for
+    /// the refusal to be a precise `413` from the handler rather than the
+    /// transport's. Every other route keeps the default through its own
+    /// extractor limit.
+    fn max_body_bytes(&self, _cfg: &dyn Config) -> usize {
+        profile::AVATAR_BODY_CEILING
     }
 
     fn tables(&self) -> &'static [&'static str] {
@@ -425,8 +461,9 @@ impl Module for Workspaces {
                 subject: "owner_id",
                 kind: DataKind::Identifier,
                 disposition: Disposition::Erase,
-                description: "The workspace's id and name, and the id of the person who \
-                              first signed in — the workspace owner.",
+                description: "The workspace's id and name, the id of the person who \
+                              first signed in — the workspace owner — and the id of the \
+                              workspace's avatar image, if an owner or admin uploaded one.",
                 redacted: &[],
                 subject_via: None,
             },
@@ -437,8 +474,12 @@ impl Module for Workspaces {
                 disposition: Disposition::Erase,
                 description: "For each workspace you signed in to: the member id your \
                               sign-in was issued, the display name the sign-in method \
-                              reports for you, your timezone and whether Slack marks \
-                              you an admin.",
+                              reports for you, the name you chose for yourself there, \
+                              the id of the avatar image you uploaded there, your \
+                              timezone and whether Slack marks you an admin. The \
+                              avatar image itself is kept in the blob store under that \
+                              id and is served only to members of the same workspace \
+                              while this row names it.",
                 redacted: &[],
                 subject_via: None,
             },
@@ -527,22 +568,24 @@ impl Module for Workspaces {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 5] = [
+        const MIGRATIONS: [SqlMigration; 6] = [
             MIGRATION_INIT,
             MIGRATION_0002,
             MIGRATION_0003,
             MIGRATION_0004,
             MIGRATION_0005,
+            MIGRATION_0006,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or
         // an entry out of order at build time.
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 5] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 6] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_0002_POSTGRES,
             MIGRATION_0003_POSTGRES,
             MIGRATION_0004_POSTGRES,
             MIGRATION_0005_POSTGRES,
+            MIGRATION_0006_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {

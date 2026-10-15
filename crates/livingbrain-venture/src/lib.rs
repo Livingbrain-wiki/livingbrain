@@ -59,12 +59,12 @@ use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_models::deadline::ModelDeadlineHttpClient;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
-use livingbrain_tokens::{DevicePorts, Me, Tokens};
+use livingbrain_tokens::{Avatars, DevicePorts, Me, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
-    Admit, EmailLedger, Exchange, LocalTurns, MemberRemoval, Pending, SignInMail, SignInMailInput,
-    Turn, TurnError, Turns, Workspaces,
+    Admit, AvatarRebind, EmailLedger, Exchange, LocalTurns, MemberRemoval, Pending, SignInMail,
+    SignInMailInput, Turn, TurnError, Turns, Workspaces,
 };
 use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
@@ -395,6 +395,11 @@ fn build(
             .module(tokens_module(device_ports))
             // `GET /v1/me` (ADR 0004): who a bearer or a session speaks for.
             .module(Me::new())
+            // `GET /v1/avatars/{id}`: a member's or the workspace's avatar,
+            // to members of that workspace only. The uploads are `me`'s and
+            // `workspaces`'; all three are diverted ([`AVATAR_ROUTES`]) so
+            // their blob views share one key space.
+            .module(Avatars::new())
             .module(pages_module(kms.clone(), &answers))
             .module(waitlist_module())
             // The cost ledger (issue #12): `GET /v1/usage/daily`, backed by
@@ -861,6 +866,41 @@ const CLI_PREFIXES: [&str; 4] = [
     "/v1/model-jobs",
 ];
 
+/// The avatar paths `fetch` diverts to [`serve_cli`]: the two uploads and
+/// the read route. Three modules touch one avatar key space (`me`,
+/// `workspaces`, `avatars`), and the harness scopes each module's blob view
+/// under its own name, so — exactly like the CLI modules and the pages key
+/// space — they are served through the stack that plants an
+/// [`AvatarRebind`] under the views. The uploads match exactly; the read
+/// route by prefix (`/v1/avatars/{id}`).
+const AVATAR_ROUTES: [&str; 2] = ["/v1/me/avatar", "/v1/workspaces/current/avatar"];
+
+/// The prefix of the avatar read route.
+const AVATAR_PREFIX: &str = "/v1/avatars/";
+
+/// Whether this request is one of the avatar paths. Unconditional: the
+/// avatar modules mount with or without a key ring.
+fn serves_avatars(path: &str) -> bool {
+    AVATAR_ROUTES.contains(&path)
+        || path
+            .strip_prefix(AVATAR_PREFIX)
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+/// The `Cache-Control` an avatar read carries instead of the harness's
+/// `no-store`, or `None` for every other request.
+///
+/// The harness stamps `no-store` on every `/v1` answer, which is right for
+/// JSON and wrong for an image whose URL changes on every upload: each page
+/// load would fetch every avatar again. A `GET` of `/v1/avatars/{id}` that
+/// succeeded is the only answer relaxed, and only to a **private** cache —
+/// the image is member-only, and `Vary: Cookie, Authorization` rides along.
+fn avatar_cache_control(method: &str, path: &str) -> Option<&'static str> {
+    let read = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+    (read && path.starts_with(AVATAR_PREFIX) && serves_avatars(path))
+        .then_some(livingbrain_workspaces::AVATAR_CACHE_CONTROL)
+}
+
 /// Whether this request is one of the CLI paths the venture diverts,
 /// and the surface is mounted at all. The mount is gated on the key ring
 /// (see [`cli_modules`]), so the presence of the `notes` module is the same
@@ -944,6 +984,16 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
     // dropping the turn on the floor.
     if let Ok(namespace) = env.durable_object(CONVERSATIONS) {
         turns.publish(namespace);
+    }
+    if serves_avatars(req.path().as_str()) {
+        let cache = avatar_cache_control(req.method().as_ref(), &req.path());
+        let mut response = serve_cli(harness, runtime, req, env, ctx).await?;
+        if let Some(policy) = cache.filter(|_| response.status_code() == 200) {
+            // `set` replaces the harness's `no-store`; a failure leaves the
+            // stricter header, which costs a refetch and nothing else.
+            let _ = response.headers_mut().set("cache-control", policy);
+        }
+        return Ok(response);
     }
     if serves_cli(harness, req.path().as_str()) {
         return serve_cli(harness, runtime, req, env, ctx).await;
@@ -1031,10 +1081,13 @@ async fn serve_cli(
     // The port-layer planting: the four scopes land on the pages key space,
     // through handles derived this request. Keys outside the four prefixes
     // — the pages module's own — pass through unchanged.
+    // The avatar paths' three views land on one `avatars/…` space the same
+    // way ([`AVATAR_ROUTES`]); its keys and the pages module's are disjoint,
+    // so the two rebinds stack in either order.
     ports.blob = ports
         .blob
         .take()
-        .map(|raw| Arc::new(PagesRebind::new(raw)) as Arc<dyn Blob>);
+        .map(|raw| Arc::new(PagesRebind::new(Arc::new(AvatarRebind::new(raw)))) as Arc<dyn Blob>);
     // `ports` moves into `router()` below, and the ceiling lookup reads the
     // same config the module contexts were built with — clone the `Arc`
     // out first, the way `serve` does.
@@ -1329,6 +1382,49 @@ mod tests {
              `<n>_<module>_<id>_<name>.sql`, plus a .harness-lock.json entry):\n{}",
             missing.join("\n")
         );
+    }
+
+    /// The avatar uploads and the read route take the rebinding stack, with
+    /// or without a key ring; nothing near them does.
+    #[test]
+    fn the_avatar_routes_divert_and_nothing_near_them_does() {
+        for path in [
+            "/v1/me/avatar",
+            "/v1/workspaces/current/avatar",
+            "/v1/avatars/av_01HZZZBBBBBBBBBBBBBBBBBBBB",
+        ] {
+            assert!(serves_avatars(path), "{path}");
+        }
+        for path in [
+            "/v1/me",
+            "/v1/workspaces/current",
+            "/v1/workspaces/members",
+            "/v1/avatars/",
+            "/v1/avatars",
+            "/v1/avatars/av_x/extra",
+            "/v1/me/avatarx",
+        ] {
+            assert!(!serves_avatars(path), "{path}");
+        }
+        let (harness, _, _) = build(unconfigured_mail(), None, None, None);
+        let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
+        assert!(names.contains(&"avatars"), "{names:?}");
+
+        // Only a read of an avatar is cached, and only privately.
+        let image = "/v1/avatars/av_01HZZZBBBBBBBBBBBBBBBBBBBB";
+        let policy = avatar_cache_control("GET", image).expect("an avatar read is cached");
+        assert!(policy.starts_with("private"), "{policy}");
+        assert!(policy.contains("immutable"), "{policy}");
+        assert!(avatar_cache_control("HEAD", image).is_some());
+        for (method, path) in [
+            ("PUT", "/v1/me/avatar"),
+            ("GET", "/v1/me/avatar"),
+            ("DELETE", image),
+            ("GET", "/v1/me"),
+            ("GET", "/v1/avatars/"),
+        ] {
+            assert_eq!(avatar_cache_control(method, path), None, "{method} {path}");
+        }
     }
 
     /// The citation route carries the source id as its path segment, so the
