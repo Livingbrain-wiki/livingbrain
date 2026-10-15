@@ -33,6 +33,9 @@ mod catalog;
 mod crypto;
 // The curated model lists behind the settings page's provider cards.
 mod curated;
+// A model call's deadline past the port's 30 s ceiling, and the client that
+// honours it (wired by the venture).
+pub mod deadline;
 mod handlers;
 // The local runner: a member's jobs run on their own device, under their own
 // subscription, through their own `claude` / `codex` CLI.

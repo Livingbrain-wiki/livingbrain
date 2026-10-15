@@ -121,8 +121,15 @@ const PASSAGE_HEAD_CHARS: usize = 1_500;
 /// The longest question accepted, in characters.
 pub const MAX_QUESTION_CHARS: usize = 4_000;
 
-/// How long one answer may take.
-const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one answer may take. A forced-thinking model reasons before it
+/// answers; two minutes is past that with room. Past the `HttpClient` port's
+/// 30 s ceiling this holds because the venture wires
+/// `livingbrain_models::deadline::ModelDeadlineHttpClient` on this route.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+// The venture's client honours a model call's deadline only up to this
+// ceiling; one past it would be cut silently.
+const _: () =
+    assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::deadline::MAX_MODEL_DEADLINE.as_secs());
 
 /// The rules every answer is written under.
 const SYSTEM_PROMPT: &str = "You answer a person's question using only the numbered sources \

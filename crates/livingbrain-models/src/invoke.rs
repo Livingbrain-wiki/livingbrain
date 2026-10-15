@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cratefield_core::axum::http;
-use cratefield_core::{Clock, Config, Database, HttpClient, HttpPolicy};
+use cratefield_core::{Clock, Config, Database, HttpClient};
 use serde_json::{Value, json};
 
 use crate::catalog::{self, Auth, Wire};
@@ -404,14 +404,16 @@ pub async fn chat(
         Wire::Openai => &["v1", "chat", "completions"],
     };
     let target = catalog::join(&url, segments).ok_or(InvokeError::Refused)?;
-    let mut builder = http::Request::builder()
-        .method(http::Method::POST)
-        .uri(target.as_str())
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .extension(HttpPolicy {
-            max_response_bytes: MAX_RESPONSE_BYTES,
-            timeout: request.timeout,
-        });
+    // `deadline::policy` carries the call's own timeout past the port's 30 s
+    // ceiling where the venture's client is wired (see [`crate::deadline`]).
+    let mut builder = crate::deadline::policy(
+        http::Request::builder()
+            .method(http::Method::POST)
+            .uri(target.as_str())
+            .header(http::header::CONTENT_TYPE, "application/json"),
+        MAX_RESPONSE_BYTES,
+        request.timeout,
+    );
     builder = match auth {
         Auth::Bearer => builder.header(http::header::AUTHORIZATION, format!("Bearer {key}")),
         Auth::XApiKey => builder.header("x-api-key", key.as_str()),

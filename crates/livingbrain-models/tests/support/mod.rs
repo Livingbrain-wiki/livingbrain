@@ -171,6 +171,9 @@ pub struct Sent {
     pub x_api_key: Option<String>,
     pub anthropic_version: Option<String>,
     pub body: String,
+    /// The model call's own deadline (`deadline::ModelDeadline`), when it
+    /// carried one.
+    pub deadline: Option<std::time::Duration>,
 }
 
 impl Default for Script {
@@ -303,6 +306,10 @@ impl HttpClient for FakeHttp {
                 x_api_key: header("x-api-key"),
                 anthropic_version: header("anthropic-version"),
                 body: String::from_utf8_lossy(&body).into_owned(),
+                deadline: parts
+                    .extensions
+                    .get::<livingbrain_models::deadline::ModelDeadline>()
+                    .map(|deadline| deadline.0),
             });
         }
         let mut status = 200;

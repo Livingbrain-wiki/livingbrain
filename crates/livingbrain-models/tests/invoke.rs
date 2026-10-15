@@ -78,6 +78,17 @@ fn a_job_runs_on_the_connected_model_with_its_key() {
         .await;
         assert_eq!(connected.status.as_u16(), 200, "{}", connected.text());
         let before = http.sent().len();
+        // The connect probe asks for its own minute, past the port's 30 s
+        // ceiling, on every request it sent to the model host.
+        assert!(before > 0);
+        for probe in &http.sent()[..before] {
+            assert_eq!(
+                probe.deadline,
+                Some(Duration::from_secs(60)),
+                "{}",
+                probe.uri
+            );
+        }
 
         let clock = clock();
         let reply = invoke::chat(
@@ -104,6 +115,8 @@ fn a_job_runs_on_the_connected_model_with_its_key() {
         );
         assert!(call.body.contains("You compile wiki pages."));
         assert!(call.body.contains("json_object"));
+        // The caller's timeout travels as the call's own deadline.
+        assert_eq!(call.deadline, Some(Duration::from_secs(5)));
         let serving = invoke::serving(&*kit.db, WORKSPACE, "triage")
             .await
             .expect("a read")
