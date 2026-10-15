@@ -17,7 +17,7 @@ use cratefield_core::axum::http::{HeaderMap, Method, header};
 use cratefield_core::{ModuleContext, Ports, Problem};
 use cratefield_kms::Kms;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scopes};
-use livingbrain_pages::{PageStore, SourceStore};
+use livingbrain_pages::{FactStore, PageStore, SourceStore};
 
 use crate::problems::{CROSS_SITE_REQUEST, UNAUTHORIZED};
 use crate::{Wiki, port};
@@ -132,6 +132,23 @@ impl Service {
         Ok(SourceStore::new(
             port(self.ctx.ports.db.clone())?,
             port(self.ctx.ports.blob.clone())?,
+            self.kms.clone(),
+            port(self.ctx.ports.clock.clone())?,
+            port(self.ctx.ports.id_gen.clone())?,
+        ))
+    }
+
+    /// The fact store for one request, over the same database and key
+    /// custodian as the pages: a fact is sealed under the same scope key a
+    /// page body is (`docs/temporal-facts.md` §6).
+    ///
+    /// # Errors
+    ///
+    /// [`Problem::internal`] when the composition left a declared port
+    /// unwired, exactly as [`Service::store`] does.
+    pub(crate) fn facts_store(&self) -> Result<FactStore, Problem> {
+        Ok(FactStore::new(
+            port(self.ctx.ports.db.clone())?,
             self.kms.clone(),
             port(self.ctx.ports.clock.clone())?,
             port(self.ctx.ports.id_gen.clone())?,

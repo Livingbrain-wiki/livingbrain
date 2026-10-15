@@ -1,4 +1,4 @@
-//! The four tools, and the citations they answer with.
+//! The five tools, and the citations they answer with.
 //!
 //! Every tool reads through the scopes the caller was granted and none takes
 //! a scope argument. A page the asker was not granted is not refused loudly —
@@ -7,7 +7,8 @@
 
 use livingbrain_access::{Scope, UserId};
 use livingbrain_pages::{
-    Author, EntityType, Frontmatter, Page, PageError, PageStore, PageWrite, parse_frontmatter,
+    Author, EntityType, FactError, FactInput, FactStore, Frontmatter, Page, PageError, PageStore,
+    PageWrite, brief_lines, brief_section, fact_json, parse_frontmatter, person_subject, relevant,
 };
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
@@ -19,6 +20,8 @@ use crate::auth::{Asker, page_scope};
 const DEFAULT_LIMIT: usize = 10;
 /// The ceiling on a caller-supplied `limit`.
 const MAX_LIMIT: usize = 25;
+/// The most facts one `brain_note` may state.
+const MAX_NOTE_FACTS: usize = 50;
 /// How many pages `brain_context_for` reads, after deduplication.
 const CONTEXT_PAGES: usize = 5;
 /// How much of a body `brain_search` quotes back.
@@ -78,8 +81,44 @@ pub(crate) fn descriptors() -> Value {
             json!({
                 "text": { "type": "string", "description": "What to remember." },
                 "title": { "type": "string", "description": "A short title for the note." },
+                "facts": {
+                    "type": "array",
+                    "maxItems": MAX_NOTE_FACTS,
+                    "description": "Temporal facts the note states (docs/temporal-facts.md, \
+                        format v1): one per claim. The brain keeps history — a new value \
+                        supersedes the old one, it never overwrites it. Do not set status \
+                        or supersedes; date it only as precisely as the text does.",
+                    "items": {
+                        "type": "object",
+                        "required": ["subject", "attribute", "value"],
+                        "properties": {
+                            "subject": { "type": "string", "description": "`<entity_type>/<slug>`, e.g. `person/nick`, or `me`." },
+                            "attribute": { "type": "string", "description": "snake_case key, e.g. `shoe_size`." },
+                            "value": { "type": "string" },
+                            "unit": { "type": "string" },
+                            "valid_from": { "type": "string", "description": "YYYY, YYYY-MM, YYYY-MM-DD or RFC 3339; when it became true." },
+                            "valid_to": { "type": "string", "description": "When it stopped being true (exclusive)." },
+                            "observed_at": { "type": "string", "description": "RFC 3339; when it was said." },
+                            "quote": { "type": "string" },
+                            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                            "cardinality": { "enum": ["one", "many"] },
+                        },
+                    },
+                },
             }),
             &["text"],
+        ),
+        tool(
+            "brain_facts",
+            "What is true about an entity, over time: the facts you may read, each with \
+             when it was valid and when it was learned. Defaults to now; pass `as_of` \
+             (YYYY, YYYY-MM or YYYY-MM-DD) to ask what was true then.",
+            json!({
+                "subject": { "type": "string", "description": "`<entity_type>/<slug>`, or `me`." },
+                "attribute": { "type": "string", "description": "One attribute, e.g. `shoe_size`." },
+                "as_of": { "type": "string", "description": "A partial date; the end of that period is used." },
+            }),
+            &[],
         ),
     ])
 }
@@ -88,10 +127,27 @@ pub(crate) fn descriptors() -> Value {
 /// (`-32602`); everything after it is an `isError` result, because the
 /// failure is no longer the caller's syntax.
 pub(crate) enum Call {
-    Search { query: String, limit: usize },
-    Page { slug: String },
-    ContextFor { repo: String, task: String },
-    Note { text: String, title: Option<String> },
+    Search {
+        query: String,
+        limit: usize,
+    },
+    Page {
+        slug: String,
+    },
+    ContextFor {
+        repo: String,
+        task: String,
+    },
+    Note {
+        text: String,
+        title: Option<String>,
+        facts: Vec<Value>,
+    },
+    Facts {
+        subject: Option<String>,
+        attribute: Option<String>,
+        as_of: Option<String>,
+    },
 }
 
 /// One tool call, parsed. The `Err` is the `-32602` message.
@@ -111,6 +167,19 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
         "brain_note" => Ok(Call::Note {
             text: required(arguments, "text")?.to_owned(),
             title: optional(arguments, "title")?.map(str::to_owned),
+            facts: match arguments.get("facts") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(facts)) if facts.len() <= MAX_NOTE_FACTS => facts.clone(),
+                Some(Value::Array(_)) => {
+                    return Err(format!("at most {MAX_NOTE_FACTS} facts per note"));
+                }
+                Some(_) => return Err("`facts` must be an array".to_owned()),
+            },
+        }),
+        "brain_facts" => Ok(Call::Facts {
+            subject: optional(arguments, "subject")?.map(str::to_owned),
+            attribute: optional(arguments, "attribute")?.map(str::to_owned),
+            as_of: optional(arguments, "as_of")?.map(str::to_owned),
         }),
         other => Err(format!("unknown tool: {other}")),
     }
@@ -119,6 +188,7 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
 /// Run one parsed call. The `Err` is the tool result's `isError` text.
 pub(crate) async fn run(
     store: &PageStore,
+    facts: &FactStore,
     asker: &Asker,
     scopes: &[String],
     call: Call,
@@ -126,8 +196,29 @@ pub(crate) async fn run(
     match call {
         Call::Search { query, limit } => search(store, scopes, &query, limit).await,
         Call::Page { slug } => page(store, scopes, &slug).await,
-        Call::ContextFor { repo, task } => context_for(store, scopes, &repo, &task).await,
-        Call::Note { text, title } => note(store, asker, &text, title.as_deref()).await,
+        Call::ContextFor { repo, task } => {
+            context_for(store, facts, asker, scopes, &repo, &task).await
+        }
+        Call::Note {
+            text,
+            title,
+            facts: stated,
+        } => note(store, facts, asker, &text, title.as_deref(), stated).await,
+        Call::Facts {
+            subject,
+            attribute,
+            as_of,
+        } => {
+            read_facts(
+                facts,
+                asker,
+                scopes,
+                subject.as_deref(),
+                attribute.as_deref(),
+                as_of.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -206,6 +297,8 @@ async fn page(store: &PageStore, scopes: &[String], slug: &str) -> Result<Value,
 /// than one mentioning the task.
 async fn context_for(
     store: &PageStore,
+    facts: &FactStore,
+    asker: &Asker,
     scopes: &[String],
     repo: &str,
     task: &str,
@@ -218,7 +311,14 @@ async fn context_for(
     }
     found.truncate(CONTEXT_PAGES);
 
-    let mut text = String::new();
+    // The facts the task is about, as of now, ahead of the pages
+    // (docs/temporal-facts.md §7): the convention, then one line each.
+    let now = facts.now();
+    let timelines = relevant(facts, &asker.user_id, scopes, task)
+        .await
+        .map_err(facts_failed)?;
+    let (lines, fact_citations) = brief_lines(&timelines, now);
+    let mut text = brief_section(&lines, now);
     for (index, page) in found.iter().enumerate() {
         text.push_str(&format!(
             "\n[{}] {} — {}\n\n{}\n",
@@ -228,7 +328,7 @@ async fn context_for(
             page.body.trim(),
         ));
     }
-    if found.is_empty() {
+    if found.is_empty() && lines.is_empty() {
         text.push_str(
             "Nothing in the pages you can read mentions this. Say so rather than \
              guessing, and ask for the repository name you are working in if it \
@@ -241,7 +341,7 @@ async fn context_for(
         .collect::<Vec<_>>();
     Ok(answer(
         append_citations(&text, &found),
-        json!({ "repo": repo, "task": task, "pages": pages }),
+        json!({ "repo": repo, "task": task, "pages": pages, "facts": fact_citations }),
     ))
 }
 
@@ -255,10 +355,21 @@ async fn context_for(
 /// the same page rather than accumulating near-duplicates.
 async fn note(
     store: &PageStore,
+    facts: &FactStore,
     asker: &Asker,
     text: &str,
     title: Option<&str>,
+    stated: Vec<Value>,
 ) -> Result<Value, String> {
+    // The facts are read before anything is written, so a malformed one
+    // refuses the note rather than leaving half of it stored.
+    let inputs = stated
+        .iter()
+        .map(|fact| fact_input(asker, fact))
+        .collect::<Result<Vec<_>, _>>()?;
+    for input in &inputs {
+        facts.check(input).map_err(facts_failed)?;
+    }
     let (clean, findings) = redact(text, Policy::Redact).map_err(|_| {
         "nothing was written: this note held something redaction refused to handle".to_owned()
     })?;
@@ -300,7 +411,28 @@ async fn note(
         .map_err(store_failed)?;
 
     let reference = format!("{scope}/{slug}");
+    let mut recorded = Vec::with_capacity(inputs.len());
+    for mut input in inputs {
+        if input.source.is_none() {
+            input.source = Some(format!("note:{reference}"));
+        }
+        let done = facts
+            .record(&scope, input, &asker.user_id)
+            .await
+            .map_err(facts_failed)?;
+        recorded.push(json!({
+            "id": done.fact.id,
+            "outcome": done.outcome.as_str(),
+            "fact": fact_json(&done.fact),
+        }));
+    }
     let mut said = format!("Noted as `{reference}` (version {}).", meta.version);
+    if !recorded.is_empty() {
+        said.push_str(&format!(
+            " {} fact(s) recorded; earlier values are kept as history.",
+            recorded.len()
+        ));
+    }
     if !findings.is_empty() {
         said.push_str(&format!(
             " {} sensitive span(s) were redacted before it was stored; the note is \
@@ -316,8 +448,139 @@ async fn note(
             "url": format!("{WIKI_BASE}/brain/{reference}"),
             "version": meta.version,
             "redacted": findings.len(),
+            "facts": recorded,
         }),
     ))
+}
+
+/// `brain_facts`: the asker's timelines, as of a date (default now), one
+/// line each in the format a model reads (docs/temporal-facts.md §7).
+async fn read_facts(
+    facts: &FactStore,
+    asker: &Asker,
+    scopes: &[String],
+    subject: Option<&str>,
+    attribute: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<Value, String> {
+    let subject = match subject.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("me") => Some(
+            person_subject(&asker.user_id).ok_or_else(|| "`me` names no person here".to_owned())?,
+        ),
+        Some(other) => Some(other.to_owned()),
+        None => None,
+    };
+    let attribute = match attribute.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(raw) => Some(
+            livingbrain_memory::timeline::normalize_attribute(raw)
+                .ok_or_else(|| "`attribute` is not an attribute key".to_owned())?,
+        ),
+        None => None,
+    };
+    let now = facts.now();
+    let at = match as_of
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && *a != "now")
+    {
+        Some(raw) => livingbrain_memory::timeline::PartialDate::parse(raw)
+            .map_err(|error| error.to_string())?
+            .as_of_instant()
+            .min(now),
+        None => now,
+    };
+    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let timelines = facts
+        .timelines(&names, subject.as_deref(), attribute.as_deref())
+        .await
+        .map_err(facts_failed)?;
+    let (lines, citations) = brief_lines(&timelines, at);
+    let text = if lines.is_empty() {
+        "No fact you can read matches that. Facts are recorded with brain_note's \
+         `facts` argument."
+            .to_owned()
+    } else {
+        brief_section(&lines, at)
+    };
+    Ok(answer(
+        text,
+        json!({
+            "as_of": livingbrain_memory::timeline::rfc3339(at),
+            "lines": lines.iter().map(|(_, line)| line).collect::<Vec<_>>(),
+            "citations": citations,
+        }),
+    ))
+}
+
+/// One `facts` item of `brain_note`, as a store input; `me` resolved.
+fn fact_input(asker: &Asker, fact: &Value) -> Result<FactInput, String> {
+    const KNOWN: [&str; 11] = [
+        "subject",
+        "attribute",
+        "value",
+        "unit",
+        "valid_from",
+        "valid_to",
+        "observed_at",
+        "source",
+        "quote",
+        "confidence",
+        "cardinality",
+    ];
+    let Some(object) = fact.as_object() else {
+        return Err("each fact is an object".to_owned());
+    };
+    if let Some(unknown) = object.keys().find(|key| !KNOWN.contains(&key.as_str())) {
+        return Err(format!(
+            "a fact has no `{unknown}` field (the brain sets status and supersession itself)"
+        ));
+    }
+    let text = |key: &str| -> Result<Option<String>, String> {
+        match object.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(Value::Number(number)) if key == "value" => Ok(Some(number.to_string())),
+            Some(Value::Bool(flag)) if key == "value" => Ok(Some(flag.to_string())),
+            Some(_) => Err(format!("a fact's `{key}` must be a string")),
+        }
+    };
+    let subject = text("subject")?.ok_or("a fact needs a `subject`")?;
+    let subject = if subject.trim() == "me" {
+        person_subject(&asker.user_id).ok_or("`me` names no person here")?
+    } else {
+        subject
+    };
+    Ok(FactInput {
+        subject,
+        attribute: text("attribute")?.ok_or("a fact needs an `attribute`")?,
+        value: text("value")?.ok_or("a fact needs a `value`")?,
+        unit: text("unit")?,
+        valid_from: text("valid_from")?,
+        valid_to: text("valid_to")?,
+        observed_at: text("observed_at")?,
+        source: text("source")?,
+        quote: text("quote")?,
+        confidence: match object.get("confidence") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_f64()
+                    .ok_or("a fact's `confidence` must be a number")?,
+            ),
+        },
+        cardinality: text("cardinality")?,
+    })
+}
+
+/// A fact store failure, as a model should see it: its own mistakes say
+/// what they were, the store's internals do not.
+fn facts_failed(error: FactError) -> String {
+    match error {
+        FactError::Invalid(message) => format!("the fact was refused: {message}"),
+        error @ FactError::CardinalityMismatch { .. } => {
+            format!("the fact was refused: {error}")
+        }
+        FactError::Store(error) => store_failed(error),
+    }
 }
 
 // ---------------------------------------------------------------------------

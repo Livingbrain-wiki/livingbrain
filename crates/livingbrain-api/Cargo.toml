@@ -26,6 +26,9 @@ livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-pages = { path = "../livingbrain-pages" }
 # The user scope a note lands in (`Scope::User` behind `page_scope`).
 livingbrain-access = { path = "../livingbrain-access" }
+# Temporal facts (docs/temporal-facts.md): the pure timeline model —
+# partial dates, resolution, the line a model reads. No I/O, wasm-safe.
+livingbrain-memory = { path = "../livingbrain-memory" }
 # Secrets and PII leave every write path before it reaches a body (issue #108).
 livingbrain-redact = { path = "../livingbrain-redact" }
 # The `Blob` port is declared with `#[async_trait]`, so implementing it here

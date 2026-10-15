@@ -18,7 +18,7 @@ use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, Statu
 use cratefield_core::{Blob, Kid, Module, Payload, Signer, Statement};
 use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness};
-use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Sources, pages_routes};
+use livingbrain_api::{Ask, Export, Facts, Notes, PagesRebind, Search, Sources, pages_routes};
 use livingbrain_pages::Pages;
 use livingbrain_tokens::Tokens;
 use livingbrain_workspaces::{SESSION_COOKIE, SESSION_PURPOSE, Workspaces};
@@ -56,6 +56,7 @@ fn kit() -> TestHarness {
         Box::new(Search::new(wiki.clone())),
         Box::new(Ask::new(wiki.clone())),
         Box::new(Export::new(wiki.clone())),
+        Box::new(Facts::new(wiki.clone())),
         Box::new(Sources::new(wiki)),
     ];
     let memory: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
@@ -638,4 +639,137 @@ async fn a_cookie_from_another_workspace_cannot_read_the_first_ones_pages() {
     .await;
     assert!(alices.text().contains("The secret date"));
     assert!(!alices.text().contains("Mallory"));
+}
+
+/// Temporal facts (`/v1/facts`, docs/temporal-facts.md) answer the same two
+/// credentials as every wiki route: the cookie reads, and writes only from
+/// its own origin; a bearer writes from anywhere; another workspace's
+/// cookie reads nothing.
+#[pollster::test]
+async fn facts_answer_the_cookie_from_its_own_origin_and_the_bearer() {
+    let kit = seeded().await;
+    let alice = session(&kit, WORKSPACE, ALICE);
+    let fact = |value: &str, from: &str| {
+        json!({ "format": 1, "facts": [{
+            "subject": "me", "attribute": "shoe_size", "value": value,
+            "unit": "EU", "valid_from": from,
+        }]})
+    };
+
+    let refused = send(
+        &kit,
+        Method::POST,
+        "/v1/facts",
+        Via::CrossSite(&alice),
+        Some(fact("40", "2025")),
+    )
+    .await;
+    assert_cross_site(&refused, "a cross-site cookie write");
+    let foreign = send(
+        &kit,
+        Method::POST,
+        "/v1/facts",
+        Via::ForeignOrigin(&alice),
+        Some(fact("40", "2025")),
+    )
+    .await;
+    assert_cross_site(&foreign, "a foreign-origin cookie write");
+
+    let written = send(
+        &kit,
+        Method::POST,
+        "/v1/facts",
+        Via::App(&alice),
+        Some(fact("40", "2025")),
+    )
+    .await;
+    assert_status(&written, StatusCode::CREATED, "a same-origin fact");
+    let first = written.json()["facts"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+
+    let minted = send(
+        &kit,
+        Method::POST,
+        "/v1/tokens",
+        Via::App(&alice),
+        Some(json!({ "name": "laptop", "scopes": [] })),
+    )
+    .await;
+    assert_status(&minted, StatusCode::CREATED, "a token is minted");
+    let token = minted.json()["token"].as_str().expect("a token").to_owned();
+    let bearer = send(
+        &kit,
+        Method::POST,
+        "/v1/facts",
+        Via::BearerCrossSite(&token),
+        Some(fact("41", "2026")),
+    )
+    .await;
+    assert_status(
+        &bearer,
+        StatusCode::CREATED,
+        "a bearer write needs no origin",
+    );
+
+    let read = send(
+        &kit,
+        Method::GET,
+        "/v1/facts?subject=me&attribute=shoe_size",
+        Via::App(&alice),
+        None,
+    )
+    .await;
+    assert_status(&read, StatusCode::OK, "a cookie read");
+    let key = &read.json()["keys"][0];
+    assert_eq!(key["current"][0]["value"], "41", "{key}");
+    assert_eq!(key["history"][1]["id"], first.as_str(), "{key}");
+    assert_eq!(key["history"][1]["status"], "superseded", "{key}");
+
+    let historical = send(
+        &kit,
+        Method::GET,
+        "/v1/facts?subject=me&as_of=2025",
+        Via::Bearer(&token),
+        None,
+    )
+    .await;
+    assert_status(&historical, StatusCode::OK, "a bearer read as of 2025");
+    assert_eq!(historical.json()["keys"][0]["current"][0]["value"], "40");
+
+    let retract = send(
+        &kit,
+        Method::POST,
+        &format!("/v1/facts/{first}/retract"),
+        Via::CrossSite(&alice),
+        None,
+    )
+    .await;
+    assert_cross_site(&retract, "a cross-site retraction");
+
+    let mallory = session(&kit, OTHER_WORKSPACE, MALLORY);
+    let elsewhere = send(&kit, Method::GET, "/v1/facts", Via::App(&mallory), None).await;
+    assert_status(&elsewhere, StatusCode::OK, "another workspace reads");
+    assert_eq!(
+        elsewhere.json()["keys"],
+        json!([]),
+        "and sees nothing of the first"
+    );
+    let stolen = send(
+        &kit,
+        Method::POST,
+        &format!("/v1/facts/{first}/retract"),
+        Via::App(&mallory),
+        None,
+    )
+    .await;
+    assert_status(
+        &stolen,
+        StatusCode::NOT_FOUND,
+        "another workspace cannot retract",
+    );
+
+    let anonymous = send(&kit, Method::GET, "/v1/facts", Via::Anonymous, None).await;
+    assert_status(&anonymous, StatusCode::UNAUTHORIZED, "no credential");
 }

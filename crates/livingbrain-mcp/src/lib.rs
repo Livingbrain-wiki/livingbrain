@@ -31,7 +31,7 @@ use cratefield_core::axum::routing::post;
 use cratefield_core::axum::{self, Json, Router};
 use cratefield_core::{ModuleContext, Problem, ProblemDef};
 use cratefield_kms::Kms;
-use livingbrain_pages::PageStore;
+use livingbrain_pages::{FactStore, PageStore};
 use livingbrain_tokens::origin_of_request;
 use serde_json::Value;
 
@@ -88,6 +88,18 @@ impl McpState {
         Ok(PageStore::new(
             port(ports.db.clone())?,
             port(ports.blob.clone())?,
+            Arc::clone(&self.kms),
+            port(ports.clock.clone())?,
+            port(ports.id_gen.clone())?,
+        ))
+    }
+
+    /// The fact store for one request (docs/temporal-facts.md), over the
+    /// same database and key custodian as the pages.
+    fn facts_store(&self) -> Result<FactStore, Problem> {
+        let ports = &self.ctx.ports;
+        Ok(FactStore::new(
+            port(ports.db.clone())?,
             Arc::clone(&self.kms),
             port(ports.clock.clone())?,
             port(ports.id_gen.clone())?,

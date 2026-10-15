@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Wiki;
+use crate::facts::{as_of, brief_lines, brief_section, relevant};
 use crate::recipes::{CONTEXT_PAGES, find_in_project, snippet};
 use crate::service::Service;
 
@@ -89,6 +90,10 @@ struct AskRequest {
     question: String,
     #[serde(default)]
     project: Option<String>,
+    /// Answer as of this partial date (docs/temporal-facts.md §5) rather
+    /// than now. Without it, a time the question names is used.
+    #[serde(default)]
+    as_of: Option<String>,
 }
 
 /// `POST /` — the pages that mention the question, as one brief.
@@ -126,7 +131,18 @@ async fn ask(
     )
     .await?;
 
-    let mut brief = String::new();
+    // The facts the question is about, as of the time it asks about: an
+    // explicit `as_of`, else a time the question names, else now.
+    let facts = state.facts_store()?;
+    let now = facts.now();
+    let at = match request.as_of.as_deref() {
+        Some(raw) => as_of(Some(raw), now)?.1,
+        None => livingbrain_memory::timeline::as_of_in_question(question, now).unwrap_or(now),
+    };
+    let timelines = relevant(&facts, &asker, &scopes, question).await?;
+    let (lines, fact_citations) = brief_lines(&timelines, at);
+
+    let mut brief = brief_section(&lines, at);
     for (index, page) in found.iter().enumerate() {
         brief.push_str(&format!(
             "\n[{}] {} — {}\n\n{}\n",
@@ -136,10 +152,10 @@ async fn ask(
             page.body.trim(),
         ));
     }
-    if found.is_empty() {
+    if found.is_empty() && lines.is_empty() {
         brief.push_str(NOTHING_FOUND);
     }
-    let citations: Vec<Value> = found
+    let mut citations: Vec<Value> = found
         .iter()
         .map(|page| {
             json!({
@@ -149,5 +165,21 @@ async fn ask(
             })
         })
         .collect();
-    Ok(Json(json!({ "answer": brief, "citations": citations })))
+    citations.extend(fact_citations);
+    let fact_keys: Vec<Value> = lines
+        .iter()
+        .map(|(index, line)| {
+            json!({
+                "subject": timelines[*index].subject,
+                "attribute": timelines[*index].attribute,
+                "line": line,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "answer": brief,
+        "citations": citations,
+        "as_of": livingbrain_memory::timeline::rfc3339(at),
+        "facts": fact_keys,
+    })))
 }

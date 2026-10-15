@@ -858,6 +858,7 @@ impl PageStore {
                 Statement::with_values("DELETE FROM page_terms WHERE scope = ?", vec![text(scope)]),
                 Statement::with_values("DELETE FROM page_links WHERE scope = ?", vec![text(scope)]),
                 Statement::with_values("DELETE FROM sources WHERE scope = ?", vec![text(scope)]),
+                Statement::with_values("DELETE FROM facts WHERE scope = ?", vec![text(scope)]),
             ])
             .await
             .map_err(PageError::Store)
@@ -1002,6 +1003,55 @@ impl PageStore {
             if body.is_head {
                 reindexed.insert(body.slug.clone(), markdown);
             }
+        }
+        drop(old_key);
+
+        // Temporal facts are sealed in their rows under the same scope key,
+        // so they move with the bodies: each re-sealed, then its row
+        // repointed, in one statement per fact.
+        let facts = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT id, sealed, key_version FROM facts \
+                 WHERE scope = ? AND key_version <> ? ORDER BY key_version ASC, id ASC",
+                vec![text(scope), int(active.version)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let mut old_version: Option<u32> = None;
+        let mut old_key = None;
+        for row in &facts.rows {
+            let id = row.get::<String>("id").unwrap_or_default();
+            let version = row.get::<u32>("key_version").unwrap_or_default();
+            if old_version != Some(version) {
+                old_key = Some(self.keys.dek(scope, version).await?);
+                old_version = Some(version);
+            }
+            let key = old_key.as_ref().expect("the key is set with the version");
+            let sealed = crate::facts::reseal(
+                key,
+                version,
+                &active.dek,
+                active.version,
+                scope,
+                &id,
+                &row.get::<String>("sealed").unwrap_or_default(),
+            )?;
+            self.db
+                .execute(&Statement::with_values(
+                    "UPDATE facts SET sealed = ?, key_version = ? \
+                     WHERE scope = ? AND id = ? AND key_version = ?",
+                    vec![
+                        text(&sealed),
+                        int(active.version),
+                        text(scope),
+                        text(&id),
+                        int(version),
+                    ],
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            report.rewritten += 1;
         }
         drop(old_key);
         drop(active);

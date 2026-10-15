@@ -31,6 +31,7 @@ mod observe;
 mod recall;
 pub mod temporal;
 pub mod text;
+pub mod timeline;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,6 +50,9 @@ pub use crate::recall::{
 };
 pub use crate::temporal::Window;
 pub use crate::text::{estimate_tokens, normalize_key, tokenize};
+pub use crate::timeline::{
+    Cardinality, DateError, FactStatus, PROMPT_CONVENTION, PartialDate, Precision, TimedFact,
+};
 
 /// What a [`MemoryStore`] could not do. Every variant means the store is
 /// exactly as it was before the call.

@@ -11,7 +11,7 @@
  */
 
 
-const CACHE = "lb-app-v8";
+const CACHE = "lb-app-v9";
 
 const SHELL = [
   "./",
@@ -33,6 +33,8 @@ const SHELL = [
   // an ES module import fails atomically, so an offline wiki needs both.
   "./assets/wiki.js",
   "./assets/wiki.css",
+  // wiki.js imports facts.js statically (temporal facts on a page).
+  "./assets/facts.js",
   // settings.js imports this statically, and an ES module import fails
   // atomically, so an offline settings page would not render at all without it.
   "./assets/stack.json",

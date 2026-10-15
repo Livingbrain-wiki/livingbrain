@@ -31,6 +31,7 @@
 
 mod answers;
 mod entity;
+mod facts;
 mod ingest;
 mod keys;
 mod scope;
@@ -40,6 +41,11 @@ mod store;
 pub use answers::{AnswerError, Answered, Answers, Asker, Citation, PageAnswers};
 pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
+};
+pub use facts::{
+    FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
+    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
+    is_subject, person_subject, relevant,
 };
 pub use ingest::{
     Extract, IngestError, IngestOutcome, Ingested, Ingestor, NoExtract, NoScreen, Screen,
@@ -101,6 +107,13 @@ const MIGRATION_SOURCE_PROJECT: SqlMigration = SqlMigration::new(
     "0005",
     "source_project",
     include_str!("../migrations/sqlite/0005_source_project.sql"),
+);
+
+/// The temporal facts table (docs/temporal-facts.md), same portable subset.
+const MIGRATION_FACTS: SqlMigration = SqlMigration::new(
+    "0006",
+    "facts",
+    include_str!("../migrations/sqlite/0006_facts.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -249,6 +262,7 @@ impl Module for Pages {
             "scope_keys",
             "page_terms",
             "sources",
+            "facts",
         ]
     }
 
@@ -324,17 +338,37 @@ impl Module for Pages {
                 redacted: &[],
                 subject_via: None,
             },
+            // Temporal facts (docs/temporal-facts.md). A fact is often about a
+            // person — their shoe size, their employer — so it is content, and
+            // the column an erasure query can bind is `written_by`, the
+            // writer's user id. The subject and attribute are plaintext like a
+            // page slug; the value, unit, source and quote are sealed under
+            // the scope key, so `forget_scope` (which deletes the rows and
+            // destroys the key) is the erasure for everything else.
+            PersonalDataSet {
+                table: "facts",
+                subject: "written_by",
+                kind: DataKind::Content,
+                disposition: Disposition::Erase,
+                description: "Each temporal fact you recorded: which entity and attribute it \
+                              is about, when it was true and when it was learned, and the \
+                              sealed value, unit, source and quote. Erasing you deletes the \
+                              row.",
+                redacted: &[],
+                subject_via: None,
+            },
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 5] = [
+        const MIGRATIONS: [SqlMigration; 6] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
             MIGRATION_SOURCE_LEDGER,
             MIGRATION_SOURCE_PROJECT,
+            MIGRATION_FACTS,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

@@ -174,7 +174,14 @@ async fn call(state: &McpState, asker: &Asker, id: &Value, params: Option<&Value
             return error(id, Refusal::Internal(message));
         }
     };
-    match tools::run(&store, asker, &scopes, parsed).await {
+    let facts = match state.facts_store() {
+        Ok(facts) => facts,
+        Err(problem) => {
+            let message = problem.detail.unwrap_or_else(|| problem.title.to_owned());
+            return error(id, Refusal::Internal(message));
+        }
+    };
+    match tools::run(&store, &facts, asker, &scopes, parsed).await {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(text) => json!({
             "jsonrpc": "2.0",

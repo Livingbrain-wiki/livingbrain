@@ -12,7 +12,7 @@
 //! the early-access list behind issue #23: joins from livingbrain.wiki, double
 //! opt-in mail through Owlpost, and the CSV export behind the admin token;
 //! and the CLI surface (issues #121 and #77) — `notes`, `search`, `ask`,
-//! `export` and `sources` from `livingbrain-api`, the five modules behind
+//! `export`, `sources`, `facts` and `coding-agents` from `livingbrain-api`, the modules behind
 //! `livingbrain`'s client contract, whose paths `fetch` diverts through the
 //! harness router itself (`serve_cli` below); and `tokens` with the harness
 //! `device-auth` grant beside it — the personal access tokens behind issue
@@ -49,7 +49,7 @@ use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Notes, PagesRebind, Search, SessionAuth, Sources, Wiki,
+    Ask, CodingAgents, Export, Facts, Notes, PagesRebind, Search, SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
@@ -350,7 +350,7 @@ fn build(
     (harness, runtime, turns)
 }
 
-/// The five CLI modules (issues #121 and #77): the routes `livingbrain`'s
+/// The CLI modules (issues #121 and #77, and the temporal facts): the routes `livingbrain`'s
 /// client speaks — `POST /v1/notes`, `GET /v1/search`, `POST /v1/ask`,
 /// `GET /v1/export`, `GET /v1/sources` (with `/projects` and `/{id}`) —
 /// each mounted at its own name under the harness rule, every one
@@ -362,7 +362,7 @@ fn build(
 /// page bodies stay physical `pages/` objects no matter which route wrote
 /// them ([`PagesRebind`], planted in [`serve_cli`]). With no key custodian
 /// there is nothing to seal a page with, so — like [`pages_module`] — none
-/// of the five is mounted and every other route keeps working.
+/// of them is mounted and every other route keeps working.
 fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
     let Some(kms) = kms else {
         return Vec::new();
@@ -373,6 +373,7 @@ fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
         Arc::new(Search::new(wiki.clone())),
         Arc::new(Ask::new(wiki.clone())),
         Arc::new(Export::new(wiki.clone())),
+        Arc::new(Facts::new(wiki.clone())),
         Arc::new(Sources::new(wiki.clone())),
         // The coding-agents compiler: its queue and status routes, and the
         // cron drain that compiles synced sessions into `coding-agents/`.
@@ -619,7 +620,7 @@ fn build_kms(env: &Env) -> Option<Arc<dyn Kms>> {
 /// The [`Wiki`] every route of `livingbrain-api` is built with: the key
 /// custodian, the [`TokenBearer`] for the CLI's personal access token, and
 /// the [`WebSession`] for the web app's session cookie. One function, so the
-/// pages surface and the five CLI modules answer to exactly the same
+/// pages surface and the CLI modules answer to exactly the same
 /// credentials — and so a native test mounts what the Worker serves.
 #[must_use]
 pub fn wiki(kms: Arc<dyn Kms>) -> Wiki {
@@ -714,36 +715,40 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
     })
 }
 
-/// The five CLI paths `fetch` diverts to [`serve_cli`] — the routes the
-/// five [`cli_modules`] mount, minus `/v1/pages`, which the pages module
+/// The CLI paths `fetch` diverts to [`serve_cli`] — the routes the
+/// [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 6] = [
+const CLI_ROUTES: [&str; 7] = [
     "/v1/notes",
     "/v1/search",
     "/v1/ask",
     "/v1/export",
     "/v1/sources",
     "/v1/coding-agents",
+    "/v1/facts",
 ];
 
 /// The diverted paths that have routes *under* them, so the divert matches
-/// the prefix: the sources listing, facet and citation route, and the
-/// coding-agents queue and process routes.
-const CLI_PREFIXES: [&str; 2] = ["/v1/sources", "/v1/coding-agents"];
+/// the prefix: the sources listing, facet and citation route, the
+/// coding-agents queue and process routes, and a fact's retraction
+/// (`/v1/facts/{id}/retract`).
+const CLI_PREFIXES: [&str; 3] = ["/v1/sources", "/v1/coding-agents", "/v1/facts"];
 
-/// Whether this request is one of the five CLI paths the venture diverts,
+/// Whether this request is one of the CLI paths the venture diverts,
 /// and the surface is mounted at all. The mount is gated on the key ring
 /// (see [`cli_modules`]), so the presence of the `notes` module is the same
 /// gate — a deployment without the ring takes these paths through the
 /// ordinary `serve`, which answers 404, exactly as a composition without
 /// the modules should.
 ///
-/// Four of the five are single endpoints and match exactly — a subroute
+/// Most are single endpoints and match exactly — a subroute
 /// under them is nobody's route, and exact matching keeps a future one from
-/// silently changing handler stack. The sources module is the exception: the
-/// bare `/v1/sources` is its listing, `/v1/sources/projects` its projects
-/// facet, and `/v1/sources/{id}` the citation route, so the prefix diverts —
-/// matching only the bare path would drop every real citation on the floor.
+/// silently changing handler stack. The sources module is the first
+/// exception: the bare `/v1/sources` is its listing, `/v1/sources/projects`
+/// its projects facet, and `/v1/sources/{id}` the citation route, so the
+/// prefix diverts — matching only the bare path would drop every real
+/// citation on the floor. The coding-agents queue and a fact's retraction
+/// (`/v1/facts/{id}/retract`) divert by prefix too ([`CLI_PREFIXES`]).
 fn serves_cli(harness: &Harness, path: &str) -> bool {
     let diverted = CLI_ROUTES.iter().any(|route| {
         path == *route
@@ -857,7 +862,7 @@ async fn brand_device_page(mut response: Response) -> worker::Result<Response> {
         .with_headers(headers))
 }
 
-/// Serves one of the five CLI paths ([`CLI_ROUTES`]) through the harness
+/// Serves one of the CLI paths ([`CLI_ROUTES`]) through the harness
 /// router directly.
 ///
 /// Why divert at all: the pinned harness has no seam to re-point one
@@ -879,7 +884,7 @@ async fn brand_device_page(mut response: Response) -> worker::Result<Response> {
 /// declaration at or under it is buffered whole. A body with no usable
 /// declaration is refused too — `serve` would read it capped through the
 /// streaming layer, and rather than re-derive that machinery here (a
-/// `!Send` bridge and a hand-rolled cap), the five CLI routes ask for a
+/// `!Send` bridge and a hand-rolled cap), the CLI routes ask for a
 /// declared length; the CLI and the web app always send one.
 ///
 /// # Errors
@@ -964,7 +969,7 @@ async fn serve_cli(
 }
 
 /// The buffered response bridge, mirroring the runtime's own: 1 MiB is a
-/// generous ceiling for what the five CLI routes answer (JSON, one zip).
+/// generous ceiling for what the CLI routes answer (JSON, one zip).
 async fn response_to_worker(response: AxumResponse) -> worker::Result<Response> {
     const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
     let (parts, body) = response.into_parts();
@@ -998,7 +1003,7 @@ fn copy_headers(worker_headers: &mut worker::Headers, headers: &HeaderMap) {
 ///
 /// **Why not `serve_scheduled`.** It derives the ports per invocation and
 /// hands each module its own scoped view, which is exactly right — except
-/// that the coding-agents compiler, like the five CLI modules, reads and
+/// that the coding-agents compiler, like the other CLI modules, reads and
 /// writes page bodies, and a scoped view under its own name is a key space
 /// no page lives in. So this is `serve_scheduled_with_limits`' loop with
 /// one change, the one [`serve_cli`] makes per request: the raw store is
@@ -1122,6 +1127,14 @@ mod tests {
             "the projects facet diverts with the citation route"
         );
         assert!(
+            serves_cli(&harness, "/v1/facts/fact-01HZZZBBBBBBBBBBBBBBBBBBB/retract"),
+            "a retraction diverts with the facts route"
+        );
+        assert!(
+            !serves_cli(&harness, "/v1/factsother"),
+            "a sibling path that only shares the prefix does not divert"
+        );
+        assert!(
             !serves_cli(&harness, "/v1/notes/01HZZZBBBBBBBBBBBBBBBBBBB"),
             "the single-endpoint CLI paths stay exact"
         );
@@ -1142,7 +1155,7 @@ mod tests {
     }
 
     /// A deployment with no page key ring still composes: the MCP surface
-    /// and the five CLI modules are not mounted, and every other route keeps
+    /// and the CLI modules are not mounted, and every other route keeps
     /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
@@ -1150,7 +1163,7 @@ mod tests {
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
-        for module in ["notes", "search", "ask", "export", "sources"] {
+        for module in ["notes", "search", "ask", "export", "sources", "facts"] {
             assert!(!names.contains(&module), "{names:?}");
         }
         for route in CLI_ROUTES {

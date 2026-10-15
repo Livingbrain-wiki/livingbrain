@@ -281,3 +281,74 @@ fn the_source_listing_holds_on_every_dialect() {
         });
     }
 }
+
+/// The fact store's hand-written SQL — `SELECT *` decoded by column name, an
+/// `IN` list, optional filters, `LIMIT ?`, and the settle pass's batched
+/// updates — on every dialect: a supersession, a retraction and the scope
+/// clause.
+#[test]
+fn the_fact_store_holds_on_every_dialect() {
+    use livingbrain_memory::timeline::FactStatus;
+    use livingbrain_pages::{FactInput, FactStore};
+
+    for kit in TestHarness::all_dialects(|| vec![Box::new(Pages::new())]) {
+        let dialect = kit.dialect;
+        let store = FactStore::new(
+            kit.db.clone(),
+            common::kms(),
+            Arc::new(kit.clock.clone()),
+            Arc::new(UlidIdGen),
+        );
+        pollster::block_on(async {
+            let shoe = |value: &str, from: &str| FactInput {
+                subject: "person/nick".to_owned(),
+                attribute: "shoe_size".to_owned(),
+                value: value.to_owned(),
+                unit: Some("EU".to_owned()),
+                valid_from: Some(from.to_owned()),
+                ..FactInput::default()
+            };
+            let old = store
+                .record(A_SCOPE, shoe("40", "2001"), "u-a")
+                .await
+                .expect("40");
+            let new = store
+                .record(A_SCOPE, shoe("41", "2002"), "u-a")
+                .await
+                .expect("41");
+            store
+                .record(B_SCOPE, shoe("45", "2001"), "u-b")
+                .await
+                .expect("45");
+            let timelines = store
+                .timelines(&[A_SCOPE], Some("person/nick"), Some("shoe_size"))
+                .await
+                .expect("a read");
+            assert_eq!(timelines.len(), 1, "{dialect}: B's fact is not A's");
+            let facts = &timelines[0].facts;
+            assert_eq!(facts.len(), 2, "{dialect}");
+            assert_eq!(facts[0].id, old.fact.id, "{dialect}: oldest first");
+            assert_eq!(facts[0].status, FactStatus::Superseded, "{dialect}");
+            assert_eq!(facts[0].range(), "2001..2002", "{dialect}");
+            assert_eq!(facts[1].status, FactStatus::Current, "{dialect}");
+            assert_eq!(facts[1].value, "41", "{dialect}");
+
+            store
+                .retract(&[A_SCOPE], &new.fact.id)
+                .await
+                .expect("a retraction")
+                .expect("found");
+            let facts = &store
+                .timelines(&[A_SCOPE], None, None)
+                .await
+                .expect("a read")[0]
+                .facts;
+            assert_eq!(
+                facts[0].status,
+                FactStatus::Current,
+                "{dialect}: 40 is back"
+            );
+            assert_eq!(facts[0].range(), "2001..now", "{dialect}");
+        });
+    }
+}
