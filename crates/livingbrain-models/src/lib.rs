@@ -47,7 +47,11 @@ mod selection;
 // Public so a sibling module that fetches a member-supplied URL reuses the
 // one guard instead of growing a second copy of it (issue #11).
 pub mod ssrf;
+// Reading a streamed completion (Server-Sent Events) for both wires.
+mod sse;
 mod store;
+// The streaming seam the venture implements over `worker::Fetch`.
+pub mod stream;
 
 use cratefield_core::{
     Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,

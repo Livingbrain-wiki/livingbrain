@@ -8,8 +8,8 @@
 //! (`cratefield-runtime-cloudflare` 0.4.0, `src/runtime.rs`). A
 //! forced-thinking compile on GLM-5.3 takes 55–100 s, so every one failed
 //! as `model-http: deadline exceeded after 30s` however long the caller
-//! asked for. Streaming the reply would not help on this port: the deadline
-//! covers the buffered body too.
+//! asked for. Streaming the reply would not help on this port alone: the
+//! deadline covers the buffered body too (hence the seam below).
 //!
 //! **What it does.** A model call attaches [`ModelDeadline`] beside its
 //! [`HttpPolicy`] (see [`policy`]). [`ModelDeadlineHttpClient`] — which the
@@ -21,11 +21,34 @@
 //! deadline through it, and on a path whose ports the runtime builds the
 //! marker is simply ignored (the call stays at 30 s).
 //!
-//! **When it goes.** Cratefield's streaming port (`send_streaming`, harness
-//! issue #859, unreleased at `cratefield-core` 0.8.4) bounds a streamed
-//! body by an idle gap and a whole-body ceiling instead of 30 s. Once the
-//! pins move to it, a model call can stream (`"stream": true`) and this
-//! wrapper can be deleted.
+//! **Streaming.** A forced-thinking model on a large prompt can take more
+//! than 100 s before its first answer byte, and Z.AI's Cloudflare front cuts
+//! an origin that has sent nothing for 100 s with a 524 — so past that a
+//! longer deadline alone does not help. A model call that asks for
+//! `"stream": true` also carries [`crate::stream::ModelStream`]; where the
+//! venture wired a [`StreamingHttp`] ([`ModelDeadlineHttpClient::with_streaming`])
+//! it is sent through [`crate::stream::receive`] instead: the head and each
+//! gap between chunks bounded by [`crate::stream::IDLE_GAP`], the whole call
+//! by its own deadline up to [`crate::stream::MAX_STREAM_DEADLINE`], and the
+//! events read as they arrive. A client without the seam sends it as any
+//! other request; [`crate::invoke::chat`] reads a buffered SSE body too.
+//!
+//! **When it goes: the switch to Cratefield 0.9.** `cratefield-core` 0.9
+//! (harness issue #859, PRs #869/#871, release PR Cratefield/harness#834)
+//! adds `HttpClient::send_streaming` with a `StreamPolicy` (head bound, idle
+//! gap, total ceiling), implemented by `cratefield-runtime-cloudflare`'s
+//! `FetchClient`. Once Living Brain pins core 0.9.x:
+//!
+//! 1. In [`crate::stream::receive`], replace the `StreamingHttp::open` call
+//!    and the hand-rolled idle/total bounds with `http.send_streaming(request)`
+//!    under a `StreamPolicy { idle: IDLE_GAP, total: <the call's deadline> }`,
+//!    keeping the [`crate::sse::Accumulator`] read loop as it is.
+//! 2. Have [`crate::invoke::chat`] call that directly on `ports.http`
+//!    instead of marking the request with `ModelStream`/`ModelDeadline`.
+//! 3. Delete this file, `StreamingHttp`/`ChunkStream`/`StreamHead`, and the
+//!    venture's `FetchStreaming` and `model_deadlines` wiring (the runtime's
+//!    own client then serves model calls), and the `MAX_MODEL_DEADLINE`
+//!    asserts in `livingbrain-api`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +57,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cratefield_core::axum::http;
 use cratefield_core::{Clock, HttpClient, HttpError, HttpPolicy, declared_content_length};
+
+use crate::stream::{ModelStream, StreamingHttp};
 
 /// The longest deadline a [`ModelDeadline`] may ask for. Past the slowest
 /// measured compile (≈100 s) with room, and short enough that one call
@@ -80,6 +105,7 @@ pub fn effective_timeout<T>(request: &http::Request<T>) -> Duration {
 pub struct ModelDeadlineHttpClient {
     inner: Arc<dyn HttpClient>,
     clock: Arc<dyn Clock>,
+    streaming: Option<Arc<dyn StreamingHttp>>,
 }
 
 impl ModelDeadlineHttpClient {
@@ -87,7 +113,19 @@ impl ModelDeadlineHttpClient {
     /// [`HttpPolicy`] size cap.
     #[must_use]
     pub fn new(inner: Arc<dyn HttpClient>, clock: Arc<dyn Clock>) -> Self {
-        Self { inner, clock }
+        Self {
+            inner,
+            clock,
+            streaming: None,
+        }
+    }
+
+    /// Sends a model call that asked to stream ([`ModelStream`]) through
+    /// `streaming`, read as it arrives ([`crate::stream::receive`]).
+    #[must_use]
+    pub fn with_streaming(mut self, streaming: Arc<dyn StreamingHttp>) -> Self {
+        self.streaming = Some(streaming);
+        self
     }
 }
 
@@ -98,6 +136,21 @@ impl HttpClient for ModelDeadlineHttpClient {
         request: http::Request<Bytes>,
     ) -> Result<http::Response<Bytes>, HttpError> {
         let limit = HttpPolicy::of_request(&request).max_response_bytes;
+        if let (Some(streaming), Some(ModelStream(wire)), Some(ModelDeadline(deadline))) = (
+            self.streaming.as_ref(),
+            request.extensions().get::<ModelStream>().copied(),
+            request.extensions().get::<ModelDeadline>().copied(),
+        ) {
+            return crate::stream::receive(
+                Arc::clone(streaming),
+                self.clock.as_ref(),
+                request,
+                wire,
+                deadline,
+                limit,
+            )
+            .await;
+        }
         let after = effective_timeout(&request);
         let inner = Arc::clone(&self.inner);
         let Some(outcome) = cratefield_core::timeout(

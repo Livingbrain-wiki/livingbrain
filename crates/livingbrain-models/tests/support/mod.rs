@@ -161,6 +161,9 @@ struct Script {
     chat_transport: Option<String>,
     /// Completion replies are all thinking, cut at `max_tokens`.
     exhausting: bool,
+    /// Completion calls answered with this Server-Sent Events body, one per
+    /// call, the way a client without the streaming seam buffers a stream.
+    chat_streams: VecDeque<String>,
 }
 
 /// How one request to the model host was signed.
@@ -191,6 +194,7 @@ impl Default for Script {
             chat_failures: VecDeque::new(),
             chat_transport: None,
             exhausting: false,
+            chat_streams: VecDeque::new(),
         }
     }
 }
@@ -270,6 +274,16 @@ impl FakeHttp {
         self
     }
 
+    /// The next completion call answers this `text/event-stream` body.
+    pub fn streaming_chat(&self, body: &str) -> &Self {
+        self.inner
+            .lock()
+            .expect("lock")
+            .chat_streams
+            .push_back(body.to_owned());
+        self
+    }
+
     /// Every request to the model host, with the headers that carry the key.
     #[must_use]
     pub fn sent(&self) -> Vec<Sent> {
@@ -323,6 +337,12 @@ impl HttpClient for FakeHttp {
         } else {
             None
         };
+        let mut content_type = "application/json";
+        let streamed = if is_chat && failure.is_none() {
+            inner.chat_streams.pop_front()
+        } else {
+            None
+        };
 
         let answer = if uri.starts_with("https://cloudflare-dns.com/dns-query") {
             // Only the A query is answered; an AAAA with no answers leaves
@@ -343,6 +363,9 @@ impl HttpClient for FakeHttp {
                 })
                 .to_string()
             }
+        } else if let Some(events) = streamed {
+            content_type = "text/event-stream";
+            events
         } else if let Some((failed_status, body, after)) = failure {
             status = failed_status;
             retry_after = after;
@@ -377,7 +400,7 @@ impl HttpClient for FakeHttp {
 
         let mut builder = Response::builder()
             .status(status)
-            .header(header::CONTENT_TYPE, "application/json");
+            .header(header::CONTENT_TYPE, content_type);
         if let Some(after) = retry_after {
             builder = builder.header(header::RETRY_AFTER, after);
         }

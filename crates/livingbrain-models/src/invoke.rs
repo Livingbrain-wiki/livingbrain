@@ -23,6 +23,14 @@
 //!   usage, under the workspace, exactly like the connect probe does. The
 //!   usage is also handed back, so a caller with its own budget can count
 //!   it without a second read.
+//! - **Streaming.** A call asks for `"stream": true` unless the provider's
+//!   card says it cannot ([`crate::curated::streams`]), so a thinking model
+//!   sends bytes the whole time it reasons and no front cuts it as idle
+//!   (Z.AI's 524 at 100 s). Where the venture wired the streaming seam the
+//!   events are read as they arrive ([`crate::stream`]); otherwise a
+//!   buffered `text/event-stream` body is read here the same way
+//!   ([`crate::sse`]), and a provider that ignored the flag answers JSON,
+//!   which is read as before.
 //!
 //! The text that goes out is the caller's. This module does not redact it:
 //! the caller knows what the text is and is the one that must have redacted
@@ -37,7 +45,7 @@ use cratefield_core::{Clock, Config, Database, HttpClient};
 use serde_json::{Value, json};
 
 use crate::catalog::{self, Auth, Wire};
-use crate::{crypto, selection, ssrf, store};
+use crate::{crypto, curated, selection, sse, ssrf, store};
 
 /// The `anthropic-version` every Messages request names.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -388,7 +396,11 @@ pub async fn chat(
         .await
         .map_err(|_| InvokeError::Refused)?;
 
+    let stream = curated::streams(&connection.provider);
     let mut body = request_body(wire, &connection.model, request);
+    if stream {
+        stream_body(&mut body, wire);
+    }
     if wire == Wire::Anthropic
         && thinking_switch(&connection.provider, &url)
         && thinking_optional(&connection.model)
@@ -414,6 +426,9 @@ pub async fn chat(
         MAX_RESPONSE_BYTES,
         request.timeout,
     );
+    if stream {
+        builder = builder.extension(crate::stream::ModelStream(wire));
+    }
     builder = match auth {
         Auth::Bearer => builder.header(http::header::AUTHORIZATION, format!("Bearer {key}")),
         Auth::XApiKey => builder.header("x-api-key", key.as_str()),
@@ -440,9 +455,22 @@ pub async fn chat(
         };
         return Err(InvokeError::Status(upstream));
     }
+    let parsed = if event_stream(response.headers()) {
+        // A client without the streaming seam buffered the whole stream.
+        match sse::read_body(response.body(), wire, MAX_RESPONSE_BYTES) {
+            Ok(completion) => completion.native_json(wire),
+            Err(failure) => {
+                return Err(InvokeError::Status(Upstream {
+                    status: failure.status,
+                    body: safe_detail(&failure.body, &key),
+                    retry_after_secs: None,
+                }));
+            }
+        }
+    } else {
+        serde_json::from_slice(response.body()).map_err(|_| InvokeError::BadResponse)?
+    };
     drop(key);
-    let parsed: Value =
-        serde_json::from_slice(response.body()).map_err(|_| InvokeError::BadResponse)?;
     let text = completion_text(&parsed, wire);
     // Nothing but thinking, cut at the ceiling: say so, rather than "no
     // completion", so the caller knows a bigger budget is the fix. Those
@@ -531,6 +559,24 @@ fn request_body(wire: Wire, model: &str, request: &ChatRequest<'_>) -> Value {
             "max_tokens": request.max_tokens,
         }),
     }
+}
+
+/// Asks for the completion as a stream: `"stream": true`, and on the
+/// OpenAI wire the usage chunk at the end (`stream_options.include_usage`),
+/// without which a streamed call reports no tokens.
+fn stream_body(body: &mut Value, wire: Wire) {
+    body["stream"] = json!(true);
+    if wire == Wire::Openai {
+        body["stream_options"] = json!({"include_usage": true});
+    }
+}
+
+/// Whether a response is a Server-Sent Events body.
+fn event_stream(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim_start().starts_with("text/event-stream"))
 }
 
 /// The completion's text, per wire; `None` when the answer carries none.
@@ -638,6 +684,25 @@ mod tests {
         let body = request_body(Wire::Anthropic, "m", &request);
         assert_eq!(body["system"], "rules");
         assert_eq!(body["messages"][0]["content"], "data");
+    }
+
+    #[test]
+    fn a_streamed_body_asks_for_usage_on_the_openai_wire() {
+        let request = ChatRequest {
+            system: "s",
+            user: "u",
+            max_tokens: 10,
+            json: false,
+            timeout: Duration::from_secs(1),
+        };
+        let mut openai = request_body(Wire::Openai, "m", &request);
+        stream_body(&mut openai, Wire::Openai);
+        assert_eq!(openai["stream"], true);
+        assert_eq!(openai["stream_options"]["include_usage"], true);
+        let mut anthropic = request_body(Wire::Anthropic, "m", &request);
+        stream_body(&mut anthropic, Wire::Anthropic);
+        assert_eq!(anthropic["stream"], true);
+        assert!(anthropic.get("stream_options").is_none());
     }
 
     #[test]

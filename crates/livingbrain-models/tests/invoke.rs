@@ -268,7 +268,176 @@ fn the_glm_request_carries_only_what_the_messages_api_takes() {
             .map(String::as_str)
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["max_tokens", "messages", "model", "system"]);
+        // `stream`: GLM-5.3 thinks before it answers, and a reply that sends
+        // nothing for 100 s is cut by Z.AI's front with a 524.
+        assert_eq!(
+            keys,
+            ["max_tokens", "messages", "model", "stream", "system"]
+        );
         assert!(body["system"].is_string());
+        assert_eq!(body["stream"], true);
+    });
+}
+
+/// A GLM-5.3 stream as Z.AI sends it: thinking first, then the answer,
+/// usage on `message_delta`.
+fn glm_stream(answer: &str, stop: &str) -> String {
+    let text = serde_json::to_string(answer).expect("json");
+    format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{{\"input_tokens\":0,\"output_tokens\":0}}}}}}\n\n\
+         event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"\"}}}}\n\n\
+         event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"thinking_delta\",\"thinking\":\"Reason first.\"}}}}\n\n\
+         event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+         event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+         event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"text_delta\",\"text\":{text}}}}}\n\n\
+         event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":1}}\n\n\
+         event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop}\"}},\"usage\":{{\"input_tokens\":120,\"output_tokens\":30}}}}\n\n\
+         event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+/// A client without the streaming seam buffers the whole stream: the
+/// answer is read from the events, the thinking skipped, the usage counted.
+#[test]
+fn a_buffered_stream_reads_as_its_answer_and_usage() {
+    pollster::block_on(async {
+        let http = FakeHttp::new();
+        let (kit, _) = glm(&http).await;
+        http.streaming_chat(&glm_stream("{\"pages\":[]}", "end_turn"));
+        let reply = run(&kit, &http).await.expect("answers");
+        assert_eq!(reply.text, "{\"pages\":[]}");
+        assert_eq!((reply.prompt_tokens, reply.completion_tokens), (120, 30));
+        assert!(reply.usage_reported);
+    });
+}
+
+/// A stream that thought through the whole ceiling is exhausted.
+#[test]
+fn a_stream_cut_at_the_ceiling_is_exhausted() {
+    pollster::block_on(async {
+        let http = FakeHttp::new();
+        let (kit, _) = glm(&http).await;
+        http.streaming_chat(&glm_stream("", "max_tokens"));
+        assert_eq!(
+            run(&kit, &http).await.expect_err("no answer"),
+            InvokeError::Exhausted
+        );
+    });
+}
+
+/// An `error` event mid-stream is the provider's refusal: its status and
+/// body, made safe like any other.
+#[test]
+fn an_error_mid_stream_is_a_status_without_the_key() {
+    pollster::block_on(async {
+        let http = FakeHttp::new();
+        let (kit, _) = glm(&http).await;
+        let full = glm_stream("never", "end_turn");
+        let cut = &full[..full.find("event: content_block_start").expect("cut")];
+        http.streaming_chat(&format!(
+            "{cut}event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"overloaded_error\",\"message\":\"Overloaded {KEY}\"}}}}\n\n"
+        ));
+        let error = run(&kit, &http).await.expect_err("failed");
+        let InvokeError::Status(upstream) = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(upstream.status, 529);
+        assert!(upstream.body.contains("Overloaded"), "{}", upstream.body);
+        assert!(!error.reason().contains(KEY), "{}", error.reason());
+    });
+}
+
+/// Where the venture wired the streaming seam, a model call goes through
+/// it: asked as a stream, signed with the key, its events read chunk by
+/// chunk (here seven bytes at a time) into the same reply.
+#[test]
+fn the_streaming_seam_carries_the_call_chunk_by_chunk() {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use cratefield_core::axum::http;
+    use cratefield_core::{HttpClient, HttpError};
+    use livingbrain_models::deadline::ModelDeadlineHttpClient;
+    use livingbrain_models::stream::{ChunkStream, StreamHead, StreamingHttp};
+
+    struct Chunks(Vec<Bytes>);
+
+    #[async_trait]
+    impl ChunkStream for Chunks {
+        async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>> {
+            (!self.0.is_empty()).then(|| Ok(self.0.remove(0)))
+        }
+    }
+
+    #[derive(Default)]
+    struct Streaming {
+        seen: Mutex<Vec<(String, Option<String>, String)>>,
+    }
+
+    #[async_trait]
+    impl StreamingHttp for Streaming {
+        async fn open(&self, request: http::Request<Bytes>) -> Result<StreamHead, HttpError> {
+            self.seen.lock().expect("lock").push((
+                request.uri().to_string(),
+                request
+                    .headers()
+                    .get("authorization")
+                    .or_else(|| request.headers().get("x-api-key"))
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                String::from_utf8_lossy(request.body()).into_owned(),
+            ));
+            let events = glm_stream("{\"pages\":[\"é\"]}", "end_turn").into_bytes();
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/event-stream"),
+            );
+            Ok(StreamHead {
+                status: http::StatusCode::OK,
+                headers,
+                body: Box::new(Chunks(
+                    events.chunks(7).map(Bytes::copy_from_slice).collect(),
+                )),
+            })
+        }
+    }
+
+    pollster::block_on(async {
+        let fake = FakeHttp::new();
+        let (kit, before) = glm(&fake).await;
+        let streaming = Arc::new(Streaming::default());
+        let clock = clock();
+        let client = ModelDeadlineHttpClient::new(
+            Arc::new(fake.clone()) as Arc<dyn HttpClient>,
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+        )
+        .with_streaming(Arc::clone(&streaming) as Arc<dyn StreamingHttp>);
+        let reply = invoke::chat(
+            &*kit.db,
+            &client,
+            &config(),
+            &clock as &dyn Clock,
+            WORKSPACE,
+            "main",
+            &request(),
+        )
+        .await
+        .expect("answers");
+        assert_eq!(reply.text, "{\"pages\":[\"é\"]}");
+        assert_eq!((reply.prompt_tokens, reply.completion_tokens), (120, 30));
+        // The completion went through the seam, not the buffered client.
+        assert!(
+            fake.sent()[before..]
+                .iter()
+                .all(|sent| !sent.uri.ends_with("/messages"))
+        );
+        let seen = streaming.seen.lock().expect("lock").clone();
+        assert_eq!(seen.len(), 1);
+        let (uri, key, body) = &seen[0];
+        assert!(uri.ends_with("/v1/messages"), "{uri}");
+        assert!(key.as_deref().is_some_and(|k| k.ends_with(KEY)), "signed");
+        assert!(body.contains("\"stream\":true"), "{body}");
     });
 }
