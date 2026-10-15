@@ -212,9 +212,14 @@ pub async fn chat(
         .map_err(|_| InvokeError::Refused)?;
 
     let mut body = request_body(wire, &connection.model, request);
-    if wire == Wire::Anthropic && thinking_switch(&connection.provider, &url) {
+    if wire == Wire::Anthropic
+        && thinking_switch(&connection.provider, &url)
+        && thinking_optional(&connection.model)
+    {
         // A thinking model spends its budget on a `thinking` block before
-        // the answer; a job wants the answer. Z.AI's GLM takes the switch.
+        // the answer; a job wants the answer. Z.AI's GLM takes the switch on
+        // the series that allow it; GLM-5.3 thinks always, and its thinking
+        // blocks are skipped when the answer is read.
         body["thinking"] = json!({"type": "disabled"});
     }
     let segments: &[&str] = match wire {
@@ -289,6 +294,21 @@ fn thinking_switch(provider: &str, base: &url::Url) -> bool {
                 || host == "open.bigmodel.cn"
                 || host.ends_with(".bigmodel.cn")
         })
+}
+
+/// Whether a GLM model's thinking may be turned off. Z.AI's thinking-mode
+/// guide (docs.z.ai/guides/capabilities/thinking-mode, 2026-10-15): the
+/// GLM-5.2, GLM-5.1, GLM-5 and GLM-4.7 series take `thinking: disabled`;
+/// GLM-5.3 and GLM-5.3-Flash "use forced thinking and cannot be disabled",
+/// so they are never sent the switch. An unknown model is left alone.
+fn thinking_optional(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    let model = model.split('[').next().unwrap_or_default();
+    ["glm-5.2", "glm-5.1", "glm-4.7"]
+        .iter()
+        .any(|series| model == *series || model.starts_with(&format!("{series}-")))
+        || model == "glm-5"
+        || model.starts_with("glm-5-")
 }
 
 /// The request body for one wire.
@@ -451,6 +471,30 @@ mod tests {
             completion_text(&answered, Wire::Openai).as_deref(),
             Some("ok")
         );
+    }
+
+    #[test]
+    fn forced_thinking_models_are_never_sent_the_switch() {
+        for model in [
+            "glm-5.2",
+            "GLM-5.1",
+            "glm-5",
+            "glm-5-turbo",
+            "glm-4.7-flash",
+            "glm-5.2[1m]",
+        ] {
+            assert!(thinking_optional(model), "{model}");
+        }
+        for model in [
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-5.3[1m]",
+            "glm-5.30",
+            "claude-x",
+            "",
+        ] {
+            assert!(!thinking_optional(model), "{model}");
+        }
     }
 
     #[test]
