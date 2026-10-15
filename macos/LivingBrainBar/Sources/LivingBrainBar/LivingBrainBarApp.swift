@@ -2,23 +2,58 @@ import AppKit
 import LivingBrainKit
 import SwiftUI
 
+/// Owns the models so both scenes share one instance of each.
+@MainActor
+final class AppState: ObservableObject {
+    let bar = BarModel()
+    lazy var sessions = SessionsModel(bar: bar)
+}
+
 @main
 struct LivingBrainBarApp: App {
-    @StateObject private var model = BarModel()
+    @StateObject private var app = AppState()
 
     var body: some Scene {
         MenuBarExtra {
-            BarMenu(model: model)
+            BarMenu(model: app.bar)
         } label: {
-            Image(nsImage: MenuIcon.image(for: model.state.phase))
-                .accessibilityLabel(MenuIcon.accessibilityLabel(for: model.state.phase))
+            MenuBarLabel(model: app.bar)
         }
         .menuBarExtraStyle(.menu)
+
+        Window("Living Brain", id: "main") {
+            MainWindow(bar: app.bar, sessions: app.sessions)
+        }
+        .defaultSize(width: 1100, height: 700)
+        .commands {
+            CommandGroup(after: .newItem) {
+                Button("Sync Now") { app.bar.syncNow() }
+                    .keyboardShortcut("r")
+            }
+        }
+    }
+}
+
+struct MenuBarLabel: View {
+    @ObservedObject var model: BarModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(nsImage: MenuIcon.image(for: model.state.phase))
+            .accessibilityLabel(MenuIcon.accessibilityLabel(for: model.state.phase))
+            .task {
+                // `open "Living Brain.app" --args --show-window` starts with
+                // the window open (the default is menu bar only).
+                if CommandLine.arguments.contains("--show-window") {
+                    openWindow(id: "main")
+                }
+            }
     }
 }
 
 struct BarMenu: View {
     @ObservedObject var model: BarModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button(model.state.isSyncing ? "Syncing…" : "Sync Now") { model.syncNow() }
@@ -31,6 +66,11 @@ struct BarMenu: View {
         }
         if let message = model.state.errorMessage {
             Text("⚠︎ " + message)
+        }
+        if model.paused {
+            Text("Sync is paused")
+        } else if model.pendingFiles > 0 {
+            Text("Watching \(model.pendingFiles) active session\(model.pendingFiles == 1 ? "" : "s")")
         }
 
         if model.signingIn {
@@ -56,7 +96,7 @@ struct BarMenu: View {
             ForEach(model.projects) { project in
                 Menu(project.name) {
                     Text(project.displayPath())
-                    Button("Reveal in Finder") { model.reveal(project) }
+                    Button("Reveal in Finder") { model.reveal(path: project.path) }
                     Button("Remove") { model.removeProject(project) }
                 }
             }
@@ -69,13 +109,21 @@ struct BarMenu: View {
 
         Divider()
 
-        Button("Open Living Brain") { model.open(BarModel.appURL) }
+        Button("Open Living Brain Window…") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut("0")
+        Button("Open Living Brain") { model.open(model.appURL) }
             .keyboardShortcut("o")
-        Button("Agent Sessions") { model.open(BarModel.sessionsURL) }
+        Button("Agent Sessions") { model.open(model.sessionsURL) }
 
         Divider()
 
+        Toggle("Pause Syncing", isOn: $model.paused)
+        Toggle("Live Sync (When a Session Goes Quiet)", isOn: $model.liveSync)
         Toggle("Sync Automatically Every 15 Min", isOn: $model.autoSync)
+        Toggle("Notifications", isOn: $model.notifications)
         Toggle("Launch at Login", isOn: Binding(
             get: { model.launchAtLogin },
             set: { model.setLaunchAtLogin($0) }

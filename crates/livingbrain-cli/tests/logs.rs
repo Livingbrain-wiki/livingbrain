@@ -786,3 +786,131 @@ fn re_syncing_leaves_the_notes_unchanged() {
         "the re-sync sent different notes for the same sessions"
     );
 }
+
+/// The planted Claude session file for `session_id`, under the test home.
+fn claude_file(home: &Path, project_dir: &str, session_id: &str) -> String {
+    home.join(".claude")
+        .join("projects")
+        .join(project_dir)
+        .join(format!("{session_id}.jsonl"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// (j) `--session` narrows the scan to the named file: one session scanned,
+/// one uploaded, the others never read — and the report carries the local
+/// fields a client needs to list it (file, branch, times).
+#[test]
+fn sync_with_session_scans_only_that_file() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let file = claude_file(&home, "-home-alice-code-demo", CLAUDE_SESSION);
+    let output = sync(&home, &api_envs(&mock.base), &["--session", &file]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["scanned"], 1, "{report}");
+    assert_eq!(report["uploaded"], 1, "{report}");
+    let session = &report["sessions"][0];
+    assert_eq!(session["session_id"], CLAUDE_SESSION, "{session}");
+    assert_eq!(session["branch"], "main", "{session}");
+    assert_eq!(
+        session["started_at"], "2026-10-01T09:30:00.000Z",
+        "{session}"
+    );
+    assert!(session["ended_at"].is_string(), "{session}");
+    assert!(
+        session["file"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(&format!("{CLAUDE_SESSION}.jsonl"))),
+        "{session}"
+    );
+    assert_eq!(
+        source_bodies(&mock).len(),
+        1,
+        "only the named session went out"
+    );
+}
+
+/// (k) `--session` never widens the opt-in: naming a session from a repo
+/// that is not allowed reports it skipped and sends nothing.
+#[test]
+fn sync_with_session_still_honours_the_opt_in() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let file = claude_file(&home, "-home-alice-code-side", SIDE_SESSION);
+    let output = sync(&home, &api_envs(&mock.base), &["--session", &file]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["scanned"], 1, "{report}");
+    assert_eq!(report["skipped"], 1, "{report}");
+    assert!(
+        mock.requests().is_empty(),
+        "a skipped --session sync touched the network"
+    );
+}
+
+/// (l) A `--session` path that is missing, or that is not under either
+/// agent's tree, is an error, not a silent empty scan.
+#[test]
+fn sync_with_a_stray_session_is_an_error() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+
+    let missing = home.join("nope.jsonl").to_string_lossy().into_owned();
+    let output = sync(&home, &api_envs(&mock.base), &["--session", &missing]);
+    assert!(!output.status.success());
+    assert!(output.stderr.contains("--session"), "{}", output.stderr);
+
+    let outside = home.join("elsewhere.jsonl");
+    std::fs::write(&outside, "{}\n").expect("write a stray file");
+    let outside = outside.to_string_lossy().into_owned();
+    let output = sync(&home, &api_envs(&mock.base), &["--session", &outside]);
+    assert!(!output.status.success());
+    assert!(
+        output.stderr.contains("not a session file"),
+        "{}",
+        output.stderr
+    );
+    assert!(mock.requests().is_empty());
+}
+
+/// (m) `logs show` prints the redacted record for one file — opted in or
+/// not — with no request at all: the planted key and the home never appear,
+/// and the record is the one a sync would send.
+#[test]
+fn show_prints_the_redacted_record_locally() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+
+    let file = claude_file(&home, "-home-alice-code-side", SIDE_SESSION);
+    let cwd = temp_dir("logs-cwd");
+    // `real_home_envs` moves HOME away from the planted tree, so the trees
+    // are named explicitly.
+    let mut args = vec![
+        "logs".to_owned(),
+        "show".to_owned(),
+        file.clone(),
+        "--json".to_owned(),
+    ];
+    args.extend(fixture_dirs(&home));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&cwd, &home, &args, &real_home_envs(&mock.base), None);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let shown = json_of(&output);
+    assert_eq!(shown["opted_in"], false, "{shown}");
+    assert_eq!(shown["record"]["session_id"], SIDE_SESSION, "{shown}");
+    let text = shown["record"].to_string();
+    assert!(!text.contains(planted_key().as_str()), "{text}");
+    assert!(!text.contains("/home/alice"), "{text}");
+    assert!(mock.requests().is_empty(), "logs show touched the network");
+}

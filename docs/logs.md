@@ -25,18 +25,21 @@ livingbrain logs deny
 | `logs deny [path]` | revoke a path `logs allow` added |
 | `logs status` | print what is opted in, and where that is recorded |
 | `logs sync` | read both agents' logs and upload the opted-in sessions |
+| `logs show <file>` | print the redacted record `logs sync` would send for one session file, opted in or not; never touches the network |
 
 | flag | what it does |
 |---|---|
 | `--claude-dir <dir>` | read Claude Code sessions from here instead of `~/.claude/projects` |
 | `--codex-dir <dir>` | read Codex sessions from here instead of `~/.codex/sessions` |
 | `--dry-run` | parse, normalise and report, but never touch the network |
+| `--session <file>` | `logs sync` only: scan just this session file (repeatable). It must sit under one of the two trees, and its repo must still be opted in |
 
 `--json` prints one object: `scanned`, `uploaded`, `unchanged`, `skipped`,
 `unreadable` (a file that could not be read at all), `unparsed` (read, but no
 session in it), `redacted`, `dry_run` and a `sessions` array of
 `{agent, session_id, repo, models, turns, tool_calls, totals, truncated,
-status, note?}` — the status one of `uploaded`, `unchanged`, `skipped`
+status, branch, started_at, ended_at, file, note?}` (`file` is the local path
+of the log; it is printed, never sent) — the status one of `uploaded`, `unchanged`, `skipped`
 (`reason: "repo not opted in"`) or `would_upload` under `--dry-run`. Every
 opted-in session also carries `note`: `{slug, project, status, id?, url?,
 error?}`, the status one of `written`, `unchanged`, `failed` or `would_write`
