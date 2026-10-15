@@ -1,0 +1,34 @@
+# Living Brain module: the GitHub connection's pure core — webhook signature
+# and delivery parsing, the REST and webhook models, the record mapping, the
+# backfill planner and the rate-limit backoff. No I/O, no routes, no storage:
+# the connector that does the HTTP and writes the ledger is a separate part.
+
+[package]
+name = "livingbrain-github"
+description = "Living Brain module: the GitHub connection's pure logic — webhook verification, REST and webhook models, record mapping, backfill planning, rate-limit backoff"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "tests/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Hmac<Sha256>` for webhook signatures, and SHA-256 for record digests. The
+# 0.12 / 0.10 pair the tree already resolves, so naming them adds no crate.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The wasm-safety check every module carries (`assert_wasm_safe_deps`).
+cratefield-testing = { workspace = true }
+# The `SourceKind` wire names are the contract with the ledger; a test pins
+# ours to the ledger's own `as_str`. Dev-only: the crate itself does not
+# depend on the pages module.
+livingbrain-pages = { path = "../livingbrain-pages" }
