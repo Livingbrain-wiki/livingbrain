@@ -52,6 +52,15 @@ export const FIELDS = Object.freeze([
   },
   {
     group: "coding_agents",
+    key: "concurrency",
+    label: "Sessions at once",
+    hint:
+      "Sessions compiled side by side in one run (at most 6 run at once). A rate limit from your model halves it for a while.",
+    unit: "sessions",
+    advanced: true,
+  },
+  {
+    group: "coding_agents",
     key: "max_chunks",
     label: "Calls per session",
     hint: "Model calls one session may take; the rest of a long one is left out.",
@@ -601,7 +610,7 @@ export function renderBudgets(root, view, doc = typeof document === "undefined" 
   );
   const savers = paintSavers(doc, view);
   const advanced = el(doc, "details", "disclosure budget-advanced");
-  advanced.appendChild(el(doc, "summary", null, "Advanced: the size of one compile"));
+  advanced.appendChild(el(doc, "summary", null, "Advanced: the size of one compile, and how many run at once"));
   for (const field of fields("coding_agents", true)) advanced.appendChild(paintField(doc, field, view.editable));
   root.appendChild(
     paintCard(

@@ -29,6 +29,10 @@ livingbrain-redact = { path = "../livingbrain-redact" }
 # The `Model`, `Gate` and `FactSink` seams are `#[async_trait]`, like every
 # harness port.
 async-trait = { workspace = true }
+# Compiles run side by side in one drain (`FuturesUnordered`), and two that
+# write one page take turns on it (`lock::Mutex`). Executor-free, so it runs
+# on the Worker's single-threaded wasm runtime as on a test's `block_on`.
+futures-util = { workspace = true, features = ["std"] }
 sea-query = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

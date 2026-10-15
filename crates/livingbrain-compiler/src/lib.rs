@@ -25,6 +25,12 @@
 //! - **History is kept** — dated entries, superseded rather than rewritten
 //!   — and the same changes go to the bi-temporal facts layer through one
 //!   adapter ([`facts`]).
+//! - **In parallel** ([`pool`]): a drain runs several compiles at once —
+//!   up to each workspace's `concurrency`, never more than six per
+//!   invocation — fair across workspaces; a 429 pauses and halves that
+//!   workspace's pool; budget holds keep parallel calls inside the token
+//!   budgets; two compiles writing one page take turns and merge
+//!   ([`merge`]) rather than overwrite.
 //! - **Safety**: model input and output redacted, a per-job token cap and a
 //!   per-workspace daily and monthly budget, the transcript fenced as data,
 //!   and every edit outside the session's own folder refused.
@@ -36,6 +42,8 @@ pub mod compile;
 pub mod edits;
 pub mod facts;
 pub mod layout;
+pub mod merge;
+pub mod pool;
 pub mod prompt;
 pub mod queue;
 pub mod record;
@@ -47,7 +55,8 @@ pub use compile::{
     Overrides, Processed, Reply, Settings, Tuning,
 };
 pub use facts::{Emitted, Fact, FactSink, NoFacts};
-pub use queue::{ClaimFilter, Finish, Job, JobStatus, Queue, Savings};
+pub use pool::{CONCURRENCY_CEILING, MAX_CALL, MAX_IN_FLIGHT};
+pub use queue::{ClaimFilter, Finish, Job, JobStatus, PoolRow, Queue, Savings};
 
 use cratefield_core::SqlMigration;
 
@@ -93,5 +102,25 @@ pub const MIGRATION_TRIAGE_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0003_triage.sql"),
 );
 
+/// The fourth migration: compiles run side by side — budget holds for the
+/// calls in flight, and each workspace's pool.
+pub const MIGRATION_PARALLEL: SqlMigration = SqlMigration::new(
+    "0004",
+    "parallel",
+    include_str!("../migrations/sqlite/0004_parallel.sql"),
+);
+
+/// The Postgres form: the counters are `BIGINT`, like the others.
+pub const MIGRATION_PARALLEL_POSTGRES: SqlMigration = SqlMigration::new(
+    "0004",
+    "parallel",
+    include_str!("../migrations/postgres/0004_parallel.sql"),
+);
+
 /// The tables the module that mounts the compiler owns.
-pub const TABLES: [&str; 2] = ["coding_agent_jobs", "coding_agent_spend"];
+pub const TABLES: [&str; 4] = [
+    "coding_agent_jobs",
+    "coding_agent_spend",
+    "coding_agent_reservations",
+    "coding_agent_pool",
+];

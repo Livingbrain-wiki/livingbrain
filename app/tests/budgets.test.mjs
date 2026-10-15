@@ -44,6 +44,7 @@ function response(overrides = {}) {
         daily_tokens: entry(3_000_000, 3_000_000),
         monthly_tokens: entry(90_000_000, 90_000_000),
         batch: entry(5, 3, "workspace", 1, 20),
+        concurrency: entry(4, 4, "default", 1, 8),
         job_tokens: entry(80_000, 80_000, "default", 1_000, 1_000_000),
         max_chunks: entry(4, 4, "default", 1, 20),
         chunk_chars: entry(32_000, 32_000, "default", 1_000, 200_000),
@@ -114,6 +115,20 @@ test("the view carries each value, its source, the default and the usage", () =>
   assert.equal(spend.fraction, 0.5);
   // Every field the server answers is shown; nothing extra.
   assert.equal(view.fields.length, FIELDS.length);
+});
+
+test("sessions at once is an advanced number, sent and range-checked like the others", () => {
+  const view = budgetView(response());
+  const field = view.fields.find((f) => f.name === "coding_agents.concurrency");
+  assert.equal(field.value, 4);
+  assert.equal(field.max, 8);
+  assert.equal(FIELDS.find((f) => f.key === "concurrency").advanced, true);
+  const inputs = { ...inputsOf(view), "coding_agents.concurrency": "6" };
+  assert.deepEqual(budgetPatch(view, inputs, false), { coding_agents: { concurrency: 6 } });
+  assert.throws(
+    () => budgetPatch(view, { ...inputsOf(view), "coding_agents.concurrency": "9" }, false),
+    /largest allowed is 8/,
+  );
 });
 
 test("a garbage answer is an empty, read-only view rather than a crash", () => {

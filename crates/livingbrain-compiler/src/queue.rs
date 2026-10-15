@@ -290,6 +290,22 @@ impl Queue {
         filter: &ClaimFilter,
         limit: usize,
     ) -> Result<Vec<Job>, DbError> {
+        self.ready_fair(now, filter, limit, None).await
+    }
+
+    /// [`Queue::ready`], taking at most `per_workspace` jobs of any one
+    /// workspace (when set), so a drain across workspaces sees each of them.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn ready_fair(
+        &self,
+        now: OffsetDateTime,
+        filter: &ClaimFilter,
+        limit: usize,
+        per_workspace: Option<usize>,
+    ) -> Result<Vec<Job>, DbError> {
         let stamp = rfc3339(now);
         let mut values = Vec::new();
         let parked = if filter.ignore_backoff {
@@ -304,7 +320,7 @@ impl Queue {
         values.push(SeaValue::BigInt(Some(i64::from(MAX_ATTEMPTS))));
         values.push(text(&stamp));
         let mut sql = format!(
-            "SELECT {COLUMNS} FROM coding_agent_jobs WHERE (status = 'queued' OR {parked} \
+            "(status = 'queued' OR {parked} \
              OR (status = 'failed' AND next_attempt_at <= ? AND attempts < ?) \
              OR (status = 'processing' AND lease_until < ?))"
         );
@@ -323,7 +339,26 @@ impl Queue {
             sql.push_str(&format!(" AND scope IN ({})", placeholders(scopes.len())));
             values.extend(scopes.iter().map(|scope| text(scope)));
         }
-        sql.push_str(" ORDER BY queued_at ASC, source_created_at ASC LIMIT ?");
+        // Fair across workspaces: at most `per_workspace` of each, oldest
+        // first within it, so one workspace's backlog cannot hide another's
+        // jobs from the drain.
+        let sql = match per_workspace {
+            Some(per) => {
+                values.push(SeaValue::BigInt(Some(
+                    i64::try_from(per).unwrap_or(i64::MAX),
+                )));
+                format!(
+                    "SELECT {COLUMNS} FROM (SELECT {COLUMNS}, ROW_NUMBER() OVER \
+                     (PARTITION BY workspace ORDER BY queued_at ASC, source_created_at ASC) \
+                     AS lane_rank FROM coding_agent_jobs WHERE {sql}) ranked \
+                     WHERE lane_rank <= ? ORDER BY queued_at ASC, source_created_at ASC LIMIT ?"
+                )
+            }
+            None => format!(
+                "SELECT {COLUMNS} FROM coding_agent_jobs WHERE {sql} \
+                 ORDER BY queued_at ASC, source_created_at ASC LIMIT ?"
+            ),
+        };
         values.push(SeaValue::BigInt(Some(
             i64::try_from(limit).unwrap_or(i64::MAX),
         )));
@@ -739,20 +774,7 @@ impl Queue {
         tokens: u64,
     ) -> Result<(), DbError> {
         self.db
-            .execute(&Statement::with_values(
-                "INSERT INTO coding_agent_spend (workspace, day, tokens, calls, updated_at) \
-                 VALUES (?, ?, ?, 1, ?) \
-                 ON CONFLICT (workspace, day) DO UPDATE SET \
-                    tokens = coding_agent_spend.tokens + excluded.tokens, \
-                    calls = coding_agent_spend.calls + excluded.calls, \
-                    updated_at = excluded.updated_at",
-                vec![
-                    text(workspace),
-                    text(&utc_day(now)),
-                    big(tokens),
-                    text(&rfc3339(now)),
-                ],
-            ))
+            .execute(&spend_statement(now, workspace, tokens))
             .await?;
         Ok(())
     }
@@ -779,6 +801,240 @@ impl Queue {
             .filter_map(|n| u64::try_from(n).ok())
             .sum())
     }
+}
+
+impl Queue {
+    /// Holds `tokens` of the workspace's compile budget for one model call
+    /// about to be made (`id` names the call), unless the budget is already
+    /// spent or held: the day's spend plus the live holds must be under
+    /// `daily`, and the month's under `monthly`. One statement, so two
+    /// compiles of the same workspace can never both take the last of it
+    /// (D1 runs one write at a time); a hold that is never settled lapses at
+    /// `expires`. `false` when the budget had no room.
+    ///
+    /// The overshoot this allows is one call: a call starts while anything
+    /// is left, and may spend past what was left.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reserve(
+        &self,
+        id: &str,
+        workspace: &str,
+        now: OffsetDateTime,
+        tokens: u64,
+        daily: u64,
+        monthly: u64,
+        expires: OffsetDateTime,
+    ) -> Result<bool, DbError> {
+        let today = utc_day(now);
+        let first = format!("{}-01", &today[..7]);
+        let stamp = rfc3339(now);
+        let held = self
+            .db
+            .execute(&Statement::with_values(
+                "INSERT INTO coding_agent_reservations (id, workspace, day, tokens, expires_at) \
+                 SELECT ?, ?, ?, CAST(? AS BIGINT), ? \
+                 WHERE (SELECT COALESCE(SUM(tokens), 0) FROM coding_agent_spend \
+                        WHERE workspace = ? AND day = ?) \
+                     + (SELECT COALESCE(SUM(tokens), 0) FROM coding_agent_reservations \
+                        WHERE workspace = ? AND day = ? AND expires_at > ?) < CAST(? AS BIGINT) \
+                   AND (SELECT COALESCE(SUM(tokens), 0) FROM coding_agent_spend \
+                        WHERE workspace = ? AND day >= ? AND day <= ?) \
+                     + (SELECT COALESCE(SUM(tokens), 0) FROM coding_agent_reservations \
+                        WHERE workspace = ? AND day >= ? AND day <= ? AND expires_at > ?) \
+                       < CAST(? AS BIGINT) \
+                 ON CONFLICT (id) DO NOTHING",
+                vec![
+                    text(id),
+                    text(workspace),
+                    text(&today),
+                    big(tokens),
+                    text(&rfc3339(expires)),
+                    text(workspace),
+                    text(&today),
+                    text(workspace),
+                    text(&today),
+                    text(&stamp),
+                    big(daily),
+                    text(workspace),
+                    text(&first),
+                    text(&today),
+                    text(workspace),
+                    text(&first),
+                    text(&today),
+                    text(&stamp),
+                    big(monthly),
+                ],
+            ))
+            .await?;
+        Ok(held == 1)
+    }
+
+    /// Settles a hold made by [`Queue::reserve`]: the hold goes, and what the
+    /// call really spent (`None` when nothing counts against the budget — a
+    /// failed call, or the owner's own runner) is recorded as spend. One
+    /// batch, so the budget never shows both or neither.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn settle(
+        &self,
+        id: &str,
+        now: OffsetDateTime,
+        workspace: &str,
+        spent: Option<u64>,
+    ) -> Result<(), DbError> {
+        let mut statements = vec![Statement::with_values(
+            "DELETE FROM coding_agent_reservations WHERE id = ?",
+            vec![text(id)],
+        )];
+        if let Some(tokens) = spent {
+            statements.push(spend_statement(now, workspace, tokens));
+        }
+        self.db.batch_atomic(&statements).await
+    }
+
+    /// The tokens live holds keep of the workspace's budget over the UTC
+    /// days `first..=last`.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn held(
+        &self,
+        workspace: &str,
+        first: &str,
+        last: &str,
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT tokens FROM coding_agent_reservations \
+                 WHERE workspace = ? AND day >= ? AND day <= ? AND expires_at > ?",
+                vec![
+                    text(workspace),
+                    text(first),
+                    text(last),
+                    text(&rfc3339(now)),
+                ],
+            ))
+            .await?;
+        Ok(rows
+            .rows
+            .iter()
+            .filter_map(|row| row.get::<i64>("tokens"))
+            .filter_map(|n| u64::try_from(n).ok())
+            .sum())
+    }
+
+    /// Drops the holds that lapsed (a compile that died mid-call).
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn clear_lapsed_holds(&self, now: OffsetDateTime) -> Result<u64, DbError> {
+        self.db
+            .execute(&Statement::with_values(
+                "DELETE FROM coding_agent_reservations WHERE expires_at <= ?",
+                vec![text(&rfc3339(now))],
+            ))
+            .await
+    }
+
+    /// The workspace's pool as the last drain left it; a workspace that
+    /// never ran has the default (its setting, no pause, no timing).
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn pool(&self, workspace: &str) -> Result<PoolRow, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT concurrency, paused_until, avg_call_ms, calls FROM coding_agent_pool \
+                 WHERE workspace = ?",
+                vec![text(workspace)],
+            ))
+            .await?;
+        Ok(rows.first().map_or_else(PoolRow::default, |row| {
+            let count = |name: &str| row.get::<i64>(name).and_then(|n| u64::try_from(n).ok());
+            PoolRow {
+                concurrency: count("concurrency"),
+                paused_until: row.get::<String>("paused_until"),
+                avg_call_ms: count("avg_call_ms").unwrap_or(0),
+                calls: count("calls").unwrap_or(0),
+            }
+        }))
+    }
+
+    /// Stores the workspace's pool for the next drain.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn save_pool(
+        &self,
+        workspace: &str,
+        pool: &PoolRow,
+        now: OffsetDateTime,
+    ) -> Result<(), DbError> {
+        self.db
+            .execute(&Statement::with_values(
+                "INSERT INTO coding_agent_pool \
+                 (workspace, concurrency, paused_until, avg_call_ms, calls, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (workspace) DO UPDATE SET concurrency = excluded.concurrency, \
+                    paused_until = excluded.paused_until, avg_call_ms = excluded.avg_call_ms, \
+                    calls = excluded.calls, updated_at = excluded.updated_at",
+                vec![
+                    text(workspace),
+                    SeaValue::BigInt(pool.concurrency.map(|n| i64::try_from(n).unwrap_or(1))),
+                    opt_text(pool.paused_until.as_deref()),
+                    big(pool.avg_call_ms),
+                    big(pool.calls),
+                    text(&rfc3339(now)),
+                ],
+            ))
+            .await?;
+        Ok(())
+    }
+}
+
+/// One workspace's compile pool between drains (`coding_agent_pool`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PoolRow {
+    /// How many of its compiles run at once now — halved by a 429, raised
+    /// by one by a drain that ran full without one. `None` until a drain
+    /// ran: the workspace's setting.
+    pub concurrency: Option<u64>,
+    /// No model call before this (RFC 3339): the last 429's `Retry-After`.
+    pub paused_until: Option<String>,
+    /// The rolling average of one compile call, in milliseconds.
+    pub avg_call_ms: u64,
+    /// How many calls the average was taken over.
+    pub calls: u64,
+}
+
+fn spend_statement(now: OffsetDateTime, workspace: &str, tokens: u64) -> Statement {
+    Statement::with_values(
+        "INSERT INTO coding_agent_spend (workspace, day, tokens, calls, updated_at) \
+         VALUES (?, ?, ?, 1, ?) \
+         ON CONFLICT (workspace, day) DO UPDATE SET \
+            tokens = coding_agent_spend.tokens + excluded.tokens, \
+            calls = coding_agent_spend.calls + excluded.calls, \
+            updated_at = excluded.updated_at",
+        vec![
+            text(workspace),
+            text(&utc_day(now)),
+            big(tokens),
+            text(&rfc3339(now)),
+        ],
+    )
 }
 
 /// What triage and compaction saved, over a set of jobs.

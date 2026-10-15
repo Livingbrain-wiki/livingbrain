@@ -7,8 +7,8 @@
 //!   the ledger holds that has no job yet, so a session synced a moment ago
 //!   shows as `queued` rather than as nothing.
 //! - `POST /v1/coding-agents/process` (`{"max": 1..3}`) — compiles up to
-//!   `max` of the asker's own jobs now, in the request, and answers what
-//!   became of each. A parked job (`skipped-no-model`, `over-budget`) is
+//!   `max` of the asker's own jobs now, in the request — side by side, so
+//!   at most three at once — and answers what became of each. A parked job (`skipped-no-model`, `over-budget`) is
 //!   re-checked at once, since the person pressing the button may just have
 //!   connected a model. Cookie writes must be same-origin, like every cookie
 //!   write on this surface.
@@ -32,8 +32,10 @@
 //! else's. The cron tick (`scheduled`) drains every workspace in bounded
 //! batches — each workspace's own sessions-per-run setting, else
 //! `CODING_AGENTS_BATCH`, never past [`livingbrain_compiler::BATCH_CEILING`]
-//! — under the invocation's cooperative budget, then runs the model-free
-//! lint over the scopes it compiled into.
+//! — up to each workspace's `concurrency` of them at once (never more than
+//! [`livingbrain_compiler::MAX_IN_FLIGHT`] in all), under the invocation's
+//! cooperative budget, then runs the model-free lint over the scopes it
+//! compiled into.
 //!
 //! Every budget and limit here is the workspace's **effective** one
 //! (`crate::budgets`): its own setting (Settings → Usage & limits), else the
@@ -82,7 +84,8 @@ use crate::service::Service;
 pub const MODEL_ROLE: &str = "main";
 
 /// The most jobs one `Process now` compiles: each is one to a few model
-/// calls inside the request.
+/// calls inside the request, and they run side by side, so this is also how
+/// many run at once (fewer when the workspace's pool is smaller).
 const MAX_PROCESS_NOW: usize = 3;
 /// How long one compile call may take. A forced-thinking model (GLM-5.3)
 /// answered a full-size compile in 55–100 s when measured (2026-10-15), and
@@ -100,6 +103,10 @@ const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(480);
 // held to `deadline::MAX_MODEL_DEADLINE`, five minutes.)
 const _: () =
     assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::stream::MAX_STREAM_DEADLINE.as_secs());
+// The compiler starts a call in a cron tick only when one of this length
+// still ends inside the invocation's wall (`livingbrain_compiler::pool`).
+const _: () =
+    assert!(CALL_TIMEOUT.as_secs() as i64 <= livingbrain_compiler::MAX_CALL.whole_seconds());
 /// The most jobs the status route lists.
 const MAX_LIST: usize = 100;
 
@@ -168,21 +175,33 @@ impl Module for CodingAgents {
                 "the row is one workspace's pooled compile tokens for one UTC day — nothing \
                  in it identifies or describes a person",
             ),
+            PersonalDataSet::none(
+                "coding_agent_reservations",
+                "the row is a hold on one workspace's pooled compile tokens for one model call \
+                 in flight — a workspace id, a count and a time, nothing about a person",
+            ),
+            PersonalDataSet::none(
+                "coding_agent_pool",
+                "the row is one workspace's compile pool — how many compiles run at once, a \
+                 rate-limit pause and an average call time; nothing about a person",
+            ),
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 3] = [
+        const SQLITE: [SqlMigration; 4] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
+            livingbrain_compiler::MIGRATION_PARALLEL,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 3] = [
+        const POSTGRES: [SqlMigration; 4] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
+            livingbrain_compiler::MIGRATION_PARALLEL_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -196,6 +215,7 @@ impl Module for CodingAgents {
         let mut errors = ConfigError::new();
         for key in [
             "CODING_AGENTS_BATCH",
+            "CODING_AGENTS_CONCURRENCY",
             "CODING_AGENTS_CHUNK_CHARS",
             "CODING_AGENTS_MAX_CHUNKS",
             "CODING_AGENTS_CONTEXT_CHARS",
@@ -632,6 +652,7 @@ async fn queue(
         "budget": {
             "paused": settings.paused,
             "batch": settings.batch,
+            "concurrency": settings.concurrency,
             "daily_tokens": settings.daily_tokens,
             "monthly_tokens": settings.monthly_tokens,
             "job_tokens": settings.job_tokens,
