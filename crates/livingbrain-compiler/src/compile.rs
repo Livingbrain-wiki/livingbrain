@@ -246,8 +246,18 @@ pub struct Call<'a> {
 pub enum ModelFailure {
     /// No model is connected in the workspace.
     NoModel,
-    /// The call failed; the string is a short fixed-vocabulary reason.
+    /// The call failed. The string starts with a short fixed-vocabulary
+    /// reason (`http`, `bad-response`, …) and may go on with what the
+    /// provider said, already made safe to show (`http 400: {…}`).
     Failed(String),
+    /// The provider is rate-limiting the key (HTTP 429): nothing was spent,
+    /// and the same call later is expected to work. The job is retried
+    /// after `retry_after_secs` (or a few minutes) without counting an
+    /// attempt, and the drain stops — the next job would be refused too.
+    Busy {
+        reason: String,
+        retry_after_secs: Option<u64>,
+    },
     /// The call was handed to the owner's own runner; its answer arrives
     /// later, and the compile waits for it.
     Pending,
@@ -521,12 +531,28 @@ impl Compiler {
                 .await?;
             compiled += 1;
             *per_workspace.entry(claimed.workspace.clone()).or_default() += 1;
+            if finish.status == JobStatus::Failed {
+                // Workers Logs: the one place a cron tick's failure shows
+                // without opening the queue. The reason is fixed-vocabulary
+                // plus a provider body already made safe to show.
+                eprintln!(
+                    "coding-agents: job for source {} failed (attempt {}): {}",
+                    claimed.source_id,
+                    claimed.attempts,
+                    finish.error.as_deref().unwrap_or("unknown")
+                );
+            }
             out.push(Processed {
                 source_id: claimed.source_id.clone(),
                 status: finish.status,
                 pages: finish.pages.clone(),
                 error: finish.error.clone(),
             });
+            // A rate-limited provider refuses the next job too: stop, and
+            // let the backoff space the calls out.
+            if finish.status == JobStatus::Failed && finish.refund_attempt {
+                break;
+            }
         }
         Ok(out)
     }
@@ -671,7 +697,27 @@ impl Compiler {
                 }
                 Err(ModelFailure::Failed(reason)) => {
                     let reason = format!("model-{reason}");
+                    self.log_failure(job, &head, &reason, now).await;
                     return self.failed(job, now, &reason, tally);
+                }
+                // Rate-limited: retried soon, without spending an attempt —
+                // a busy key is not this job's fault. What this run applied
+                // stays; the retry carries on from this chunk.
+                Err(ModelFailure::Busy {
+                    reason,
+                    retry_after_secs,
+                }) => {
+                    let reason = format!("model-{reason}");
+                    self.log_failure(job, &head, &reason, now).await;
+                    let wait = retry_after_secs
+                        .unwrap_or(BUSY_RETRY_SECS)
+                        .clamp(60, MAX_BUSY_RETRY_SECS);
+                    return Finish {
+                        retry_at: Some(now + Duration::seconds(wait as i64)),
+                        chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                        refund_attempt: true,
+                        ..self.with_tally(JobStatus::Failed, Some(&reason), tally)
+                    };
                 }
                 // Out on the owner's runner: what this run applied stays, and
                 // the job carries on from this chunk when the answer comes
@@ -764,6 +810,27 @@ impl Compiler {
             chunks_done: Some(u32::try_from(parts).unwrap_or(u32::MAX)),
             ..self.with_tally(JobStatus::Done, error.as_deref(), tally)
         }
+    }
+
+    /// Appends a failed compile to the scope's log page, so the reason is
+    /// in the wiki and not only in the queue — once per distinct reason, so
+    /// a job retried every quarter hour for the same 429 writes one line.
+    async fn log_failure(&self, job: &Job, head: &SessionHead, reason: &str, now: OffsetDateTime) {
+        if job.last_error.as_deref() == Some(reason) {
+            return;
+        }
+        let short: String = head.session_id.chars().take(8).collect();
+        let line = format!(
+            "- **{}** · {}/{} · session `{short}` of {} · not compiled (attempt {}): {} · [source]({})",
+            utc_day(now),
+            head.agent_folder,
+            head.project,
+            head.day,
+            job.attempts,
+            edits::one_line(&redacted_text(reason), 400),
+            prompt::source_href(&head.source_id)
+        );
+        let _ = self.append_log(&job.scope, &line).await;
     }
 
     /// A `failed` finish, with the retry time its attempt count earns: 15
@@ -1291,6 +1358,12 @@ fn redacted_text(text: &str) -> String {
         .map(|(clean, _)| clean)
         .unwrap_or_default()
 }
+
+/// How long a rate-limited job waits when the provider named no
+/// `Retry-After`.
+const BUSY_RETRY_SECS: u64 = 5 * 60;
+/// The longest a rate-limited job waits, whatever `Retry-After` says.
+const MAX_BUSY_RETRY_SECS: u64 = 30 * 60;
 
 /// The most fact refusals one log line spells out; the rest are counted.
 const MAX_SKIPS_LOGGED: usize = 5;

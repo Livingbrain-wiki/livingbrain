@@ -299,6 +299,30 @@ fn a_failed_model_call_falls_back_to_the_sources() {
     assert_eq!(model.calls().len(), 1);
 }
 
+/// The fallback says why: the provider's status and (safe) error body, so a
+/// failing Ask is diagnosable from its own answer.
+#[test]
+fn a_failed_model_call_says_why_it_fell_back() {
+    let model = Arc::new(Scripted {
+        serving: Some(serving("zhipu-glm-en", "glm-5.3-flash")),
+        reply: Err(InvokeError::Status(livingbrain_models::invoke::Upstream {
+            status: 429,
+            body: r#"{"error":{"code":"1302","message":"Rate limit reached for requests"}}"#
+                .to_owned(),
+            retry_after_secs: None,
+        })),
+        seen: Mutex::new(Vec::new()),
+    });
+    let fx = fixture_with_ask_model(model.clone());
+    seed(&fx, WORKSPACE, &user("user-a"), "kestrel", KESTREL);
+    let body = ask(&fx, json!({ "question": "kestrel" }));
+    assert!(answer_of(&body).starts_with(MODEL_FAILED), "{body}");
+    assert_eq!(body["mode"], "sources");
+    let reason = body["fallback_reason"].as_str().expect("a reason");
+    assert!(reason.starts_with("model-http 429: "), "{reason}");
+    assert!(reason.contains("Rate limit reached"), "{reason}");
+}
+
 #[test]
 fn the_model_never_sees_a_page_the_asker_cannot_read() {
     let model = Scripted::answering("Dawn [1].");

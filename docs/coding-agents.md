@@ -48,7 +48,7 @@ hook.
 | `queued` | waiting |
 | `processing` | claimed under a 15-minute lease; a dead worker's lease lapses |
 | `done` | compiled; `pages` lists what it wrote |
-| `failed` | retried after 15 min, then 1 h; after 3 attempts it stays failed |
+| `failed` | retried after 15 min, then 1 h; after 3 attempts it stays failed. `error` says why — for a model call, the provider's status and its (redacted, 300-character) error body, e.g. `model-http 429: {"error":{"code":"1302",…}}`. A rate limit (HTTP 429) is retried after `Retry-After` (or 5 min, at most 30) without counting an attempt, and stops that drain. **Retry failed** (`POST /v1/coding-agents/retry`) puts your failed jobs back to `queued` with their attempts reset |
 | `skipped-no-model` | no model connected; checked again hourly, and at once by **Process now** |
 | `over-budget` | the compile budget is spent; checked again when it resets |
 | `superseded` | a newer body of the same session arrived before this one ran |
@@ -69,6 +69,11 @@ Jobs are processed in two places:
 - **`POST /v1/coding-agents/process`** (`{"max": 1..3}`) compiles up to
   `max` of *your* jobs inside the request. Cookie callers must be on the
   same origin.
+
+`POST /v1/coding-agents/retry` requeues *your* `failed` jobs (attempts
+reset) and answers `{"requeued": n, "counts": …}`. A failed compile is also
+written to the scope's `coding-agents/log` once per distinct reason, and to
+Workers Logs (`coding-agents: job for source … failed …`).
 
 `GET /v1/coding-agents/queue?limit=&source=` returns your jobs, a count per
 status, whether a model is connected, and the budget with what has been

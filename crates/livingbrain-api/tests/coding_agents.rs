@@ -168,6 +168,81 @@ fn both_routes_need_a_credential() {
     );
 }
 
+/// A model whose every call fails the way Z.AI failed the compile in
+/// production, before the error carried what the provider said.
+struct Refusing;
+
+#[async_trait::async_trait]
+impl Model for Refusing {
+    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn complete(
+        &self,
+        _call: &Call<'_>,
+        _system: &str,
+        _user: &str,
+        _max_tokens: u32,
+    ) -> Result<Reply, ModelFailure> {
+        Err(ModelFailure::Failed(
+            r#"http 400: {"error":{"message":"bad request"}}"#.to_owned(),
+        ))
+    }
+}
+
+/// A job that ran out of attempts shows why, and "Retry failed" puts the
+/// asker's own failed jobs — and nobody else's — back in the queue.
+#[test]
+fn retry_requeues_only_the_asker_s_failed_jobs() {
+    let fx = fixture();
+    let mine = sync(&fx, "user-a", "s-a");
+    sync(&fx, "user-b", "s-b");
+    let compiler = fx.compiler(Arc::new(Refusing));
+    // A drain takes a bounded share per workspace; drain until both ran.
+    for _ in 0..2 {
+        let processed = pollster::block_on(compiler.drain(
+            &ClaimFilter::default(),
+            10,
+            &ScheduledBudget::unbounded(),
+        ))
+        .expect("a drain");
+        assert!(
+            processed.iter().all(|p| p.status == JobStatus::Failed),
+            "{processed:?}"
+        );
+    }
+
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(queue["counts"]["failed"], 1, "{queue}");
+    assert_eq!(
+        queue["jobs"][0]["error"],
+        r#"model-http 400: {"error":{"message":"bad request"}}"#
+    );
+
+    let response = post(&fx, TOKEN_A, "/v1/coding-agents/retry", json!({}));
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        common::body_text(&response)
+    );
+    let body = response.json();
+    assert_eq!(body["requeued"], 1, "{body}");
+    assert_eq!(body["counts"]["queued"], 1);
+    assert_eq!(body["counts"]["failed"], 0);
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(queue["jobs"][0]["source_id"], mine.as_str());
+    assert_eq!(queue["jobs"][0]["status"], "queued");
+    assert_eq!(queue["jobs"][0]["attempts"], 0);
+    // user-b's failed job is still failed.
+    let theirs = get(&fx, TOKEN_B, "/v1/coding-agents/queue").json();
+    assert_eq!(theirs["jobs"][0]["status"], "failed");
+    assert_eq!(
+        common::post_anon(&fx, "/v1/coding-agents/retry", "{}").status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 /// A model that answers each call with the next scripted reply.
 #[derive(Default)]
 struct Scripted(Mutex<VecDeque<Value>>);

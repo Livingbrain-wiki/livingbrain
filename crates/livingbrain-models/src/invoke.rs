@@ -11,8 +11,11 @@
 //!   "no model" means for its job (the coding-agents compiler parks the job
 //!   as `skipped-no-model`).
 //! - **The key** is decrypted here, used for one request, and dropped. It
-//!   never reaches a return value, an error, or a log line — an error names
-//!   an HTTP status at most, never a provider's body, which can echo it.
+//!   never reaches a return value, an error, or a log line. A provider's
+//!   error body *is* carried (issue: a compile that failed as a bare
+//!   `model-http` could not be diagnosed), but only as [`Upstream::body`]:
+//!   the key itself replaced, redacted, scrubbed, on one line, and cut to
+//!   [`MAX_DETAIL_CHARS`].
 //! - **The SSRF guard** runs again on every call, over the stored base URL:
 //!   a host that resolved to a public address at connect time may not any
 //!   more, and the guard is cheap next to a completion.
@@ -43,6 +46,14 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// a handful of wiki pages fits well inside it; anything past it is a
 /// provider misbehaving, and the call fails rather than buffering it.
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// The most characters of a provider's error body an [`InvokeError`]
+/// carries: enough for `{"error":{"code":"1302","message":"Rate limit…"}}`,
+/// not enough for a provider that quotes the prompt back to matter.
+pub const MAX_DETAIL_CHARS: usize = 300;
+
+/// How much of an error body is read at all before it is made safe.
+const MAX_DETAIL_READ_BYTES: usize = 4 * 1024;
 
 /// One job's request to the workspace's model.
 #[derive(Debug, Clone)]
@@ -122,10 +133,24 @@ pub fn parse_context_size(raw: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
+/// A provider's non-2xx answer, made safe to store and show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    /// The HTTP status.
+    pub status: u16,
+    /// The provider's error body, made safe by [`safe_detail`]: the key
+    /// replaced, redacted, scrubbed, on one line, at most
+    /// [`MAX_DETAIL_CHARS`] characters. Empty when it sent none.
+    pub body: String,
+    /// The provider's `Retry-After`, in seconds, when it sent one.
+    pub retry_after_secs: Option<u64>,
+}
+
 /// Why a call did not happen, or did not answer.
 ///
-/// No variant carries a provider's body or the key: an HTTP status is the
-/// most a caller learns.
+/// No variant carries the key. A provider's error body is carried only as
+/// [`Upstream::body`] and a transport failure only as
+/// [`InvokeError::Transport`], both made safe by [`safe_detail`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvokeError {
     /// Nothing serves the role in this workspace.
@@ -136,11 +161,20 @@ pub enum InvokeError {
     Key,
     /// The stored base URL is refused by the SSRF guard now.
     Refused,
-    /// The provider answered with a non-2xx status, or the transport
-    /// failed (`None`).
+    /// The call could not be made at all (`None`), or answered this status.
+    /// [`chat`] itself answers [`InvokeError::Status`] or
+    /// [`InvokeError::Transport`]; this is for callers with no ports.
     Http(Option<u16>),
+    /// The provider answered a non-2xx status.
+    Status(Upstream),
+    /// The request never got an answer: the transport failed or the
+    /// deadline passed. The message is made safe by [`safe_detail`].
+    Transport(String),
     /// The provider answered 2xx with something that is not a completion.
     BadResponse,
+    /// The provider stopped at the completion ceiling before writing any
+    /// answer: a thinking model spent the whole `max_tokens` thinking.
+    Exhausted,
     /// The connections table could not be read.
     Store,
     /// A member's runner reported a failure; the string is one of
@@ -157,10 +191,45 @@ impl InvokeError {
             Self::NoSecret => "no-secret",
             Self::Key => "key",
             Self::Refused => "ssrf-refused",
-            Self::Http(_) => "http",
+            Self::Http(_) | Self::Status(_) | Self::Transport(_) => "http",
             Self::BadResponse => "bad-response",
+            Self::Exhausted => "max-tokens",
             Self::Store => "store",
             Self::Runner(_) => "runner",
+        }
+    }
+
+    /// The failure as one line for a status column, a log line or an API
+    /// answer: the [`InvokeError::variant`], then what the provider said —
+    /// `http 429: {"error":{…}}`, `http: deadline exceeded after 300s`,
+    /// `runner-timeout`. Never the key (see [`safe_detail`]).
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Status(upstream) if upstream.body.is_empty() => {
+                format!("http {}", upstream.status)
+            }
+            Self::Status(upstream) => format!("http {}: {}", upstream.status, upstream.body),
+            Self::Transport(message) => format!("http: {message}"),
+            Self::Http(Some(status)) => format!("http {status}"),
+            Self::Runner(reason) => format!("runner-{reason}"),
+            other => other.variant().to_owned(),
+        }
+    }
+
+    /// Whether the provider said it is rate-limiting this key (HTTP 429):
+    /// nothing was spent, and the same call later is expected to work.
+    #[must_use]
+    pub fn rate_limited(&self) -> bool {
+        matches!(self, Self::Status(upstream) if upstream.status == 429)
+    }
+
+    /// The provider's `Retry-After`, in seconds, when it sent one.
+    #[must_use]
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Self::Status(upstream) => upstream.retry_after_secs,
+            _ => None,
         }
     }
 }
@@ -174,7 +243,22 @@ impl std::fmt::Display for InvokeError {
             Self::Refused => write!(f, "the model endpoint is refused by the SSRF guard"),
             Self::Http(Some(status)) => write!(f, "the model endpoint answered HTTP {status}"),
             Self::Http(None) => write!(f, "the model endpoint could not be reached"),
+            Self::Status(upstream) if upstream.body.is_empty() => {
+                write!(f, "the model endpoint answered HTTP {}", upstream.status)
+            }
+            Self::Status(upstream) => write!(
+                f,
+                "the model endpoint answered HTTP {}: {}",
+                upstream.status, upstream.body
+            ),
+            Self::Transport(message) => {
+                write!(f, "the model endpoint could not be reached ({message})")
+            }
             Self::BadResponse => write!(f, "the model endpoint answered with no completion"),
+            Self::Exhausted => write!(
+                f,
+                "the model spent its whole completion budget before answering"
+            ),
             Self::Store => write!(f, "the model connections could not be read"),
             Self::Runner(reason) => write!(f, "your runner could not answer ({reason})"),
         }
@@ -182,6 +266,66 @@ impl std::fmt::Display for InvokeError {
 }
 
 impl std::error::Error for InvokeError {}
+
+/// Text from a provider — an error body, a transport message — made safe
+/// to store and show: `key` replaced wherever it appears whole, then the
+/// redactor's findings removed, then the logging scrubber (bearer
+/// credentials, addresses, query strings), then flattened onto one line and
+/// cut to [`MAX_DETAIL_CHARS`]. Text the redactor refuses becomes nothing.
+#[must_use]
+pub fn safe_detail(raw: &str, key: &str) -> String {
+    let mut end = raw.len().min(MAX_DETAIL_READ_BYTES);
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut text = raw[..end].to_owned();
+    let key = key.trim();
+    if key.len() >= 8 {
+        text = text.replace(key, "[redacted]");
+    }
+    let Ok((redacted, _)) = livingbrain_redact::redact(&text, livingbrain_redact::Policy::Redact)
+    else {
+        return String::new();
+    };
+    let scrubbed = cratefield_core::scrub_text(&redacted);
+    let flat = scrubbed
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX_DETAIL_CHARS {
+        return flat;
+    }
+    let mut cut: String = flat.chars().take(MAX_DETAIL_CHARS - 1).collect();
+    cut.push('…');
+    cut
+}
+
+/// A `Retry-After` header in seconds. The HTTP-date form is not read: no
+/// provider this module talks to sends it, and a guess is worse than none.
+fn retry_after(headers: &http::HeaderMap) -> Option<u64> {
+    headers
+        .get(http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// A transport failure, made safe ([`safe_detail`]).
+fn transport(error: &cratefield_core::HttpError, key: &str) -> InvokeError {
+    use cratefield_core::HttpError;
+    let message = match error {
+        HttpError::DeadlineExceeded { after } => {
+            format!("deadline exceeded after {}s", after.as_secs())
+        }
+        HttpError::ResponseTooLarge { limit } => format!("response over {limit} bytes"),
+        HttpError::BlockedDestination(_) => return InvokeError::Refused,
+        HttpError::Transport(message) => format!("transport: {message}"),
+    };
+    InvokeError::Transport(safe_detail(&message, key))
+}
 
 /// The connection that would serve a job for `role` in `workspace_id`, or
 /// `None` when nothing does. Reads no key.
@@ -278,19 +422,33 @@ pub async fn chat(
     let outgoing = builder
         .body(Bytes::from(body.to_string()))
         .map_err(|_| InvokeError::Http(None))?;
-    drop(key);
-    // The transport error's own message is dropped: it can carry request
-    // details, and the key is in a header of this request.
-    let response = http
-        .send(outgoing)
-        .await
-        .map_err(|_| InvokeError::Http(None))?;
+    // The key is kept only until the answer is read, so that a provider (or
+    // a transport layer) quoting it back can have it taken out of what the
+    // failure carries; see [`safe_detail`].
+    let sent = http.send(outgoing).await;
+    let response = match sent {
+        Ok(response) => response,
+        Err(error) => return Err(transport(&error, &key)),
+    };
     if !response.status().is_success() {
-        return Err(InvokeError::Http(Some(response.status().as_u16())));
+        let upstream = Upstream {
+            status: response.status().as_u16(),
+            body: safe_detail(&String::from_utf8_lossy(response.body()), &key),
+            retry_after_secs: retry_after(response.headers()),
+        };
+        return Err(InvokeError::Status(upstream));
     }
+    drop(key);
     let parsed: Value =
         serde_json::from_slice(response.body()).map_err(|_| InvokeError::BadResponse)?;
-    let text = completion_text(&parsed, wire).ok_or(InvokeError::BadResponse)?;
+    let text = completion_text(&parsed, wire);
+    // Nothing but thinking, cut at the ceiling: say so, rather than "no
+    // completion", so the caller knows a bigger budget is the fix. Those
+    // tokens were spent, so they are recorded like an answer's.
+    let exhausted = text.is_none() && stopped_at_ceiling(&parsed, wire);
+    if text.is_none() && !exhausted {
+        return Err(InvokeError::BadResponse);
+    }
     let usage = usage(&parsed, wire);
     let (prompt_tokens, completion_tokens) = usage.unwrap_or((0, 0));
     // The ledger (issue #12). A lost count must never fail the call that
@@ -303,6 +461,9 @@ pub async fn chat(
         completion_tokens,
     )
     .await;
+    let Some(text) = text else {
+        return Err(InvokeError::Exhausted);
+    };
     Ok(ChatReply {
         text,
         prompt_tokens,
@@ -394,6 +555,19 @@ fn completion_text(parsed: &Value, wire: Wire) -> Option<String> {
                 .filter_map(|b| b.get("text").and_then(Value::as_str))
                 .collect();
             Some(text).filter(|text| !text.trim().is_empty())
+        }
+    }
+}
+
+/// Whether the answer says it stopped at `max_tokens`.
+fn stopped_at_ceiling(parsed: &Value, wire: Wire) -> bool {
+    match wire {
+        Wire::Anthropic => parsed.get("stop_reason").and_then(Value::as_str) == Some("max_tokens"),
+        Wire::Openai => {
+            parsed
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str)
+                == Some("length")
         }
     }
 }

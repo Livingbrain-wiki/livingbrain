@@ -264,6 +264,14 @@ impl World {
             .expect("a listing")
     }
 
+    /// The log page of `user`'s personal scope.
+    fn log(&self, user: &str) -> String {
+        pollster::block_on(self.pages().read(&personal(WORKSPACE, user), layout::LOG))
+            .expect("a read")
+            .expect("the log page")
+            .markdown
+    }
+
     fn count(&self, table: &str) -> i64 {
         pollster::block_on(self.db.query(&Statement::new(format!(
             "SELECT COUNT(*) AS n FROM {table}"
@@ -684,6 +692,90 @@ fn a_model_failure_retries_with_backoff_then_stays_failed() {
     let job = &world.jobs()[0];
     assert_eq!(job.attempts, 3);
     assert!(job.next_attempt_at.is_none());
+}
+
+/// The production failure (2026-10-15): Z.AI answered the compile 429
+/// "Rate limit reached for requests". The job says so in `last_error` and
+/// in the log page, keeps its attempts, comes back after `Retry-After`,
+/// and the drain stops rather than spending the next job on the same 429.
+#[test]
+fn a_rate_limited_call_is_retried_without_spending_an_attempt() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    world.sync(WORKSPACE, "u1", "s-2", "y");
+    let reason =
+        r#"http 429: {"error":{"code":"1302","message":"Rate limit reached for requests"}}"#;
+    let busy = Fake::answering(move |_, _| {
+        Err(ModelFailure::Busy {
+            reason: reason.to_owned(),
+            retry_after_secs: Some(120),
+        })
+    });
+    let processed = world.drain(&world.compiler(&busy));
+    assert_eq!(processed.len(), 1, "the drain stops at the first 429");
+    assert_eq!(busy.calls(), 1);
+    assert_eq!(processed[0].status, JobStatus::Failed);
+    assert_eq!(
+        processed[0].error.as_deref(),
+        Some(format!("model-{reason}").as_str())
+    );
+    let failed = world
+        .jobs()
+        .into_iter()
+        .find(|job| job.status == JobStatus::Failed)
+        .expect("the failed job");
+    assert_eq!(failed.attempts, 0, "a 429 is not the job's attempt");
+    assert!(
+        failed
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("1302"))
+    );
+    let log = world.log("u1");
+    assert!(
+        log.contains("not compiled") && log.contains("Rate limit reached"),
+        "{log}"
+    );
+
+    // The next drain reaches the second job (the first waits out its
+    // Retry-After); then nothing is ready until the wait is over.
+    assert_eq!(world.drain(&world.compiler(&busy)).len(), 1);
+    assert!(world.drain(&world.compiler(&busy)).is_empty());
+    // After it, the same 429 again is not logged a second time.
+    world.clock.advance(Duration::minutes(3));
+    world.drain(&world.compiler(&busy));
+    assert_eq!(
+        world.log("u1").matches("not compiled").count(),
+        2,
+        "one per job"
+    );
+    assert!(world.jobs().iter().all(|job| job.attempts == 0));
+    world.clock.advance(Duration::minutes(3));
+    let ok = Fake::answering(|_, _| Ok(reply(&[])));
+    let processed = world.drain(&world.compiler(&ok));
+    assert!(
+        processed.iter().all(|p| p.status == JobStatus::Done),
+        "{processed:?}"
+    );
+}
+
+/// A provider error that is not a rate limit spends an attempt, and its
+/// status and body are what the job says.
+#[test]
+fn a_model_http_failure_names_the_status_and_body() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "x");
+    let model = Fake::answering(|_, _| {
+        Err(ModelFailure::Failed(
+            r#"http 400: {"error":{"message":"bad param"}}"#.to_owned(),
+        ))
+    });
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(
+        processed[0].error.as_deref(),
+        Some(r#"model-http 400: {"error":{"message":"bad param"}}"#)
+    );
+    assert_eq!(world.jobs()[0].attempts, 1);
 }
 
 #[test]

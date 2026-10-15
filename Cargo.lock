@@ -1828,6 +1828,7 @@ dependencies = [
  "bytes",
  "cratefield-core",
  "cratefield-testing",
+ "livingbrain-redact",
  "livingbrain-tokens",
  "livingbrain-usage",
  "livingbrain-workspaces",

@@ -5,6 +5,7 @@
 // own binary, so a helper only one of them uses is dead code in the others.
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -153,6 +154,13 @@ struct Script {
     /// A thinking model: every reply leads with its reasoning (a `thinking`
     /// block on the Anthropic wire, `reasoning_content` on the OpenAI one).
     thinking: bool,
+    /// Completion calls answered with `(status, body, retry-after)` instead,
+    /// one per call, before the model answers normally again.
+    chat_failures: VecDeque<(u16, String, Option<String>)>,
+    /// The next completion call fails in transport with this message.
+    chat_transport: Option<String>,
+    /// Completion replies are all thinking, cut at `max_tokens`.
+    exhausting: bool,
 }
 
 /// How one request to the model host was signed.
@@ -177,6 +185,9 @@ impl Default for Script {
             list_status: 200,
             list_body: None,
             thinking: false,
+            chat_failures: VecDeque::new(),
+            chat_transport: None,
+            exhausting: false,
         }
     }
 }
@@ -233,6 +244,29 @@ impl FakeHttp {
         self
     }
 
+    /// The next completion call answers `status` with `body` (and a
+    /// `Retry-After` when given), the way a provider refuses one.
+    pub fn failing_chat(&self, status: u16, body: &str, retry_after: Option<&str>) -> &Self {
+        self.inner.lock().expect("lock").chat_failures.push_back((
+            status,
+            body.to_owned(),
+            retry_after.map(str::to_owned),
+        ));
+        self
+    }
+
+    /// The next completion call fails in transport with `message`.
+    pub fn unreachable_chat(&self, message: &str) -> &Self {
+        self.inner.lock().expect("lock").chat_transport = Some(message.to_owned());
+        self
+    }
+
+    /// Completion replies spend the whole `max_tokens` thinking.
+    pub fn exhausting(&self) -> &Self {
+        self.inner.lock().expect("lock").exhausting = true;
+        self
+    }
+
     /// Every request to the model host, with the headers that carry the key.
     #[must_use]
     pub fn sent(&self) -> Vec<Sent> {
@@ -272,6 +306,16 @@ impl HttpClient for FakeHttp {
             });
         }
         let mut status = 200;
+        let mut retry_after = None;
+        let is_chat = uri.ends_with("/chat/completions") || uri.ends_with("/messages");
+        if is_chat && let Some(message) = inner.chat_transport.take() {
+            return Err(HttpError::Transport(message));
+        }
+        let failure = if is_chat {
+            inner.chat_failures.pop_front()
+        } else {
+            None
+        };
 
         let answer = if uri.starts_with("https://cloudflare-dns.com/dns-query") {
             // Only the A query is answered; an AAAA with no answers leaves
@@ -292,6 +336,15 @@ impl HttpClient for FakeHttp {
                 })
                 .to_string()
             }
+        } else if let Some((failed_status, body, after)) = failure {
+            status = failed_status;
+            retry_after = after;
+            body
+        } else if uri.ends_with("/messages") && inner.exhausting {
+            json!({"type": "message", "role": "assistant", "stop_reason": "max_tokens",
+                   "content": [{"type": "thinking", "thinking": "Still thinking…"}],
+                   "usage": {"input_tokens": 50, "output_tokens": 64}})
+            .to_string()
         } else if uri.ends_with("/chat/completions") {
             chat_completion(inner.tools && wants_tools, inner.thinking)
         } else if uri.ends_with("/messages") {
@@ -315,9 +368,13 @@ impl HttpClient for FakeHttp {
         };
         drop(inner);
 
-        Response::builder()
+        let mut builder = Response::builder()
             .status(status)
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(after) = retry_after {
+            builder = builder.header(header::RETRY_AFTER, after);
+        }
+        builder
             .body(Bytes::from(answer))
             .map_err(|err| HttpError::Transport(err.to_string()))
     }
