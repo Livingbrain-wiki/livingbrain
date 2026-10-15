@@ -221,3 +221,48 @@ fn a_search_answers_401_without_a_credential() {
         common::body_text(&response)
     );
 }
+
+/// Regression: the project filter runs **before** the limit. A dozen
+/// unlabelled pages that sort ahead of the project's own used to fill the
+/// limit, the filter then threw them all away, and `--project` answered
+/// with nothing although matching pages existed.
+#[test]
+fn the_project_filter_applies_before_the_limit() {
+    let fixture = fixture();
+    for index in 0..12 {
+        seed(
+            &fixture,
+            WORKSPACE,
+            &user("user-a"),
+            &format!("a-unlabelled-{index:02}"),
+            &format!("---\ntitle: Unlabelled {index}\n---\nThe cutover plan, take {index}."),
+        );
+    }
+    for slug in ["zz-atlas-1", "zz-atlas-2", "zz-atlas-3"] {
+        seed(
+            &fixture,
+            WORKSPACE,
+            &user("user-a"),
+            slug,
+            &format!("---\ntitle: {slug}\nproject: atlas\n---\nThe atlas cutover plan, {slug}."),
+        );
+    }
+
+    // The default limit (10) is smaller than the unlabelled pages ahead.
+    let atlas = results(&fixture, TOKEN_A, "/v1/search?q=cutover&project=atlas");
+    assert_eq!(atlas.len(), 3, "every atlas page, none lost: {atlas:?}");
+
+    // And the limit still bounds the filtered answer.
+    let two = results(
+        &fixture,
+        TOKEN_A,
+        "/v1/search?q=cutover&project=atlas&limit=2",
+    );
+    assert_eq!(two.len(), 2, "{two:?}");
+    for hit in &two {
+        assert!(
+            hit["url"].as_str().expect("a url").contains("/zz-atlas-"),
+            "{two:?}"
+        );
+    }
+}

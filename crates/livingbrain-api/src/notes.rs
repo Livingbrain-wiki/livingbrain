@@ -7,6 +7,14 @@
 //! of the same text bumps that page's version rather than making a new one.
 //! The project a note is filed under, when one is sent, rides in the
 //! frontmatter fence, which is what `GET /v1/search?project=…` filters on.
+//!
+//! A caller that keeps one note per *thing* — `livingbrain logs sync`
+//! keeps one per agent session, whose text grows as the session does —
+//! names the page itself with `slug`. A keyed note is updated in place
+//! rather than re-hashed into a new page, and a keyed write whose page
+//! already holds exactly that markdown is not written at all: the answer
+//! says `unchanged: true` and the version does not move, so a re-sync is a
+//! no-op.
 
 use std::sync::Arc;
 
@@ -17,7 +25,7 @@ use cratefield_core::axum::routing::post;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_mcp::page_scope;
-use livingbrain_pages::{Author, EntityType, PageWrite};
+use livingbrain_pages::{Author, EntityType, PageWrite, is_slug};
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -85,7 +93,8 @@ impl Module for Notes {
 }
 
 /// A `POST /v1/notes` body. `title` is accepted for MCP parity with
-/// `brain_note`; `project` is what the CLI's `--project` sends.
+/// `brain_note`; `project` is what the CLI's `--project` sends; `slug`,
+/// when sent, names the page instead of the hash of the text.
 #[derive(Debug, Deserialize)]
 struct NoteRequest {
     body: String,
@@ -93,6 +102,8 @@ struct NoteRequest {
     title: Option<String>,
     #[serde(default)]
     project: Option<String>,
+    #[serde(default)]
+    slug: Option<String>,
 }
 
 /// `POST /` — one note, redacted and filed in the asker's own scope.
@@ -107,11 +118,15 @@ struct NoteRequest {
 /// calls a model, and the note is stored verbatim (after redaction) for
 /// search and `ask` to find.
 ///
+/// With `slug`, the note is that page in the asker's own scope, updated in
+/// place; a write that would change nothing is skipped and answered with
+/// `unchanged: true` at the head version.
+///
 /// # Errors
 ///
-/// 401 without a credential, 422 for an empty body or content redaction
-/// refused, 409 when the note's page has a conflict pending, and the
-/// store's mapped problem otherwise.
+/// 401 without a credential, 400 for an empty body or a `slug` outside
+/// the slug rule, 422 for content redaction refused, 409 when the note's
+/// page has a conflict pending, and the store's mapped problem otherwise.
 async fn note(
     State(state): State<Arc<Service>>,
     headers: HeaderMap,
@@ -121,6 +136,15 @@ async fn note(
     if request.body.trim().is_empty() {
         return Err(Problem::validation_failed("`body` is required"));
     }
+    let keyed = match request.slug.as_deref() {
+        None => None,
+        Some(slug) if is_slug(slug) => Some(slug.to_owned()),
+        Some(_) => {
+            return Err(Problem::validation_failed(
+                "`slug` must be 1-128 lowercase ascii letters, digits or `-`",
+            ));
+        }
+    };
     // Nothing a model or a person pasted reaches a body with a secret or a
     // piece of personal data still in it (issue #108).
     let (clean, findings) =
@@ -147,33 +171,46 @@ async fn note(
         &asker.workspace_id,
         &Scope::User(UserId::new(asker.user_id.clone())),
     );
-    let slug = note_slug(&clean);
+    let slug = keyed.clone().unwrap_or_else(|| note_slug(&clean));
+    let markdown = note_markdown(&title, project.as_deref(), &clean);
     let store = state.store()?;
-    let head = store
-        .read(&scope, &slug)
-        .await
-        .map_err(page_read_error)?
-        .map(|page| page.version);
+    let head = store.read(&scope, &slug).await.map_err(page_read_error)?;
+    let reference = format!("{scope}/{slug}");
+    // A keyed note that already says exactly this is left alone: re-sending
+    // the same session is how a sync proves it has nothing new.
+    if keyed.is_some()
+        && let Some(page) = &head
+        && page.entity_type == EntityType::Decision
+        && page.markdown == markdown
+    {
+        return Ok(Json(json!({
+            "id": reference,
+            "url": wiki_url(&scope, &slug),
+            "version": page.version,
+            "redacted": findings.len(),
+            "unchanged": true,
+        })));
+    }
     let meta = store
         .write(
             &scope,
             &slug,
             PageWrite {
                 entity_type: EntityType::Decision,
-                markdown: note_markdown(&title, project.as_deref(), &clean),
+                markdown,
                 author: Author::Brain { reconciles: None },
-                base_version: head,
+                base_version: head.map(|page| page.version),
             },
         )
         .await
         .map_err(page_write_error)?;
 
-    let reference = format!("{scope}/{slug}");
     Ok(Json(json!({
         "id": reference,
         "url": wiki_url(&scope, &slug),
         "version": meta.version,
         "redacted": findings.len(),
+        "unchanged": false,
     })))
 }
 

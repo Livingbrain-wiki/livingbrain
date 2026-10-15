@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Wiki;
-use crate::recipes::{CONTEXT_PAGES, find, keep_project, snippet};
+use crate::recipes::{CONTEXT_PAGES, find_in_project, snippet};
 use crate::service::Service;
 
 /// What an ask answers with when nothing in the asker's pages mentions the
@@ -116,8 +116,14 @@ async fn ask(
 
     let store = state.store()?;
     let scopes = state.scopes(&asker);
-    let found = find(&store, &scopes, question, CONTEXT_PAGES).await?;
-    let found = keep_project(found, request.project.as_deref());
+    let found = find_in_project(
+        &store,
+        &scopes,
+        question,
+        CONTEXT_PAGES,
+        request.project.as_deref(),
+    )
+    .await?;
 
     let mut brief = String::new();
     for (index, page) in found.iter().enumerate() {

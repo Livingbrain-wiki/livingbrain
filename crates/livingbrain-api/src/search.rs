@@ -17,7 +17,7 @@ use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Po
 use serde_json::{Value, json};
 
 use crate::Wiki;
-use crate::recipes::{DEFAULT_LIMIT, MAX_LIMIT, find, keep_project, result_json};
+use crate::recipes::{DEFAULT_LIMIT, MAX_LIMIT, find_in_project, result_json};
 use crate::service::Service;
 
 /// The `search` module, constructed with the pages access the venture
@@ -82,7 +82,9 @@ impl Module for Search {
 /// citation URL and a snippet.
 ///
 /// `project`, when sent, keeps only the pages whose frontmatter names it —
-/// the key a filed note carries. `limit` defaults to 10 and is **clamped,
+/// the key a filed note carries — and it is applied **before** the limit,
+/// so a project answers with up to `limit` of its own pages however many
+/// unlabelled ones match too. `limit` defaults to 10 and is **clamped,
 /// not refused**: a caller asking for a thousand hits wants hits, so
 /// anything above 25 gets 25; a limit that does not parse is a 422.
 ///
@@ -111,8 +113,7 @@ async fn search(
 
     let store = state.store()?;
     let scopes = state.scopes(&asker);
-    let found = find(&store, &scopes, q, limit).await?;
-    let found = keep_project(found, project);
+    let found = find_in_project(&store, &scopes, q, limit, project).await?;
     let results: Vec<Value> = found.iter().map(result_json).collect();
     Ok(Json(json!({ "results": results })))
 }

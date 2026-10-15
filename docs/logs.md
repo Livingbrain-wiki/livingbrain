@@ -3,8 +3,10 @@
 `livingbrain logs sync` reads the session logs your local coding agents
 already wrote — Claude Code under `~/.claude/projects`, Codex under
 `~/.codex/sessions` — and uploads the sessions whose repository you have
-opted in, one normalised **source** per session. Nothing is read that you did
-not already have on disk; nothing is sent that you did not allow.
+opted in, one normalised **source** per session — and beside each one a short
+**note**, a searchable page filed under the repository's name, so the session
+turns up in `livingbrain search` and `livingbrain ask`. Nothing is read that
+you did not already have on disk; nothing is sent that you did not allow.
 
 ## Use it
 
@@ -34,8 +36,44 @@ livingbrain logs deny
 `unreadable` (a file that could not be read at all), `unparsed` (read, but no
 session in it), `redacted`, `dry_run` and a `sessions` array of
 `{agent, session_id, repo, models, turns, tool_calls, totals, truncated,
-status}` — the status one of `uploaded`, `unchanged`, `skipped`
-(`reason: "repo not opted in"`) or `would_upload` under `--dry-run`.
+status, note?}` — the status one of `uploaded`, `unchanged`, `skipped`
+(`reason: "repo not opted in"`) or `would_upload` under `--dry-run`. Every
+opted-in session also carries `note`: `{slug, project, status, id?, url?,
+error?}`, the status one of `written`, `unchanged`, `failed` or `would_write`
+under `--dry-run` (`null` for a session that recorded no repository), and the
+top level counts them in `notes`, e.g. `{"written": 2}`.
+
+## Find a session again
+
+A source in the ledger is not yet a page, and `search` and `ask` read pages.
+So once a session's source is in the ledger — uploaded, or already there —
+`logs sync` also writes it a note through `POST /v1/notes`, in your personal
+scope, filed under the **project** named after the repository's directory
+(`~/work/demo` files under `demo`). Filter on it:
+
+```
+livingbrain search --project demo "migration"
+livingbrain ask --project demo "what did we decide about the migration?"
+```
+
+The project filter runs before the result limit, so `--project` answers with
+up to `--limit` of that project's pages however many other pages match too.
+
+The note is a compact summary of the session: agent, session id, repository,
+branch, first and last timestamp, models, turn and tool-call counts (tool
+names only), token and cost totals, the id of the source it summarises, and
+the conversation's text excerpted — each turn cut to 400 characters, and the
+excerpt to 12 KiB, with a line saying how many turns were left out. It is
+built from the same home-elided record as the source and redacted on this
+machine before it is sent; the notes route redacts again on arrival.
+
+Notes are idempotent too. Each is keyed by agent and session —
+`agent-log-<agent>-<session-id>` — so a session that grew updates its one
+page in place, and a re-sync of an unchanged session sends the same note,
+which the server recognises and does not write (`status: "unchanged"`). A
+note the server refuses — say, because someone edited that page by hand —
+is reported as `failed` with the reason; the session's source is in the
+ledger regardless, and the next sync tries the note again.
 
 ## Opt-in is per repository
 

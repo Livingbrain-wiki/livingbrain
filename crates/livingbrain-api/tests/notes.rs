@@ -244,3 +244,88 @@ fn a_note_answers_401_without_and_with_a_rejected_credential() {
         "one body for both cases"
     );
 }
+
+#[test]
+fn a_keyed_note_is_updated_in_place_and_an_identical_resend_writes_nothing() {
+    let fixture = fixture();
+    let first = note(
+        &fixture,
+        TOKEN_A,
+        json!({
+            "body": "Session one, two turns.",
+            "title": "claude_code session abc",
+            "project": "atlas",
+            "slug": "agent-log-claude-code-abc",
+        }),
+    );
+    assert_eq!(slug_of(&first), "agent-log-claude-code-abc", "{first}");
+    assert_eq!(first["version"], 1, "{first}");
+    assert_eq!(first["unchanged"], false, "{first}");
+
+    // The same note again: no new version, and the answer says so.
+    let again = note(
+        &fixture,
+        TOKEN_A,
+        json!({
+            "body": "Session one, two turns.",
+            "title": "claude_code session abc",
+            "project": "atlas",
+            "slug": "agent-log-claude-code-abc",
+        }),
+    );
+    assert_eq!(again["id"], first["id"], "{again}");
+    assert_eq!(again["version"], 1, "{again}");
+    assert_eq!(again["unchanged"], true, "{again}");
+
+    // The session grew: the same page, one version on — not a second page.
+    let grown = note(
+        &fixture,
+        TOKEN_A,
+        json!({
+            "body": "Session one, four turns now.",
+            "title": "claude_code session abc",
+            "project": "atlas",
+            "slug": "agent-log-claude-code-abc",
+        }),
+    );
+    assert_eq!(grown["id"], first["id"], "{grown}");
+    assert_eq!(grown["version"], 2, "{grown}");
+    assert_eq!(grown["unchanged"], false, "{grown}");
+
+    let listed = get(&fixture, TOKEN_A, "/v1/pages");
+    let body = listed.json();
+    let pages = body["pages"].as_array().expect("pages list");
+    assert_eq!(pages.len(), 1, "{}", common::body_text(&listed));
+    let page = get(&fixture, TOKEN_A, "/v1/pages/agent-log-claude-code-abc");
+    assert_eq!(
+        page.json()["markdown"],
+        "---\ntitle: claude_code session abc\nproject: atlas\n---\n\nSession one, four turns now.\n",
+        "{}",
+        common::body_text(&page)
+    );
+}
+
+#[test]
+fn a_slug_outside_the_slug_rule_is_a_400() {
+    let fixture = fixture();
+    for slug in [
+        "",
+        "Upper-Case",
+        "has space",
+        "under_score",
+        &"a".repeat(129),
+    ] {
+        let response = post(
+            &fixture,
+            TOKEN_A,
+            "/v1/notes",
+            json!({ "body": "A note.", "slug": slug }),
+        );
+        assert_eq!(
+            status_of(&response),
+            400,
+            "slug {slug:?}: {}",
+            common::body_text(&response)
+        );
+    }
+}
