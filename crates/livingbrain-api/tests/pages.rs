@@ -45,11 +45,7 @@ fn a_page_reads_back_in_the_shape_the_web_app_pins() {
     assert_eq!(page["slug"], "tamar", "{page}");
     assert_eq!(page["title"], "Tamar routes", "{page}");
     assert_eq!(page["markdown"], TAMAR, "{page}");
-    assert_eq!(
-        page["url"],
-        format!("https://livingbrain.wiki/brain/{scope}/tamar"),
-        "{page}"
-    );
+    assert_eq!(page["url"], common::page_url(&scope, "tamar"), "{page}");
     assert_eq!(page["version"], tamar.version, "{page}");
     assert_eq!(page["entity_type"], "decision", "{page}");
     // The kestrel page links here; nothing else does.
@@ -61,7 +57,7 @@ fn a_page_reads_back_in_the_shape_the_web_app_pins() {
     assert_eq!(citations[0]["title"], "kestrel", "{page}");
     assert_eq!(
         citations[0]["url"],
-        format!("https://livingbrain.wiki/brain/{scope}/kestrel"),
+        common::page_url(&scope, "kestrel"),
         "{page}"
     );
 }
@@ -169,10 +165,7 @@ fn the_list_carries_the_readable_pages_with_their_citation_urls() {
         assert!(page["updated_at"].is_string(), "{page}");
         assert_eq!(
             page["url"],
-            format!(
-                "https://livingbrain.wiki/brain/{scope}/{}",
-                page["slug"].as_str().expect("slug")
-            ),
+            common::page_url(&scope, page["slug"].as_str().expect("slug")),
             "{page}"
         );
     }
@@ -226,11 +219,7 @@ fn a_put_with_a_null_base_version_creates_a_page_in_the_askers_own_scope() {
     assert_eq!(page["version"], 1, "a create is the first version: {page}");
     assert_eq!(page["title"], "Dawn run", "{page}");
     assert_eq!(page["entity_type"], "decision", "{page}");
-    assert_eq!(
-        page["url"],
-        format!("https://livingbrain.wiki/brain/{scope}/dawn-run"),
-        "{page}"
-    );
+    assert_eq!(page["url"], common::page_url(&scope, "dawn-run"), "{page}");
     // The title the client chose went into the fence the entity needs.
     assert_eq!(
         page["markdown"], "---\ntitle: Dawn run\n---\n\nThe route runs at dawn.",

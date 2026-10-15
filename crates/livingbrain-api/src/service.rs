@@ -212,6 +212,14 @@ impl Service {
         }
     }
 
+    /// The deployment's public web-app origin every page link is built
+    /// under ([`livingbrain_pages::app_base`]): one setting, read from this
+    /// module's config, so search, ask, notes and the page routes all cite
+    /// the same host the MCP server and the Slack agent do.
+    pub(crate) fn base(&self) -> String {
+        livingbrain_pages::app_base(self.ctx.config.as_ref())
+    }
+
     /// This module's own context: its ports and its config.
     pub(crate) fn ctx(&self) -> &ModuleContext {
         &self.ctx

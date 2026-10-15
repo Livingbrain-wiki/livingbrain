@@ -117,6 +117,11 @@ fn fixture(auth: Arc<dyn BearerAuth>) -> Fixture {
         let store: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
         ports.blob = Some(store.clone());
         blob = Some(store);
+        // The deployment's own origin, which every cited page is under.
+        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
+            livingbrain_pages::APP_BASE_KEY,
+            "https://app.brain.test",
+        )]));
     });
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
     Fixture {
@@ -414,9 +419,17 @@ fn an_agent_sees_only_its_users_pages() {
         reference,
         format!("{}/kestrel", page_scope("ws-one", &user("u-a")))
     );
+    // The deployment's own web app, never the marketing site.
     assert_eq!(
         cited["url"],
-        format!("https://livingbrain.wiki/brain/{reference}")
+        livingbrain_pages::reference_url("https://app.brain.test", reference)
+    );
+    assert!(
+        cited["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://app.brain.test/wiki?slug=kestrel&scope="),
+        "{cited}"
     );
     assert!(found.contains(cited["url"].as_str().unwrap()), "{found}");
 

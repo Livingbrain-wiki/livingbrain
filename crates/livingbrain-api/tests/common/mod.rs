@@ -144,6 +144,23 @@ impl Fixture {
     }
 }
 
+/// The public origin the fixture deploys under (`WORKSPACES_REDIRECT_BASE`):
+/// deliberately not production's, so a link built from a constant shows.
+pub const APP_BASE: &str = "https://app.brain.test";
+
+/// The web app's address for one page under [`APP_BASE`] — what every
+/// surface must cite.
+#[allow(dead_code)]
+pub fn page_url(scope: &str, slug: &str) -> String {
+    format!("{APP_BASE}/wiki?slug={slug}&scope={scope}")
+}
+
+/// The `slug` a page URL names (`…/wiki?slug=…&scope=…`).
+#[allow(dead_code)]
+pub fn slug_in(url: &str) -> Option<&str> {
+    url.split_once("?slug=")?.1.split('&').next()
+}
+
 /// One workspace with two people, and the first person's id again in a
 /// second workspace.
 pub fn fixture() -> Fixture {
@@ -196,6 +213,11 @@ pub fn fixture() -> Fixture {
 
     let kit = TestHarness::with_ports(modules, |ports| {
         ports.blob = Some(Arc::new(PagesRebind::new(Arc::clone(&memory))) as Arc<dyn Blob>);
+        // The deployment's own origin, which every page link is built under.
+        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
+            livingbrain_pages::APP_BASE_KEY,
+            APP_BASE,
+        )]));
     });
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
     Fixture {

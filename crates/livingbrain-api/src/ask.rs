@@ -124,6 +124,7 @@ async fn ask(
     let scopes = state.scopes(&asker);
     let found = find_in_project(
         &store,
+        &state.base(),
         &scopes,
         question,
         CONTEXT_PAGES,

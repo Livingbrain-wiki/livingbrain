@@ -52,7 +52,7 @@ fn a_result_carries_the_citation_a_reader_needs() {
     assert_eq!(found[0]["title"], "Kestrel routes", "{found:?}");
     assert_eq!(
         found[0]["url"],
-        format!("https://livingbrain.wiki/brain/{scope}/kestrel"),
+        common::page_url(&scope, "kestrel"),
         "{found:?}"
     );
     let snippet = found[0]["snippet"].as_str().expect("a snippet");
@@ -86,7 +86,7 @@ fn a_search_reads_only_the_scopes_the_caller_was_granted() {
     let mut slugs: Vec<String> = mine
         .iter()
         .filter_map(|result| result["url"].as_str())
-        .filter_map(|url| url.rsplit('/').next())
+        .filter_map(common::slug_in)
         .map(str::to_owned)
         .collect();
     slugs.sort();
@@ -97,7 +97,7 @@ fn a_search_reads_only_the_scopes_the_caller_was_granted() {
     let mut other: Vec<String> = theirs
         .iter()
         .filter_map(|result| result["url"].as_str())
-        .filter_map(|url| url.rsplit('/').next())
+        .filter_map(common::slug_in)
         .map(str::to_owned)
         .collect();
     other.sort();
@@ -261,7 +261,10 @@ fn the_project_filter_applies_before_the_limit() {
     assert_eq!(two.len(), 2, "{two:?}");
     for hit in &two {
         assert!(
-            hit["url"].as_str().expect("a url").contains("/zz-atlas-"),
+            hit["url"]
+                .as_str()
+                .expect("a url")
+                .contains("slug=zz-atlas-"),
             "{two:?}"
         );
     }

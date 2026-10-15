@@ -542,7 +542,10 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
             ) {
                 cell.publish(Arc::new(PageAnswers::new(
                     PageStore::new(db, blob, Arc::clone(&mcp_kms), clock, id_gen),
-                    WIKI_BASE,
+                    // Where a citation opens: this deployment's own web app
+                    // (`WORKSPACES_REDIRECT_BASE`), the origin every other
+                    // surface cites too — not the marketing site.
+                    livingbrain_pages::app_base(ctx.config.as_ref()),
                 )));
             }
             livingbrain_mcp::router(ctx, Arc::clone(&mcp_kms), Arc::clone(&mcp_auth))
@@ -551,10 +554,6 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
             livingbrain_mcp::sources_router(ctx, Arc::clone(&kms), Arc::clone(&auth))
         })
 }
-
-/// Where the pages are published. A citation is an absolute link, so this is
-/// the site's own origin rather than the API's.
-const WIKI_BASE: &str = "https://livingbrain.wiki";
 
 /// The [`Answers`] the composition could not build yet.
 ///

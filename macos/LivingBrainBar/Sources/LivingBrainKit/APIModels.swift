@@ -63,7 +63,7 @@ public struct Citation: Decodable, Equatable, Sendable, Hashable {
     public var url: String?
     public var quote: String?
 
-    /// The page slug, read from `…/brain/<scope>/<slug>`.
+    /// The page slug, read from the page URL (see `SearchResult.slug(fromURL:)`).
     public var slug: String? { url.flatMap(SearchResult.slug(fromURL:)) }
 }
 
@@ -76,9 +76,14 @@ public struct SearchResult: Decodable, Equatable, Sendable, Identifiable, Hashab
 
     public var slug: String? { Self.slug(fromURL: url) }
 
-    /// The last path segment of a page URL (`https://…/brain/<scope>/<slug>`).
+    /// The slug a page URL names: the `slug` query item of the web app's page
+    /// address (`https://…/wiki?slug=<slug>&scope=<scope>`), which the server
+    /// cites, else the last path segment of the older `…/brain/<scope>/<slug>`.
     public static func slug(fromURL url: String) -> String? {
         guard let components = URLComponents(string: url) else { return nil }
+        if let slug = components.queryItems?.first(where: { $0.name == "slug" })?.value, !slug.isEmpty {
+            return slug
+        }
         let last = components.path.split(separator: "/").last.map(String.init)
         return last?.isEmpty == false ? last : nil
     }

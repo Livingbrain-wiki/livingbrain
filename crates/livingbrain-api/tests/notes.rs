@@ -43,10 +43,7 @@ fn a_note_is_a_page_in_the_askers_own_scope() {
     );
     assert_eq!(
         answer["url"],
-        format!(
-            "https://livingbrain.wiki/brain/{scope}/{}",
-            slug_of(&answer)
-        ),
+        common::page_url(&scope, slug_of(&answer)),
         "{}",
         answer
     );

@@ -34,6 +34,7 @@ mod entity;
 mod facts;
 mod ingest;
 mod keys;
+mod links;
 mod scope;
 mod sources;
 mod store;
@@ -52,6 +53,7 @@ pub use ingest::{
     SourceIngest, Verdict,
 };
 pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
+pub use links::{APP_BASE_KEY, DEFAULT_APP_BASE, app_base, page_url, reference_url};
 pub use scope::{page_scope, page_scopes_for};
 pub use sources::{
     MAX_PROJECT_LEN, MAX_SOURCE_BODY_BYTES, ProjectCount, Released, Source, SourceError,

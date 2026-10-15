@@ -202,7 +202,7 @@ impl Answers for PageAnswers {
             ));
             citations.push(Citation {
                 title: quoted.title,
-                url: format!("{}/brain/{}/{}", self.base, hit.scope, hit.slug),
+                url: crate::page_url(&self.base, &hit.scope, &hit.slug),
             });
         }
         if citations.is_empty() {

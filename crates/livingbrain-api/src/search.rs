@@ -115,7 +115,7 @@ async fn search(
 
     let store = state.store()?;
     let scopes = state.scopes(&asker);
-    let found = find_in_project(&store, &scopes, q, limit, project).await?;
+    let found = find_in_project(&store, &state.base(), &scopes, q, limit, project).await?;
     let results: Vec<Value> = found.iter().map(result_json).collect();
     // The facts `q` is about, as of now (docs/temporal-facts.md §5): what
     // holds today, with the history beside it.
