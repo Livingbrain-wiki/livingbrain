@@ -2730,3 +2730,705 @@ main > p.tiny:last-child {
 .usebar[data-tone="over"] .usebar__text {
   color: var(--bad);
 }
+
+/*   the app shell: top bar, sidebar, drawer, palette
+     (docs/ux-navigation.md; built by `shell.js` from `nav.js`)
+   ---------------------------------------------------------------- */
+
+:root {
+  --sidebar-w: 15rem;
+  --sidebar-rail: 3.75rem;
+  --topbar-h: 58px;
+}
+
+.topbar__in {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--topbar-h);
+  padding: 8px clamp(12px, 2vw, 20px);
+}
+
+.topbar .brand {
+  margin-inline-end: 0;
+  flex-shrink: 0;
+}
+
+/* The menu button: phones and tablets only, where the sidebar is a drawer. */
+.topbar__menu {
+  display: none;
+  flex: 0 0 auto;
+  min-height: 40px;
+  min-width: 40px;
+  padding: 0;
+  border-color: var(--line);
+}
+.burger,
+.burger::before,
+.burger::after {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.burger {
+  position: relative;
+}
+.burger::before,
+.burger::after {
+  content: "";
+  position: absolute;
+  left: 0;
+}
+.burger::before {
+  top: -5px;
+}
+.burger::after {
+  top: 5px;
+}
+
+/* The workspace switcher and the user menu: a button and a dropdown. */
+.ws,
+.user {
+  position: relative;
+  min-width: 0;
+}
+
+.ws__btn,
+.user__btn {
+  min-height: 36px;
+  max-width: 100%;
+  padding: 0 10px;
+  gap: 8px;
+  border-color: var(--line2);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.ws__btn::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin-top: -3px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  opacity: 0.7;
+}
+
+.ws__name {
+  min-width: 0;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user__btn {
+  padding: 0 10px 0 4px;
+  font-weight: 500;
+}
+
+.user__avatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--f-display);
+  font-weight: 650;
+  font-size: 14px;
+}
+
+.user .session-bar__who {
+  max-width: 10rem;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 80;
+  display: grid;
+  gap: 2px;
+  min-width: 14rem;
+  max-width: min(20rem, calc(100vw - 24px));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg2);
+  box-shadow: 0 16px 40px oklch(0 0 0 / 0.35);
+}
+.ws .menu {
+  left: 0;
+}
+.user .menu {
+  right: 0;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink2);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: start;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.menu__item:hover:not(:disabled),
+.menu__item:focus-visible {
+  background: var(--bg3);
+  color: var(--ink);
+}
+.menu__item[aria-current="true"],
+.menu__item[aria-current="true"]:disabled {
+  color: var(--ink);
+  border-style: none;
+  cursor: default;
+}
+.menu__hint {
+  color: var(--ink3);
+  font-weight: 400;
+}
+.menu__label,
+.menu__note {
+  margin: 0;
+  padding: 6px 12px 4px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+.menu__note {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* The search trigger: a field-shaped button in the middle of the bar. */
+.topbar__search {
+  flex: 1 1 14rem;
+  justify-content: space-between;
+  min-width: 0;
+  max-width: 30rem;
+  min-height: 38px;
+  margin-inline: auto;
+  padding: 0 8px 0 14px;
+  border-color: var(--line2);
+  background: var(--bg);
+  color: var(--ink3);
+  font-size: 14px;
+  font-weight: 400;
+}
+.topbar__search::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  margin-inline-end: 2px;
+}
+.topbar__search-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar__kbd,
+kbd {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink3);
+  background: var(--bg2);
+}
+
+.topbar #header-signin {
+  min-height: 36px;
+  padding-inline: 14px;
+  font-size: 14px;
+}
+
+/* The page under the bar: the sidebar beside a column of main + footer. */
+.shell {
+  flex: 1 0 auto;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  align-items: start;
+}
+
+.shell__col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: calc(100dvh - var(--topbar-h));
+}
+
+.shell__col > main {
+  flex: 1 0 auto;
+}
+
+main.shell__main {
+  max-width: 1120px;
+}
+
+.sidebar {
+  position: sticky;
+  top: var(--topbar-h);
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--topbar-h));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-inline-end: 1px solid var(--line2);
+  background: var(--bg);
+}
+
+.sidebar__nav {
+  flex: 1 0 auto;
+  padding: 14px 10px 8px;
+}
+
+.sidebar__group + .sidebar__group {
+  margin-top: 14px;
+}
+
+.sidebar__label {
+  margin: 0 0 4px;
+  padding: 0 10px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+.sidebar__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.sidebar__link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--ink2);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+a.sidebar__link:hover {
+  color: var(--ink);
+  background: var(--bg2);
+}
+
+.sidebar__link[aria-current="page"] {
+  color: var(--ink);
+  background: var(--bg2);
+}
+.sidebar__link[aria-current="page"]::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+.sidebar__link[aria-current="page"] .ico {
+  color: var(--accent);
+}
+
+.sidebar__link--soon,
+.sidebar__link--soon[aria-disabled="true"] {
+  color: var(--ink3);
+  border-style: none;
+  cursor: default;
+}
+
+.sidebar__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__soon {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.ico {
+  flex: 0 0 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sidebar__collapse {
+  display: flex;
+  justify-content: flex-start;
+  text-align: start;
+  gap: 10px;
+  min-height: 40px;
+  margin: 8px 10px 12px;
+  padding: 0 10px;
+  border-color: transparent;
+  color: var(--ink3);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Collapsed (desktop): a rail of icons; the labels stay for screen readers
+ * through the links' text, hidden only visually. */
+body[data-nav-collapsed="true"] .shell {
+  grid-template-columns: var(--sidebar-rail) minmax(0, 1fr);
+}
+body[data-nav-collapsed="true"] .sidebar__nav {
+  padding-inline: 8px;
+}
+body[data-nav-collapsed="true"] .sidebar__label {
+  height: 1px;
+  margin: 10px 8px;
+  padding: 0;
+  overflow: hidden;
+  color: transparent;
+  background: var(--line2);
+}
+body[data-nav-collapsed="true"] .sidebar__link,
+body[data-nav-collapsed="true"] .sidebar__collapse {
+  justify-content: center;
+  padding: 0;
+}
+body[data-nav-collapsed="true"] .sidebar__collapse {
+  margin-inline: 8px;
+}
+body[data-nav-collapsed="true"] :is(.sidebar__text, .sidebar__soon) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+body[data-nav-collapsed="true"] .sidebar__link[aria-current="page"]::before {
+  left: -8px;
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  background: oklch(0 0 0 / 0.5);
+}
+
+/* Phones and tablets: the sidebar is an off-canvas drawer. */
+@media (max-width: 55.99rem) {
+  .topbar__menu {
+    display: inline-flex;
+  }
+  .shell,
+  body[data-nav-collapsed="true"] .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 70;
+    width: min(18rem, 86vw);
+    height: 100dvh;
+    border-inline-end: 1px solid var(--line);
+    background: var(--bg2);
+    box-shadow: 0 0 40px oklch(0 0 0 / 0.4);
+    transform: translateX(-105%);
+    visibility: hidden;
+  }
+  body[data-nav="open"] .sidebar {
+    transform: none;
+    visibility: visible;
+  }
+  .sidebar__collapse {
+    display: none;
+  }
+  body[data-nav-collapsed="true"] :is(.sidebar__text, .sidebar__soon) {
+    position: static;
+    width: auto;
+    height: auto;
+    clip: auto;
+  }
+  body[data-nav-collapsed="true"] .sidebar__label {
+    height: auto;
+    margin: 0 0 4px;
+    padding: 0 10px;
+    color: var(--ink3);
+    background: none;
+  }
+  body[data-nav-collapsed="true"] .sidebar__link {
+    justify-content: flex-start;
+    padding: 0 10px;
+  }
+  .sidebar__link {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sidebar {
+    transition: transform 200ms var(--ease), visibility 200ms;
+  }
+}
+
+/* Narrow phones: the search trigger keeps its icon and shortcut-less label,
+ * the user button its avatar. */
+@media (max-width: 40rem) {
+  .topbar__in {
+    gap: 8px;
+  }
+  .topbar .brand__word {
+    display: none;
+  }
+  .topbar__kbd {
+    display: none;
+  }
+  .ws__name {
+    max-width: 7rem;
+  }
+  .user .session-bar__who {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .user__btn {
+    padding: 0 4px;
+  }
+  .topbar .theme-btn {
+    font-size: 0;
+    gap: 0;
+    padding: 0 10px;
+  }
+}
+
+/* The narrowest phones: the theme toggle steps aside for the switcher
+ * (the user menu and the palette both still switch the theme). */
+@media (max-width: 26rem) {
+  .topbar .theme-btn {
+    display: none;
+  }
+  .topbar .brand {
+    display: none;
+  }
+}
+
+/* The sign-in page, signed out: no sidebar, no search — just the door. */
+body[data-page="signin"]:not([data-session="signed-in"]) :is(.sidebar, .topbar__menu, .topbar__search, .scrim) {
+  display: none;
+}
+body[data-page="signin"]:not([data-session="signed-in"]) .shell {
+  grid-template-columns: minmax(0, 1fr);
+}
+body[data-page="signin"]:not([data-session="signed-in"]) .topbar .brand {
+  display: flex;
+  margin-inline-end: auto;
+}
+body[data-page="signin"]:not([data-session="signed-in"]) .topbar .theme-btn {
+  display: inline-flex;
+}
+body[data-page="signin"]:not([data-session="signed-in"]) .topbar .brand__word {
+  display: inline;
+}
+
+/* Breadcrumbs on a page and a transcript. */
+.crumbs {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--ink3);
+}
+.crumbs__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.crumbs__list li {
+  display: inline-flex;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.crumbs__list li + li::before {
+  content: "/";
+  margin-inline-end: 4px;
+  color: var(--line);
+}
+.crumbs a {
+  color: var(--ink2);
+  text-decoration: none;
+}
+.crumbs a:hover {
+  color: var(--accent);
+}
+.crumbs [aria-current="page"] {
+  color: var(--ink2);
+}
+
+/* Home: where to go, as cards. */
+.jump {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+}
+.jump__card {
+  display: grid;
+  gap: 6px;
+  height: 100%;
+  padding: 16px 18px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background: var(--bg2);
+  color: var(--ink);
+  text-decoration: none;
+}
+.jump__card:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+.jump__card .muted {
+  font-size: 14px;
+}
+
+/* Settings, one tab at a time: no section nav (the sidebar is it), and a
+ * tab of one section keeps that section's heading for screen readers only. */
+.settings-layout--tabs {
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 60rem) {
+  .settings-layout--tabs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.sect--solo > .sect__head {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* The command palette: a modal near the top of the screen. */
+.palette {
+  width: min(40rem, calc(100vw - 24px));
+  max-height: min(34rem, calc(100dvh - 24px));
+  margin: max(12px, 10vh) auto auto;
+  padding: 0;
+  overflow: hidden;
+}
+.palette__panel {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+}
+.palette__input {
+  min-height: 56px;
+  padding: 0 18px;
+  border: 0;
+  border-bottom: 1px solid var(--line2);
+  border-radius: 0;
+  background: transparent;
+  font-size: 17px;
+}
+.palette__input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.palette__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+}
+.palette__group {
+  padding: 10px 12px 4px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+.palette__opt {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.palette__opt--active {
+  background: var(--accent-soft);
+}
+.palette__label {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.palette__detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink3);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette__none {
+  padding: 14px 12px;
+  color: var(--ink3);
+}
+.palette__foot {
+  max-width: none;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--line2);
+}

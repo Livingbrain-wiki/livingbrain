@@ -83,6 +83,34 @@ These are shown on purpose, marked in the UI, and never sent:
 - **Audit.** The app sends `section`, `key` and `value` with every settings
   write so a server *can* audit it; no server records it yet.
 
+## The app shell and navigation
+
+Every page shares one shell (docs/ux-navigation.md has the audit and the
+information architecture): a top bar — workspace switcher, **Search or ask**
+(the ⌘K / Ctrl+K command palette, also `/`), theme, user menu — and a left
+sidebar grouped **Brain** (Home, Ask the brain, Pages, Facts), **Sources**
+(Agent sessions, Coding agents, GitHub, Imports), **Workspace** (Members,
+Agent accounts, Access & audit) and **Settings** (Models, Usage & limits,
+Integrations, API tokens, Account). On screens under 56rem the sidebar is a
+drawer behind the ☰ button; on wider ones it collapses to an icon rail.
+
+- `assets/nav.js` is the IA as data — the destinations, the settings tabs,
+  which destination an address is (`activeId`), breadcrumbs, and the
+  palette's rows — and pure, so `tests/nav.test.mjs` pins that every address
+  published before the shell (`wiki.html?slug=`, `?view=sessions…`,
+  `settings.html#tokens`, the API's `/wiki?slug=` citations) still lands on a
+  destination.
+- `assets/shell.js` builds the sidebar and the palette from it with
+  `createElement`/`createElementNS` only, and wires the drawer, the collapse
+  rail and the two menus. `app.js` mounts it in `boot()`; `wiki.js` tells it
+  which view is showing with an `lb-view` event.
+- `settings.html` shows one tab at a time, chosen by the hash; `#connect`,
+  `#soon` and `#stack` land on Integrations.
+- `wiki.html` gained `?view=ask[&q=]` (the one box: page hits as you type,
+  Enter asks), `?view=coding-agents` (the #187 tree, moved off the Pages
+  list), `?view=imports` (`GET /v1/sources?kind=import`, each readable in
+  place) and `?view=new`.
+
 ## The wiki page: wired end to end
 
 `wiki.html` is a four-view shell (home, page, editor, new-page form) run by
@@ -199,6 +227,11 @@ The test files (`node --test` prints the current count):
 - `tests/models.test.mjs` — the Models section against the Rust handler's own
   role list and the catalog the server compiles in, form validation, the cards, disconnect through
   `LB.setting`, and the settings page's copy (no API paths or dead controls).
+- `tests/nav.test.mjs` — the IA: every legacy address resolves, the settings
+  tabs cover every section, breadcrumbs, palette rows, and the three pages
+  carry one shell with the same ids and an untouched theme script.
+- `tests/shell.test.mjs` — the shell on a stub DOM: the sidebar, the current
+  item, the drawer and rail, the switcher, and the palette by keyboard.
 - `tests/session.test.mjs` — the `/me` check and sign-out from
   `assets/session.js`: signed in, signed out and "could not tell", what each
   one shows, and the hidden-until-checked markup of `index.html`.
@@ -217,7 +250,9 @@ quietly.
 | `wiki.html` | The four-view wiki shell: home (all pages, pins, filter), a page with its TOC, backlinks and citations, the editor, the new-page form, the ask dialog, header search and the small-screen drawer |
 | `assets/app.css` | The website's tokens (`--bg`, `--bg2`, `--ink`, `--line`, `--accent`, oklch), fonts and components |
 | `assets/wiki.css` | The wiki page's own styles, on the shared tokens: the search panel, drawer, page lists, editor toggle and touch-target sizes |
-| `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting`, sign-out |
+| `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting`, sign-out, the settings tabs, mounting the shell |
+| `assets/nav.js` | The information architecture as data: destinations, settings tabs, `activeId`, breadcrumbs, palette rows |
+| `assets/shell.js` | The app shell: sidebar, drawer, collapse rail, workspace switcher, user menu, ⌘K palette |
 | `assets/wiki.js` | The wiki controller (`wikiPage`) and its pure helpers (`slugify`, `validSlug`, `parseBrainUrl`, `highlightTerms`); imported by `app.js`, dispatched for `body[data-page="wiki"]` |
 | `assets/models.js` | The roles, the provider catalog as the picker uses it, connect-form validation, and the connected-model cards |
 | `assets/providers.json` | The provider catalog: every provider Colonizer supports, vendored by `scripts/sync-providers`. The server compiles in the same file |

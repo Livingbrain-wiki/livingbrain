@@ -1217,7 +1217,7 @@ test("search: debounced, highlighted, keyboard-driven, and quiet below two chara
   assert.equal(el("wiki-search-results").hidden, true);
 });
 
-test("search: the 401 signed-out state says sign in, and / focuses the box", async () => {
+test("search: the 401 signed-out state says sign in, and / focuses the box on the Ask view", async () => {
   reset();
   seedTriggers();
   respond = (method, url) => {
@@ -1236,9 +1236,23 @@ test("search: the 401 signed-out state says sign in, and / focuses the box", asy
   assert.equal(el("wiki-search-results").hidden, false);
   assert.match(el("wiki-search-results").textContent, /Sign in to search\./);
 
-  // "/" anywhere outside a field focuses the search box.
-  const handlers = docListeners.keydown || [];
+  // On a page, "/" is the shell's (it opens the palette): the wiki's own
+  // handler leaves the box alone.
+  let handlers = docListeners.keydown || [];
   assert.ok(handlers.length > 0, "the global key handler is wired");
+  focused.length = 0;
+  for (const handler of handlers) {
+    await handler({ key: "/", target: { tagName: "BODY" }, preventDefault() {} });
+  }
+  assert.ok(!focused.includes(el("wiki-search")), "off the Ask view the box stays put");
+
+  // On the Ask view, "/" anywhere outside a field focuses the box.
+  reset({ search: "?view=ask" });
+  seedTriggers();
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  handlers = docListeners.keydown || [];
+  focused.length = 0;
   for (const handler of handlers) {
     await handler({ key: "/", target: { tagName: "BODY" }, preventDefault() {} });
   }
@@ -1277,15 +1291,6 @@ test("drawer: toggles with aria-expanded, closes on Escape", async () => {
   assert.equal(el("wiki-drawer").hidden, false);
   await el("drawer-toggle").click();
   assert.equal(el("wiki-drawer").hidden, true);
-});
-
-test("signed-in chrome: drawer sign-in hidden, sign-out mirror shown", async () => {
-  reset();
-  seedTriggers();
-  await wikiPage(globalThis.LB.api);
-  await drain();
-  assert.equal(el("drawer-signin").hidden, true);
-  assert.equal(el("drawer-signout").hidden, false);
 });
 
 test("ApiError still carries status and message for the wiki's branching", () => {
@@ -1730,7 +1735,7 @@ test("the queue card says what triage held back and what it saved", () => {
   assert.equal(triageSummary(undefined), "");
 });
 
-test("coding-agents: home shows the compiled pages as a folder, not as recent pages", async () => {
+test("coding-agents: Pages leaves the compiled pages out and points at their folder", async () => {
   reset({ search: "" });
   seedTriggers();
   respond = (method, url) => {
@@ -1740,9 +1745,33 @@ test("coding-agents: home shows the compiled pages as a folder, not as recent pa
   };
   await wikiPage(globalThis.LB.api);
   await drain();
-  assert.equal(el("coding-agents-section").hidden, false);
   const recent = walk(el("recent-list"), ".wiki-row__slug").map((n) => n.textContent);
   assert.deepEqual(recent, ["kestrel-routes"]);
+  assert.equal(el("home-ca-hint").hidden, false);
+  assert.match(el("home-ca-hint").textContent, /compiled coding-agent pages are filed under Coding agents/);
+  assert.equal(walk(el("home-ca-hint"), "a")[0].href, "wiki.html?view=coding-agents");
+
+  // A filter finds them again, as plain rows.
+  el("list-filter").value = "decisions";
+  await el("list-filter").fire("input");
+  const found = walk(el("recent-list"), ".wiki-row__slug").map((n) => n.textContent);
+  assert.ok(found.includes("coding-agents--claude--demo--decisions"), String(found));
+});
+
+test("coding-agents: ?view=coding-agents shows the compiled pages as a folder tree", async () => {
+  reset({ search: "?view=coding-agents" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages?limit=200") return json(CA_PAGES);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("coding-agents-view").hidden, false);
+  assert.equal(el("home-view").hidden, true);
+  assert.equal(el("coding-agents-section").hidden, false);
+  assert.equal(el("ca-empty").hidden, true);
   const folders = walk(el("coding-agents-tree"), "summary").map((n) => n.textContent);
   assert.deepEqual(folders, ["coding-agents/", "claude/", "demo/", "codex/", "demo/", "projects/"]);
   const links = walk(el("coding-agents-tree"), "a").map((a) => a.href);
@@ -2262,8 +2291,8 @@ test("coding-agents tree: synced agents and projects are folders before any page
   assert.equal(sessionsPath({ agent: "Bad One" }), "/v1/sources?kind=agent_log&limit=50");
 });
 
-test("coding-agents: home shows colonizer/ from synced sessions, linking to its sessions", async () => {
-  reset({ search: "" });
+test("coding-agents: the view shows colonizer/ from synced sessions, linking to its sessions", async () => {
+  reset({ search: "?view=coding-agents" });
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
@@ -2313,4 +2342,161 @@ test("agent sessions: ?agent= filters the list, and the agent select changes it"
   await drain();
   assert.ok(calls.some((call) => call.url === "/v1/sources?kind=agent_log&limit=50&agent=codex"));
   assert.equal(replacedUrls.at(-1), "wiki.html?view=sessions&agent=codex");
+});
+
+/* ------------------------------------- the shell's views (ux-navigation) */
+
+test("ask view: one box — Enter with no page picked asks, and the answer lands under it", async () => {
+  reset({ search: "?view=ask" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url.startsWith("/v1/search?")) {
+      return json({ results: [{ title: "Kestrel", url: "https://app.test/wiki?slug=kestrel&scope=shared", snippet: "k" }] });
+    }
+    if (method === "POST" && url === "/v1/ask") {
+      return json({
+        answer: "Kestrel is owned by [[ada]].",
+        citations: [{ title: "Kestrel", url: "https://app.test/wiki?slug=kestrel", quote: "owned by ada" }],
+      });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("ask-view").hidden, false);
+  assert.equal(el("home-view").hidden, true);
+  assert.equal(globalThis.document.body.dataset.view, "ask");
+  assert.ok(focused.includes(el("wiki-search")), "the box takes the focus");
+  assert.equal(el("ask-view-result").hidden, true, "nothing asked yet");
+
+  el("wiki-search").value = "who owns kestrel";
+  await el("wiki-search").fire("input");
+  await wait(260);
+  await drain();
+  assert.equal(el("wiki-search-results").hidden, false, "pages match as you type");
+
+  // Enter with no option active: a question, not the first hit.
+  await el("wiki-search").fire("keydown", { key: "Enter" });
+  await drain();
+  assert.deepEqual(assigns, [], "no page was opened");
+  const post = calls.find((call) => call.method === "POST");
+  assert.equal(post.url, "/v1/ask");
+  assert.deepEqual(JSON.parse(post.init.body), { question: "who owns kestrel" });
+  assert.equal(el("ask-view-result").hidden, false);
+  assert.match(el("ask-view-answer").textContent, /Kestrel is owned by/);
+  assert.equal(walk(el("ask-view-citations"), "blockquote").length, 1);
+  assert.equal(el("wiki-search-results").hidden, true, "the hits make way for the answer");
+  assert.equal(replacedUrls.at(-1), "wiki.html?view=ask&q=who%20owns%20kestrel", "the address keeps the question");
+  assert.equal(el("ask-go").disabled, false);
+
+  // The form's submit (the Ask button) is the same path.
+  calls.length = 0;
+  await el("wiki-search-form").fire("submit");
+  await drain();
+  assert.ok(calls.some((call) => call.method === "POST" && call.url === "/v1/ask"));
+});
+
+test("ask view: ?q= pre-fills the box and asks at once; signed out says sign in", async () => {
+  reset({ search: "?view=ask&q=what%20is%20kestrel" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (method === "POST" && url === "/v1/ask") return json({ answer: "A router.", citations: [] });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("wiki-search").value, "what is kestrel");
+  assert.equal(JSON.parse(calls.find((call) => call.method === "POST").init.body).question, "what is kestrel");
+  assert.match(el("ask-view-answer").textContent, /A router\./);
+
+  reset({ search: "?view=ask&q=x" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json({ title: "Unauthorized" }, 401);
+    return json({ title: "Unauthorized" }, 401);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(calls.some((call) => call.method === "POST"), false, "nothing is asked signed out");
+  assert.match(el("wiki-notice").textContent, /Sign in to search and ask the brain\./);
+});
+
+test("imports view: lists kind=import sources and reads one when it is opened", async () => {
+  reset({ search: "?view=imports" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources?kind=import&limit=50") {
+      return json({
+        sources: [
+          { id: "01HIMPORTA", kind: "import", scope: "shared", path: "notes/one.md", project: "demo", created_at: "2026-10-01T10:00:00Z" },
+          { id: "01HIMPORTB", kind: "import", scope: "personal", path: "notes/two.md", project: null, created_at: "2026-10-02T10:00:00Z" },
+        ],
+        next_cursor: null,
+      });
+    }
+    if (url === "/v1/sources/01HIMPORTA") return json({ id: "01HIMPORTA", kind: "import", body: "---\ntitle: One\n---\n# One\n\nA **note**." });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("imports-view").hidden, false);
+  assert.equal(el("imports-list").hidden, false);
+  assert.equal(el("imports-empty").hidden, true);
+  assert.equal(el("imports-more").hidden, true);
+  assert.match(el("imports-status").textContent, /2 imports/);
+  const rows = el("imports-list").children;
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /notes\/one\.md/);
+  const details = rows[0].children[0];
+  details.open = true;
+  await details.fire("toggle");
+  await drain();
+  assert.ok(calls.some((call) => call.url === "/v1/sources/01HIMPORTA"));
+  assert.ok(walk(details, "strong").length > 0, "the body went through the Markdown renderer");
+  assert.doesNotMatch(details.textContent, /title: One/, "the frontmatter fence is not shown");
+  // Opening it again does not fetch again.
+  const before = calls.length;
+  await details.fire("toggle");
+  assert.equal(calls.length, before);
+});
+
+test("imports view: none yet explains how to import", async () => {
+  reset({ search: "?view=imports" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url.startsWith("/v1/sources?kind=import")) return json({ sources: [], next_cursor: null });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("imports-list").hidden, true);
+  assert.equal(el("imports-empty").hidden, false);
+});
+
+test("?view=new opens the new-page form; a page shows its breadcrumbs", async () => {
+  reset({ search: "?view=new" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url === "/v1/pages/hello") return json(HELLO);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("new-page-view").hidden, false);
+  assert.ok(focused.includes(el("np-slug")));
+
+  reset({ search: "?slug=hello" });
+  seedTriggers();
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  const crumbs = walk(el("page-crumbs"), "li").map((li) => li.textContent);
+  assert.deepEqual(crumbs, ["Pages", "Hello"]);
+  assert.equal(walk(el("page-crumbs"), "a")[0].getAttribute("href"), "wiki.html");
+  assert.equal(globalThis.document.body.dataset.view, "page");
 });
