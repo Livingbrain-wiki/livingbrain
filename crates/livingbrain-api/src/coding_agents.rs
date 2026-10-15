@@ -421,31 +421,57 @@ struct UsageGate {
 #[async_trait::async_trait]
 impl Gate for UsageGate {
     async fn over_budget(&self, workspace: &str) -> bool {
-        let now = self.clock.now();
-        let today = livingbrain_usage::utc_day(now);
-        let first = format!("{}-01", &today[..7]);
-        let Ok(rows) = livingbrain_usage::days(&*self.db, workspace, &first, &today).await else {
-            return false;
-        };
-        let mtd = livingbrain_usage::month_to_date(&rows, now);
-        let model = match invoke::serving(&*self.db, workspace, MODEL_ROLE).await {
-            Ok(Some(serving)) => livingbrain_usage::model_cost_micro_usd(
+        let serving = invoke::serving(&*self.db, workspace, MODEL_ROLE)
+            .await
+            .ok()
+            .flatten();
+        over_budget(
+            &*self.db,
+            &*self.config,
+            &*self.clock,
+            workspace,
+            serving.as_ref(),
+        )
+        .await
+    }
+}
+
+/// Whether `workspace` is past its monthly budget
+/// (`USAGE_BUDGET_CENTS_MONTHLY`), read the way `GET /v1/usage/daily` reads
+/// it: month-to-date model tokens priced by `serving` (the connection that
+/// would run the call; unpriced or `None` counts zero), plus mail. The one
+/// rule both the compiler's gate and `POST /v1/ask` answer to. A ledger
+/// that cannot be read is not over — a lost read must not stop the brain.
+pub(crate) async fn over_budget(
+    db: &dyn Database,
+    config: &dyn Config,
+    clock: &dyn Clock,
+    workspace: &str,
+    serving: Option<&invoke::Serving>,
+) -> bool {
+    let now = clock.now();
+    let today = livingbrain_usage::utc_day(now);
+    let first = format!("{}-01", &today[..7]);
+    let Ok(rows) = livingbrain_usage::days(db, workspace, &first, &today).await else {
+        return false;
+    };
+    let mtd = livingbrain_usage::month_to_date(&rows, now);
+    let model = serving
+        .and_then(|serving| {
+            livingbrain_usage::model_cost_micro_usd(
                 &serving.provider,
                 &serving.model,
                 mtd.prompt_tokens,
                 mtd.completion_tokens,
             )
-            .unwrap_or(0),
-            _ => 0,
-        };
-        let total = model + livingbrain_usage::email_cost_micro_usd(mtd.emails_sent);
-        let budget = self
-            .config
-            .get("USAGE_BUDGET_CENTS_MONTHLY")
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or(livingbrain_usage::DEFAULT_BUDGET_CENTS_MONTHLY);
-        livingbrain_usage::status(total, budget) == livingbrain_usage::BudgetStatus::Over
-    }
+        })
+        .unwrap_or(0);
+    let total = model + livingbrain_usage::email_cost_micro_usd(mtd.emails_sent);
+    let budget = config
+        .get("USAGE_BUDGET_CENTS_MONTHLY")
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(livingbrain_usage::DEFAULT_BUDGET_CENTS_MONTHLY);
+    livingbrain_usage::status(total, budget) == livingbrain_usage::BudgetStatus::Over
 }
 
 /// `GET /queue` — the asker's jobs and where the queue stands.

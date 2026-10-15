@@ -94,6 +94,13 @@ impl Fixture {
         self.db.clone()
     }
 
+    /// The harness's own clock.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
     /// An ingest pipeline over this fixture's own ports, so a test can put a
     /// source through the real pipeline and read it back through the route.
     /// `defer` is the caller's — a test asserting on deferred work passes
@@ -177,6 +184,30 @@ pub fn slug_in(url: &str) -> Option<&str> {
 /// One workspace with two people, and the first person's id again in a
 /// second workspace.
 pub fn fixture() -> Fixture {
+    fixture_with(None, None)
+}
+
+/// [`fixture`], with `POST /v1/ask` answering through `model` — a test's
+/// scripted stand-in for the workspace's connected model.
+#[allow(dead_code)]
+pub fn fixture_with_ask_model(model: Arc<dyn livingbrain_api::AskModel>) -> Fixture {
+    fixture_with(Some(model), None)
+}
+
+/// [`fixture_with_ask_model`], also answering to a session cookie through
+/// `session` — the web app's way in.
+#[allow(dead_code)]
+pub fn fixture_with_session(
+    model: Arc<dyn livingbrain_api::AskModel>,
+    session: Arc<dyn livingbrain_api::SessionAuth>,
+) -> Fixture {
+    fixture_with(Some(model), Some(session))
+}
+
+fn fixture_with(
+    ask_model: Option<Arc<dyn livingbrain_api::AskModel>>,
+    session: Option<Arc<dyn livingbrain_api::SessionAuth>>,
+) -> Fixture {
     let askers = [
         (TOKEN_A, WORKSPACE, "user-a"),
         (TOKEN_B, WORKSPACE, "user-b"),
@@ -214,6 +245,10 @@ pub fn fixture() -> Fixture {
     // routes can open.
     let memory: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
     let wiki = Wiki::new(Arc::clone(&key), Arc::clone(&auth));
+    let wiki = match session {
+        Some(session) => wiki.with_session(session),
+        None => wiki,
+    };
 
     let wiki_for_routes = wiki.clone();
     let pages = Pages::new().surface(move |ctx| pages_routes(ctx, &wiki_for_routes));
@@ -221,7 +256,10 @@ pub fn fixture() -> Fixture {
         Box::new(pages),
         Box::new(Notes::new(wiki.clone())),
         Box::new(Search::new(wiki.clone())),
-        Box::new(Ask::new(wiki.clone())),
+        Box::new(match ask_model {
+            Some(model) => Ask::new(wiki.clone()).with_model(model),
+            None => Ask::new(wiki.clone()),
+        }),
         Box::new(Export::new(wiki.clone())),
         Box::new(Facts::new(wiki.clone())),
         Box::new(Sources::new(wiki.clone())),

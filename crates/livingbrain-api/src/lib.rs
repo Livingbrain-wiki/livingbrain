@@ -78,7 +78,10 @@ mod service;
 mod sources;
 mod zip;
 
-pub use ask::Ask;
+pub use ask::{
+    ASK_ROLE, Ask, AskModel, MAX_ANSWER_TOKENS, MAX_CONTEXT_CHARS, MAX_QUESTION_CHARS,
+    MODEL_FAILED, NO_MODEL, OVER_BUDGET,
+};
 pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, StoreFacts};
 pub use export::Export;
 pub use facts::Facts;
