@@ -1,0 +1,18 @@
+---
+source: crates/livingbrain-venture/tests/mail.rs
+expression: mail.text
+---
+Sign in to Living Brain
+
+Use the button below to sign in to Living Brain.
+
+Sign in:
+https://api.livingbrain.wiki/v1/workspaces/email/verify?token=example-token
+
+This link works once, for the next 15 minutes.
+
+If you didn't ask for this, ignore it — nothing has happened.
+
+--
+Sent to ada@example.com because someone asked to sign in to Living Brain with this address.
+Living Brain · https://livingbrain.wiki · hello@livingbrain.wiki

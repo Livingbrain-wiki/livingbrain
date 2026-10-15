@@ -34,6 +34,11 @@
 //! through it. [`Turns`] is its sibling for issue #7: several people can
 //! talk in one thread at once, and what serialises the agent's turns is a
 //! per-conversation coordinator only the composition can provide.
+//!
+//! [`SignInMail`] is one more seam of the same kind: the venture's mail theme
+//! and template crate are the composition's, so the composition renders the
+//! sign-in mail and this module keeps what makes it safe to send — the link,
+//! its lifetime and the per-link idempotency key.
 
 #![forbid(unsafe_code)]
 
@@ -151,6 +156,41 @@ pub trait EmailLedger: Send + Sync {
     async fn record_email(&self, db: &dyn Database, now: OffsetDateTime, workspace_id: &str);
 }
 
+/// What a sign-in mail has to say, handed to a [`SignInMail`] renderer.
+///
+/// Only the three facts the mail is about, and nothing a renderer could leak
+/// by accident: the token reaches it inside `link` because the link *is* the
+/// mail, but neither the stored token hash nor the idempotency key does —
+/// the key is set by this module after the renderer returns, so no renderer
+/// can change what makes a provider retry collapse.
+#[derive(Debug, Clone, Copy)]
+pub struct SignInMailInput<'a> {
+    /// The single-use link the mail exists to deliver.
+    pub link: &'a str,
+    /// How long the link lives, in whole minutes.
+    pub minutes: i64,
+    /// The address the mail goes to, for a "sent to … because …" line.
+    pub recipient: &'a str,
+}
+
+/// Renders the sign-in mail's subject, HTML and text, for the composition to
+/// inject (the branded sign-in mail).
+///
+/// A seam rather than a dependency for the reason the crate's `Cargo.toml`
+/// records: a module may name only the Cratefield ports, so the template
+/// crate and the venture's theme — both of which belong to the composition —
+/// cannot be reached from here. What this module may hold is "a way to turn
+/// a link into a mail", which is exactly this. With none injected the module
+/// renders its own plain mail, so a composition with no theme still signs
+/// people in.
+pub trait SignInMail: Send + Sync {
+    /// The rendered mail for `input`. Infallible on purpose: a renderer has
+    /// nothing to fail on but its own bug, and a sign-in that cannot send
+    /// because a theme was malformed is worse than an unbranded one — a
+    /// composition that can fail validates its theme before injecting it.
+    fn render(&self, input: &SignInMailInput<'_>) -> cratefield_core::Rendered;
+}
+
 /// Workspaces, Slack sign-in and the member mirror.
 #[derive(Default)]
 pub struct Workspaces {
@@ -165,9 +205,12 @@ pub struct Workspaces {
     /// `None` is a composition that mounted no usage module: mail still
     /// sends, nothing counts it.
     ledger: Option<Arc<dyn EmailLedger>>,
+    /// The seam the sign-in mail renders through. `None` is the module's
+    /// own plain mail.
+    sign_in_mail: Option<Arc<dyn SignInMail>>,
 }
 
-// The two seams are `dyn`s and not a `Debug`; the module itself is still
+// The seams are `dyn`s and not a `Debug`; the module itself is still
 // one, so a composition that prints its modules keeps working.
 impl std::fmt::Debug for Workspaces {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -175,6 +218,7 @@ impl std::fmt::Debug for Workspaces {
             .field("answers", &self.answers.is_some())
             .field("turns", &self.turns.is_some())
             .field("ledger", &self.ledger.is_some())
+            .field("sign_in_mail", &self.sign_in_mail.is_some())
             .finish()
     }
 }
@@ -221,6 +265,19 @@ impl Workspaces {
     #[must_use]
     pub fn email_ledger(mut self, ledger: Arc<dyn EmailLedger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Render each sign-in mail through `mail`, the composition's branded
+    /// renderer, instead of the module's plain one.
+    ///
+    /// Injected rather than built here for the reason recorded on
+    /// [`SignInMail`]: the theme and the template crate are the venture's.
+    /// The per-link idempotency key is still this module's, set after `mail`
+    /// renders, so a renderer cannot weaken it.
+    #[must_use]
+    pub fn sign_in_mail(mut self, mail: Arc<dyn SignInMail>) -> Self {
+        self.sign_in_mail = Some(mail);
         self
     }
 }
@@ -438,6 +495,7 @@ impl Module for Workspaces {
             self.answers.clone(),
             self.turns.clone(),
             self.ledger.clone(),
+            self.sign_in_mail.clone(),
         )
     }
 }

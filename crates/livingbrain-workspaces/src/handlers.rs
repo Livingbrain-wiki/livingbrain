@@ -23,7 +23,8 @@ use cratefield_core::axum::routing::{get, post};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{
     Clock, Database, DbError, IdGen, MailError, Message, ModuleContext, Problem, ProblemDef,
-    SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email, origin_of,
+    Rendered, SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email,
+    origin_of,
 };
 use cratefield_kms::Kms;
 use livingbrain_pages::Answers;
@@ -31,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
-use crate::EmailLedger;
 use crate::config::{self, Settings};
 use crate::conversation::{LocalTurns, Turns};
 use crate::events;
@@ -40,6 +40,7 @@ use crate::flow::{self, Flow, Session};
 use crate::install;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
+use crate::{EmailLedger, SignInMail, SignInMailInput};
 
 /// A cookie-carrying write a browser reports as coming from another site.
 /// The same refusal `livingbrain-tokens` answers its cookie writes with.
@@ -207,6 +208,9 @@ pub(crate) struct ModuleState {
     /// The seam the cost ledger counts an email send through (issue #12).
     /// `None` is a composition that mounted no usage module.
     ledger: Option<Arc<dyn EmailLedger>>,
+    /// What renders a sign-in mail: the composition's branded renderer when
+    /// one was injected, [`PlainSignInMail`] otherwise.
+    sign_in_mail: Arc<dyn SignInMail>,
 }
 
 impl ModuleState {
@@ -248,6 +252,7 @@ pub(crate) fn router(
     answers: Option<Arc<dyn Answers>>,
     turns: Option<Arc<dyn Turns>>,
     ledger: Option<Arc<dyn EmailLedger>>,
+    sign_in_mail: Option<Arc<dyn SignInMail>>,
 ) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
@@ -264,6 +269,7 @@ pub(crate) fn router(
         answers,
         turns: turns.unwrap_or_else(|| Arc::new(LocalTurns::default())),
         ledger,
+        sign_in_mail: sign_in_mail.unwrap_or_else(|| Arc::new(PlainSignInMail)),
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))
@@ -1248,7 +1254,7 @@ async fn email_start(
     .map_err(database)?;
 
     let link = format!("{public_base}/v1/workspaces/email/verify?token={token}");
-    let message = sign_in_mail(&state.mail_from, &email, &link);
+    let message = sign_in_message(&*state.sign_in_mail, &state.mail_from, &email, &link);
     match mailer.send(message).await {
         Ok(SendOutcome::Sent { .. }) => {}
         // A mailer that is wired but has no key sends nothing. That is a
@@ -1293,45 +1299,74 @@ impl ModuleState {
     }
 }
 
-/// A sign-in mail, rendered here rather than through a template crate: a
-/// module may depend on `cratefield-core` and pure Rust, and this venture's
-/// mail theme belongs to the module that owns it.
+/// The module's own sign-in mail, for a composition that injected no
+/// [`SignInMail`]: rendered here rather than through a template crate,
+/// because a module may depend on `cratefield-core` and pure Rust, and a
+/// venture's mail theme belongs to the composition that owns it.
 ///
 /// The link is the only thing the body has to say, so the text part is one
 /// line and the HTML part is the same sentence in a link.
-fn sign_in_mail(from: &str, to: &str, link: &str) -> Message {
-    let minutes = flow::SIGN_IN_TTL_SECS / 60;
-    let text = format!(
-        "Your Living Brain sign-in link:\n\n{link}\n\nIt works once, and for the next \
-         {minutes} minutes. If you did not ask for it, ignore this message — nothing has \
-         happened yet."
-    );
-    let html = format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <title>Your Living Brain sign-in link</title>\n</head>\n<body>\n\
-         <h1>Sign in to Living Brain</h1>\n\
-         <p>This link works once, and for the next {minutes} minutes.</p>\n\
-         <p><a href=\"{link}\">Sign in</a></p>\n\
-         <p>If you did not ask for it, ignore this message — nothing has happened yet.</p>\n\
-         </body>\n</html>\n"
-    );
-    Message::new(
-        to.to_owned(),
-        from.to_owned(),
-        "Your Living Brain sign-in link",
-        text,
+pub(crate) struct PlainSignInMail;
+
+impl SignInMail for PlainSignInMail {
+    fn render(&self, input: &SignInMailInput<'_>) -> Rendered {
+        let SignInMailInput { link, minutes, .. } = *input;
+        let text = format!(
+            "Your Living Brain sign-in link:\n\n{link}\n\nIt works once, and for the next \
+             {minutes} minutes. If you did not ask for it, ignore this message — nothing has \
+             happened yet."
+        );
+        let html = format!(
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+             <title>Your Living Brain sign-in link</title>\n</head>\n<body>\n\
+             <h1>Sign in to Living Brain</h1>\n\
+             <p>This link works once, and for the next {minutes} minutes.</p>\n\
+             <p><a href=\"{link}\">Sign in</a></p>\n\
+             <p>If you did not ask for it, ignore this message — nothing has happened yet.</p>\n\
+             </body>\n</html>\n"
+        );
+        Rendered {
+            subject: "Your Living Brain sign-in link".to_owned(),
+            html,
+            text,
+        }
+    }
+}
+
+/// The sign-in mail for `link`, rendered by `renderer` and keyed here.
+///
+/// The renderer decides only what the mail looks like. The idempotency key
+/// is set after it returns, from the link alone, so swapping the plain mail
+/// for the venture's branded one cannot change when a provider collapses a
+/// retried send.
+fn sign_in_message(renderer: &dyn SignInMail, from: &str, to: &str, link: &str) -> Message {
+    let Rendered {
+        subject,
         html,
-    )
-    // A provider that retried the same send collapses it instead of
-    // mailing twice. The key is per *link*, not per address: keyed on the
-    // address, every later sign-in to it reused the key with a new body and
-    // Owlpost refused it (409 idempotency-conflict), so an address could be
-    // mailed exactly once. It is a domain-separated SHA-256 of the link, so
-    // neither the token nor the stored token hash reaches a third party.
-    .idempotency_key(format!(
-        "workspaces-sign-in-{}",
-        token_hash(&format!("idempotency-key:{link}"))
-    ))
+        text,
+    } = renderer.render(&SignInMailInput {
+        link,
+        minutes: flow::SIGN_IN_TTL_SECS / 60,
+        recipient: to,
+    });
+    Message::new(to.to_owned(), from.to_owned(), subject, text, html)
+        // A provider that retried the same send collapses it instead of
+        // mailing twice. The key is per *link*, not per address: keyed on the
+        // address, every later sign-in to it reused the key with a new body and
+        // Owlpost refused it (409 idempotency-conflict), so an address could be
+        // mailed exactly once. It is a domain-separated SHA-256 of the link, so
+        // neither the token nor the stored token hash reaches a third party.
+        .idempotency_key(format!(
+            "workspaces-sign-in-{}",
+            token_hash(&format!("idempotency-key:{link}"))
+        ))
+}
+
+/// The module's plain sign-in mail: what a composition with no renderer
+/// sends, and what the key tests below pin.
+#[cfg(test)]
+fn sign_in_mail(from: &str, to: &str, link: &str) -> Message {
+    sign_in_message(&PlainSignInMail, from, to, link)
 }
 
 /// A mail the provider refused. The error's `Display` is already scrubbed
@@ -1740,6 +1775,37 @@ mod tests {
             "a new link gets a new key"
         );
         assert!(!key.contains("t1") && !key.contains(&token_hash("t1")));
+    }
+
+    /// An injected renderer decides what the mail says and nothing else: it
+    /// is handed the link, the link's lifetime and the recipient, its three
+    /// parts are what is sent, and the idempotency key is the one the plain
+    /// mail for the same link carries — the renderer cannot touch it.
+    #[test]
+    fn an_injected_renderer_writes_the_body_and_the_module_keeps_the_key() {
+        struct Echo;
+        impl SignInMail for Echo {
+            fn render(&self, input: &SignInMailInput<'_>) -> Rendered {
+                Rendered {
+                    subject: "branded".to_owned(),
+                    html: format!("<a href=\"{}\">{}</a>", input.link, input.recipient),
+                    text: format!("{} for {} minutes", input.link, input.minutes),
+                }
+            }
+        }
+        let link = "https://app.example/v1/workspaces/email/verify?token=t1";
+        let branded = sign_in_message(&Echo, "from@x.test", "a@x.test", link);
+        let plain = sign_in_mail("from@x.test", "a@x.test", link);
+        assert_eq!(branded.subject, "branded");
+        assert_eq!(branded.html, format!("<a href=\"{link}\">a@x.test</a>"));
+        assert_eq!(
+            branded.text,
+            format!("{link} for {} minutes", flow::SIGN_IN_TTL_SECS / 60)
+        );
+        assert_eq!(branded.to, "a@x.test");
+        assert_eq!(branded.from, "from@x.test");
+        assert!(branded.idempotency_key.is_some());
+        assert_eq!(branded.idempotency_key, plain.idempotency_key);
     }
 
     /// The verify page carries a live token in its URL and in a hidden

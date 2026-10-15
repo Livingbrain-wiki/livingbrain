@@ -26,7 +26,8 @@
 //! `Harness::build` refuses a composition that leaves any of them unwired.
 //!
 //! Mail goes through Owlpost (`cratefield-adapter-owlpost`); the waitlist's
-//! confirm mails render through `themed_templates(&mail_theme())`.
+//! confirm mails render through `themed_templates(&mail_theme())`, and the
+//! workspaces sign-in mail through [`ThemedSignInMail`] over the same theme.
 #![forbid(unsafe_code)]
 
 use cratefield_adapter_owlpost::Owlpost;
@@ -38,10 +39,10 @@ use cratefield_core::axum::http::{
 use cratefield_core::axum::response::Response as AxumResponse;
 use cratefield_core::{
     Blob, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes, RandomError,
-    Template, Venture,
+    Rendered, Template, Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
-use cratefield_mail_templates::MailTheme;
+use cratefield_mail_templates::{MailTheme, Message as MailBody};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
 use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
@@ -56,7 +57,8 @@ use livingbrain_tokens::{DevicePorts, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
-    Admit, EmailLedger, Exchange, LocalTurns, Pending, Turn, TurnError, Turns, Workspaces,
+    Admit, EmailLedger, Exchange, LocalTurns, Pending, SignInMail, SignInMailInput, Turn,
+    TurnError, Turns, Workspaces,
 };
 use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
@@ -150,6 +152,54 @@ const DEFAULT_MAIL_FROM: &str = "Living Brain <hello@livingbrain.wiki>";
 pub fn mail_theme() -> MailTheme {
     MailTheme::from_json(include_str!("mail-theme.json"))
         .expect("mail-theme.json is a valid MailTheme")
+}
+
+/// The workspaces sign-in mail in this venture's theme: the logo, the brand
+/// palette in light and dark, a primary button and the pasteable link — the
+/// same shell the waitlist's confirm mails wear, so the first mail a person
+/// gets from Living Brain looks like the product rather than a bare page.
+///
+/// The module renders a plain mail of its own when nothing is injected; this
+/// is what the composition injects instead ([`SignInMail`]). The module keeps
+/// the per-link idempotency key, so nothing here can change it.
+pub struct ThemedSignInMail {
+    theme: MailTheme,
+}
+
+impl ThemedSignInMail {
+    /// The renderer over `theme`; the Worker passes [`mail_theme`].
+    #[must_use]
+    pub fn new(theme: MailTheme) -> Self {
+        Self { theme }
+    }
+}
+
+impl SignInMail for ThemedSignInMail {
+    fn render(&self, input: &SignInMailInput<'_>) -> Rendered {
+        let minutes = input.minutes;
+        MailBody::new("Your Living Brain sign-in link", "Sign in to Living Brain")
+            .preheader(format!(
+                "Your sign-in link works once, for the next {minutes} minutes."
+            ))
+            .paragraph("Use the button below to sign in to Living Brain.")
+            .button("Sign in", input.link)
+            .fallback_link()
+            .note(format!(
+                "This link works once, for the next {minutes} minutes."
+            ))
+            .note("If you didn't ask for this, ignore it — nothing has happened.")
+            .recipient(input.recipient)
+            .why("someone asked to sign in to Living Brain with this address")
+            .render(&self.theme)
+            .into()
+    }
+}
+
+/// The sign-in mail renderer the Worker injects into `workspaces`. A function
+/// so a native test renders exactly the mail the Worker sends.
+#[must_use]
+pub fn sign_in_mail() -> Arc<dyn SignInMail> {
+    Arc::new(ThemedSignInMail::new(mail_theme()))
 }
 
 /// The mail settings resolved from the Worker's `Env`.
@@ -267,7 +317,10 @@ fn build(
                 Workspaces::new()
                     .answering(Arc::new(answers.clone()))
                     .taking_turns(Arc::new(turns.clone()))
-                    .email_ledger(Arc::new(UsageLedger)),
+                    .email_ledger(Arc::new(UsageLedger))
+                    // The sign-in mail in the venture's theme, not the
+                    // module's plain fallback.
+                    .sign_in_mail(sign_in_mail()),
             )
             .module(Models::new())
             .module(Tools::new())
@@ -644,6 +697,47 @@ fn serves_cli(harness: &Harness, path: &str) -> bool {
     diverted && harness.modules().iter().any(|m| m.name() == "notes")
 }
 
+/// The device grant's approval page (issue #72): `GET /v1/device-auth`, the
+/// one `/v1` document whose form posts back to `/v1`.
+const DEVICE_PAGE: &str = "/v1/device-auth";
+
+/// The `Referrer-Policy` the approval page must carry instead of the
+/// harness's `no-referrer`, or `None` for every other response.
+///
+/// **Why.** The harness stamps `Referrer-Policy: no-referrer` on every
+/// `/v1/*` response (`cratefield-core` 0.8.0, `security_headers_layer` in
+/// `src/http.rs`). That is right for JSON, but the device grant's page
+/// (`cratefield-module-device-auth` 0.3.0, `approval_page` in
+/// `src/handlers.rs`) is a document with two `<form method="post">`
+/// buttons, and the Fetch standard's "append a request `Origin` header"
+/// step serializes the origin of a non-`GET` request as `null` when the
+/// request's referrer policy is `no-referrer` — and a form submission
+/// inherits that policy from the page that holds the form. So every press of
+/// Approve or Deny reached `/v1/device-auth/approve` with `Origin: null`,
+/// and the module's `require_same_origin` refuses exactly that ("origin is
+/// null; requests must come from this venture's own origin", 403). The
+/// module has no allow-list or switch for it, and it is right not to: a
+/// `null` origin is also what a sandboxed cross-site frame sends.
+///
+/// **The policy.** `same-origin` sends the real origin (and the referrer) to
+/// this venture's own origin and nothing at all to anyone else, so the
+/// approve POST carries `Origin: https://<this host>` and passes the check,
+/// while the page's URL — which holds the `user_code` — still never reaches
+/// another site. It is the narrowest policy under which the form works.
+///
+/// **Scope.** Only `GET`/`HEAD` of the page itself, whatever it answers:
+/// the code form, the unknown-code page, the approval page, or the `303` to
+/// sign-in (a redirect's policy governs the next hop, which is this
+/// venture's own sign-in page). The decision `POST`s answer documents with
+/// no form and keep `no-referrer`, and so does every other `/v1` route —
+/// the workspaces email-verify page in particular, whose URL carries a live
+/// sign-in token and which sets `no-referrer` itself.
+fn page_referrer_policy(method: &str, path: &str) -> Option<&'static str> {
+    let is_page = path == DEVICE_PAGE || path.strip_suffix('/') == Some(DEVICE_PAGE);
+    let is_read = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");
+    (is_page && is_read).then_some("same-origin")
+}
+
 #[event(fetch)]
 /// Worker fetch entry point.
 ///
@@ -664,7 +758,17 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
     if serves_cli(harness, req.path().as_str()) {
         return serve_cli(harness, runtime, req, env, ctx).await;
     }
-    serve(harness, runtime, req, env, ctx).await
+    // Read before `serve` takes the request; see `page_referrer_policy`.
+    let referrer_policy = page_referrer_policy(req.method().as_ref(), &req.path());
+    let mut response = serve(harness, runtime, req, env, ctx).await?;
+    if let Some(policy) = referrer_policy {
+        // `set` replaces the harness's `no-referrer` rather than adding a
+        // second value. A failure leaves the stricter header standing, which
+        // breaks the button but never weakens anything, so it is not worth
+        // failing the page over.
+        let _ = response.headers_mut().set("referrer-policy", policy);
+    }
+    Ok(response)
 }
 
 /// Serves one of the five CLI paths ([`CLI_ROUTES`]) through the harness
@@ -908,6 +1012,157 @@ mod tests {
         }
         for route in CLI_ROUTES {
             assert!(!serves_cli(&harness, route), "{route}");
+        }
+    }
+
+    /// The device grant and the tokens module that answers its hooks, over
+    /// the kit's fakes and this venture's `venture()` — the two modules the
+    /// approval page and its decision forms run through.
+    fn device_kit() -> cratefield_testing::TestHarness {
+        let ports = DevicePorts::new();
+        cratefield_testing::TestHarness::with_builder(
+            vec![
+                Box::new(device_auth_module(&ports)),
+                Box::new(tokens_module(ports)),
+            ],
+            |builder| builder.venture(venture()),
+            |_| {},
+        )
+    }
+
+    /// One request through the kit's router, with the headers a browser
+    /// on `https://app.livingbrain.wiki` would send.
+    async fn send(
+        kit: &cratefield_testing::TestHarness,
+        method: HttpMethod,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> AxumResponse {
+        let mut builder = HttpRequest::builder()
+            .method(method)
+            .uri(format!("https://app.livingbrain.wiki{path}"))
+            .header(header::HOST, "app.livingbrain.wiki");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder
+            .body(Body::from(body.to_owned()))
+            .expect("a well-formed request");
+        kit.router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("the router is infallible")
+    }
+
+    /// The production failure, end to end through the harness and the
+    /// pinned device-auth module: the page leaves the harness carrying
+    /// `no-referrer`, a form posted from a `no-referrer` page arrives with
+    /// `Origin: null`, and the module refuses that with the 403 people saw.
+    /// The override replaces the page's policy with `same-origin`, under
+    /// which the same form arrives with this host's real origin — and the
+    /// module lets that through to the approver (here, an anonymous visitor
+    /// is sent to sign in: past the origin check, not stopped by it).
+    #[pollster::test]
+    async fn the_approval_form_posts_a_real_origin_and_passes_the_check() {
+        let kit = device_kit();
+
+        // The page: the harness stamps `no-referrer`, the venture swaps it.
+        let page = send(
+            &kit,
+            HttpMethod::GET,
+            "/v1/device-auth?user_code=ABCD-EFGH",
+            &[("sec-fetch-site", "none")],
+            "",
+        )
+        .await;
+        let mut headers = page.headers().clone();
+        assert_eq!(
+            headers.get("referrer-policy").map(HeaderValue::as_bytes),
+            Some(&b"no-referrer"[..]),
+            "the harness's stamp, which the fix overrides"
+        );
+        let policy = page_referrer_policy("GET", "/v1/device-auth")
+            .expect("the approval page gets its own policy");
+        headers.insert("referrer-policy", HeaderValue::from_static(policy));
+        // Under `same-origin` the Fetch standard serializes a same-origin
+        // POST's `Origin` as the page's own origin; under `no-referrer` it
+        // is `null`. Nothing laxer than that is allowed through.
+        assert_eq!(
+            headers.get("referrer-policy").map(HeaderValue::as_bytes),
+            Some(&b"same-origin"[..])
+        );
+
+        let form = [
+            ("sec-fetch-site", "same-origin"),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        // What the browser sent while the page carried `no-referrer`.
+        let mut null_origin = form.to_vec();
+        null_origin.push(("origin", "null"));
+        let refused = send(
+            &kit,
+            HttpMethod::POST,
+            "/v1/device-auth/approve",
+            &null_origin,
+            "user_code=ABCD-EFGH",
+        )
+        .await;
+        assert_eq!(refused.status(), 403, "Origin: null is refused");
+        let body = to_bytes(refused.into_body(), 64 * 1024)
+            .await
+            .expect("a problem body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("cross-site-request") && body.contains("origin is null"),
+            "the production 403: {body}"
+        );
+
+        // What it sends once the page carries `same-origin`.
+        let mut real_origin = form.to_vec();
+        real_origin.push(("origin", "https://app.livingbrain.wiki"));
+        let accepted = send(
+            &kit,
+            HttpMethod::POST,
+            "/v1/device-auth/approve",
+            &real_origin,
+            "user_code=ABCD-EFGH",
+        )
+        .await;
+        assert_eq!(
+            accepted.status(),
+            303,
+            "past the origin check: an anonymous approver is sent to sign in"
+        );
+    }
+
+    /// The override is the page's alone. The decision posts and every other
+    /// `/v1` route — the email-verify page, which carries a live sign-in
+    /// token in its URL, above all — keep the harness's `no-referrer`.
+    #[test]
+    fn only_the_device_page_relaxes_its_referrer_policy() {
+        assert_eq!(
+            page_referrer_policy("GET", "/v1/device-auth"),
+            Some("same-origin")
+        );
+        assert_eq!(
+            page_referrer_policy("HEAD", "/v1/device-auth/"),
+            Some("same-origin")
+        );
+        for (method, path) in [
+            ("POST", "/v1/device-auth"),
+            ("POST", "/v1/device-auth/approve"),
+            ("POST", "/v1/device-auth/deny"),
+            ("POST", "/v1/device-auth/code"),
+            ("POST", "/v1/device-auth/token"),
+            ("GET", "/v1/device-auth/approve"),
+            ("GET", "/v1/device-authx"),
+            ("GET", "/v1/workspaces/email/verify"),
+            ("POST", "/v1/workspaces/email/verify"),
+            ("GET", "/v1/tokens"),
+        ] {
+            assert_eq!(page_referrer_policy(method, path), None, "{method} {path}");
         }
     }
 

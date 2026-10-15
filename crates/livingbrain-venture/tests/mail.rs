@@ -1,6 +1,7 @@
 //! The venture's branded mail (issue #63): the theme parses and clears WCAG
-//! AA, the waitlist's confirm mails and a venture message render the way the
-//! snapshots beside this file say, and a send carries both parts.
+//! AA, the waitlist's confirm mails, the workspaces sign-in mail and a
+//! venture message render the way the snapshots beside this file say, and a
+//! send carries both parts.
 //!
 //! The waitlist module is not mounted yet, so these render its templates
 //! directly through `themed_templates` rather than through a harness.
@@ -10,7 +11,8 @@ use cratefield_core::{Mailer, Message, Rendered, SystemClock};
 use cratefield_mail_templates::{Email, Message as MailBody};
 use cratefield_module_waitlist::themed_templates;
 use cratefield_testing::FakeHttpClient;
-use livingbrain_venture::mail_theme;
+use livingbrain_venture::{mail_theme, sign_in_mail};
+use livingbrain_workspaces::SignInMailInput;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -134,6 +136,54 @@ fn venture_message() -> Email {
         .recipient("ada@example.com")
         .why("you have a Living Brain account")
         .render(&mail_theme())
+}
+
+/// The workspaces sign-in mail as the Worker injects it: a sample link of
+/// the shape the module mints, the module's own 15-minute lifetime.
+const SIGN_IN_LINK: &str =
+    "https://api.livingbrain.wiki/v1/workspaces/email/verify?token=example-token";
+
+fn sign_in() -> Rendered {
+    sign_in_mail().render(&SignInMailInput {
+        link: SIGN_IN_LINK,
+        minutes: 15,
+        recipient: "ada@example.com",
+    })
+}
+
+/// The sign-in mail wears the brand — the logo and both palettes' accent —
+/// and carries the link as the button and as the pasteable fallback, in
+/// the HTML part and the text part alike.
+#[test]
+fn the_sign_in_mail_is_branded_and_carries_the_link() {
+    let mail = sign_in();
+    let theme = mail_theme();
+    let logo = theme.logo_url.as_deref().expect("the theme has a logo");
+    assert!(mail.html.contains(logo), "logo missing: {}", mail.html);
+    for colour in [&theme.light.button, &theme.dark.button, &theme.light.bg] {
+        assert!(mail.html.contains(colour.as_str()), "{colour} missing");
+    }
+    assert!(mail.html.contains("Sign in to Living Brain"));
+    assert!(
+        mail.html.matches(SIGN_IN_LINK).count() >= 2,
+        "the button and the fallback link both carry it"
+    );
+    assert!(mail.html.contains("ada@example.com"), "the recipient line");
+    assert!(mail.text.contains(SIGN_IN_LINK), "{}", mail.text);
+    assert!(mail.text.contains("15 minutes"), "{}", mail.text);
+    assert!(
+        mail.text.contains("If you didn't ask for this, ignore it"),
+        "{}",
+        mail.text
+    );
+}
+
+#[test]
+fn the_sign_in_mail_renders() {
+    let mail = sign_in();
+    insta::assert_snapshot!("sign_in_subject", mail.subject);
+    insta::assert_snapshot!("sign_in_html", mail.html);
+    insta::assert_snapshot!("sign_in_text", mail.text);
 }
 
 #[test]
