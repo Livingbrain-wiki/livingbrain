@@ -275,3 +275,8 @@ WORKSPACES_REDIRECT_BASE = "https://app.livingbrain.wiki"
 DEVICE_AUTH_API_BASE = "https://app.livingbrain.wiki"
 MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
 WORKSPACES_MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
+# Coding-agents compiler budget (docs/coding-agents.md): the owner raised it to
+# compile the Colonizer backfill (489 colonies) in about a day, not a week.
+CODING_AGENTS_DAILY_TOKENS = "3000000"
+CODING_AGENTS_MONTHLY_TOKENS = "90000000"
+CODING_AGENTS_BATCH = "3"
