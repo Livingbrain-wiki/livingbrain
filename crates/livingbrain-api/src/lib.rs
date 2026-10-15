@@ -64,6 +64,7 @@
 #![forbid(unsafe_code)]
 
 mod ask;
+mod coding_agents;
 mod export;
 mod notes;
 mod pages;
@@ -76,6 +77,7 @@ mod sources;
 mod zip;
 
 pub use ask::Ask;
+pub use coding_agents::{CodingAgents, MODEL_ROLE};
 pub use export::Export;
 pub use notes::Notes;
 pub use pages::pages_routes;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use cratefield_kms::{Dek, LocalFileKms};
 use cratefield_testing::{assert_wasm_safe_deps, conformance};
-use livingbrain_api::{Ask, Export, Notes, Search, Sources, Wiki};
+use livingbrain_api::{Ask, CodingAgents, Export, Notes, Search, Sources, Wiki};
 
 /// One `Wiki` over a fresh custodian and an authenticator that
 /// refuses everything — the conformance probes mount modules and probe
@@ -49,6 +49,7 @@ fn the_sibling_modules_conform() {
     conformance(Box::new(Ask::new(wiki())));
     conformance(Box::new(Export::new(wiki())));
     conformance(Box::new(Sources::new(wiki())));
+    conformance(Box::new(CodingAgents::new(wiki())));
 }
 
 #[test]

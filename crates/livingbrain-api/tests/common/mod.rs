@@ -23,7 +23,9 @@ use cratefield_core::{Blob, Clock, Database, Defer, Ports, ScopedBlob, UlidIdGen
 use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
-use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Sources, Wiki, pages_routes};
+use livingbrain_api::{
+    Ask, CodingAgents, Export, Notes, PagesRebind, Search, Sources, Wiki, pages_routes,
+};
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
 use livingbrain_pages::{
     Author, EntityType, Ingestor, Page, PageStore, PageWrite, Pages, SourceStore,
@@ -142,7 +144,12 @@ pub fn fixture() -> Fixture {
         Box::new(Search::new(wiki.clone())),
         Box::new(Ask::new(wiki.clone())),
         Box::new(Export::new(wiki.clone())),
-        Box::new(Sources::new(wiki)),
+        Box::new(Sources::new(wiki.clone())),
+        Box::new(CodingAgents::new(wiki)),
+        // The two tables the compiler reads beside its own: which model
+        // serves the workspace, and the usage ledger its budget gate reads.
+        Box::new(livingbrain_models::Models::new()),
+        Box::new(livingbrain_usage::Usage::new()),
     ];
 
     let kit = TestHarness::with_ports(modules, |ports| {

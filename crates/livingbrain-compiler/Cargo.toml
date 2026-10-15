@@ -1,0 +1,43 @@
+# The coding-agents wiki compiler: synced coding-agent sessions (the
+# `agent_log` sources in the ledger) compiled by the workspace's own model
+# into an LLM-maintained wiki under `coding-agents/`, Karpathy-style — raw
+# sources immutable, pages incrementally maintained, every claim cited.
+
+[package]
+name = "livingbrain-compiler"
+description = "Living Brain: the coding-agents wiki compiler — a queue over synced agent sessions, compiled into cited, dated wiki pages by the workspace's own model"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The ports (`Database`, `Clock`, `Config`, the scheduled budget). `axum`
+# is not used here: the routes live in `livingbrain-api`.
+cratefield-core = { workspace = true }
+# The page store the compiled pages are written to, and the source ledger
+# the sessions are read from — both sealed per scope.
+livingbrain-pages = { path = "../livingbrain-pages" }
+# Every model input and output is redacted, on top of the ingest's own pass.
+livingbrain-redact = { path = "../livingbrain-redact" }
+# The `Model`, `Gate` and `FactSink` seams are `#[async_trait]`, like every
+# harness port.
+async-trait = { workspace = true }
+sea-query = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+cratefield-testing = { workspace = true, features = ["postgres"] }
+cratefield-kms = { workspace = true }
+livingbrain-access = { path = "../livingbrain-access" }
+pollster = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }

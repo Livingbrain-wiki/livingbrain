@@ -39,16 +39,18 @@ use cratefield_core::axum::http::{
 use cratefield_core::axum::response::Response as AxumResponse;
 use cratefield_core::{
     Blob, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes, RandomError,
-    Rendered, Template, Venture,
+    Rendered, ScheduledLimits, ScheduledSplit, Template, Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
 use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
-    Cloudflare, ContextDefer, FetchClient, WorkersClock, install_tracing, serve, serve_scheduled,
+    Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
-use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, SessionAuth, Sources, Wiki};
+use livingbrain_api::{
+    Ask, CodingAgents, Export, Notes, PagesRebind, Search, SessionAuth, Sources, Wiki,
+};
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
@@ -371,7 +373,10 @@ fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
         Arc::new(Search::new(wiki.clone())),
         Arc::new(Ask::new(wiki.clone())),
         Arc::new(Export::new(wiki.clone())),
-        Arc::new(Sources::new(wiki)),
+        Arc::new(Sources::new(wiki.clone())),
+        // The coding-agents compiler: its queue and status routes, and the
+        // cron drain that compiles synced sessions into `coding-agents/`.
+        Arc::new(CodingAgents::new(wiki)),
     ]
 }
 
@@ -712,13 +717,19 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
 /// The five CLI paths `fetch` diverts to [`serve_cli`] — the routes the
 /// five [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 5] = [
+const CLI_ROUTES: [&str; 6] = [
     "/v1/notes",
     "/v1/search",
     "/v1/ask",
     "/v1/export",
     "/v1/sources",
+    "/v1/coding-agents",
 ];
+
+/// The diverted paths that have routes *under* them, so the divert matches
+/// the prefix: the sources listing, facet and citation route, and the
+/// coding-agents queue and process routes.
+const CLI_PREFIXES: [&str; 2] = ["/v1/sources", "/v1/coding-agents"];
 
 /// Whether this request is one of the five CLI paths the venture diverts,
 /// and the surface is mounted at all. The mount is gated on the key ring
@@ -735,7 +746,11 @@ const CLI_ROUTES: [&str; 5] = [
 /// matching only the bare path would drop every real citation on the floor.
 fn serves_cli(harness: &Harness, path: &str) -> bool {
     let diverted = CLI_ROUTES.iter().any(|route| {
-        path == *route || (*route == "/v1/sources" && path.starts_with("/v1/sources/"))
+        path == *route
+            || (CLI_PREFIXES.contains(route)
+                && path
+                    .strip_prefix(route)
+                    .is_some_and(|rest| rest.starts_with('/')))
     });
     diverted && harness.modules().iter().any(|m| m.name() == "notes")
 }
@@ -977,12 +992,65 @@ fn copy_headers(worker_headers: &mut worker::Headers, headers: &HeaderMap) {
 #[event(scheduled)]
 /// Worker scheduled (cron) entry point: fans a firing out over the same
 /// composed harness's modules — the `waitlist` module prunes expired
-/// confirmation claims here. The cron lives in `wrangler.toml`; a trigger on
-/// another Worker never reaches this handler.
+/// confirmation claims here, and the `coding-agents` module drains its
+/// compile queue. The cron lives in `wrangler.toml`; a trigger on another
+/// Worker never reaches this handler.
+///
+/// **Why not `serve_scheduled`.** It derives the ports per invocation and
+/// hands each module its own scoped view, which is exactly right — except
+/// that the coding-agents compiler, like the five CLI modules, reads and
+/// writes page bodies, and a scoped view under its own name is a key space
+/// no page lives in. So this is `serve_scheduled_with_limits`' loop with
+/// one change, the one [`serve_cli`] makes per request: the raw store is
+/// wrapped in [`PagesRebind`] before the views are cut, so the sibling
+/// modules' keys land on `pages/…` and every other key passes through
+/// unchanged. The split, the budget and the error handling are the
+/// runtime's own (`cratefield-runtime-cloudflare` 0.4.0, `src/lib.rs`).
 pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::ScheduleContext) {
     let (harness, runtime, _) = instance(&env);
-    serve_scheduled(harness, runtime, event, env, ctx).await;
+    install_tracing();
+    let cron = event.cron();
+    let mut ports = runtime.ports(&env, Arc::new(ScheduleDefer(ctx)));
+    ports.blob = ports
+        .blob
+        .take()
+        .map(|raw| Arc::new(PagesRebind::new(raw)) as Arc<dyn Blob>);
+    let clock = ports.clock.clone();
+    let start = clock
+        .as_ref()
+        .map_or(OffsetDateTime::UNIX_EPOCH, |clock| clock.now());
+    let mut split = ScheduledSplit::new(SCHEDULED_LIMITS, start, harness.modules().len());
+    for module in harness.modules() {
+        let now = clock
+            .as_ref()
+            .map_or(OffsetDateTime::UNIX_EPOCH, |clock| clock.now());
+        let budget = Arc::new(split.next(now));
+        let mut module_ctx = harness.module_context(module.as_ref(), &ports);
+        module_ctx.scheduled = Arc::clone(&budget);
+        if let Err(err) = module.scheduled(&module_ctx, &cron).await {
+            // Logged, never a failed cron — the runtime's own rule.
+            worker::console_error!(
+                "scheduled module work failed: module={} cron={} error={}",
+                module.name(),
+                cron,
+                err
+            );
+        }
+        split.settle(&budget);
+    }
 }
+
+/// What one cron invocation may spend, split across the modules in order
+/// with each module's unspent share rolling forward. The runtime's default
+/// (25 s, 40 steps) is sized for a pass that never waits on a model; a
+/// compile does, so the wall is longer — a scheduled Worker may run for
+/// minutes — while the step count stays under the Workers Free plan's 50
+/// subrequests. The compiler checks the budget before each job and takes
+/// `CODING_AGENTS_BATCH` (default 1) jobs a tick at most.
+const SCHEDULED_LIMITS: ScheduledLimits = ScheduledLimits {
+    wall: Some(time::Duration::minutes(5)),
+    subrequests: Some(45),
+};
 
 #[cfg(test)]
 mod tests {
@@ -1022,6 +1090,10 @@ mod tests {
         for route in CLI_ROUTES {
             assert!(serves_cli(&harness, route), "{route}");
         }
+        assert!(names.contains(&"coding-agents"), "{names:?}");
+        assert!(serves_cli(&harness, "/v1/coding-agents/queue"));
+        assert!(serves_cli(&harness, "/v1/coding-agents/process"));
+        assert!(!serves_cli(&harness, "/v1/coding-agentsx/queue"));
         // Issue #72: the grant a CLI logs in through, and its credential.
         assert!(names.contains(&"device-auth"), "{names:?}");
         assert!(names.contains(&"tokens"), "{names:?}");
