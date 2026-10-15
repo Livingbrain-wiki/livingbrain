@@ -45,6 +45,14 @@ pub struct Budgets {
     pub ask_max_output_tokens: Option<u64>,
     /// The monthly spend limit, in US cents.
     pub spend_cents_monthly: Option<u64>,
+    /// Triage before a compile: trivial sessions skipped, failing loops
+    /// and lookups summarised in one log line, no model call for either.
+    pub compiler_triage: Option<bool>,
+    /// Compaction of bulky tool output before a compile.
+    pub compiler_compaction: Option<bool>,
+    /// How readily triage holds a session back: 0 lenient, 1 balanced,
+    /// 2 strict.
+    pub compiler_triage_strictness: Option<u64>,
 }
 
 /// A stored row: the choices, and when they were last saved.
@@ -56,7 +64,7 @@ pub struct StoredBudgets {
 }
 
 /// The columns, in one place, so the read and the write cannot disagree.
-const COLUMNS: [&str; 11] = [
+const COLUMNS: [&str; 14] = [
     "compiler_paused",
     "compiler_daily_tokens",
     "compiler_monthly_tokens",
@@ -68,11 +76,14 @@ const COLUMNS: [&str; 11] = [
     "ask_context_chars",
     "ask_max_output_tokens",
     "spend_cents_monthly",
+    "compiler_triage",
+    "compiler_compaction",
+    "compiler_triage_strictness",
 ];
 
 impl Budgets {
-    /// The values in [`COLUMNS`] order, the pause as 0/1.
-    fn values(&self) -> [Option<u64>; 11] {
+    /// The values in [`COLUMNS`] order, the switches as 0/1.
+    fn values(&self) -> [Option<u64>; 14] {
         [
             self.compiler_paused.map(u64::from),
             self.compiler_daily_tokens,
@@ -85,6 +96,9 @@ impl Budgets {
             self.ask_context_chars,
             self.ask_max_output_tokens,
             self.spend_cents_monthly,
+            self.compiler_triage.map(u64::from),
+            self.compiler_compaction.map(u64::from),
+            self.compiler_triage_strictness,
         ]
     }
 
@@ -102,6 +116,9 @@ impl Budgets {
             ask_context_chars: number("ask_context_chars"),
             ask_max_output_tokens: number("ask_max_output_tokens"),
             spend_cents_monthly: number("spend_cents_monthly"),
+            compiler_triage: number("compiler_triage").map(|flag| flag != 0),
+            compiler_compaction: number("compiler_compaction").map(|flag| flag != 0),
+            compiler_triage_strictness: number("compiler_triage_strictness"),
         }
     }
 }

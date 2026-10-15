@@ -144,6 +144,16 @@ export const PRESETS = Object.freeze([
   },
 ]);
 
+/**
+ * The triage strictness levels, as the select lists them. The server answers
+ * with its own `options`; these are the labels.
+ */
+export const STRICTNESS = Object.freeze([
+  { id: "lenient", label: "Lenient — only empty sessions skipped, only failing loops summarised" },
+  { id: "balanced", label: "Balanced — also short lookups that changed nothing (default)" },
+  { id: "strict", label: "Strict — any session that changed no file and said little" },
+]);
+
 /** The name an input carries: `group.key`. */
 export function fieldName(field) {
   return `${field.group}.${field.key}`;
@@ -206,6 +216,16 @@ export function budgetView(response) {
     };
   });
   const pausedEntry = (settings.coding_agents || {}).paused || {};
+  const compiler = settings.coding_agents || {};
+  const switchOf = (entry, fallback) => ({
+    value: entry.value == null ? fallback : entry.value === true,
+    source: entry.source === "workspace" ? "workspace" : "default",
+    inherited: entry.inherited == null ? fallback : entry.inherited === true,
+  });
+  const strictnessEntry = compiler.triage_strictness || {};
+  const strictnessOptions = Array.isArray(strictnessEntry.options)
+    ? strictnessEntry.options.map(String)
+    : STRICTNESS.map((s) => s.id);
   const usage = body.usage || {};
   const value = (name) => (fields.find((f) => f.name === name) || {}).value;
   return {
@@ -216,6 +236,16 @@ export function budgetView(response) {
       value: pausedEntry.value === true,
       source: pausedEntry.source === "workspace" ? "workspace" : "default",
       inherited: pausedEntry.inherited === true,
+    },
+    savers: {
+      triage: switchOf(compiler.triage || {}, true),
+      compaction: switchOf(compiler.compaction || {}, true),
+      strictness: {
+        value: String(strictnessEntry.value || "balanced"),
+        source: strictnessEntry.source === "workspace" ? "workspace" : "default",
+        inherited: String(strictnessEntry.inherited || "balanced"),
+        options: strictnessOptions,
+      },
     },
     bars: [
       usageBar("Compiled today", usage.compile_tokens_today, value("coding_agents.daily_tokens"), formatCount, "tokens"),
@@ -297,13 +327,14 @@ function parseInput(field, raw) {
 
 /**
  * The `PATCH` body for what changed: `inputs` maps a field name to the text in
- * its input, `paused` is the switch. A field whose input is empty goes back to
+ * its input, `paused` is the switch, `savers` the token savers
+ * (`{triage, compaction, strictness}`). A field whose input is empty goes back to
  * the default (`null`) when the workspace had set it; a value equal to what
  * is already in force is left out, so saving untouched cards pins nothing.
  * Throws a {@link FieldError} for a value that is not a number or is outside
  * the field's range. Answers `null` when nothing changed.
  */
-export function budgetPatch(view, inputs, paused) {
+export function budgetPatch(view, inputs, paused, savers) {
   const patch = {};
   const put = (group, key, value) => {
     patch[group] = patch[group] || {};
@@ -328,6 +359,27 @@ export function budgetPatch(view, inputs, paused) {
   if (typeof paused === "boolean" && paused !== view.paused.value) {
     // Back to the deployment's (running) is a clear, not a pinned `false`.
     put("coding_agents", "paused", paused === view.paused.inherited ? null : paused);
+  }
+  // The token savers: a switch or the strictness moved back to the
+  // deployment's value is a clear, not a pin.
+  const now = (savers && typeof savers === "object" ? savers : {});
+  const shown = view.savers || {};
+  for (const key of ["triage", "compaction"]) {
+    const entry = shown[key];
+    if (entry && typeof now[key] === "boolean" && now[key] !== entry.value) {
+      put("coding_agents", key, now[key] === entry.inherited ? null : now[key]);
+    }
+  }
+  const strictness = shown.strictness;
+  if (strictness && typeof now.strictness === "string" && now.strictness !== strictness.value) {
+    if (!strictness.options.includes(now.strictness)) {
+      throw new FieldError("coding_agents.triage_strictness", "Pick one of the listed levels.");
+    }
+    put(
+      "coding_agents",
+      "triage_strictness",
+      now.strictness === strictness.inherited ? null : now.strictness,
+    );
   }
   return Object.keys(patch).length ? patch : null;
 }
@@ -407,6 +459,85 @@ function paintField(doc, field, editable) {
   return wrap;
 }
 
+/**
+ * The token savers: triage and compaction switches and the triage
+ * strictness, with a line saying what each does and whose value it is.
+ */
+function paintSavers(doc, view) {
+  const savers = view.savers;
+  const wrap = el(doc, "fieldset", "budget-savers");
+  wrap.appendChild(el(doc, "legend", null, "Token savers"));
+  const check = (id, on, text) => {
+    const label = el(doc, "label", "check");
+    const box = doc.createElement("input");
+    box.type = "checkbox";
+    box.id = id;
+    box.checked = on;
+    box.disabled = !view.editable;
+    label.appendChild(box);
+    label.appendChild(doc.createTextNode(` ${text}`));
+    return label;
+  };
+  wrap.appendChild(
+    check(
+      "budget-triage",
+      savers.triage.value,
+      "Triage — skip trivial sessions and log failing loops in one line, without a model call",
+    ),
+  );
+  wrap.appendChild(
+    check(
+      "budget-compaction",
+      savers.compaction.value,
+      "Compaction — send the model the errors, commands and files, not the full tool output",
+    ),
+  );
+  const field = el(doc, "div", "field");
+  const label = el(doc, "label", null, "Triage strictness");
+  label.setAttribute("for", "budget-strictness");
+  field.appendChild(label);
+  const select = doc.createElement("select");
+  select.id = "budget-strictness";
+  select.disabled = !view.editable;
+  for (const id of savers.strictness.options) {
+    const option = doc.createElement("option");
+    option.value = id;
+    option.textContent = (STRICTNESS.find((s) => s.id === id) || { label: id }).label;
+    if (id === savers.strictness.value) option.selected = true;
+    select.appendChild(option);
+  }
+  field.appendChild(select);
+  field.appendChild(
+    el(
+      doc,
+      "p",
+      "hint",
+      "Nothing is lost either way: a skipped or summarised session keeps its source, and " +
+        "“Compile fully” on the queue compiles it in full.",
+    ),
+  );
+  const err = el(doc, "p", "field-error");
+  err.setAttribute("data-budget-error", "coding_agents.triage_strictness");
+  field.appendChild(err);
+  wrap.appendChild(field);
+  return wrap;
+}
+
+/** The token savers as the inputs under `root` now say. */
+export function readSavers(root) {
+  if (!root) return {};
+  const box = (id) => {
+    const input = root.querySelector(`#${id}`);
+    return input ? input.checked === true : undefined;
+  };
+  const select = root.querySelector("#budget-strictness");
+  return {
+    triage: box("budget-triage"),
+    compaction: box("budget-compaction"),
+    strictness: select ? String(select.value) : undefined,
+  };
+}
+
 /** A card: a heading, a line under it, then its fields. */
 function paintCard(doc, title, lede, children) {
   const card = el(doc, "div", "slot budget-card");
@@ -468,6 +599,7 @@ export function renderBudgets(root, view, doc = typeof document === "undefined" 
   pause.appendChild(
     doc.createTextNode(" Pause compiling — synced sessions wait in the queue until you resume"),
   );
+  const savers = paintSavers(doc, view);
   const advanced = el(doc, "details", "disclosure budget-advanced");
   advanced.appendChild(el(doc, "summary", null, "Advanced: the size of one compile"));
   for (const field of fields("coding_agents", true)) advanced.appendChild(paintField(doc, field, view.editable));
@@ -481,6 +613,7 @@ export function renderBudgets(root, view, doc = typeof document === "undefined" 
         paintBar(doc, bar("Compiled today")),
         paintBar(doc, bar("Compiled this month")),
         ...fields("coding_agents", false).map((f) => paintField(doc, f, view.editable)),
+        savers,
         advanced,
       ],
     ),

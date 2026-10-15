@@ -90,8 +90,11 @@ const INVALID: ProblemDef = ProblemDef {
 struct Field {
     group: &'static str,
     key: &'static str,
-    /// A pause switch (a boolean), not a number.
+    /// A switch (a boolean), not a number.
     switch: bool,
+    /// A named choice: the stored number is the index into these names,
+    /// and the wire value is the name. Empty for a number or a switch.
+    choices: &'static [&'static str],
     min: u64,
     max: u64,
     get: fn(&Budgets) -> Option<u64>,
@@ -103,11 +106,12 @@ struct Field {
 const UNBOUNDED: u64 = 1_000_000_000_000;
 
 /// Every setting the tab shows, in the order it shows them.
-const FIELDS: [Field; 11] = [
+const FIELDS: [Field; 14] = [
     Field {
         group: "coding_agents",
         key: "paused",
         switch: true,
+        choices: &[],
         min: 0,
         max: 1,
         get: |b| b.compiler_paused.map(u64::from),
@@ -117,6 +121,7 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "daily_tokens",
         switch: false,
+        choices: &[],
         min: 0,
         max: UNBOUNDED,
         get: |b| b.compiler_daily_tokens,
@@ -126,6 +131,7 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "monthly_tokens",
         switch: false,
+        choices: &[],
         min: 0,
         max: UNBOUNDED,
         get: |b| b.compiler_monthly_tokens,
@@ -135,6 +141,7 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "batch",
         switch: false,
+        choices: &[],
         min: 1,
         max: BATCH_CEILING as u64,
         get: |b| b.compiler_batch,
@@ -144,6 +151,7 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "job_tokens",
         switch: false,
+        choices: &[],
         min: 1_000,
         max: JOB_TOKENS_CEILING,
         get: |b| b.compiler_job_tokens,
@@ -153,6 +161,7 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "max_chunks",
         switch: false,
+        choices: &[],
         min: 1,
         max: MAX_CHUNKS_CEILING as u64,
         get: |b| b.compiler_max_chunks,
@@ -162,6 +171,7 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "chunk_chars",
         switch: false,
+        choices: &[],
         min: 1_000,
         max: CHUNK_CHARS_CEILING as u64,
         get: |b| b.compiler_chunk_chars,
@@ -171,15 +181,47 @@ const FIELDS: [Field; 11] = [
         group: "coding_agents",
         key: "max_output_tokens",
         switch: false,
+        choices: &[],
         min: 256,
         max: MAX_OUTPUT_TOKENS_CEILING as u64,
         get: |b| b.compiler_max_output_tokens,
         set: |b, v| b.compiler_max_output_tokens = v,
     },
     Field {
+        group: "coding_agents",
+        key: "triage",
+        switch: true,
+        choices: &[],
+        min: 0,
+        max: 1,
+        get: |b| b.compiler_triage.map(u64::from),
+        set: |b, v| b.compiler_triage = v.map(|v| v != 0),
+    },
+    Field {
+        group: "coding_agents",
+        key: "compaction",
+        switch: true,
+        choices: &[],
+        min: 0,
+        max: 1,
+        get: |b| b.compiler_compaction.map(u64::from),
+        set: |b, v| b.compiler_compaction = v.map(|v| v != 0),
+    },
+    Field {
+        group: "coding_agents",
+        key: "triage_strictness",
+        switch: false,
+        choices: &["lenient", "balanced", "strict"],
+        min: 0,
+        max: 2,
+        get: |b| b.compiler_triage_strictness,
+        set: |b, v| b.compiler_triage_strictness = v,
+    },
+    Field {
         group: "ask",
         key: "context_chars",
         switch: false,
+        choices: &[],
         min: ASK_CONTEXT_CHARS_FLOOR,
         max: ASK_CONTEXT_CHARS_CEILING,
         get: |b| b.ask_context_chars,
@@ -189,6 +231,7 @@ const FIELDS: [Field; 11] = [
         group: "ask",
         key: "max_output_tokens",
         switch: false,
+        choices: &[],
         min: ASK_MAX_TOKENS_FLOOR,
         max: ASK_MAX_TOKENS_CEILING,
         get: |b| b.ask_max_output_tokens,
@@ -198,6 +241,7 @@ const FIELDS: [Field; 11] = [
         group: "spend",
         key: "monthly_cents",
         switch: false,
+        choices: &[],
         min: 0,
         max: 100_000_000,
         get: |b| b.spend_cents_monthly,
@@ -221,6 +265,11 @@ pub fn overrides(budgets: &Budgets) -> Overrides {
         job_tokens: budgets.compiler_job_tokens,
         daily_tokens: budgets.compiler_daily_tokens,
         monthly_tokens: budgets.compiler_monthly_tokens,
+        triage: budgets.compiler_triage,
+        compaction: budgets.compiler_compaction,
+        triage_strictness: budgets
+            .compiler_triage_strictness
+            .map(livingbrain_compiler::triage::Strictness::from_index),
     }
 }
 
@@ -411,6 +460,18 @@ fn parse(field: &Field, value: &Value) -> Result<Option<u64>, String> {
             .map(|on| Some(u64::from(on)))
             .ok_or_else(|| format!("`{name}` must be true, false or null"));
     }
+    if !field.choices.is_empty() {
+        return value
+            .as_str()
+            .and_then(|label| field.choices.iter().position(|choice| *choice == label))
+            .map(|index| Some(index as u64))
+            .ok_or_else(|| {
+                format!(
+                    "`{name}` must be one of {}, or null",
+                    field.choices.join(", ")
+                )
+            });
+    }
     let Some(number) = value.as_u64() else {
         return Err(format!(
             "`{name}` must be a whole number from {} to {}, or null to use the default",
@@ -450,6 +511,9 @@ async fn view(ctx: &ModuleContext, member: &livingbrain_tokens::Member) -> Resul
             "job_tokens" => settings.job_tokens,
             "max_chunks" => settings.max_chunks as u64,
             "chunk_chars" => settings.chunk_chars as u64,
+            "triage" => u64::from(settings.triage),
+            "compaction" => u64::from(settings.compaction),
+            "triage_strictness" => settings.strictness.index(),
             _ => u64::from(settings.max_output_tokens),
         }
     };
@@ -467,18 +531,30 @@ async fn view(ctx: &ModuleContext, member: &livingbrain_tokens::Member) -> Resul
         let set = (field.get)(own).is_some();
         let value = value_of(field, own, &effective);
         let fallback = value_of(field, &none, &inherited);
+        let named = |index: u64| {
+            field
+                .choices
+                .get(usize::try_from(index).unwrap_or(usize::MAX))
+                .map_or(Value::Null, |name| json!(name))
+        };
         let (value, fallback) = if field.switch {
             (json!(value != 0), json!(fallback != 0))
+        } else if !field.choices.is_empty() {
+            (named(value), named(fallback))
         } else {
             (json!(value), json!(fallback))
         };
-        let entry = json!({
+        let numeric = !field.switch && field.choices.is_empty();
+        let mut entry = json!({
             "value": value,
             "source": if set { "workspace" } else { "default" },
             "inherited": fallback,
-            "min": if field.switch { Value::Null } else { json!(field.min) },
-            "max": if field.switch { Value::Null } else { json!(field.max) },
+            "min": if numeric { json!(field.min) } else { Value::Null },
+            "max": if numeric { json!(field.max) } else { Value::Null },
         });
+        if !field.choices.is_empty() {
+            entry["options"] = json!(field.choices);
+        }
         groups
             .entry(field.group.to_owned())
             .or_insert_with(|| Value::Object(Map::new()))
@@ -629,5 +705,57 @@ mod tests {
         assert!(refused(json!({"coding_agents": {"nope": 1}})).contains("not a setting"));
         assert!(refused(json!({"billing": {}})).contains("not a settings group"));
         assert!(refused(json!([1])).contains("JSON object"));
+    }
+
+    /// The triage switches and the named strictness: set by name, stored
+    /// as an index, read back by name, refused when not one of the names.
+    #[test]
+    fn the_triage_settings_take_switches_and_a_named_strictness() {
+        let patched = apply(
+            Budgets::default(),
+            &json!({"coding_agents": {"triage": false, "compaction": true, "triage_strictness": "strict"}}),
+        )
+        .expect("a valid patch");
+        assert_eq!(patched.compiler_triage, Some(false));
+        assert_eq!(patched.compiler_compaction, Some(true));
+        assert_eq!(patched.compiler_triage_strictness, Some(2));
+        let settings = compiler_settings(&EmptyConfig, &patched);
+        assert!(!settings.triage);
+        assert!(settings.compaction);
+        assert_eq!(
+            settings.strictness,
+            livingbrain_compiler::triage::Strictness::Strict
+        );
+        // The defaults: both on, balanced; the env var in between.
+        let none = compiler_settings(&EmptyConfig, &Budgets::default());
+        assert!(none.triage && none.compaction);
+        assert_eq!(
+            none.strictness,
+            livingbrain_compiler::triage::Strictness::Balanced
+        );
+        let env = MapConfig::from_pairs([
+            ("CODING_AGENTS_TRIAGE", "off"),
+            ("CODING_AGENTS_TRIAGE_STRICTNESS", "lenient"),
+        ]);
+        let from_env = compiler_settings(&env, &Budgets::default());
+        assert!(!from_env.triage);
+        assert_eq!(
+            from_env.strictness,
+            livingbrain_compiler::triage::Strictness::Lenient
+        );
+        let refused = apply(
+            Budgets::default(),
+            &json!({"coding_agents": {"triage_strictness": "max"}}),
+        )
+        .expect_err("refused");
+        assert!(refused.contains("lenient, balanced, strict"), "{refused}");
+        assert!(
+            apply(
+                Budgets::default(),
+                &json!({"coding_agents": {"triage_strictness": 2}})
+            )
+            .is_err(),
+            "a name, not an index"
+        );
     }
 }

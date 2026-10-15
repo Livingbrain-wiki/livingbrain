@@ -29,6 +29,9 @@ cratefield-mail-templates = { workspace = true }
 # adapter on its join form. The venture, not a module, names them.
 cratefield-module-waitlist = { workspace = true }
 cratefield-adapter-turnstile = { workspace = true }
+# Jev (TypeSafe's System One) behind the `Classifier` port: the coding-agents
+# compiler's triage, when the `TYPESAFE_API_KEY` secret is set.
+cratefield-adapter-typesafe = { workspace = true }
 # The device authorization grant (issue #72): the codes, the approval page
 # and the polling state machine, for a client with no browser. The venture
 # supplies its two hooks — who may approve, and what a credential is.

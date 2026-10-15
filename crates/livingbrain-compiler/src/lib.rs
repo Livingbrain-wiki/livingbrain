@@ -7,7 +7,13 @@
 //! - **A queue feeds the compiler** ([`queue`]): one job per source body,
 //!   idempotent on the ledger's own key, with a status the person can see —
 //!   `queued`, `processing`, `done`, `failed`, `skipped-no-model`,
-//!   `over-budget`, `superseded`, `skipped`, `waiting-runner`.
+//!   `over-budget`, `superseded`, `skipped`, `waiting-runner`,
+//!   `skipped-trivial`, `summary-only`.
+//! - **Triage and compaction come first** ([`triage`], [`compact`]): a
+//!   trivial session is skipped and a failing loop logged in one line, with
+//!   no model call; the rest is compiled from a transcript cut down to its
+//!   errors, commands and files. The source stays whole, and "Compile
+//!   fully" compiles any triaged session without either.
 //! - **The compiler maintains pages incrementally** ([`compile`]): it shows
 //!   the workspace's own model the conventions page, the pages the session
 //!   may touch and one transcript chunk, and applies the model's answer —
@@ -25,6 +31,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compact;
 pub mod compile;
 pub mod edits;
 pub mod facts;
@@ -32,6 +39,7 @@ pub mod layout;
 pub mod prompt;
 pub mod queue;
 pub mod record;
+pub mod triage;
 
 pub use compile::{
     BATCH_CEILING, CHUNK_CHARS_CEILING, Call, Compiler, Gate, JOB_TOKENS_CEILING,
@@ -39,7 +47,7 @@ pub use compile::{
     Overrides, Processed, Reply, Settings, Tuning,
 };
 pub use facts::{Emitted, Fact, FactSink, NoFacts};
-pub use queue::{ClaimFilter, Finish, Job, JobStatus, Queue};
+pub use queue::{ClaimFilter, Finish, Job, JobStatus, Queue, Savings};
 
 use cratefield_core::SqlMigration;
 
@@ -69,6 +77,20 @@ pub const MIGRATION_WAITING_RUNNER_POSTGRES: SqlMigration = SqlMigration::new(
     "0002",
     "waiting_runner",
     include_str!("../migrations/postgres/0002_waiting_runner.sql"),
+);
+
+/// The third migration: triage and compaction before a compile.
+pub const MIGRATION_TRIAGE: SqlMigration = SqlMigration::new(
+    "0003",
+    "triage",
+    include_str!("../migrations/sqlite/0003_triage.sql"),
+);
+
+/// The Postgres form: the counters are `BIGINT`, like the others.
+pub const MIGRATION_TRIAGE_POSTGRES: SqlMigration = SqlMigration::new(
+    "0003",
+    "triage",
+    include_str!("../migrations/postgres/0003_triage.sql"),
 );
 
 /// The tables the module that mounts the compiler owns.

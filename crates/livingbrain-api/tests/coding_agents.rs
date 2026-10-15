@@ -24,16 +24,38 @@ fn sync(fx: &common::Fixture, user: &str, session: &str) -> String {
     sync_on(fx, user, session, "2026-10-15T01:00:00Z")
 }
 
-/// Syncs one session for `user` that started at `started_at`.
+/// Syncs one session for `user` that started at `started_at`: a request
+/// and an edit, real work that triage always sends to a full compile.
 fn sync_on(fx: &common::Fixture, user: &str, session: &str, started_at: &str) -> String {
     let body = json!({
         "schema_version": 1, "agent": "codex", "collector_version": 1,
         "session_id": session, "repo": "~/code/demo",
         "started_at": started_at,
+        "turns": [
+            {"role": "user", "text": "move the demo to D1", "tool_calls": []},
+            {"role": "assistant", "text": "Done.",
+             "tool_calls": [{"name": "apply_patch", "path": "src/db.rs", "status": "ok"}]}
+        ],
+        "totals": {}, "truncated": false
+    })
+    .to_string();
+    ingest(fx, user, session, body)
+}
+
+/// Syncs a greeting for `user`: triage skips it.
+fn sync_greeting(fx: &common::Fixture, user: &str, session: &str) -> String {
+    let body = json!({
+        "schema_version": 1, "agent": "codex", "collector_version": 1,
+        "session_id": session, "repo": "~/code/demo",
+        "started_at": "2026-10-15T01:00:00Z",
         "turns": [{"role": "user", "text": "hello", "tool_calls": []}],
         "totals": {}, "truncated": false
     })
     .to_string();
+    ingest(fx, user, session, body)
+}
+
+fn ingest(fx: &common::Fixture, user: &str, session: &str, body: String) -> String {
     pollster::block_on(
         fx.ingestor(Arc::new(FakeDefer::default()))
             .ingest(SourceIngest {
@@ -280,6 +302,78 @@ fn retry_requeues_only_the_asker_s_failed_jobs() {
         common::post_anon(&fx, "/v1/coding-agents/retry", "{}").status,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[test]
+fn a_skipped_session_is_counted_and_compile_fully_compiles_it_for_its_owner_only() {
+    let fx = fixture();
+    let greeting = sync_greeting(&fx, "user-a", "hi-a");
+    let model = Arc::new(Scripted::default());
+    model.then(json!([]));
+    let processed = compile(&fx, &model);
+    assert_eq!(
+        processed[0].status,
+        JobStatus::SkippedTrivial,
+        "{processed:?}"
+    );
+
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(queue["counts"]["skipped-trivial"], 1, "{queue}");
+    assert_eq!(queue["triage"]["skipped"], 1, "{queue}");
+    assert_eq!(queue["triage"]["enabled"], true);
+    assert_eq!(queue["triage"]["strictness"], "balanced");
+    assert_eq!(queue["triage"]["classifier"], false);
+    assert!(
+        queue["triage"]["tokens_saved"].as_u64().unwrap_or(0) > 0,
+        "{queue}"
+    );
+    let job = &queue["jobs"][0];
+    assert_eq!(job["status"], "skipped-trivial");
+    assert_eq!(job["error"], "trivial");
+    assert_eq!(job["triage"]["decision"], "skip");
+    assert_eq!(job["can_compile_fully"], true);
+
+    // Not someone else's job, and a body that names no source is refused.
+    let theirs = post(
+        &fx,
+        TOKEN_B,
+        "/v1/coding-agents/compile-fully",
+        json!({"source_id": greeting}),
+    );
+    assert_eq!(theirs.status, StatusCode::NOT_FOUND);
+    let bad = post(
+        &fx,
+        TOKEN_A,
+        "/v1/coding-agents/compile-fully",
+        json!({"source_id": "../x"}),
+    );
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        common::post_anon(&fx, "/v1/coding-agents/compile-fully", "{}").status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // The owner's "Compile fully": requeued and compiled in the request,
+    // on the composition's model (none is connected in this fixture, so it
+    // parks as `skipped-no-model` — out of triage, waiting for a model).
+    let response = post(
+        &fx,
+        TOKEN_A,
+        "/v1/coding-agents/compile-fully",
+        json!({"source_id": greeting}),
+    );
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        common::body_text(&response)
+    );
+    let body = response.json();
+    assert_eq!(body["requeued"], true);
+    assert_eq!(body["counts"]["skipped-trivial"], 0, "{body}");
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_ne!(queue["jobs"][0]["status"], "skipped-trivial", "{queue}");
+    assert_eq!(queue["jobs"][0]["triage"]["forced"], true, "{queue}");
 }
 
 /// A model that answers each call with the next scripted reply.

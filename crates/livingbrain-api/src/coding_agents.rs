@@ -21,7 +21,13 @@
 //!   by agent and project, with how many compiled ([`tree`]): the home
 //!   view's `coding-agents/` folders before any page is written.
 //!
-//! All four answer only for the asker's own scopes — the same two clauses the
+//! - `POST /v1/coding-agents/compile-fully` (`{"source_id"}`) — "Compile
+//!   fully": puts one of the asker's own `skipped-trivial` or `summary-only`
+//!   jobs back to `queued`, to be compiled with no triage and no compaction,
+//!   and compiles it at once in the request. Triage never loses a session:
+//!   its source is untouched, and this is the way back from a wrong call.
+//!
+//! All five answer only for the asker's own scopes — the same two clauses the
 //! source listing applies — so a member sees and spends nothing of anybody
 //! else's. The cron tick (`scheduled`) drains every workspace in bounded
 //! batches — each workspace's own sessions-per-run setting, else
@@ -162,14 +168,16 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 2] = [
+        const SQLITE: [SqlMigration; 3] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
+            livingbrain_compiler::MIGRATION_TRIAGE,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 2] = [
+        const POSTGRES: [SqlMigration; 3] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
+            livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -211,6 +219,7 @@ impl Module for CodingAgents {
             .route("/process", post(process))
             .route("/retry", post(retry))
             .route("/tree", get(tree::tree))
+            .route("/compile-fully", post(compile_fully))
             .with_state(state)
     }
 
@@ -315,7 +324,8 @@ pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
             clock,
             Settings::from_config(&*ctx.config),
         )
-        .with_tuning(Arc::new(StoredTuning { db })),
+        .with_tuning(Arc::new(StoredTuning { db }))
+        .with_classifier(wiki.classifier.clone()),
     )
 }
 
@@ -567,6 +577,10 @@ async fn queue(
         .counts(&asker.workspace_id, &scopes)
         .await
         .map_err(|_| Problem::internal())?;
+    let savings = queue
+        .savings(&asker.workspace_id, &scopes)
+        .await
+        .map_err(|_| Problem::internal())?;
     // The workspace's effective settings: its own, else the env vars.
     let own = livingbrain_usage::budgets_or_default(&*db, &asker.workspace_id).await;
     let settings = crate::budgets::compiler_settings(&*ctx.config, &own);
@@ -619,6 +633,18 @@ async fn queue(
             "spent_today": spent_today,
             "spent_month": spent_month,
         },
+        "triage": {
+            "enabled": settings.triage,
+            "compaction": settings.compaction,
+            "strictness": settings.strictness.as_str(),
+            "classifier": service.wiki().classifier.is_some(),
+            "skipped": savings.skipped,
+            "summarised": savings.summarised,
+            "full": savings.full,
+            "tokens_raw": savings.tokens_raw,
+            "tokens_sent": savings.tokens_sent,
+            "tokens_saved": savings.tokens_saved(),
+        },
         "jobs": jobs.iter().map(job_view).collect::<Vec<_>>(),
     })))
 }
@@ -667,6 +693,73 @@ async fn process(
         .await
         .map_err(|_| Problem::internal())?;
     Ok(Json(json!({
+        "processed": processed.iter().map(|p| json!({
+            "source_id": p.source_id,
+            "status": p.status.as_str(),
+            "pages": p.pages,
+            "error": p.error,
+        })).collect::<Vec<_>>(),
+        "counts": counts
+            .iter()
+            .map(|(status, n)| (status.as_str().to_owned(), json!(n)))
+            .collect::<serde_json::Map<String, Value>>(),
+    })))
+}
+
+/// `POST /compile-fully` — compile one of the asker's triaged sessions in
+/// full: no triage, no compaction, now.
+async fn compile_fully(
+    State(service): State<Arc<Service>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, Problem> {
+    let asker = service.asker(&Method::POST, &headers).await?;
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| Problem::validation_failed("the body is not JSON"))?;
+    let source_id = value
+        .get("source_id")
+        .and_then(Value::as_str)
+        .filter(|id| {
+            !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .ok_or_else(|| Problem::validation_failed("source_id must be a source id"))?
+        .to_owned();
+    let scopes = service.scopes(&asker);
+    // The asker's own memory only, as for `Process now`.
+    let own: Vec<String> = scopes
+        .iter()
+        .filter(|scope| scope.starts_with("user-"))
+        .cloned()
+        .collect();
+    let ctx = service.ctx();
+    let clock = port(ctx.ports.clock.clone())?;
+    let compiler = compiler(ctx, &service.wiki()).ok_or_else(Problem::internal)?;
+    let requeued = compiler
+        .queue()
+        .compile_fully(&asker.workspace_id, &own, &source_id, clock.now())
+        .await
+        .map_err(|_| Problem::internal())?;
+    if !requeued {
+        return Err(Problem::not_found()
+            .with_detail("no skipped-trivial or summary-only job of yours has that source id"));
+    }
+    let filter = ClaimFilter {
+        workspace: Some(asker.workspace_id.clone()),
+        scopes: Some(own),
+        ignore_backoff: true,
+        source_id: Some(source_id),
+    };
+    let processed = compiler
+        .drain(&filter, 1, &ScheduledBudget::unbounded())
+        .await
+        .map_err(|_| Problem::internal())?;
+    let counts = compiler
+        .queue()
+        .counts(&asker.workspace_id, &scopes)
+        .await
+        .map_err(|_| Problem::internal())?;
+    Ok(Json(json!({
+        "requeued": true,
         "processed": processed.iter().map(|p| json!({
             "source_id": p.source_id,
             "status": p.status.as_str(),
@@ -731,5 +824,15 @@ fn job_view(job: &Job) -> Value {
         "queued_at": job.queued_at,
         "updated_at": job.updated_at,
         "next_attempt_at": job.next_attempt_at,
+        "triage": job.triage.as_ref().map(|decision| json!({
+            "decision": decision,
+            "reason": job.triage_reason,
+            "forced": job.force_full,
+        })),
+        "estimate": {"raw": job.est_tokens_raw, "sent": job.est_tokens_sent},
+        "can_compile_fully": matches!(
+            job.status,
+            JobStatus::SkippedTrivial | JobStatus::SummaryOnly
+        ),
     })
 }

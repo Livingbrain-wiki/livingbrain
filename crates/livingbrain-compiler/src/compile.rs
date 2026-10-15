@@ -20,19 +20,21 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use cratefield_core::{Clock, Config, DbError, ScheduledBudget};
+use cratefield_core::{Classifier, Clock, Config, DbError, ScheduledBudget};
 use livingbrain_pages::{
     Author, EntityType, Page, PageError, PageStore, PageWrite, SourceError, SourceStore,
 };
 use livingbrain_redact::{Policy, redact};
 use time::{Duration, OffsetDateTime};
 
+use crate::compact::{self, CallRef, Keep};
 use crate::edits::{self, PageEdit};
 use crate::facts::{Fact, FactSink};
 use crate::layout::{self, Allowed, Place};
 use crate::prompt::{self, SessionHead, Shown};
 use crate::queue::{ClaimFilter, Finish, Job, JobStatus, MAX_ATTEMPTS, Queue, utc_day};
-use crate::record;
+use crate::record::{self, Session};
+use crate::triage::{self, Decision, Plan, Strictness, Triage};
 
 /// The most sessions one cron run may compile for one workspace, whatever
 /// the workspace or the deployment asks for: the scheduled invocation's
@@ -67,6 +69,9 @@ pub struct Overrides {
     pub job_tokens: Option<u64>,
     pub daily_tokens: Option<u64>,
     pub monthly_tokens: Option<u64>,
+    pub triage: Option<bool>,
+    pub compaction: Option<bool>,
+    pub triage_strictness: Option<Strictness>,
 }
 
 /// Where a workspace's [`Overrides`] come from. The composition wires one
@@ -123,6 +128,16 @@ pub struct Settings {
     pub monthly_tokens: u64,
     /// How long a claim holds a job before another drain may take it.
     pub lease: Duration,
+    /// Triage before a compile (`CODING_AGENTS_TRIAGE`, default on):
+    /// trivial sessions skipped, failing loops and lookups summarised in
+    /// one model-free log line ([`crate::triage`]).
+    pub triage: bool,
+    /// Compaction of the transcript before a compile
+    /// (`CODING_AGENTS_COMPACTION`, default on; [`crate::compact`]).
+    pub compaction: bool,
+    /// How readily triage holds a session back
+    /// (`CODING_AGENTS_TRIAGE_STRICTNESS`, default `balanced`).
+    pub strictness: Strictness,
 }
 
 impl Default for Settings {
@@ -138,6 +153,9 @@ impl Default for Settings {
             daily_tokens: 400_000,
             monthly_tokens: 4_000_000,
             lease: Duration::minutes(15),
+            triage: true,
+            compaction: true,
+            strictness: Strictness::Balanced,
         }
     }
 }
@@ -157,6 +175,16 @@ impl Settings {
         let size = |key: &str, fallback: usize| {
             usize::try_from(number(key, fallback as u64)).unwrap_or(fallback)
         };
+        let switch = |key: &str, fallback: bool| {
+            config
+                .get(key)
+                .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "on" | "yes" => Some(true),
+                    "0" | "false" | "off" | "no" => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(fallback)
+        };
         Self {
             paused: false,
             batch: size("CODING_AGENTS_BATCH", default.batch),
@@ -172,6 +200,12 @@ impl Settings {
             daily_tokens: number("CODING_AGENTS_DAILY_TOKENS", default.daily_tokens),
             monthly_tokens: number("CODING_AGENTS_MONTHLY_TOKENS", default.monthly_tokens),
             lease: default.lease,
+            triage: switch("CODING_AGENTS_TRIAGE", default.triage),
+            compaction: switch("CODING_AGENTS_COMPACTION", default.compaction),
+            strictness: config
+                .get("CODING_AGENTS_TRIAGE_STRICTNESS")
+                .and_then(|raw| Strictness::parse(&raw))
+                .unwrap_or(default.strictness),
         }
         .bounded()
     }
@@ -203,6 +237,9 @@ impl Settings {
             daily_tokens: overrides.daily_tokens.unwrap_or(self.daily_tokens),
             monthly_tokens: overrides.monthly_tokens.unwrap_or(self.monthly_tokens),
             lease: self.lease,
+            triage: overrides.triage.unwrap_or(self.triage),
+            compaction: overrides.compaction.unwrap_or(self.compaction),
+            strictness: overrides.triage_strictness.unwrap_or(self.strictness),
         }
         .bounded()
     }
@@ -320,6 +357,8 @@ pub struct Compiler {
     clock: Arc<dyn Clock>,
     settings: Settings,
     tuning: Arc<dyn Tuning>,
+    /// The triage classifier (Jev), when the venture wires one.
+    classifier: Option<Arc<dyn Classifier>>,
 }
 
 /// What one job accumulated across its calls.
@@ -380,7 +419,18 @@ impl Compiler {
             clock,
             settings,
             tuning: Arc::new(NoTuning),
+            classifier: None,
         }
+    }
+
+    /// The same compiler, asking `classifier` (Jev) once per session before
+    /// a compile: how much of a compile it deserves, which topic pages it
+    /// bears on, which bulky outputs it needs word for word
+    /// ([`crate::triage::Plan::ask`]). Without one, the free rule decides.
+    #[must_use]
+    pub fn with_classifier(mut self, classifier: Option<Arc<dyn Classifier>>) -> Self {
+        self.classifier = classifier;
+        self
     }
 
     /// The same compiler, reading each workspace's own [`Overrides`] from
@@ -514,7 +564,7 @@ impl Compiler {
             }
             // A cron tick's share is counted in subrequest-shaped steps; a
             // compile is several (the source, the pages, the model calls).
-            if !budget.try_spend(8) {
+            if !budget.try_spend(if self.classifier.is_some() { 9 } else { 8 }) {
                 break;
             }
             if !self.queue.claim(&job, now, self.settings.lease).await? {
@@ -586,6 +636,19 @@ impl Compiler {
     /// Compiles one claimed job, and says how it ended. Never fails: every
     /// failure is a status the queue records.
     async fn process(&self, job: &Job, settings: &Settings) -> Finish {
+        let mut stamp = Stamp::default();
+        let finish = self.process_job(job, settings, &mut stamp).await;
+        Finish {
+            triage: stamp.triage,
+            estimate: stamp.estimate,
+            ..finish
+        }
+    }
+
+    /// [`Compiler::process`]'s body. What triage decided and what the
+    /// compile is estimated to send go on `stamp` as soon as they are known,
+    /// so every way out of here records them.
+    async fn process_job(&self, job: &Job, settings: &Settings, stamp: &mut Stamp) -> Finish {
         let now = self.clock.now();
         let source = match self.sources.by_id(&job.source_id).await {
             Ok(Some(source)) if source.scope == job.scope && source.workspace == job.workspace => {
@@ -636,10 +699,55 @@ impl Compiler {
             totals: session.totals.clone(),
             previously_compiled: self.queue.previously_compiled(job).await.ok().flatten(),
         };
-        let (chunks, mut omitted) = session.chunks(settings.chunk_chars, settings.max_chunks);
-        if chunks.is_empty() || session.turns.is_empty() {
+        let (raw_chunks, _) = session.chunks(settings.chunk_chars, settings.max_chunks);
+        if raw_chunks.is_empty() || session.turns.is_empty() {
             return Finish::status(JobStatus::Skipped, Some("empty-session"));
         }
+
+        // Triage, then compaction: what the session deserves, and what of
+        // it the model is sent. The source itself is never changed.
+        let signals = triage::signals(&session);
+        let plan = self.plan(job, &session, &signals, &allowed, settings).await;
+        // Every call carries the fixed prompt and the conventions; the
+        // pages shown vary per call and are left out, so the estimate is
+        // a floor on both sides.
+        let overhead =
+            prompt::estimate_tokens(prompt::SYSTEM) + prompt::estimate_tokens(&conventions);
+        let cost = |chunks: &[String]| -> u64 {
+            chunks
+                .iter()
+                .map(|chunk| prompt::estimate_tokens(chunk) + overhead)
+                .sum()
+        };
+        let raw_tokens = cost(&raw_chunks);
+        stamp.triage = Some((
+            plan.decision.triage.as_str().to_owned(),
+            plan.decision.reason.clone(),
+            plan.stored(),
+        ));
+        stamp.estimate = Some((raw_tokens, 0));
+        match plan.decision.triage {
+            Triage::Skip => {
+                return Finish::status(JobStatus::SkippedTrivial, Some(&plan.decision.reason));
+            }
+            Triage::Summary => {
+                let line = summary_line(&head, &signals, &plan.decision.reason, now);
+                let mut finish =
+                    Finish::status(JobStatus::SummaryOnly, Some(&plan.decision.reason));
+                if self.append_log(&job.scope, &line).await {
+                    finish.pages.push(layout::LOG.to_owned());
+                }
+                return finish;
+            }
+            Triage::Full => {}
+        }
+        let sent_session = if plan.compact {
+            compact::compact(&session, &plan.keep).0
+        } else {
+            session.clone()
+        };
+        let (chunks, mut omitted) = sent_session.chunks(settings.chunk_chars, settings.max_chunks);
+        stamp.estimate = Some((raw_tokens.max(cost(&chunks)), cost(&chunks)));
 
         let mut tally = Tally::default();
         let parts = chunks.len();
@@ -648,7 +756,10 @@ impl Compiler {
         let resumed = usize::try_from(job.chunks_done).unwrap_or(0).min(parts);
         let spent_before = job.prompt_tokens.saturating_add(job.completion_tokens);
         for (index, chunk) in chunks.iter().enumerate().skip(resumed) {
-            let shown = match self.context(&job.scope, &allowed).await {
+            let shown = match self
+                .context(&job.scope, &allowed, plan.topics.as_deref())
+                .await
+            {
                 Ok(shown) => shown,
                 Err(_) => return self.failed(job, now, "store", tally),
             };
@@ -859,7 +970,98 @@ impl Compiler {
             retry_at: None,
             chunks_done: None,
             refund_attempt: false,
+            triage: None,
+            estimate: None,
         }
+    }
+
+    /// The triage plan for one claimed job.
+    ///
+    /// - "Compile fully" (`force_full`): full, no compaction, every page.
+    /// - A compile resuming after its runner answered: the plan it started
+    ///   with, so the transcript is cut exactly as before.
+    /// - Otherwise the free rule (when triage is on), then — when a
+    ///   classifier is wired — one call that may raise or (when sure) lower
+    ///   the decision, pick the topic pages and mark outputs to keep or cut.
+    async fn plan(
+        &self,
+        job: &Job,
+        session: &Session,
+        signals: &triage::Signals,
+        allowed: &Allowed,
+        settings: &Settings,
+    ) -> CompilePlan {
+        if job.force_full {
+            return CompilePlan::full("forced", false);
+        }
+        if job.chunks_done > 0 {
+            return job
+                .triage_plan
+                .as_deref()
+                .and_then(CompilePlan::restore)
+                .unwrap_or_else(|| CompilePlan::full("resumed", false));
+        }
+        let rule = if settings.triage {
+            triage::rule(signals, settings.strictness)
+        } else {
+            Decision::new(Triage::Full, "triage-off")
+        };
+        let mut plan = Plan::from_rule(rule.clone());
+        if let Some(classifier) = &self.classifier
+            && (settings.triage || settings.compaction)
+        {
+            let candidates = self
+                .topic_candidates(&job.scope, allowed)
+                .await
+                .unwrap_or_default();
+            plan = plan
+                .ask(
+                    classifier.as_ref(),
+                    session,
+                    signals,
+                    settings.strictness,
+                    &candidates,
+                )
+                .await;
+        }
+        if !settings.triage {
+            // Triage off: the classifier only informs compaction.
+            plan.decision = rule;
+            plan.topics = None;
+        }
+        CompilePlan {
+            decision: plan.decision,
+            compact: settings.compaction,
+            keep: if settings.compaction {
+                plan.keep
+            } else {
+                BTreeMap::new()
+            },
+            topics: plan.topics,
+        }
+    }
+
+    /// The session's own topic pages — the pages in its folder beyond the
+    /// fixed ones — with a title from the slug, for the classifier.
+    async fn topic_candidates(
+        &self,
+        scope: &str,
+        allowed: &Allowed,
+    ) -> Result<Vec<(String, String)>, PageError> {
+        let fixed = allowed.context_slugs();
+        let prefix = allowed.folder_prefix();
+        Ok(self
+            .pages
+            .list(&[scope], 1_000)
+            .await?
+            .into_iter()
+            .filter(|page| page.slug.starts_with(&prefix) && !fixed.contains(&page.slug))
+            .take(triage::MAX_TOPIC_QUESTIONS)
+            .map(|page| {
+                let title = page.slug[prefix.len()..].replace('-', " ");
+                (page.slug, title)
+            })
+            .collect())
     }
 
     /// Creates the two pages every scope's folder starts from, when they
@@ -904,7 +1106,16 @@ impl Compiler {
     /// The pages one call is shown: the session's folder and its parents,
     /// any topic pages already in the folder, and — read-only — the other
     /// agents' pages for the same project, which the rollup merges.
-    async fn context(&self, scope: &str, allowed: &Allowed) -> Result<Vec<Shown>, PageError> {
+    ///
+    /// With `topics` (the triage classifier's picks), the session's own
+    /// topic pages are only those it picked; the fixed pages are always
+    /// shown.
+    async fn context(
+        &self,
+        scope: &str,
+        allowed: &Allowed,
+        topics: Option<&[String]>,
+    ) -> Result<Vec<Shown>, PageError> {
         let listed = self.pages.list(&[scope], 1_000).await?;
         let mut slugs = allowed.context_slugs();
         let prefix = allowed.folder_prefix();
@@ -912,7 +1123,8 @@ impl Compiler {
             if slugs.len() >= 24 {
                 break;
             }
-            let extra = summary.slug.starts_with(&prefix)
+            let picked = topics.is_none_or(|topics| topics.contains(&summary.slug));
+            let extra = (summary.slug.starts_with(&prefix) && picked)
                 || matches!(
                     layout::place(&summary.slug),
                     Some(Place::Project { ref agent, ref project, ref page })
@@ -1432,6 +1644,125 @@ fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTim
         prompt::source_href(&head.source_id)
     ));
     line
+}
+
+/// What a run decided before it compiled, recorded on its finish whichever
+/// way it ends.
+#[derive(Debug, Default)]
+struct Stamp {
+    triage: Option<(String, String, Option<String>)>,
+    estimate: Option<(u64, u64)>,
+}
+
+/// How one compile runs: the triage decision, whether the transcript is
+/// compacted and how, and the topic pages shown. Stored on the job (ids
+/// and flags only) so a resumed compile cuts the transcript the same way.
+#[derive(Debug, Clone, PartialEq)]
+struct CompilePlan {
+    decision: Decision,
+    compact: bool,
+    keep: BTreeMap<CallRef, Keep>,
+    topics: Option<Vec<String>>,
+}
+
+impl CompilePlan {
+    fn full(reason: &str, compact: bool) -> Self {
+        Self {
+            decision: Decision::new(Triage::Full, reason),
+            compact,
+            keep: BTreeMap::new(),
+            topics: None,
+        }
+    }
+
+    /// The stored form, for a full compile only (the others never resume).
+    fn stored(&self) -> Option<String> {
+        if self.decision.triage != Triage::Full {
+            return None;
+        }
+        let keep: Vec<serde_json::Value> = self
+            .keep
+            .iter()
+            .map(|((turn, call), keep)| {
+                serde_json::json!([turn, call, if *keep == Keep::Verbatim { "v" } else { "s" }])
+            })
+            .collect();
+        Some(
+            serde_json::json!({
+                "reason": self.decision.reason,
+                "compact": self.compact,
+                "keep": keep,
+                "topics": self.topics,
+            })
+            .to_string(),
+        )
+    }
+
+    fn restore(stored: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(stored).ok()?;
+        let keep = value
+            .get("keep")
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let turn = usize::try_from(entry.get(0)?.as_u64()?).ok()?;
+                        let call = usize::try_from(entry.get(1)?.as_u64()?).ok()?;
+                        let keep = match entry.get(2)?.as_str()? {
+                            "v" => Keep::Verbatim,
+                            _ => Keep::SignalOnly,
+                        };
+                        Some(((turn, call), keep))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let topics = value.get("topics").and_then(|topics| {
+            topics.as_array().map(|slugs| {
+                slugs
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+        });
+        Some(Self {
+            decision: Decision::new(
+                Triage::Full,
+                value
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("resumed"),
+            ),
+            compact: value
+                .get("compact")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            keep,
+            topics,
+        })
+    }
+}
+
+/// The log line of a `summary-only` session: what it did, in counts, and
+/// how to compile it after all.
+fn summary_line(
+    head: &SessionHead,
+    signals: &triage::Signals,
+    reason: &str,
+    now: OffsetDateTime,
+) -> String {
+    let short: String = head.session_id.chars().take(8).collect();
+    format!(
+        "- **{}** · {}/{} · session `{short}` of {} · {} · not compiled — **Compile fully** on the queue compiles it · [source]({})",
+        utc_day(now),
+        head.agent_folder,
+        head.project,
+        head.day,
+        edits::one_line(&redacted_text(&triage::summary_text(signals, reason)), 300),
+        prompt::source_href(&head.source_id)
+    )
 }
 
 fn start_of_next_day(now: OffsetDateTime) -> OffsetDateTime {

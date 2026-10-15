@@ -73,7 +73,17 @@ npx wrangler secret put WORKSPACES_SLACK_SIGNING_SECRET --env production  # veri
 npx wrangler secret put OWLPOST_API_KEY --env production                  # sends the mail
 npx wrangler secret put TURNSTILE_SECRET --env production                 # captcha gate; absent = joins refused, fail-closed
 npx wrangler secret put ADMIN_TOKEN --env production                      # the waitlist CSV export
+npx wrangler secret put TYPESAFE_API_KEY --env production                 # optional: Jev triage for the coding-agents compiler
 ```
+
+`TYPESAFE_API_KEY` is optional. Without it the compiler triages with its own
+free rule and nothing goes to TypeSafe. With it, one Jev call per compiled
+session sends a redacted digest (counts, short excerpts, one line per tool
+call, never tool output) to `api.typesafe.ai` (US-hosted, billed to the
+TypeSafe account the key belongs to). The model is pinned by the adapter;
+set the `TYPESAFE_MODEL` var to pin a different version. Only the compiler
+uses it — the Slack judge stays unwired. See `docs/coding-agents.md`,
+"Triage and compaction".
 
 Never reuse a staging secret value in production, and never rotate a KEK
 casually: rotating `HARNESS_KEK_CURRENT` or `MODEL_KEYS_SECRET` orphans the
