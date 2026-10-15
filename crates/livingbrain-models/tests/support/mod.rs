@@ -185,8 +185,9 @@ pub struct Sent {
     pub x_api_key: Option<String>,
     pub anthropic_version: Option<String>,
     pub body: String,
-    /// The model call's own deadline (`deadline::ModelDeadline`), when it
-    /// carried one.
+    /// The call's own deadline: a streamed call's whole-body ceiling
+    /// (`StreamPolicy::total_timeout`), else the `HttpPolicy` timeout it
+    /// asked for (before the port's clamp).
     pub deadline: Option<std::time::Duration>,
 }
 
@@ -333,8 +334,14 @@ impl HttpClient for FakeHttp {
                 body: String::from_utf8_lossy(&body).into_owned(),
                 deadline: parts
                     .extensions
-                    .get::<livingbrain_models::deadline::ModelDeadline>()
-                    .map(|deadline| deadline.0),
+                    .get::<cratefield_core::StreamPolicy>()
+                    .map(|policy| policy.total_timeout)
+                    .or_else(|| {
+                        parts
+                            .extensions
+                            .get::<cratefield_core::HttpPolicy>()
+                            .map(|policy| policy.timeout)
+                    }),
             });
         }
         let mut status = 200;

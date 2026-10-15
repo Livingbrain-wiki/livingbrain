@@ -33,9 +33,6 @@ mod catalog;
 mod crypto;
 // The curated model lists behind the settings page's provider cards.
 mod curated;
-// A model call's deadline past the port's 30 s ceiling, and the client that
-// honours it (wired by the venture).
-pub mod deadline;
 mod handlers;
 // Jev, the compiler's optional triage classifier: the per-workspace switch,
 // key and model, and the precedence that picks the classifier a compile runs.
@@ -53,7 +50,7 @@ pub mod ssrf;
 // Reading a streamed completion (Server-Sent Events) for both wires.
 mod sse;
 mod store;
-// The streaming seam the venture implements over `worker::Fetch`.
+// Reading a model call's streamed reply through the port's streaming send.
 pub mod stream;
 
 use cratefield_core::{

@@ -123,16 +123,14 @@ pub const MAX_QUESTION_CHARS: usize = 4_000;
 
 /// How long one answer may take. A forced-thinking model reasons before it
 /// answers, at roughly 35 tokens a second on GLM-5.3; four minutes is past
-/// that with room. The call streams (`livingbrain_models::stream`), so a
-/// stalled one ends after 90 s without bytes. Past the `HttpClient` port's
-/// 30 s ceiling this holds because the venture wires
-/// `livingbrain_models::deadline::ModelDeadlineHttpClient` on this route.
+/// that with room. The call streams (`livingbrain_models::stream`) through
+/// the `HttpClient` port's streaming send, so this bounds the whole body and
+/// a stalled one ends after 90 s without bytes.
 const CALL_TIMEOUT: Duration = Duration::from_secs(240);
-// The venture's client honours a model call's deadline only up to this
-// ceiling; one past it would be cut silently. Under the unstreamed ceiling
-// too, so a provider carded `"stream": false` keeps the same bound.
+// A streamed call's deadline is honoured only up to this ceiling; one past
+// it would be cut silently.
 const _: () =
-    assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::deadline::MAX_MODEL_DEADLINE.as_secs());
+    assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::stream::MAX_STREAM_DEADLINE.as_secs());
 
 /// The rules every answer is written under.
 const SYSTEM_PROMPT: &str = "You answer a person's question using only the numbered sources \

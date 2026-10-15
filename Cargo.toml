@@ -28,38 +28,38 @@ repository = "https://github.com/Livingbrain-wiki/livingbrain"
 # Harness, from crates.io (see the note above). `cratefield-core` is the ports-only
 # crate every module depends on; `runtime-cloudflare` is the Worker's runtime and
 # `testing` is the test double, neither of which a module names.
-cratefield-core = "=0.8.0"
-cratefield-runtime-cloudflare = "=0.4.0"
-cratefield-testing = "=0.5.0"
+cratefield-core = "=0.9.0"
+cratefield-runtime-cloudflare = "=0.4.3"
+cratefield-testing = "=0.5.2"
 
 # The mail round (issue #63): `module-waitlist` ships the confirm mails,
 # `mail-templates` renders them in this venture's theme, and `adapter-owlpost`
 # is the `Mailer` port. Pinned to the same release round as the rest, so every
 # one of them resolves to the single `cratefield-core` above.
-cratefield-adapter-owlpost = "=0.2.0"
-cratefield-mail-templates = "=0.1.0"
-cratefield-module-waitlist = "=0.4.0"
+cratefield-adapter-owlpost = "=0.2.2"
+cratefield-mail-templates = "=0.1.2"
+cratefield-module-waitlist = "=0.4.3"
 # The device authorization grant (issue #72): the codes, the approval page
 # and the polling state machine for a client with no browser. This venture
 # supplies the two hooks — who may approve, and what a credential is.
-cratefield-module-device-auth = "=0.3.0"
+cratefield-module-device-auth = "=0.3.1"
 # The two classifiers the judge thresholds for (issue #53): the
 # purpose-trained one (`Calibration::Classifier`) and the language-model
 # fallback over a `TextModel` (`Calibration::LanguageModel`). Dev-only here,
 # in the judge's test that proves the family mapping against the real
 # adapters; the venture is what wires either of them.
-cratefield-adapter-classifier-llm = "=0.3.0"
-cratefield-adapter-typesafe = "=0.3.0"
+cratefield-adapter-classifier-llm = "=0.3.1"
+cratefield-adapter-typesafe = "=0.3.1"
 # The KMS port: the only thing the page store asks of a key custodian is
 # wrap and unwrap a data key (issue #43). It has no dependency on
 # `cratefield-core` at all, so it cannot pull a second copy of the ports in.
 cratefield-kms = "=0.2.0"
 # RS256 for the GitHub App's JWT (the GitHub connection, Part C): the
 # harness's own pure-Rust signer, `rsa` 0.9 with no RNG, so it builds for the
-# Worker. It depends on `cratefield-core` 0.8, the one copy above.
-cratefield-push-auth = "=0.3.0"
+# Worker. It depends on `cratefield-core` 0.9, the one copy above.
+cratefield-push-auth = "=0.3.1"
 # Turnstile, the captcha on the waitlist's public join form (issue #23).
-cratefield-adapter-turnstile = "=0.3.0"
+cratefield-adapter-turnstile = "=0.3.2"
 
 # The Workers SDK, pinned to the version the runtime crate targets. Only the
 # venture crate names it.

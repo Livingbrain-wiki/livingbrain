@@ -298,18 +298,16 @@ usage ledger.
 A forced-thinking model such as Z.AI's GLM-5.3 can reason for more than
 100 s before the first answer byte, and Z.AI's Cloudflare front cuts a
 reply that has sent nothing for 100 s with `524`; a streamed reply sends its
-thinking as it goes, so the connection never sits idle. In the Worker the
-stream is read as it arrives (`livingbrain_models::stream`, opened by the
-venture's `model_stream::FetchStreaming` over `worker::Fetch`): a call fails
-as `model-http: the model stream stalled` after 90 s with no bytes, and as
-a deadline past the call's own timeout (at most 15 minutes). The thinking is
-dropped and only the answer, the usage and the stop reason are kept; an
-`error` event mid-stream fails the call with its status and body, like a
-refusal. A provider whose card in `app/assets/model-cards.json` sets
-`"stream": false` is called unstreamed. When Living Brain moves to
-`cratefield-core` 0.9, the venture's seam is replaced by the harness's
-`HttpClient::send_streaming` — the steps are in the header of
-`crates/livingbrain-models/src/deadline.rs`.
+thinking as it goes, so the connection never sits idle. The stream is read
+as it arrives (`livingbrain_models::stream`) through the harness's own
+`HttpClient::send_streaming` (`cratefield-core` 0.9) under a `StreamPolicy`:
+the response head within the port's 30 s, a call fails as `model-http: the
+model stream stalled` after 90 s with no bytes, and as a deadline past the
+call's own timeout (at most 15 minutes). The thinking is dropped and only
+the answer, the usage and the stop reason are kept; an `error` event
+mid-stream fails the call with its status and body, like a refusal. A
+provider whose card in `app/assets/model-cards.json` sets `"stream": false`
+is called unstreamed, and is then held to the port's buffered 30 s.
 
 **Your own subscription (the local runner).** If you chose to run your jobs
 on your own device (`PUT /v1/models/mine/main`, the Claude/ChatGPT
