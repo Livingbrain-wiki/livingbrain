@@ -692,3 +692,392 @@ async fn a_key_scope_with_a_space_in_it_is_refused_rather_than_split() {
         json!(["read:personal:usr_bob/coding-agents"])
     );
 }
+
+/// Every grant in the workspace, as an owner sees them.
+async fn all_grants(kit: &Kit) -> Vec<Value> {
+    let (status, list) = send(
+        kit,
+        Method::GET,
+        "/v1/access/grants",
+        &Who::Browser(OWNER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    list["grants"].as_array().expect("grants").clone()
+}
+
+async fn audit_actions(kit: &Kit) -> Vec<(String, String)> {
+    let (status, log) = send(
+        kit,
+        Method::GET,
+        "/v1/audit?limit=200",
+        &Who::Browser(OWNER),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{log}");
+    log["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| {
+            (
+                entry["action"].as_str().unwrap_or_default().to_owned(),
+                entry["detail"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn folder_grant(principal: &str, space: &str, path: &str, kind: &str) -> Value {
+    json!({"principal": principal, "space": space, "path": path, "kind": kind, "permission": "read"})
+}
+
+#[pollster::test]
+async fn a_batch_creates_every_grant_and_an_audit_line_each_or_none() {
+    let kit = kit().await;
+    let (agent, _, _) = agent_with_key(&kit, BOB).await;
+    let agent = format!("agent:{agent}");
+    let batch: Vec<Value> = ["member:usr_admin", agent.as_str()]
+        .iter()
+        .flat_map(|who| {
+            ["coding-agents/claude", "coding-agents/codex"]
+                .iter()
+                .map(|path| folder_grant(who, "personal:me", path, "pages"))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let (status, made) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": batch })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    assert_eq!(made["created"], 4);
+    assert_eq!(made["grants"].as_array().expect("grants").len(), 4);
+    assert_eq!(all_grants(&kit).await.len(), 4);
+    let batch_id = made["batch"].as_str().expect("a batch id").to_owned();
+    let lines = audit_actions(&kit)
+        .await
+        .into_iter()
+        .filter(|(action, detail)| action == "grant.create" && detail.contains(&batch_id))
+        .count();
+    assert_eq!(lines, 4, "one audit line per grant");
+
+    // The same request again replaces, it does not duplicate.
+    let (status, again) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": [folder_grant("member:usr_admin", "personal:me", "coding-agents/claude", "pages")] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(all_grants(&kit).await.len(), 4);
+
+    // One entry naming nobody refuses the batch, says which, and writes none.
+    let (status, body) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": [
+            folder_grant("member:usr_admin", "personal:me", "notes", "pages"),
+            folder_grant("member:usr_ghost", "personal:me", "notes", "pages"),
+        ] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("grants[1]"),
+        "{body}"
+    );
+    // A bad folder in the last entry: the same.
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": [
+            folder_grant("member:usr_admin", "personal:me", "notes", "facts"),
+            folder_grant("member:usr_admin", "personal:me", "../x", "facts"),
+        ] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        all_grants(&kit).await.len(),
+        4,
+        "nothing from a refused batch"
+    );
+}
+
+#[pollster::test]
+async fn a_batch_cannot_reach_into_another_members_space() {
+    let kit = kit().await;
+    // The owner may hand out the shared space, but not Bob's: the second
+    // entry refuses the whole batch, the first included.
+    let (status, body) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(OWNER),
+        Some(json!({ "grants": [
+            folder_grant("member:usr_bob", "shared", "", "*"),
+            folder_grant("member:usr_owner", "personal:usr_bob", "", "*"),
+        ] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(all_grants(&kit).await.is_empty());
+    // Nor can a member hand out the shared space through a batch.
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": [folder_grant("member:usr_admin", "shared", "", "*")] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // And a cross-site batch is refused before anything is read.
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::CrossSite(BOB),
+        Some(json!({ "grants": [folder_grant("member:usr_admin", "personal:me", "", "*")] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(all_grants(&kit).await.is_empty());
+}
+
+#[pollster::test]
+async fn a_batch_is_capped_and_never_empty() {
+    let kit = kit().await;
+    let many: Vec<Value> = (0..101)
+        .map(|n| folder_grant("member:usr_admin", "personal:me", &format!("f{n}"), "pages"))
+        .collect();
+    for grants in [json!(many), json!([])] {
+        let (status, body) = send(
+            &kit,
+            Method::POST,
+            "/v1/access/grants/batch",
+            &Who::Browser(BOB),
+            Some(json!({ "grants": grants })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    let hundred: Vec<Value> = many.into_iter().take(100).collect();
+    let (status, made) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": hundred })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    assert_eq!(made["created"], 100);
+    let ids: Vec<Value> = (0..101).map(|n| json!(format!("grt_{n}"))).collect();
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch/revoke",
+        &Who::Browser(BOB),
+        Some(json!({ "ids": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[pollster::test]
+async fn a_batch_revoke_removes_all_or_none_and_audits_each() {
+    let kit = kit().await;
+    let (_, made) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch",
+        &Who::Browser(BOB),
+        Some(json!({ "grants": [
+            folder_grant("member:usr_admin", "personal:me", "a", "pages"),
+            folder_grant("member:usr_owner", "personal:me", "b", "pages"),
+        ] })),
+    )
+    .await;
+    let bobs: Vec<String> = made["grants"]
+        .as_array()
+        .expect("grants")
+        .iter()
+        .map(|grant| grant["id"].as_str().expect("id").to_owned())
+        .collect();
+    let (status, shared) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants",
+        &Who::Browser(OWNER),
+        Some(folder_grant("member:usr_bob", "shared", "team", "pages")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{shared}");
+    let owners = shared["id"].as_str().expect("id").to_owned();
+
+    // Bob may not remove the owner's shared grant (it is an allow *to* him,
+    // which he may give up — so use a deny the owner wrote instead).
+    let (_, deny) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants",
+        &Who::Browser(OWNER),
+        Some(json!({"principal": "member:usr_bob", "space": "shared", "path": "secret", "permission": "read", "effect": "deny"})),
+    )
+    .await;
+    let deny = deny["id"].as_str().expect("id").to_owned();
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch/revoke",
+        &Who::Browser(BOB),
+        Some(json!({ "ids": [bobs[0], bobs[1], deny] })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "one refusal refuses the batch"
+    );
+    assert_eq!(all_grants(&kit).await.len(), 4, "nothing removed");
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch/revoke",
+        &Who::Browser(BOB),
+        Some(json!({ "ids": [bobs[0], "grt_nothing"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(all_grants(&kit).await.len(), 4);
+
+    // His own two and the allow made to him: all three go.
+    let (status, done) = send(
+        &kit,
+        Method::POST,
+        "/v1/access/grants/batch/revoke",
+        &Who::Browser(BOB),
+        Some(json!({ "ids": [bobs[0], bobs[1], owners] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["revoked"], 3);
+    let left = all_grants(&kit).await;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["id"], deny.as_str());
+    let batch_id = done["batch"].as_str().expect("a batch id").to_owned();
+    let lines = audit_actions(&kit)
+        .await
+        .into_iter()
+        .filter(|(action, detail)| action == "grant.delete" && detail.contains(&batch_id))
+        .count();
+    assert_eq!(lines, 3);
+}
+
+#[pollster::test]
+async fn agents_are_disabled_and_enabled_in_bulk_by_who_may_manage_them() {
+    let kit = kit().await;
+    let (one, key_one, _) = agent_with_key(&kit, BOB).await;
+    let (two, key_two, _) = agent_with_key(&kit, BOB).await;
+    let (admins, _, _) = agent_with_key(&kit, ADMIN).await;
+    let me = |key: String| {
+        let kit = &kit;
+        async move {
+            send(kit, Method::GET, "/v1/me", &Who::Bearer(&key), None)
+                .await
+                .0
+        }
+    };
+
+    // Bob cannot reach the admin's agent: the whole batch is refused.
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/agents/batch",
+        &Who::Browser(BOB),
+        Some(json!({"ids": [one, admins], "disabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(me(key_one.clone()).await, StatusCode::OK, "nothing changed");
+
+    let (status, done) = send(
+        &kit,
+        Method::POST,
+        "/v1/agents/batch",
+        &Who::Browser(BOB),
+        Some(json!({"ids": [one, two], "disabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["changed"], 2);
+    assert_eq!(me(key_one.clone()).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(me(key_two.clone()).await, StatusCode::UNAUTHORIZED);
+
+    // An admin enables them again, with the admin's own (already enabled).
+    let (status, done) = send(
+        &kit,
+        Method::POST,
+        "/v1/agents/batch",
+        &Who::Browser(ADMIN),
+        Some(json!({"ids": [one, two, admins], "disabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["changed"], 2, "the one already enabled is left alone");
+    assert_eq!(me(key_one).await, StatusCode::OK, "keys are untouched");
+    assert_eq!(me(key_two).await, StatusCode::OK);
+    let actions = audit_actions(&kit).await;
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|(action, _)| action == "agent.disable")
+            .count(),
+        2
+    );
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|(action, _)| action == "agent.enable")
+            .count(),
+        2
+    );
+
+    for body in [json!({"ids": [], "disabled": true}), json!({"ids": [one]})] {
+        let (status, _) = send(
+            &kit,
+            Method::POST,
+            "/v1/agents/batch",
+            &Who::Browser(BOB),
+            Some(body),
+        )
+        .await;
+        assert!(status.is_client_error());
+    }
+    let (status, _) = send(
+        &kit,
+        Method::POST,
+        "/v1/agents/batch",
+        &Who::CrossSite(BOB),
+        Some(json!({"ids": [one], "disabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

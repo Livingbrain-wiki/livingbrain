@@ -447,10 +447,10 @@
               <div id="page-access-status" class="notice" role="status" aria-live="polite"></div>
               <ul id="page-access-list" class="plain-list"></ul>
               <form id="page-share-form" class="connect" hidden novalidate>
-                <div class="field">
-                  <label for="page-share-who">Share with</label>
-                  <select id="page-share-who"></select>
-                </div>
+                <fieldset id="page-share-who" aria-describedby="err-pageShareWho">
+                  <legend>Share with</legend>
+                  <p class="field-error" id="err-pageShareWho"></p>
+                </fieldset>
                 <div class="field">
                   <label for="page-share-permission">Access</label>
                   <select id="page-share-permission">
@@ -459,7 +459,7 @@
                   </select>
                 </div>
                 <div class="form-actions">
-                  <button type="submit" data-variant="primary">Share this page</button>
+                  <button type="submit" id="page-share-submit" data-variant="primary">Share this page</button>
                 </div>
               </form>
             </section>
