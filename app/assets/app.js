@@ -102,6 +102,7 @@ import {
 } from "./session.js";
 import { wikiPage } from "./wiki.js";
 import { mountShell } from "./shell.js";
+import { brainPage } from "./brain.js";
 import { settingsTab, SETTINGS_TABS } from "./nav.js";
 
 /**
@@ -576,6 +577,12 @@ pages.signin = async function signin() {
   // rather than to a broken fetch.
   const slack = $("#signin-slack");
   slack.href = `${apiBase()}/v1/workspaces/slack/start`;
+};
+
+/* --- the brain map ---------------------------------------------------- */
+
+pages.brain = function brain() {
+  return brainPage({ api, ApiError, notice, renderInto, checkSession });
 };
 
 /* --- settings ------------------------------------------------------- */

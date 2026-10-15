@@ -893,6 +893,56 @@ export function stripFrontmatter(markdown) {
   return source;
 }
 
+/**
+ * Replaces every `[[slug]]` / `[[slug|Label]]` in the article's text with a
+ * real anchor: a `TreeWalker` over the text nodes, each swapped in place
+ * for text nodes and anchors built with `createElement` + `textContent`,
+ * like everything else that reaches the document. A body that never yields
+ * a valid slug — `[[orbit window]]` bare, say — keeps the literal brackets
+ * it was written with, and `pre`/`code` are never touched: there `[[…]]` is
+ * quoted text, not a link.
+ */
+export function linkWikilinks(container) {
+  if (!container || typeof document.createTreeWalker !== "function") return;
+  const walker = document.createTreeWalker(container, SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  const pattern = /\[\[([^[\]]+)\]\]/g;
+  for (const node of nodes) {
+    const owner = node.parentNode;
+    const value = String(
+      node.nodeValue != null ? node.nodeValue : node.textContent || "",
+    );
+    if (!owner || !value.includes("[[")) continue;
+    if (typeof owner.closest === "function" && owner.closest("pre, code")) {
+      continue;
+    }
+    const parts = [];
+    let cursor = 0;
+    let match;
+    while ((match = pattern.exec(value)) !== null) {
+      const link = wikilinkToLink(match[1]);
+      if (!link) continue;
+      if (match.index > cursor) {
+        parts.push(document.createTextNode(value.slice(cursor, match.index)));
+      }
+      const anchor = document.createElement("a");
+      anchor.setAttribute(
+        "href",
+        `wiki.html?slug=${encodeURIComponent(link.slug)}`,
+      );
+      anchor.textContent = link.label;
+      parts.push(anchor);
+      cursor = match.index + match[0].length;
+    }
+    if (!parts.length) continue;
+    if (cursor < value.length) {
+      parts.push(document.createTextNode(value.slice(cursor)));
+    }
+    node.replaceWith(...parts);
+  }
+}
+
 /* --------------------------------------------- tiny description builders */
 
 function tx(value) {
@@ -1131,6 +1181,18 @@ export async function wikiPage(api) {
     "ask", "coding-agents", "imports",
   ];
 
+  /** The tab title per view; a page's own title replaces it when it loads. */
+  const VIEW_TITLES = {
+    home: "Pages",
+    new: "New page",
+    sessions: "Agent sessions",
+    transcript: "Agent session",
+    facts: "Facts",
+    ask: "Ask the brain",
+    "coding-agents": "Coding agents",
+    imports: "Imports",
+  };
+
   /** Shows one view, and tells the shell (the sidebar's current item) and
    * the sheet (`body[data-view]`) which it is. */
   function showView(name) {
@@ -1139,6 +1201,7 @@ export async function wikiPage(api) {
       if (els.views[view]) els.views[view].hidden = view !== name;
     }
     if (document.body && document.body.dataset) document.body.dataset.view = name;
+    if (VIEW_TITLES[name]) document.title = `${VIEW_TITLES[name]} — Living Brain`;
     if (typeof CustomEvent === "function" && typeof document.dispatchEvent === "function") {
       document.dispatchEvent(new CustomEvent("lb-view", { detail: { view: name } }));
     }
@@ -2119,61 +2182,12 @@ export async function wikiPage(api) {
     signInNotice("Sign in to read this page.");
   }
 
-  /**
-   * Replaces every `[[slug]]` / `[[slug|Label]]` in the article's text with a
-   * real anchor: a `TreeWalker` over the text nodes, each swapped in place
-   * for text nodes and anchors built with `createElement` + `textContent`,
-   * like everything else that reaches the document. A body that never yields
-   * a valid slug — `[[orbit window]]` bare, say — keeps the literal brackets
-   * it was written with, and `pre`/`code` are never touched: there `[[…]]` is
-   * quoted text, not a link.
-   */
-  function linkWikilinks(container) {
-    if (!container || typeof document.createTreeWalker !== "function") return;
-    const walker = document.createTreeWalker(container, SHOW_TEXT);
-    const nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    const pattern = /\[\[([^[\]]+)\]\]/g;
-    for (const node of nodes) {
-      const owner = node.parentNode;
-      const value = String(
-        node.nodeValue != null ? node.nodeValue : node.textContent || "",
-      );
-      if (!owner || !value.includes("[[")) continue;
-      if (typeof owner.closest === "function" && owner.closest("pre, code")) {
-        continue;
-      }
-      const parts = [];
-      let cursor = 0;
-      let match;
-      while ((match = pattern.exec(value)) !== null) {
-        const link = wikilinkToLink(match[1]);
-        if (!link) continue;
-        if (match.index > cursor) {
-          parts.push(document.createTextNode(value.slice(cursor, match.index)));
-        }
-        const anchor = document.createElement("a");
-        anchor.setAttribute(
-          "href",
-          `wiki.html?slug=${encodeURIComponent(link.slug)}`,
-        );
-        anchor.textContent = link.label;
-        parts.push(anchor);
-        cursor = match.index + match[0].length;
-      }
-      if (!parts.length) continue;
-      if (cursor < value.length) {
-        parts.push(document.createTextNode(value.slice(cursor)));
-      }
-      node.replaceWith(...parts);
-    }
-  }
-
   function renderPage() {
     const page = state.page || {};
     els.pageBody.hidden = false;
     els.pageMeta.hidden = false;
     els.pageTitle.textContent = page.title || page.slug || "Untitled";
+    document.title = `${page.title || page.slug || "Untitled"} — Living Brain`;
     paintCrumbs(els.pageCrumbs, pageCrumbs(page.slug || state.slug, page.title));
     const pill = document.createElement("span");
     pill.className = "pill";

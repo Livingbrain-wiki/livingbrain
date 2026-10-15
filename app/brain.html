@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Brain map — Living Brain</title>
+    <meta name="color-scheme" content="dark light" />
+    <meta name="lb-api" content="" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#070f11" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f8f8" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="preload" href="assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="assets/fonts/hanken-grotesk.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="assets/app.css" />
+    <link rel="stylesheet" href="assets/brain.css" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("lb-theme");
+          if (t !== "light" && t !== "dark") {
+            t = window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark";
+          }
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body data-page="brain">
+    <a class="skip" href="#main">Skip to the content</a>
+    <header class="hd topbar">
+      <div class="topbar__in">
+        <button
+          type="button"
+          id="nav-toggle"
+          class="topbar__menu"
+          aria-controls="app-sidebar"
+          aria-expanded="false"
+          aria-label="Menu"
+        ><span class="burger" aria-hidden="true"></span></button>
+        <a class="brand" href="index.html"
+          ><span class="mark" aria-hidden="true"><span></span></span
+          ><span class="brand__word">livingbrain<span>.wiki</span></span></a
+        >
+        <div id="ws-switch" class="ws" hidden>
+          <button
+            type="button"
+            id="ws-button"
+            class="ws__btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="ws-menu"
+          ><span class="sr">Workspace: </span><span id="ws-name" class="ws__name">Workspace</span></button>
+          <div id="ws-menu" class="menu" hidden></div>
+        </div>
+        <button type="button" id="palette-open" class="topbar__search" aria-keyshortcuts="Meta+K Control+K /">
+          <span class="topbar__search-text">Search or ask…</span>
+          <kbd class="topbar__kbd" aria-hidden="true">⌘K</kbd>
+        </button>
+        <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
+        <div id="session-bar" class="session-bar user" hidden>
+          <button
+            type="button"
+            id="user-button"
+            class="user__btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="user-menu"
+          ><span id="user-initial" class="user__avatar" aria-hidden="true"></span><span class="session-bar__who"><span class="sr">Signed in as </span><strong id="session-who"></strong></span></button>
+          <div id="user-menu" class="menu" hidden>
+            <a class="menu__item" href="settings.html#account">Account</a>
+            <a class="menu__item" href="settings.html#tokens">API tokens</a>
+            <button type="button" id="user-theme" class="menu__item">Switch theme</button>
+            <button type="button" id="header-signout" class="menu__item">Sign out</button>
+          </div>
+        </div>
+        <a href="index.html" id="header-signin" class="hd-btn btn">Sign in</a>
+      </div>
+    </header>
+    <div class="shell">
+      <aside id="app-sidebar" class="sidebar" aria-label="Sidebar">
+        <nav id="app-nav" class="sidebar__nav" aria-label="Main"></nav>
+        <button type="button" id="nav-collapse" class="sidebar__collapse" aria-pressed="false">Collapse</button>
+      </aside>
+      <div id="nav-scrim" class="scrim" hidden></div>
+      <div class="shell__col">
+      <main id="main" class="wrap shell__main map-main">
+        <div class="page-head map-head">
+          <p class="eyebrow">Brain</p>
+          <h1>Brain map</h1>
+          <p class="lede">
+            Everything your brain holds that you can read — pages, sessions,
+            projects and facts — and how it links together. Drag to turn it,
+            scroll to zoom, pick a node to read it.
+          </p>
+        </div>
+        <div id="map-notice" class="notice" role="status" aria-live="polite"></div>
+
+        <div class="map-tools" role="group" aria-label="Map filters">
+          <div class="map-search">
+            <label for="map-search" class="sr">Find a node</label>
+            <input
+              id="map-search"
+              type="search"
+              placeholder="Find in the map…"
+              autocomplete="off"
+              role="combobox"
+              aria-expanded="false"
+              aria-controls="map-results"
+              aria-autocomplete="list"
+            />
+            <ul id="map-results" class="map-results" role="listbox" aria-label="Matching nodes" hidden></ul>
+          </div>
+          <select id="map-project" aria-label="Show one project" hidden></select>
+          <select id="map-agent" aria-label="Show one agent" hidden></select>
+          <span id="map-status" class="status map-status" role="status"></span>
+        </div>
+        <div id="map-legend" class="map-legend" role="group" aria-label="Kinds shown"></div>
+
+        <div id="map-stage" class="map-stage">
+          <canvas
+            id="map-canvas"
+            class="map-canvas"
+            tabindex="0"
+            role="img"
+            aria-label="Your brain as a 3D graph. Arrow keys turn it, plus and minus zoom, 0 resets. The list below holds the same nodes."
+          ></canvas>
+          <div id="map-tip" class="map-tip" hidden></div>
+          <div class="map-controls" role="group" aria-label="View">
+            <button type="button" id="map-zoom-in" class="btn-sm" aria-label="Zoom in">+</button>
+            <button type="button" id="map-zoom-out" class="btn-sm" aria-label="Zoom out">−</button>
+            <button type="button" id="map-spin" class="btn-sm" aria-pressed="true">Spin</button>
+            <button type="button" id="map-flat" class="btn-sm" aria-pressed="false">Flat</button>
+            <button type="button" id="map-reset" class="btn-sm">Reset</button>
+          </div>
+          <aside id="map-panel" class="map-panel" aria-labelledby="map-panel-title" hidden>
+            <div class="map-panel__head">
+              <p id="map-panel-kind" class="eyebrow"></p>
+              <button type="button" id="map-panel-close" class="btn-sm" aria-label="Close the panel">Close</button>
+            </div>
+            <h2 id="map-panel-title"></h2>
+            <p id="map-panel-meta" class="tiny"></p>
+            <a id="map-panel-open" class="btn btn--primary map-panel__open" hidden>Open</a>
+            <div id="map-panel-body" class="prose map-panel__body"></div>
+          </aside>
+          <div id="map-empty" class="map-empty card" hidden>
+            <h2>Nothing to map yet</h2>
+            <p>
+              The map draws the pages, sessions and facts you can read. Import
+              notes, sync your coding-agent sessions, or write a page, and the
+              brain starts to grow here.
+            </p>
+          </div>
+        </div>
+
+        <div class="map-time">
+          <button type="button" id="map-play" class="btn-sm" aria-pressed="false">Play</button>
+          <label for="map-time" class="sr">Show the brain as of</label>
+          <input id="map-time" type="range" min="0" max="1000" step="1" value="1000" />
+          <span id="map-time-label" class="tiny"></span>
+        </div>
+
+        <details id="map-list" class="disclosure map-list">
+          <summary>The map as a list</summary>
+          <p class="hint">The most connected nodes first, with the filters above applied.</p>
+          <ol id="map-list-body" class="map-list__body"></ol>
+        </details>
+      </main>
+    <footer class="ft">
+      <div class="wrap ft__in">
+        <span class="brand__word brand__word--sm">livingbrain<span>.wiki</span></span>
+        <nav class="ft__nav" aria-label="Elsewhere">
+          <a href="https://livingbrain.wiki/">Website</a>
+          <a href="https://livingbrain.wiki/docs/">Docs</a>
+          <a href="https://livingbrain.wiki/privacy/">Privacy</a>
+          <a href="https://livingbrain.wiki/terms/">Terms</a>
+        </nav>
+      </div>
+    </footer>
+      </div>
+    </div>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

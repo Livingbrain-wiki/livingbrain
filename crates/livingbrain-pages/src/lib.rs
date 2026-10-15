@@ -32,6 +32,7 @@
 mod answers;
 mod entity;
 mod facts;
+mod graph;
 mod ingest;
 mod keys;
 mod links;
@@ -49,6 +50,7 @@ pub use facts::{
     MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
     is_subject, person_subject, relevant,
 };
+pub use graph::{GraphLink, GraphPage, GraphRows, GraphSource, GraphSubject, graph_rows};
 pub use ingest::{
     Extract, IngestError, IngestOutcome, Ingested, Ingestor, NoExtract, NoScreen, Screen,
     SourceIngest, Verdict,

@@ -20,6 +20,7 @@ export const NAV = Object.freeze([
       { id: "ask", label: "Ask the brain", href: "wiki.html?view=ask", icon: "ask", hint: "Search pages, or ask a question" },
       { id: "pages", label: "Pages", href: "wiki.html", icon: "pages", hint: "Pinned and recent pages" },
       { id: "facts", label: "Facts", href: "wiki.html?view=facts", icon: "facts", hint: "What is true, and since when" },
+      { id: "map", label: "Brain map", href: "brain.html", icon: "map", hint: "Your brain as a 3D graph" },
     ],
   },
   {
