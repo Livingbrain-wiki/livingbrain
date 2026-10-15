@@ -283,6 +283,11 @@ public struct APIClient: Sendable {
         try decode(ProviderCatalog.self, await send(request("GET", "/assets/providers.json", authorized: false)))
     }
 
+    /// `GET /v1/me`: who the saved token speaks for, in which workspace.
+    public func me() async throws -> Me {
+        try await get(Me.self, "/v1/me")
+    }
+
     public func tokens() async throws -> [TokenSummary] {
         try await get(TokensEnvelope.self, "/v1/tokens").tokens
     }
