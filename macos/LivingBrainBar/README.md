@@ -2,16 +2,17 @@
 
 A native menu bar app that runs `livingbrain logs sync` for you, so your
 Claude Code and Codex sessions in opted-in repositories land in Living Brain
-without opening a terminal — live, as each session goes quiet. SwiftUI,
+without opening a terminal — live, as each session goes quiet — plus a
+workspace window for the wiki, Ask, synced sessions, usage and settings. SwiftUI,
 macOS 14+, no third-party dependencies. It lives in the menu bar
 (`LSUIElement`); opening the Living Brain window adds a Dock icon until the
 window closes.
 
-The app is a thin shell over the CLI: every sync, opt-in and sign-in is a
-`livingbrain` subprocess. The CLI keeps deciding what may upload — a session
-recorded outside an opted-in repository never leaves the machine, and
-redaction still happens locally — and the app never reads, logs or shows a
-token.
+For syncing, the app is a thin shell over the CLI: every sync and opt-in is
+a `livingbrain` subprocess. The CLI keeps deciding what may upload — a
+session recorded outside an opted-in repository never leaves the machine,
+and redaction still happens locally. The workspace window holds its own API
+token in the keychain (see below); no token is ever logged or shown.
 
 ## The menu
 
@@ -72,8 +73,54 @@ the next one), and the same error at most once every 30 minutes.
   opt-in switch each (`logs allow` / `logs deny`), plus the pause, live-sync,
   schedule and notification switches.
 
-`--show-window` (`open "Living Brain.app" --args --show-window`) starts
-with the window open.
+### Workspace (signed in)
+
+The window's **Workspace** section talks to the API directly over HTTPS
+(`https://app.livingbrain.wiki` by default; change it under Settings) with
+`Authorization: Bearer`. Sign in with **Sign In with Browser** (the same
+device flow `livingbrain login` uses, client `livingbrain-cli`) or **Use the
+CLI's Sign-in**, which copies the token the CLI keeps in the keychain
+(service `wiki.livingbrain.cli`, account = the API URL; macOS asks first).
+The app keeps its own copy under service `wiki.livingbrain.mac`. Tokens are
+never logged or shown, and a 401 signs the app out.
+
+- **Wiki** — the page list (`GET /v1/pages`), search with a project filter
+  (`GET /v1/search`, ⌘K), pages rendered natively (headings, lists, quotes,
+  code, `[[wikilinks]]` that navigate, backlinks), **Edit** (⌘E) and save with
+  the version that was read (`PUT /v1/pages/{slug}` `base_version`); a 409
+  offers *Load Their Version* or *Overwrite with Mine*. **New Note** (⌘N)
+  posts `POST /v1/notes` with an optional project.
+- **Ask** — `POST /v1/ask`, project-scoped, with numbered citations that
+  open the cited page.
+- **Agent Sessions** — the synced timeline per project
+  (`GET /v1/sources/projects?kind=agent_log`, `GET /v1/sources?kind=agent_log`
+  with paging), grouped by day; a session opens as its transcript
+  (`GET /v1/sources/{id}`).
+- **Usage** — `GET /v1/usage/daily?days=7|14|31` (workspace admins): totals,
+  month-to-date spend against the budget, and Swift Charts of requests and
+  tokens per day. Non-admins see why it is empty.
+- **Settings** — server URL, sign in/out; models per role (`GET /v1/models`,
+  `PUT`/`DELETE /v1/models/{role}`, *Discover* via `POST /v1/models/discover`,
+  providers from the app's `providers.json`); API tokens (list, revoke).
+
+What the API does not offer a bearer token, so the app links to the web
+Settings instead: creating API tokens (`POST /v1/tokens` takes the web
+session only, so a token can never mint a token), Slack connection status
+(no endpoint reports it), and the workspace's name or switching workspaces
+(`/v1/workspaces/me` is cookie-only and names one workspace). The current
+workspace id is shown from the usage response when you are an admin.
+
+Keyboard: ⌘K search, ⌘N new note, ⌘R sync, ⌘E edit, ⌘S save, ⌘1–⌘7 sections.
+
+### Launch flags
+
+- `--show-window` starts with the window open.
+- `--destination wiki|ask|timeline|usage|sessions|projects|settings` picks the section.
+- `--snapshot <file.png>` (with `--snapshot-delay <s>`) writes a PNG of the
+  window, for docs and UI checks where screen capture is not permitted.
+- `--api-fixtures <dir>` answers every API call from recorded JSON
+  (`GET_v1_pages.json`, …) with no server or token; `--open-page <slug>`
+  and `--select-first` pick something to show.
 
 ## Which CLI it runs
 
@@ -117,7 +164,8 @@ and signs it.
 ```
 Package.swift
 Sources/LivingBrainKit/    # testable: CLI JSON models, SyncState, CLI locator/runner, opt-in file,
-                           #   idle debouncer, notification throttle, FSEvents watcher, session ledger
+                           #   idle debouncer, notification throttle, FSEvents watcher, session ledger,
+                           #   API client + models, keychain token store, Markdown blocks
 Sources/LivingBrainBar/    # the SwiftUI menu bar extra, the window, and AppKit glue
 Tests/LivingBrainKitTests/ # XCTest + recorded CLI JSON fixtures
 scripts/build-app.sh

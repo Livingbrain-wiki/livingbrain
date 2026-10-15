@@ -85,11 +85,19 @@ final class SessionsTests: XCTestCase {
     func testShowDecodesTheRecord() throws {
         let shown = try CLIOutput.sessionShow(fixture("logs-show"))
         XCTAssertFalse(shown.optedIn)
-        XCTAssertEqual(shown.record.agent, "claude_code")
-        XCTAssertEqual(shown.record.branch, "main")
-        XCTAssertEqual(shown.record.turns.count, 2)
-        XCTAssertEqual(shown.record.turns[1].toolCalls, ["Bash"])
-        XCTAssertEqual(shown.record.turns.map(\.id), [0, 1])
+        let record = try XCTUnwrap(shown.record)
+        XCTAssertEqual(record.agent, "claude_code")
+        XCTAssertEqual(record.branch, "main")
+        XCTAssertEqual(record.turns.count, 2)
+        XCTAssertEqual(record.turns[1].toolCalls, ["Bash"])
+        XCTAssertEqual(record.turns.map(\.id), [0, 1])
+
+        let raw = try CLIOutput.sessionShow(Data(#"{"file":"/f","opted_in":true,"redacted":1,"record":null,"body":"{\"x\":\"\\[REDACTED:email]\"}"}"#.utf8))
+        XCTAssertNil(raw.record)
+        XCTAssertEqual(SessionShow.repairEscapes(#"a\[b \\[c \n \"q\""#), #"a\\[b \\[c \n \"q\""#)
+        let broken = try CLIOutput.sessionShow(Data(#"{"file":"/f","opted_in":true,"redacted":1,"record":null,"body":"{\"session_id\":\"s\",\"turns\":[{\"role\":\"user\",\"text\":\"mail\\[REDACTED:email]\",\"tool_calls\":[]}]}"}"#.utf8))
+        XCTAssertEqual(broken.displayRecord?.turns.first?.text, #"mail\[REDACTED:email]"#)
+        XCTAssertEqual(raw.body, #"{"x":"\[REDACTED:email]"}"#)
     }
 
     func testUnsupportedDetection() {
@@ -156,6 +164,7 @@ final class SessionsTests: XCTestCase {
         let elsewhere = try XCTUnwrap(repos.first { $0.name == "elsewhere" })
         XCTAssertTrue(elsewhere.optedIn)
         XCTAssertEqual(elsewhere.sessions, 0)
+        XCTAssertEqual(repos.prefix(2).map(\.optedIn), [true, true], "opted-in repos sort first")
         XCTAssertTrue(RepoSummary.isInside("/a/b/c", "/a/b"))
         XCTAssertFalse(RepoSummary.isInside("/a/bc", "/a/b"))
         XCTAssertEqual(RepoSummary.expand("~/x", home: "/h"), "/h/x")

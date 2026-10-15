@@ -17,11 +17,41 @@ public struct SessionShow: Decodable, Equatable, Sendable {
     public var file: String
     public var optedIn: Bool
     public var redacted: Int
-    public var record: SessionRecord
+    /// The parsed record; nil when redaction left the text unparseable.
+    public var record: SessionRecord?
+    /// The exact text a sync would send (absent from the first `show` builds).
+    public var body: String?
 
     enum CodingKeys: String, CodingKey {
-        case file, redacted, record
+        case file, redacted, record, body
         case optedIn = "opted_in"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        file = try c.decodeIfPresent(String.self, forKey: .file) ?? ""
+        optedIn = try c.decodeIfPresent(Bool.self, forKey: .optedIn) ?? false
+        redacted = try c.decodeIfPresent(Int.self, forKey: .redacted) ?? 0
+        record = try c.decodeIfPresent(SessionRecord.self, forKey: .record)
+        body = try c.decodeIfPresent(String.self, forKey: .body)
+    }
+
+    /// The record for display: the CLI's parse, else the body with any
+    /// escape that redaction broke (`\[REDACTED:…]`) re-escaped. Display
+    /// only — the bytes a sync sends are `body`, unchanged.
+    public var displayRecord: SessionRecord? {
+        if let record { return record }
+        guard let body else { return nil }
+        return try? JSONDecoder().decode(SessionRecord.self, from: Data(Self.repairEscapes(body).utf8))
+    }
+
+    static let strayEscape = try! NSRegularExpression(pattern: #"(?<!\\)((?:\\\\)*)\\(?!["\\/bfnrtu])"#)
+
+    /// Double every backslash that does not start a valid JSON escape.
+    public static func repairEscapes(_ text: String) -> String {
+        strayEscape.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "$1\\\\\\\\"
+        )
     }
 }
 
@@ -134,20 +164,43 @@ public struct SessionLedger: Codable, Equatable, Sendable {
 }
 
 /// One row of the Recent Sessions browser: a local session plus what the
-/// ledger knows about it.
+/// ledger and the log file itself say about it.
 public struct SessionRow: Identifiable, Equatable, Sendable {
     public enum SyncStatus: Equatable, Sendable {
         case notOptedIn
         case pending
         case synced(Date)
+        case failed(String)
     }
 
     public var session: SyncedSession
     public var ledger: SessionLedger.Entry?
+    /// The local log file: the report's `file`, else found on disk.
+    public var file: String?
+    /// The newest timestamp the session recorded.
+    public var lastActivity: Date?
+    public var branch: String?
+    /// The git root's name (see `RepoName`).
+    public var repoName: String
+    /// The last live sync of this file failed with this message.
+    public var error: String?
     public var id: String { session.key }
+
+    public init(session: SyncedSession, ledger: SessionLedger.Entry? = nil, file: String? = nil,
+                lastActivity: Date? = nil, branch: String? = nil, repoName: String? = nil, error: String? = nil)
+    {
+        self.session = session
+        self.ledger = ledger
+        self.file = file ?? session.file
+        self.lastActivity = lastActivity ?? session.endedDate
+        self.branch = branch ?? session.branch
+        self.repoName = repoName ?? session.projectName
+        self.error = error
+    }
 
     public var status: SyncStatus {
         if !session.isOptedIn { return .notOptedIn }
+        if let error { return .failed(error) }
         if let entry = ledger { return .synced(entry.syncedAt) }
         return .pending
     }
@@ -155,15 +208,17 @@ public struct SessionRow: Identifiable, Equatable, Sendable {
     public var statusLabel: String {
         switch status {
         case .notOptedIn: return "Not opted in"
-        case .pending: return "Not synced yet"
+        case .pending: return "Pending"
         case .synced: return "Synced"
+        case .failed: return "Error"
         }
     }
 
-    /// The page to open in Living Brain: the session's note when known, else
-    /// the project's session list.
+    /// The page to open in Living Brain: the session's note when it has been
+    /// synced, else the project's session list (the server's project is the
+    /// CLI's repo basename, `SyncedSession.projectName`).
     public func webURL(base: URL) -> URL {
-        let slug = ledger?.noteSlug ?? (session.isOptedIn ? session.note?.slug : nil)
+        let slug = ledger?.noteSlug ?? session.note?.slug
         var components = URLComponents(url: base.appendingPathComponent("wiki.html"), resolvingAgainstBaseURL: false)!
         if let slug, ledger != nil {
             components.queryItems = [URLQueryItem(name: "slug", value: slug)]
@@ -176,11 +231,40 @@ public struct SessionRow: Identifiable, Equatable, Sendable {
         return components.url!
     }
 
-    /// Build rows from a dry-run report, newest first.
-    public static func rows(from report: SyncReport, ledger: SessionLedger) -> [SessionRow] {
-        report.sessions
-            .map { SessionRow(session: $0, ledger: ledger.entry(for: $0)) }
-            .sorted { ($0.session.endedDate ?? .distantPast) > ($1.session.endedDate ?? .distantPast) }
+    /// Build rows from a dry-run report, newest first. `index` and `meta`
+    /// fill what an older CLI's report lacks; `errors` maps a log file to
+    /// the message its last live sync failed with.
+    public static func rows(
+        from report: SyncReport,
+        ledger: SessionLedger,
+        index: SessionFileIndex = SessionFileIndex(),
+        meta: (String) -> SessionFileMeta = { _ in SessionFileMeta() },
+        home: String = NSHomeDirectory(),
+        isRepoRoot: (String) -> Bool = RepoName.hasGitEntry,
+        errors: [String: String] = [:]
+    ) -> [SessionRow] {
+        var names: [String: String] = [:]
+        return report.sessions
+            .map { session in
+                let file = session.file ?? index.path(agent: session.agent, sessionId: session.sessionId)
+                let needsMeta = session.endedAt == nil || session.branch == nil
+                let fileMeta = (needsMeta ? file.map(meta) : nil) ?? SessionFileMeta()
+                let name = names[session.repo] ?? RepoName.display(repo: session.repo, home: home, isRepoRoot: isRepoRoot)
+                names[session.repo] = name
+                return SessionRow(
+                    session: session,
+                    ledger: ledger.entry(for: session),
+                    file: file,
+                    lastActivity: session.endedDate ?? fileMeta.lastActivity,
+                    branch: session.branch ?? fileMeta.branch,
+                    repoName: name,
+                    error: file.flatMap { errors[$0] }
+                )
+            }
+            .sorted {
+                let a = $0.lastActivity ?? .distantPast, b = $1.lastActivity ?? .distantPast
+                return a == b ? $0.id < $1.id : a > b
+            }
     }
 }
 
@@ -192,7 +276,9 @@ public struct RepoSummary: Identifiable, Equatable, Sendable {
     public var optedIn: Bool
     public var lastActivity: Date?
     public var id: String { path }
-    public var name: String { (path as NSString).lastPathComponent }
+    public var name: String {
+        path == NSHomeDirectory() ? "(home)" : (path as NSString).lastPathComponent
+    }
 
     /// Every repo the sessions mention, plus every allowed path, sorted by
     /// most recent activity. A repo is opted in when an allowed path is it or
@@ -214,8 +300,10 @@ public struct RepoSummary: Identifiable, Equatable, Sendable {
         for key in byPath.keys {
             byPath[key]!.optedIn = allowed.contains { isInside(key, $0) }
         }
+        // Opted-in first, then most recent activity, then name.
         return byPath.values.sorted {
-            ($0.lastActivity ?? .distantPast, $1.name) > ($1.lastActivity ?? .distantPast, $0.name)
+            if $0.optedIn != $1.optedIn { return $0.optedIn }
+            return ($0.lastActivity ?? .distantPast, $1.name) > ($1.lastActivity ?? .distantPast, $0.name)
         }
     }
 
