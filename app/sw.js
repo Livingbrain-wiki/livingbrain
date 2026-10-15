@@ -11,7 +11,7 @@
  */
 
 
-const CACHE = "lb-app-v11";
+const CACHE = "lb-app-v12";
 
 const SHELL = [
   "./",
@@ -41,6 +41,9 @@ const SHELL = [
   "./assets/wiki.css",
   // wiki.js imports facts.js statically (temporal facts on a page).
   "./assets/facts.js",
+  // app.js imports the shell and the destinations it is built from.
+  "./assets/shell.js",
+  "./assets/nav.js",
   // settings.js imports this statically, and an ES module import fails
   // atomically, so an offline settings page would not render at all without it.
   "./assets/stack.json",

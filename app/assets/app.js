@@ -101,6 +101,8 @@ import {
   MCP_PATH,
 } from "./session.js";
 import { wikiPage } from "./wiki.js";
+import { mountShell } from "./shell.js";
+import { settingsTab, SETTINGS_TABS } from "./nav.js";
 
 /**
  * The API base. Same-origin by default, because the app is served from the
@@ -385,7 +387,10 @@ async function wireHeaderSession() {
   const bar = $("#session-bar");
   if (!bar) return;
   const els = { bar, who: $("#session-who"), signin: $("#header-signin") };
-  applyHeader(els, await checkSession(api));
+  if (shell) shell.applySession({ kind: "checking" });
+  const state = await checkSession(api);
+  applyHeader(els, state);
+  if (shell) shell.applySession(state);
   const button = $("#header-signout");
   if (button) {
     button.addEventListener("click", async () => {
@@ -401,8 +406,40 @@ async function wireHeaderSession() {
   }
 }
 
+/**
+ * The app shell (`shell.js`): the sidebar, the drawer, the switcher, the
+ * user menu and the palette. `null` where the page has no shell to mount
+ * (a document without `getElementById` — the tests' stub DOM).
+ */
+let shell = null;
+
+function mountAppShell() {
+  try {
+    shell = mountShell({
+      api,
+      origin: apiOrigin(),
+      toggleTheme: () => applyTheme(currentTheme() === "dark" ? "light" : "dark"),
+      signOut: async () => {
+        try {
+          await signOut();
+        } catch {
+          /* the cookie may already be gone; either way, back to the front door */
+        }
+        location.assign("index.html");
+      },
+    });
+    // `wiki.js` switches views in place and says so with this event.
+    document.addEventListener("lb-view", (event) => {
+      if (shell && event && event.detail) shell.setActive(event.detail.view);
+    });
+  } catch {
+    shell = null;
+  }
+}
+
 /** Runs a page's setup once the DOM is parsed. */
 function boot() {
+  if (typeof document.getElementById === "function") mountAppShell();
   wireThemeToggle($("#theme-toggle"));
   wireHeaderSession().catch(() => {
     /* the header keeps its plain "Sign in" link */
@@ -543,7 +580,66 @@ pages.signin = async function signin() {
 
 /* --- settings ------------------------------------------------------- */
 
+/**
+ * The settings page shows one tab at a time (docs/ux-navigation.md): the
+ * hash names the tab, the old anchors (`#connect`, `#soon`, `#stack`) land
+ * on the tab that holds them, and the page head names the tab and its group.
+ */
+const TAB_HEADS = Object.freeze({
+  models: ["Settings", "Models", "Bring your own model for each job the brain does. Keys are encrypted before they are stored."],
+  limits: ["Settings", "Usage & limits", "How much the brain may spend on the workspace's model, and what it has spent."],
+  integrations: ["Settings", "Integrations", "Connect your coding agent, the CLI and the tools that read from the brain."],
+  tokens: ["Settings", "API tokens", "Tokens let a coding agent or the CLI read your brain without a browser."],
+  members: ["Workspace", "Members", "Who is in this workspace and what they may do."],
+  account: ["Settings", "Account", "Who you are signed in as, your workspaces, and signing out."],
+});
+
+export function showSettingsTab(hash) {
+  const tab = settingsTab(hash);
+  const shown = new Set(SETTINGS_TABS[tab]);
+  for (const sections of Object.values(SETTINGS_TABS)) {
+    for (const id of sections) {
+      const section = document.getElementById(id);
+      if (!section) continue;
+      section.hidden = !shown.has(id);
+      // A tab of one section: its own heading repeats the page's, so it is
+      // kept for screen readers (the section's label) and hidden from view.
+      section.classList.toggle("sect--solo", shown.size === 1);
+    }
+  }
+  const [eyebrow, title, lede] = TAB_HEADS[tab];
+  const head = { eyebrow: $("#settings-eyebrow"), title: $("#settings-title"), lede: $("#settings-lede") };
+  if (head.eyebrow) head.eyebrow.textContent = eyebrow;
+  if (head.title) head.title.textContent = title;
+  if (head.lede) head.lede.textContent = lede;
+  document.title = `${title} — Living Brain`;
+  if (shell) shell.setActive();
+  return tab;
+}
+
+function wireSettingsTabs() {
+  showSettingsTab(location.hash);
+  window.addEventListener("hashchange", () => {
+    showSettingsTab(location.hash);
+    window.scrollTo(0, 0);
+  });
+  const signout = $("#account-signout");
+  if (signout) {
+    signout.addEventListener("click", async () => {
+      signout.disabled = true;
+      try {
+        await signOut();
+        location.assign("index.html");
+      } catch (error) {
+        signout.disabled = false;
+        notice($("#settings-notice"), `Not signed out: ${error.message}`, "bad");
+      }
+    });
+  }
+}
+
 pages.settings = async function settings() {
+  wireSettingsTabs();
   wireSectionNav();
   wireCopyButtons();
   fillConnectPanel();

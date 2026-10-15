@@ -1,7 +1,10 @@
-// The wiki page: home (list + pins, and the compiled `coding-agents/`
-// folder), a page, its editor, the new-page form, the agent-sessions list
-// with each session's compile status and the queue card, one session's
-// transcript, the ask panel and header search (with its project filter).
+// The wiki page: Pages (list + pins), a page, its editor, the new-page form,
+// the agent-sessions list with each session's compile status and the queue
+// card, one session's transcript, the compiled `coding-agents/` folders, the
+// imports, Facts, and Ask the brain — one box that searches as you type and
+// asks on Enter (with its project filter) — plus the ask-about-this-page
+// dialog. Which view shows is the address's (`?view=`, `?slug=`); the
+// sidebar around them is `shell.js`'s (docs/ux-navigation.md).
 //
 // `app.js` imports `wikiPage` from here and its boot dispatches it for
 // `body[data-page="wiki"]`, so this file is the one module the wiki page runs
@@ -28,8 +31,9 @@ import {
   renderMarkdown,
   isSafeHref,
 } from "./markdown.js";
-import { applyHeader, checkSession, signOutRequest } from "./session.js";
+import { applyHeader, checkSession } from "./session.js";
 import { factsDescription, factsPath } from "./facts.js";
+import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
 
 /** Where the per-browser list of pinned `scope/slug` keys lives. */
 const PIN_KEY = "lb-wiki-pinned";
@@ -991,6 +995,9 @@ export async function wikiPage(api) {
       sessions: $("#sessions-view"),
       transcript: $("#transcript-view"),
       facts: $("#facts-view"),
+      ask: $("#ask-view"),
+      "coding-agents": $("#coding-agents-view"),
+      imports: $("#imports-view"),
     },
     notice: $("#wiki-notice"),
     status: $("#wiki-status"),
@@ -1002,6 +1009,20 @@ export async function wikiPage(api) {
     recentList: $("#recent-list"),
     homeNomatch: $("#home-nomatch"),
     homeEmpty: $("#home-empty"),
+    homeCaHint: $("#home-ca-hint"),
+    pageCrumbs: $("#page-crumbs"),
+    transcriptCrumbs: $("#transcript-crumbs"),
+    askGo: $("#ask-go"),
+    askViewStatus: $("#ask-view-status"),
+    askViewResult: $("#ask-view-result"),
+    askViewAnswer: $("#ask-view-answer"),
+    askViewCitations: $("#ask-view-citations"),
+    caStatus: $("#ca-status"),
+    caEmpty: $("#ca-empty"),
+    importsStatus: $("#imports-status"),
+    importsList: $("#imports-list"),
+    importsMore: $("#imports-more"),
+    importsEmpty: $("#imports-empty"),
     pageTitle: $("#page-title"),
     pageMeta: $("#page-meta"),
     pageBody: $("#page-body"),
@@ -1061,8 +1082,6 @@ export async function wikiPage(api) {
     transcriptBody: $("#transcript-body"),
     drawerToggle: $("#drawer-toggle"),
     drawer: $("#wiki-drawer"),
-    drawerSignin: $("#drawer-signin"),
-    drawerSignout: $("#drawer-signout"),
     askPanel: $("#ask-panel"),
     askQuestion: $("#ask-question"),
     askSubmit: $("#ask-submit"),
@@ -1097,17 +1116,46 @@ export async function wikiPage(api) {
     caSessions: null,
     // The compile queue, keyed by source id (`/v1/coding-agents/queue`).
     jobs: new Map(),
+    // The view on screen, as `showView` last set it.
+    view: "",
+    // The imports listing (`/v1/sources?kind=import`) and its cursor.
+    imports: [],
+    importsCursor: null,
   };
   let searchTimer = null;
 
   /* -- small shared pieces ------------------------------------------ */
 
-  const VIEWS = ["home", "page", "editor", "new", "sessions", "transcript", "facts"];
+  const VIEWS = [
+    "home", "page", "editor", "new", "sessions", "transcript", "facts",
+    "ask", "coding-agents", "imports",
+  ];
 
+  /** Shows one view, and tells the shell (the sidebar's current item) and
+   * the sheet (`body[data-view]`) which it is. */
   function showView(name) {
+    state.view = name;
     for (const view of VIEWS) {
       if (els.views[view]) els.views[view].hidden = view !== name;
     }
+    if (document.body && document.body.dataset) document.body.dataset.view = name;
+    if (typeof CustomEvent === "function" && typeof document.dispatchEvent === "function") {
+      document.dispatchEvent(new CustomEvent("lb-view", { detail: { view: name } }));
+    }
+  }
+
+  /** A breadcrumb trail (`nav.js`'s `[{label, href?}]`) into its `<nav>`:
+   * an ordered list, links for the ancestors, the current page last. */
+  function paintCrumbs(container, crumbs) {
+    if (!container) return;
+    const items = crumbs.map((crumb, at) => {
+      const last = at === crumbs.length - 1;
+      const inner = crumb.href && !last
+        ? el("a", [tx(crumb.label)], { href: crumb.href })
+        : el("span", [tx(crumb.label)], last ? { "aria-current": "page" } : null);
+      return el("li", [inner]);
+    });
+    renderInto(container, [el("ol", items, { class: "crumbs__list" })]);
   }
 
   /** A plain button with a handler, for the notice area's actions. */
@@ -1143,8 +1191,6 @@ export async function wikiPage(api) {
       },
       state.session,
     );
-    if (els.drawerSignin) els.drawerSignin.hidden = state.signedIn;
-    if (els.drawerSignout) els.drawerSignout.hidden = !state.signedIn;
     // Ask hits the API like Edit and Pin do, so its two buttons stand down
     // with the write affordances wherever they live (page toolbar, editor).
     for (const button of [els.edit, els.pinToggle, els.askOpen, els.askOpenEdit]) {
@@ -1219,16 +1265,17 @@ export async function wikiPage(api) {
     );
     const pins = readPins();
     const pinned = matches.filter((row) => pins.includes(pinId(row)));
-    // The compiled coding-agents pages are a folder of their own, not
-    // recent pages: they would crowd everything else off the list.
+    // The compiled coding-agents pages have their own place (Sources →
+    // Coding agents): unfiltered they would crowd everything else off the
+    // list, so they show here only when a filter asks for them.
     const recent = matches.filter(
-      (row) => !pins.includes(pinId(row)) && !codingAgentsPlace(row.slug),
+      (row) => !pins.includes(pinId(row)) && (query !== "" || !codingAgentsPlace(row.slug)),
     );
     fillList(els.pinnedList, pinned, true);
     fillList(els.recentList, recent, false);
     els.pinnedSection.hidden = pinned.length === 0;
     els.recentSection.hidden = recent.length === 0;
-    renderCodingAgents(matches, query !== "");
+    paintCodingAgentsHint(query === "" ? state.rows.filter((row) => codingAgentsPlace(row.slug)).length : 0);
     els.listFilter.hidden = state.rows.length === 0;
     els.homeEmpty.hidden = state.rows.length !== 0;
     els.homeNomatch.hidden = !(state.rows.length > 0 && matches.length === 0);
@@ -1287,7 +1334,26 @@ export async function wikiPage(api) {
     return details;
   }
 
-  /** The `coding-agents/` folder on the home view: agent, then project. */
+  /** The line under the Pages toolbar that says where the compiled pages
+   * went: "12 compiled coding-agent pages are under Coding agents". */
+  function paintCodingAgentsHint(count) {
+    if (!els.homeCaHint) return;
+    els.homeCaHint.replaceChildren();
+    els.homeCaHint.hidden = count === 0;
+    if (!count) return;
+    els.homeCaHint.appendChild(
+      document.createTextNode(
+        `${count} compiled coding-agent ${count === 1 ? "page is" : "pages are"} filed under `,
+      ),
+    );
+    const link = document.createElement("a");
+    link.href = "wiki.html?view=coding-agents";
+    link.textContent = "Coding agents";
+    els.homeCaHint.appendChild(link);
+    els.homeCaHint.appendChild(document.createTextNode("."));
+  }
+
+  /** The `coding-agents/` folders: agent, then project. */
   function renderCodingAgents(rows, filtering) {
     if (!els.caSection || !els.caTree) return;
     // Filtering narrows to pages; the synced folders are the unfiltered view.
@@ -1314,6 +1380,7 @@ export async function wikiPage(api) {
 
   function renderHomeSignedOut() {
     if (els.caSection) els.caSection.hidden = true;
+    if (els.homeCaHint) els.homeCaHint.hidden = true;
     els.listFilter.hidden = true;
     els.pinnedSection.hidden = true;
     els.recentSection.hidden = true;
@@ -1330,13 +1397,7 @@ export async function wikiPage(api) {
       return;
     }
     try {
-      // The synced sessions' folders are a nicety: without them the tree is
-      // the compiled pages alone.
-      const [data, sessions] = await Promise.all([
-        api("/v1/pages?limit=200"),
-        api(TREE_PATH).catch(() => null),
-      ]);
-      state.caSessions = sessions && Array.isArray(sessions.agents) ? sessions : null;
+      const data = await api("/v1/pages?limit=200");
       state.rows = data && Array.isArray(data.pages) ? data.pages : [];
       els.homeStatus.textContent = `${state.rows.length} ${
         state.rows.length === 1 ? "page" : "pages"
@@ -1353,6 +1414,196 @@ export async function wikiPage(api) {
       renderHomeSignedOut();
       notice(els.notice, `Could not load pages: ${error.message}`, "bad");
       els.notice.appendChild(mkButton("Retry", loadHome));
+    }
+  }
+
+  /* -- coding agents: the compiled folders (Sources → Coding agents) --- */
+
+  /** The coding-agents view: the compiled pages from the page listing and
+   * the synced sessions' folders from the tree route, as one folder tree
+   * (#187). The tree route is a nicety: without it the folders are the
+   * compiled pages alone. */
+  async function loadCodingAgents() {
+    showView("coding-agents");
+    if (els.caEmpty) els.caEmpty.hidden = true;
+    if (!state.signedIn) {
+      if (els.caSection) els.caSection.hidden = true;
+      if (els.caStatus) els.caStatus.textContent = "";
+      signInNotice("Sign in to see your coding agents.");
+      return;
+    }
+    if (els.caStatus) els.caStatus.textContent = "Loading…";
+    try {
+      const [data, sessions] = await Promise.all([
+        api("/v1/pages?limit=200"),
+        api(TREE_PATH).catch(() => null),
+      ]);
+      state.caSessions = sessions && Array.isArray(sessions.agents) ? sessions : null;
+      state.rows = data && Array.isArray(data.pages) ? data.pages : [];
+      renderCodingAgents(state.rows, false);
+      const empty = !els.caSection || els.caSection.hidden;
+      if (els.caEmpty) els.caEmpty.hidden = !empty;
+      if (els.caStatus) els.caStatus.textContent = "";
+      clearNotice();
+    } catch (error) {
+      if (els.caStatus) els.caStatus.textContent = "";
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        if (els.caSection) els.caSection.hidden = true;
+        signInNotice("Sign in to see your coding agents.");
+        return;
+      }
+      notice(els.notice, `Could not load the coding agents: ${error.message}`, "bad");
+      els.notice.appendChild(mkButton("Retry", loadCodingAgents));
+    }
+  }
+
+  /* -- imports (Sources → Imports) ------------------------------------ */
+
+  /** One imported source: its path, project and date; opening it reads
+   * the body once (`GET /v1/sources/{id}`) and renders it as Markdown. */
+  function importElement(row) {
+    const li = document.createElement("li");
+    li.className = "wiki-row import-row";
+    const details = document.createElement("details");
+    details.className = "import";
+    const summary = document.createElement("summary");
+    summary.className = "wiki-row__link";
+    const name = document.createElement("span");
+    name.className = "wiki-row__slug";
+    name.textContent = row.path || row.id || "(unnamed import)";
+    summary.appendChild(name);
+    if (row.project) {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = row.project;
+      summary.appendChild(pill);
+    }
+    const meta = document.createElement("span");
+    meta.className = "wiki-row__meta";
+    meta.textContent = [formatDate(row.created_at), row.scope === "shared" ? "shared" : ""]
+      .filter(Boolean)
+      .join(" · ");
+    summary.appendChild(meta);
+    details.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "prose import__body";
+    details.appendChild(body);
+    let loaded = false;
+    details.addEventListener("toggle", async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      body.textContent = "Loading…";
+      try {
+        const source = await api(sourcePath(row.id || ""));
+        renderInto(body, renderMarkdown(stripFrontmatter((source && source.body) || "")));
+      } catch (error) {
+        loaded = false;
+        body.textContent = `Could not open this import: ${error.message}`;
+      }
+    });
+    li.appendChild(details);
+    return li;
+  }
+
+  async function loadImports({ more = false } = {}) {
+    showView("imports");
+    if (!state.signedIn) {
+      els.importsList.hidden = true;
+      els.importsEmpty.hidden = true;
+      els.importsMore.hidden = true;
+      els.importsStatus.textContent = "";
+      signInNotice("Sign in to see your imports.");
+      return;
+    }
+    const cursor = more ? state.importsCursor : "";
+    els.importsStatus.textContent = "Loading…";
+    try {
+      const params = new URLSearchParams({ kind: "import", limit: String(SESSIONS_LIMIT) });
+      if (cursor) params.set("cursor", cursor);
+      const data = await api(`/v1/sources?${params.toString()}`);
+      const rows = data && Array.isArray(data.sources) ? data.sources : [];
+      state.imports = more ? state.imports.concat(rows) : rows;
+      state.importsCursor = (data && data.next_cursor) || null;
+      if (!more) els.importsList.replaceChildren();
+      for (const row of rows) els.importsList.appendChild(importElement(row));
+      els.importsList.hidden = state.imports.length === 0;
+      els.importsEmpty.hidden = state.imports.length !== 0;
+      els.importsMore.hidden = !state.importsCursor;
+      const count = state.imports.length;
+      els.importsStatus.textContent = count
+        ? `${count}${state.importsCursor ? "+" : ""} ${count === 1 ? "import" : "imports"}`
+        : "";
+      clearNotice();
+    } catch (error) {
+      els.importsStatus.textContent = "";
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        await loadImports();
+        return;
+      }
+      notice(els.notice, `Could not load the imports: ${error.message}`, "bad");
+      els.notice.appendChild(mkButton("Retry", () => loadImports({ more })));
+    }
+  }
+
+  /* -- ask the brain (the one box) ------------------------------------ */
+
+  /** The Ask view; `question` pre-fills the box and asks at once. */
+  async function openAskView(question = "") {
+    showView("ask");
+    els.askViewResult.hidden = true;
+    els.askViewStatus.textContent = "";
+    if (!state.signedIn) {
+      signInNotice("Sign in to search and ask the brain.");
+      return;
+    }
+    clearNotice();
+    if (question) {
+      els.searchInput.value = question;
+      await askInView(question);
+    }
+    if (typeof els.searchInput.focus === "function") els.searchInput.focus();
+  }
+
+  /** Asks the brain from the Ask view and draws the answer with its
+   * citations under the box. The address keeps the question (`&q=`), so a
+   * reload or a shared link asks it again. */
+  async function askInView(question) {
+    const q = String(question || "").trim();
+    if (!q) {
+      els.askViewStatus.textContent = "Type a question first.";
+      return;
+    }
+    closeSearch();
+    history.replaceState(null, "", askHref(q));
+    els.askGo.disabled = true;
+    els.askViewStatus.textContent = "Asking…";
+    try {
+      const answer = await askWithRunner(api, { question: q }, {
+        onWait: () => {
+          els.askViewStatus.textContent =
+            "Your own Claude Code or Codex is answering this on your device…";
+        },
+      });
+      els.askViewStatus.textContent = "";
+      renderInto(els.askViewAnswer, renderMarkdown((answer && answer.answer) || ""));
+      linkWikilinks(els.askViewAnswer);
+      renderInto(els.askViewCitations, askCitations(answer && answer.citations));
+      els.askViewResult.hidden = false;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        els.askViewStatus.textContent = "";
+        signInNotice("Sign in to search and ask the brain.");
+        return;
+      }
+      els.askViewStatus.textContent = `Could not ask: ${error.message}`;
+    } finally {
+      els.askGo.disabled = false;
     }
   }
 
@@ -1726,6 +1977,7 @@ export async function wikiPage(api) {
     showView("transcript");
     els.transcriptBody.replaceChildren();
     els.transcriptTitle.textContent = "Agent session";
+    paintCrumbs(els.transcriptCrumbs, transcriptCrumbs("Agent session"));
     if (!state.signedIn) {
       signInNotice("Sign in to see your agent sessions.");
       return;
@@ -1751,6 +2003,7 @@ export async function wikiPage(api) {
         ]);
       }
       els.transcriptStatus.textContent = "";
+      paintCrumbs(els.transcriptCrumbs, transcriptCrumbs(els.transcriptTitle.textContent));
       clearNotice();
     } catch (error) {
       els.transcriptStatus.textContent = "";
@@ -1921,6 +2174,7 @@ export async function wikiPage(api) {
     els.pageBody.hidden = false;
     els.pageMeta.hidden = false;
     els.pageTitle.textContent = page.title || page.slug || "Untitled";
+    paintCrumbs(els.pageCrumbs, pageCrumbs(page.slug || state.slug, page.title));
     const pill = document.createElement("span");
     pill.className = "pill";
     pill.textContent = page.entity_type || "page";
@@ -2003,6 +2257,7 @@ export async function wikiPage(api) {
     state.page = null;
     state.version = null;
     showView("page");
+    paintCrumbs(els.pageCrumbs, pageCrumbs(targetSlug, targetSlug));
     if (!state.signedIn) {
       els.pageTitle.textContent = targetSlug;
       paintSignedOutPage();
@@ -2415,18 +2670,6 @@ export async function wikiPage(api) {
     els.drawer.hidden ? openDrawer() : closeDrawer(),
   );
 
-  if (els.drawerSignout) {
-    els.drawerSignout.addEventListener("click", async () => {
-      try {
-        const request = signOutRequest();
-        await api(request.path, { method: request.method });
-      } catch {
-        /* the cookie may already be gone; either way, leave for the front door */
-      }
-      location.assign("index.html");
-    });
-  }
-
   for (const trigger of $$("[data-new-page]")) {
     trigger.addEventListener("click", openNewPage);
   }
@@ -2477,6 +2720,9 @@ export async function wikiPage(api) {
   }
   if (els.sessionsMore) {
     els.sessionsMore.addEventListener("click", () => loadSessions({ more: true }));
+  }
+  if (els.importsMore) {
+    els.importsMore.addEventListener("click", () => loadImports({ more: true }));
   }
   if (els.caProcess) els.caProcess.addEventListener("click", processNow);
   if (els.caRetry) els.caRetry.addEventListener("click", retryFailed);
@@ -2543,21 +2789,31 @@ export async function wikiPage(api) {
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      chooseResult(state.activeSearch >= 0 ? state.activeSearch : 0);
+      submitBox();
     }
   });
+  /** The one box's Enter (and its Ask button): a page picked with the
+   * arrows opens; otherwise the text is a question for the brain. */
+  function submitBox() {
+    if (state.activeSearch >= 0 && state.searchResults[state.activeSearch]) {
+      chooseResult(state.activeSearch);
+      return;
+    }
+    clearTimeout(searchTimer);
+    askInView(els.searchInput.value);
+  }
   els.searchForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (state.searchResults.length) {
-      chooseResult(state.activeSearch >= 0 ? state.activeSearch : 0);
-    }
+    submitBox();
   });
 
-  // One document keydown for the two global keys: "/" focuses search (unless
-  // the keystroke is aimed at a field), Escape shuts the drawer.
+  // One document keydown for the two page keys: on the Ask view "/" focuses
+  // its box (unless the keystroke is aimed at a field; everywhere else the
+  // shell's palette takes "/"), and Escape shuts the drawer.
   document.addEventListener("keydown", (event) => {
     if (!event || typeof event.key !== "string") return;
     if (event.key === "/" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (state.view !== "ask") return;
       const target = event.target;
       const tag =
         target && typeof target.tagName === "string" ? target.tagName.toLowerCase() : "";
@@ -2595,5 +2851,11 @@ export async function wikiPage(api) {
   else if (startView === "sessions" && params.get("source")) await loadTranscript(params.get("source"));
   else if (startView === "sessions") await loadSessions();
   else if (startView === "facts") await loadFacts();
-  else await loadHome();
+  else if (startView === "ask") await openAskView(String(params.get("q") || "").trim());
+  else if (startView === "coding-agents") await loadCodingAgents();
+  else if (startView === "imports") await loadImports();
+  else if (startView === "new" && state.signedIn) {
+    await loadHome();
+    openNewPage();
+  } else await loadHome();
 }

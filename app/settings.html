@@ -31,48 +31,76 @@
     </script>
   </head>
   <body data-page="settings">
-    <a class="skip" href="#main">Skip to settings</a>
-    <header class="hd">
-      <div class="wrap hd__in">
-        <a class="brand" href="wiki.html"
+    <a class="skip" href="#main">Skip to the content</a>
+    <header class="hd topbar">
+      <div class="topbar__in">
+        <button
+          type="button"
+          id="nav-toggle"
+          class="topbar__menu"
+          aria-controls="app-sidebar"
+          aria-expanded="false"
+          aria-label="Menu"
+        ><span class="burger" aria-hidden="true"></span></button>
+        <a class="brand" href="index.html"
           ><span class="mark" aria-hidden="true"><span></span></span
           ><span class="brand__word">livingbrain<span>.wiki</span></span></a
         >
-        <nav class="nav" aria-label="App">
-          <a href="wiki.html">Wiki</a>
-          <a href="settings.html" aria-current="page">Settings</a>
-          <a href="index.html" id="header-signin">Sign in</a>
-        </nav>
-        <div id="session-bar" class="session-bar" hidden>
-          <span class="session-bar__who"
-            >Signed in as <strong id="session-who"></strong></span
-          >
-          <button type="button" id="header-signout" class="hd-btn">Sign out</button>
+        <div id="ws-switch" class="ws" hidden>
+          <button
+            type="button"
+            id="ws-button"
+            class="ws__btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="ws-menu"
+          ><span class="sr">Workspace: </span><span id="ws-name" class="ws__name">Workspace</span></button>
+          <div id="ws-menu" class="menu" hidden></div>
         </div>
+        <button type="button" id="palette-open" class="topbar__search" aria-keyshortcuts="Meta+K Control+K /">
+          <span class="topbar__search-text">Search or ask…</span>
+          <kbd class="topbar__kbd" aria-hidden="true">⌘K</kbd>
+        </button>
         <button id="theme-toggle" type="button" class="theme-btn">Theme</button>
+        <div id="session-bar" class="session-bar user" hidden>
+          <button
+            type="button"
+            id="user-button"
+            class="user__btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="user-menu"
+          ><span id="user-initial" class="user__avatar" aria-hidden="true"></span><span class="session-bar__who"><span class="sr">Signed in as </span><strong id="session-who"></strong></span></button>
+          <div id="user-menu" class="menu" hidden>
+            <a class="menu__item" href="settings.html#account">Account</a>
+            <a class="menu__item" href="settings.html#tokens">API tokens</a>
+            <button type="button" id="user-theme" class="menu__item">Switch theme</button>
+            <button type="button" id="header-signout" class="menu__item">Sign out</button>
+          </div>
+        </div>
+        <a href="index.html" id="header-signin" class="hd-btn btn">Sign in</a>
       </div>
     </header>
+    <div class="shell">
+      <aside id="app-sidebar" class="sidebar" aria-label="Sidebar">
+        <nav id="app-nav" class="sidebar__nav" aria-label="Main"></nav>
+        <button type="button" id="nav-collapse" class="sidebar__collapse" aria-pressed="false">Collapse</button>
+      </aside>
+      <div id="nav-scrim" class="scrim" hidden></div>
+      <div class="shell__col">
 
-      <main id="main" class="wrap settings-page">
+      <main id="main" class="wrap shell__main settings-page">
         <div class="page-head">
-          <p class="eyebrow">Your workspace</p>
-          <h1>Settings</h1>
-          <p class="lede">
+          <p class="eyebrow" id="settings-eyebrow">Settings</p>
+          <h1 id="settings-title">Settings</h1>
+          <p class="lede" id="settings-lede">
             Connect the models your brain thinks with, and the agents and tools
             that read from it.
           </p>
         </div>
         <div id="settings-notice" class="notice" role="status" aria-live="polite"></div>
 
-        <div class="settings-layout">
-          <nav class="snav" aria-label="Settings sections">
-            <a href="#models" aria-current="true">Models</a>
-            <a href="#tokens">API tokens</a>
-            <a href="#members">Members</a>
-            <a href="#limits">Usage &amp; limits</a>
-            <a href="#connect">Connect</a>
-            <a href="#soon">Coming soon</a>
-          </nav>
+        <div class="settings-layout settings-layout--tabs">
 
           <div class="settings-main">
             <!-- models -->
@@ -248,8 +276,6 @@
                 </div>
               </div>
 
-              <h3>Your workspaces</h3>
-              <ul id="workspace-list" class="plain-list"></ul>
             </section>
 
             <!-- usage & limits: the workspace's budgets, painted by
@@ -278,13 +304,45 @@
               </form>
             </section>
 
+            <!-- account: who is signed in, where, and the way out. The
+                 `[data-session]` slots are filled by the shell (`shell.js`),
+                 the workspace list by the members section's loader. -->
+            <section class="card sect" id="account" aria-labelledby="account-h">
+              <header class="sect__head">
+                <h2 id="account-h">Account</h2>
+                <p class="muted">Who you are signed in as, and where.</p>
+              </header>
+              <dl class="facts">
+                <div>
+                  <dt>Signed in as</dt>
+                  <dd data-session="who"></dd>
+                </div>
+                <div>
+                  <dt>Workspace</dt>
+                  <dd data-session="workspaceName"></dd>
+                </div>
+                <div>
+                  <dt>Your role</dt>
+                  <dd data-session="role"></dd>
+                </div>
+              </dl>
+              <h3>Your workspaces</h3>
+              <p class="hint">Switching moves this browser's session to the workspace you pick.</p>
+              <ul id="workspace-list" class="plain-list"></ul>
+              <h3>Sign out</h3>
+              <p class="hint">Signs this browser out. Your API tokens keep working until you revoke them.</p>
+              <div class="form-actions">
+                <button type="button" id="account-signout">Sign out</button>
+              </div>
+            </section>
+
             <!-- connect your coding agent -->
             <section class="card sect" id="connect" aria-labelledby="connect-h">
               <header class="sect__head">
                 <h2 id="connect-h">Connect your coding agent</h2>
                 <p class="muted">
-                  Your agent reads the brain over MCP. Create a token above,
-                  then use it here.
+                  Your agent reads the brain over MCP. Create a token in
+                  <a href="#tokens">API tokens</a>, then use it here.
                 </p>
               </header>
 
@@ -359,6 +417,8 @@
                 </li>
               </ul>
             </section>
+
+
 
             <!-- built with: read-only vendored registry data, collapsed. The
                  venture id and both hrefs are written by bootStack() from
@@ -583,6 +643,8 @@
         </nav>
       </div>
     </footer>
+      </div>
+    </div>
     <script type="module" src="assets/app.js"></script>
   </body>
 </html>

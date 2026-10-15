@@ -23,48 +23,52 @@ html {
   padding: 0 0.1em;
 }
 
-/*   header: the search box
+/*   Ask the brain: the one box
    ---------------------------------------------------------------- */
 
+/* The box is a card: the field, the project filter and Ask on one row (the
+ * filter and the button wrap under the field on phones), the hint under
+ * them, and the results listbox hanging under the whole form. */
 .wiki-search {
   position: relative;
-  flex: 1 1 10rem;
-  min-width: 0;
-  max-width: 22rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: var(--space-3);
 }
 
 .wiki-search > input {
-  min-height: 40px;
-  padding: 0 12px;
-  font-size: 14px;
+  flex: 1 1 16rem;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 14px;
+  font-size: 16px;
   background: var(--bg);
 }
 
-/* The project filter sits beside the field, inside the same form, so the
- * results panel still hangs under both. */
-.wiki-search {
-  display: flex;
-  gap: 6px;
-}
-
-.wiki-search > input {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
 .wiki-project {
-  flex: 0 1 9rem;
+  flex: 0 1 11rem;
   min-width: 0;
-  min-height: 40px;
+  min-height: 48px;
   padding: 0 8px;
   font-size: 14px;
   background: var(--bg);
 }
 
+.wiki-search > button {
+  min-height: 48px;
+}
+
+.wiki-search__hint {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
 /* The results listbox hangs under the field, above the page. */
 .wiki-search__panel {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% - 8px);
   left: 0;
   right: 0;
   z-index: 60;
@@ -111,43 +115,31 @@ html {
   color: var(--ink3);
 }
 
-@media (max-width: 40rem) {
-  /* The field takes the whole second row on phones, next to the menu button. */
-  .wiki-search {
-    order: 3;
-    flex: 1 1 100%;
-    max-width: none;
-  }
+.ask-result {
+  margin-top: var(--space-3);
 }
 
-/* Touch: the field, like every control on this page, clears 44 px. */
-@media (pointer: coarse) {
-  .wiki-search > input,
+.ask-result h2 {
+  font-size: var(--step-1);
+}
+
+@media (max-width: 40rem) {
+  .wiki-search > button,
   .wiki-project {
-    min-height: 44px;
+    flex: 1 1 8rem;
   }
 }
 
-/* Under 40rem the header's inline nav duplicates the drawer: the same links
- * plus sign in/out live in there behind the Menu button, and on a phone the
- * drawer is the one nav. The inline list stands down wherever the Menu button
- * shows; from 40rem up it is back and the button is gone. */
-@media (max-width: 40rem) {
-  .hd__in .nav {
-    display: none;
-  }
-}
-
-/*   header: the small-screen drawer
+/*   the page's "On this page" drawer (phones)
    ---------------------------------------------------------------- */
 
 .wiki-drawer__btn {
   flex-shrink: 0;
 }
 
-/* The drawer is only a phone-and-tablet affordance: from 40rem up the header
- * nav and the page's side TOC already carry everything it has. */
-@media (min-width: 40rem) {
+/* Only a narrow-screen affordance: from 72rem up the side TOC is there
+ * (the sidebar takes 15rem of the width, so the TOC waits for room). */
+@media (min-width: 72rem) {
   .wiki-drawer__btn,
   #wiki-drawer {
     display: none;
@@ -157,46 +149,6 @@ html {
 .wiki-drawer {
   border-bottom: 1px solid var(--line2);
   background: var(--bg2);
-}
-
-.wiki-drawer__nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 10px var(--gutter) 0;
-}
-
-.wiki-drawer__nav a {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: 0 12px;
-  border-radius: 8px;
-  color: var(--ink2);
-  text-decoration: none;
-}
-
-.wiki-drawer__nav a:hover {
-  color: var(--ink);
-  background: var(--bg3);
-}
-
-/* The drawer's sign-out mirror: styled as a nav link, wired like the header's. */
-.wiki-drawer__signout {
-  min-height: 44px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 8px;
-  justify-content: flex-start;
-  font-size: inherit;
-  font-weight: 400;
-  color: var(--ink2);
-  background: transparent;
-}
-
-.wiki-drawer__signout:hover:not(:disabled) {
-  color: var(--ink);
-  background: var(--bg3);
 }
 
 .wiki-drawer__h {
@@ -212,6 +164,23 @@ html {
 
 .wiki-drawer .wiki-toc {
   padding: 0 var(--gutter) 14px;
+}
+
+/*   imports: each row opens in place
+   ---------------------------------------------------------------- */
+
+.import > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.import > summary::-webkit-details-marker {
+  display: none;
+}
+
+.import__body {
+  padding: 12px 14px 16px;
+  border-top: 1px solid var(--line2);
 }
 
 /*   the table of contents (both mounts)
@@ -258,7 +227,7 @@ html {
   align-items: start;
 }
 
-@media (min-width: 60rem) {
+@media (min-width: 72rem) {
   .wiki-page {
     grid-template-columns: minmax(0, 1fr) 14rem;
   }
