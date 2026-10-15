@@ -25,7 +25,13 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
 struct MainWindow: View {
     @ObservedObject var bar: BarModel
     @ObservedObject var sessions: SessionsModel
-    @SceneStorage("destination") private var destination: Destination = .sessions
+    @SceneStorage("destination") private var destination: Destination = {
+        // `--destination <name>` picks the first section (UI checks, docs).
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--destination"), i + 1 < args.count,
+           let d = Destination(rawValue: args[i + 1]) { return d }
+        return .sessions
+    }()
 
     var body: some View {
         NavigationSplitView {
@@ -53,6 +59,7 @@ struct MainWindow: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         .onDisappear { NSApp.setActivationPolicy(.accessory) }
+        .task { await Snapshot.takeIfRequested() }
     }
 }
 

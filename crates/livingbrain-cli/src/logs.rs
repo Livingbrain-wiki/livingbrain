@@ -1043,14 +1043,17 @@ fn show(
         Some(body) => (body, session.redacted),
         None => build_body(&session.record, &session.file)?,
     };
-    let record: Value =
-        serde_json::from_str(&body).map_err(|error| err(format!("{}: {error}", file.display())))?;
+    // The body is redacted as text, so a replacement can land inside a JSON
+    // escape and leave bytes that no longer parse. `body` is always the exact
+    // text a sync would send; `record` is its parse, or null when it has none.
+    let record: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     out.json_or(
         &json!({
             "file": session.file.display().to_string(),
             "opted_in": session.opted_in,
             "redacted": redacted,
             "record": record,
+            "body": body,
         }),
         || println!("{body}"),
     );

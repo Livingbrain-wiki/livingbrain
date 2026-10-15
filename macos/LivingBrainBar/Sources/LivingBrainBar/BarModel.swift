@@ -28,6 +28,8 @@ final class BarModel: ObservableObject {
     /// Session files waiting to go quiet, for the menu's "watching" line.
     @Published private(set) var pendingFiles = 0
     @Published private(set) var watchedRoots: [String] = []
+    /// Log files whose last live sync failed, with the CLI's message.
+    @Published private(set) var failedFiles: [String: String] = [:]
 
     @Published var autoSync: Bool {
         didSet { defaults.set(autoSync, forKey: Keys.autoSync); scheduleTimer() }
@@ -155,6 +157,7 @@ final class BarModel: ObservableObject {
             } catch {
                 state.fail(message: error.localizedDescription)
             }
+            for file in files { failedFiles[file] = state.errorMessage }
             if let message = state.errorMessage { notifyError(message) }
             await refreshProjects()
             NotificationCenter.default.post(name: .livingBrainSynced, object: nil)

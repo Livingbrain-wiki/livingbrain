@@ -19,6 +19,7 @@ final class SessionsModel: ObservableObject {
     @Published private(set) var repos: [RepoSummary] = []
     @Published private(set) var loadedAt: Date?
     @Published var projectFilter: String? = nil
+    @Published var optedInOnly = false
     @Published var search = ""
     @Published var selection: SessionRow.ID? {
         didSet { if selection != oldValue { loadTranscript() } }
@@ -39,15 +40,17 @@ final class SessionsModel: ObservableObject {
     }
 
     var projectNames: [String] {
-        Array(Set(rows.map(\.session.projectName))).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        Array(Set(rows.map(\.repoName))).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     var filteredRows: [SessionRow] {
         rows.filter { row in
-            (projectFilter == nil || row.session.projectName == projectFilter)
+            (projectFilter == nil || row.repoName == projectFilter)
+                && (!optedInOnly || row.session.isOptedIn)
                 && (search.isEmpty
+                    || row.repoName.localizedCaseInsensitiveContains(search)
                     || row.session.repo.localizedCaseInsensitiveContains(search)
-                    || (row.session.branch ?? "").localizedCaseInsensitiveContains(search)
+                    || (row.branch ?? "").localizedCaseInsensitiveContains(search)
                     || row.session.sessionId.localizedCaseInsensitiveContains(search)
                     || row.session.models.joined(separator: " ").localizedCaseInsensitiveContains(search))
         }
@@ -71,7 +74,21 @@ final class SessionsModel: ObservableObject {
                 }
                 let report = try CLIOutput.syncReport(result.stdout)
                 self.report = report
-                rows = SessionRow.rows(from: report, ledger: bar.ledger)
+                let ledger = bar.ledger
+                let errors = bar.failedFiles
+                // Reading the log tails is file I/O over hundreds of files:
+                // off the main thread.
+                rows = await Task.detached(priority: .userInitiated) {
+                    let home = NSHomeDirectory()
+                    let index = SessionFileIndex.scan(
+                        claudeRoot: (home as NSString).appendingPathComponent(".claude/projects"),
+                        codexRoot: (home as NSString).appendingPathComponent(".codex/sessions")
+                    )
+                    return SessionRow.rows(
+                        from: report, ledger: ledger, index: index,
+                        meta: { SessionFileMeta.read(path: $0) }, home: home, errors: errors
+                    )
+                }.value
                 repos = RepoSummary.summarise(
                     sessions: report.sessions,
                     allowed: bar.projects.map(\.path),
@@ -79,6 +96,9 @@ final class SessionsModel: ObservableObject {
                 )
                 loadedAt = Date()
                 load = .loaded
+                if selection == nil, CommandLine.arguments.contains("--select-first") {
+                    selection = filteredRows.first?.id
+                }
             } catch {
                 load = .failed(Scrub.text(error.localizedDescription))
             }
@@ -86,7 +106,7 @@ final class SessionsModel: ObservableObject {
     }
 
     private func loadTranscript() {
-        guard let row = selectedRow, let file = row.session.file else {
+        guard let row = selectedRow, let file = row.file else {
             transcript = selectedRow == nil ? .none : .failed("Update the livingbrain CLI to see transcripts (it needs `logs show`).")
             return
         }
@@ -110,7 +130,7 @@ final class SessionsModel: ObservableObject {
     }
 
     func syncSelected() {
-        guard let file = selectedRow?.session.file else { return }
+        guard let file = selectedRow?.file else { return }
         bar.syncNow(files: [file])
     }
 

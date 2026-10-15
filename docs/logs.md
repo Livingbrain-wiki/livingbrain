@@ -25,7 +25,7 @@ livingbrain logs deny
 | `logs deny [path]` | revoke a path `logs allow` added |
 | `logs status` | print what is opted in, and where that is recorded |
 | `logs sync` | read both agents' logs and upload the opted-in sessions |
-| `logs show <file>` | print the redacted record `logs sync` would send for one session file, opted in or not; never touches the network |
+| `logs show <file>` | print the redacted record `logs sync` would send for one session file, opted in or not; never touches the network. `--json` gives `{file, opted_in, redacted, body, record}`: `body` is the exact text, `record` its parse (`null` if redaction left it unparseable) |
 
 | flag | what it does |
 |---|---|
