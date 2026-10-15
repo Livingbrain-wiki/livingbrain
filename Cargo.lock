@@ -1777,6 +1777,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-github"
+version = "0.1.0"
+dependencies = [
+ "cratefield-testing",
+ "hmac 0.12.1",
+ "livingbrain-pages",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "livingbrain-judge"
 version = "0.1.0"
 dependencies = [

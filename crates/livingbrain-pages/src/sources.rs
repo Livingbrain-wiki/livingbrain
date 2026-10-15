@@ -94,6 +94,13 @@ pub enum SourceKind {
     Radar,
     /// A note the brain or a person wrote about what arrived.
     Note,
+    /// A commit on a GitHub repository the workspace connected.
+    GithubCommit,
+    /// An issue on a connected GitHub repository, its comments folded in.
+    GithubIssue,
+    /// A pull request on a connected GitHub repository, its reviews and
+    /// comments folded in.
+    GithubPr,
 }
 
 impl SourceKind {
@@ -109,6 +116,9 @@ impl SourceKind {
             Self::Monitoring => "monitoring",
             Self::Radar => "radar",
             Self::Note => "note",
+            Self::GithubCommit => "github_commit",
+            Self::GithubIssue => "github_issue",
+            Self::GithubPr => "github_pr",
         }
     }
 
@@ -124,6 +134,9 @@ impl SourceKind {
             "monitoring" => Some(Self::Monitoring),
             "radar" => Some(Self::Radar),
             "note" => Some(Self::Note),
+            "github_commit" => Some(Self::GithubCommit),
+            "github_issue" => Some(Self::GithubIssue),
+            "github_pr" => Some(Self::GithubPr),
             _ => None,
         }
     }
