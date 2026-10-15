@@ -30,14 +30,13 @@ pub(crate) const SNIPPET_CHARS: usize = 240;
 pub(crate) const MAX_TITLE_CHARS: usize = 120;
 /// Hex characters of the note slug's SHA-256. Mirror of `SLUG_HEX`.
 pub(crate) const SLUG_HEX: usize = 12;
-/// The site's wiki root, which every citation URL is built against. Mirror
-/// of `WIKI_BASE`.
-pub(crate) const WIKI_BASE: &str = "https://livingbrain.wiki";
-
-/// The citation URL for one page: the same address the site serves it at,
-/// and the same one the MCP server cites.
-pub(crate) fn wiki_url(scope: &str, slug: &str) -> String {
-    format!("{WIKI_BASE}/brain/{scope}/{slug}")
+/// The citation URL for one page: the web app's page address under the
+/// deployment's own origin (`base`, from [`Service::base`]), the same one
+/// the MCP server cites ([`livingbrain_pages::page_url`]).
+///
+/// [`Service::base`]: crate::service::Service::base
+pub(crate) fn wiki_url(base: &str, scope: &str, slug: &str) -> String {
+    livingbrain_pages::page_url(base, scope, slug)
 }
 
 /// A page's title by the shared rule: frontmatter `name`, then `title`,
@@ -81,12 +80,12 @@ pub(crate) struct Found {
 }
 
 impl Found {
-    /// Prepares one read page.
-    pub(crate) fn of(page: &Page) -> Self {
+    /// Prepares one read page, its citation URL under `base`.
+    pub(crate) fn of(base: &str, page: &Page) -> Self {
         Self {
             scope: page.scope.clone(),
             slug: page.slug.clone(),
-            url: wiki_url(&page.scope, &page.slug),
+            url: wiki_url(base, &page.scope, &page.slug),
             title: title_of(page),
             body: body_of(page),
         }
@@ -109,6 +108,7 @@ impl Found {
 /// [`Problem`] from the store, mapped by [`crate::problems`].
 pub(crate) async fn find(
     store: &PageStore,
+    base: &str,
     scopes: &[String],
     query: &str,
     limit: usize,
@@ -122,7 +122,7 @@ pub(crate) async fn find(
     for hit in hits {
         match store.read(&hit.scope, &hit.slug).await {
             Ok(None) => {}
-            Ok(Some(page)) => found.push(Found::of(&page)),
+            Ok(Some(page)) => found.push(Found::of(base, &page)),
             Err(error) => return Err(page_read_error(error)),
         }
     }
@@ -151,13 +151,14 @@ pub(crate) const PROJECT_SCAN: usize = 250;
 /// [`Problem`] from the store, mapped by [`crate::problems`].
 pub(crate) async fn find_in_project(
     store: &PageStore,
+    base: &str,
     scopes: &[String],
     query: &str,
     limit: usize,
     project: Option<&str>,
 ) -> Result<Vec<Found>, Problem> {
     let Some(project) = project else {
-        return find(store, scopes, query, limit).await;
+        return find(store, base, scopes, query, limit).await;
     };
     let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let hits = store
@@ -172,7 +173,7 @@ pub(crate) async fn find_in_project(
         match store.read(&hit.scope, &hit.slug).await {
             Ok(None) => {}
             Ok(Some(page)) if page.frontmatter.get("project") == Some(project) => {
-                found.push(Found::of(&page));
+                found.push(Found::of(base, &page));
             }
             Ok(Some(_)) => {}
             Err(error) => return Err(page_read_error(error)),

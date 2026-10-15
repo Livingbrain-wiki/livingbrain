@@ -181,7 +181,10 @@ async fn call(state: &McpState, asker: &Asker, id: &Value, params: Option<&Value
             return error(id, Refusal::Internal(message));
         }
     };
-    match tools::run(&store, &facts, asker, &scopes, parsed).await {
+    // Where the cited pages are read: the deployment's own web app, from
+    // the one setting every surface shares.
+    let base = livingbrain_pages::app_base(state.ctx.config.as_ref());
+    match tools::run(&store, &facts, &base, asker, &scopes, parsed).await {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(text) => json!({
             "jsonrpc": "2.0",

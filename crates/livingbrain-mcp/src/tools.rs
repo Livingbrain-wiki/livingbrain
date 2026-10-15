@@ -8,7 +8,8 @@
 use livingbrain_access::{Scope, UserId};
 use livingbrain_pages::{
     Author, EntityType, FactError, FactInput, FactStore, Frontmatter, Page, PageError, PageStore,
-    PageWrite, brief_lines, brief_section, fact_json, parse_frontmatter, person_subject, relevant,
+    PageWrite, brief_lines, brief_section, fact_json, page_url, parse_frontmatter, person_subject,
+    reference_url, relevant,
 };
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
@@ -30,8 +31,6 @@ const SNIPPET_CHARS: usize = 240;
 const MAX_TITLE_CHARS: usize = 120;
 /// Hex characters of the note slug's SHA-256.
 const SLUG_HEX: usize = 12;
-/// The site's wiki root, which [`Found::url`] builds a citation against.
-const WIKI_BASE: &str = "https://livingbrain.wiki";
 
 /// The tools as `tools/list` returns them.
 pub(crate) fn descriptors() -> Value {
@@ -189,21 +188,22 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
 pub(crate) async fn run(
     store: &PageStore,
     facts: &FactStore,
+    base: &str,
     asker: &Asker,
     scopes: &[String],
     call: Call,
 ) -> Result<Value, String> {
     match call {
-        Call::Search { query, limit } => search(store, scopes, &query, limit).await,
-        Call::Page { slug } => page(store, scopes, &slug).await,
+        Call::Search { query, limit } => search(store, base, scopes, &query, limit).await,
+        Call::Page { slug } => page(store, base, scopes, &slug).await,
         Call::ContextFor { repo, task } => {
-            context_for(store, facts, asker, scopes, &repo, &task).await
+            context_for(store, facts, base, asker, scopes, &repo, &task).await
         }
         Call::Note {
             text,
             title,
             facts: stated,
-        } => note(store, facts, asker, &text, title.as_deref(), stated).await,
+        } => note(store, facts, base, asker, &text, title.as_deref(), stated).await,
         Call::Facts {
             subject,
             attribute,
@@ -229,11 +229,12 @@ pub(crate) async fn run(
 /// of `query`.
 async fn search(
     store: &PageStore,
+    base: &str,
     scopes: &[String],
     query: &str,
     limit: usize,
 ) -> Result<Value, String> {
-    let found = find(store, scopes, query, limit).await?;
+    let found = find(store, base, scopes, query, limit).await?;
     let mut text = String::new();
     for (index, page) in found.iter().enumerate() {
         text.push_str(&format!(
@@ -267,12 +268,17 @@ async fn search(
 ///
 /// A direct read rather than a search on the slug: search matches a body's
 /// words, and a page named `retry-policy` need not contain the word "retry".
-async fn page(store: &PageStore, scopes: &[String], slug: &str) -> Result<Value, String> {
+async fn page(
+    store: &PageStore,
+    base: &str,
+    scopes: &[String],
+    slug: &str,
+) -> Result<Value, String> {
     for scope in scopes {
         let Ok(Some(hit)) = store.read(scope, slug).await else {
             continue;
         };
-        let found = Found::new(scope, slug, &hit);
+        let found = Found::new(base, scope, slug, &hit);
         return Ok(answer(
             format!("# {}\n\n{}", found.title, found.body),
             json!({
@@ -298,13 +304,14 @@ async fn page(store: &PageStore, scopes: &[String], slug: &str) -> Result<Value,
 async fn context_for(
     store: &PageStore,
     facts: &FactStore,
+    base: &str,
     asker: &Asker,
     scopes: &[String],
     repo: &str,
     task: &str,
 ) -> Result<Value, String> {
-    let mut found = find(store, scopes, task, CONTEXT_PAGES).await?;
-    for page in find(store, scopes, repo, CONTEXT_PAGES).await? {
+    let mut found = find(store, base, scopes, task, CONTEXT_PAGES).await?;
+    for page in find(store, base, scopes, repo, CONTEXT_PAGES).await? {
         if !found.contains(&page) {
             found.push(page);
         }
@@ -356,6 +363,7 @@ async fn context_for(
 async fn note(
     store: &PageStore,
     facts: &FactStore,
+    base: &str,
     asker: &Asker,
     text: &str,
     title: Option<&str>,
@@ -445,7 +453,7 @@ async fn note(
         json!({
             "title": title,
             "ref": reference,
-            "url": format!("{WIKI_BASE}/brain/{reference}"),
+            "url": reference_url(base, &reference),
             "version": meta.version,
             "redacted": findings.len(),
             "facts": recorded,
@@ -597,7 +605,7 @@ struct Found {
 }
 
 impl Found {
-    fn new(scope: &str, slug: &str, page: &Page) -> Self {
+    fn new(base: &str, scope: &str, slug: &str, page: &Page) -> Self {
         let reference = format!("{scope}/{slug}");
         let (_, body) = parse_frontmatter(&page.markdown, page.entity_type)
             .unwrap_or_else(|_| (Frontmatter::default(), page.markdown.clone()));
@@ -615,7 +623,7 @@ impl Found {
         Self {
             title,
             reference: reference.clone(),
-            url: format!("{WIKI_BASE}/brain/{reference}"),
+            url: page_url(base, scope, slug),
             body,
         }
     }
@@ -625,6 +633,7 @@ impl Found {
 /// `&[&str]` the store binds — the only place a query meets a scope list.
 async fn find(
     store: &PageStore,
+    base: &str,
     scopes: &[String],
     query: &str,
     limit: usize,
@@ -640,7 +649,7 @@ async fn find(
             // A hit whose page is gone — a scope shredded between the search
             // and the read — is skipped rather than failing the whole call.
             Ok(None) => {}
-            Ok(Some(page)) => found.push(Found::new(&hit.scope, &hit.slug, &page)),
+            Ok(Some(page)) => found.push(Found::new(base, &hit.scope, &hit.slug, &page)),
             Err(error) => return Err(store_failed(error)),
         }
     }

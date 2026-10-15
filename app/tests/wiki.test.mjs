@@ -429,6 +429,16 @@ test("pure helpers: slugify, validSlug, parseBrainUrl, highlightTerms", async ()
     slug: "kestrel-routes",
   });
   assert.deepEqual(parseBrainUrl("/brain/personal/ada"), { scope: "personal", slug: "ada" });
+  // The form the server cites now: the web app's own page address.
+  assert.deepEqual(
+    parseBrainUrl("https://app.livingbrain.wiki/wiki?slug=kestrel-routes&scope=user-01HX"),
+    { scope: "user-01HX", slug: "kestrel-routes" },
+  );
+  assert.deepEqual(
+    parseBrainUrl("https://app.brain.test/wiki?slug=coding-agents%2Frepo%2Fs1&scope=shared"),
+    { scope: "shared", slug: "coding-agents/repo/s1" },
+  );
+  assert.deepEqual(parseBrainUrl("wiki.html?slug=ada"), { scope: "", slug: "ada" });
   assert.equal(parseBrainUrl("https://livingbrain.wiki/brain/solo"), null);
   assert.equal(parseBrainUrl("https://livingbrain.wiki/"), null);
   assert.equal(parseBrainUrl(null), null);

@@ -116,6 +116,10 @@ final class APIClientTests: XCTestCase {
         mock.on("GET", "/v1/search", try apiFixture("search"))
         let results = try await client.search("kestrel", project: "atlas", limit: 5)
         XCTAssertEqual(results.first?.slug, "q3-plan")
+        // The web app's page address, which the server cites now.
+        XCTAssertEqual(SearchResult.slug(fromURL: "https://app.livingbrain.wiki/wiki?slug=q3-plan&scope=user-01HX"), "q3-plan")
+        XCTAssertEqual(SearchResult.slug(fromURL: "https://app.livingbrain.wiki/wiki?slug=coding-agents%2Frepo%2Fs1&scope=shared"),
+                       "coding-agents/repo/s1")
         let query = URLComponents(url: mock.last!.url!, resolvingAgainstBaseURL: false)!.queryItems!
         XCTAssertEqual(query.map(\.name), ["q", "project", "limit"])
         XCTAssertEqual(query[0].value, "kestrel")

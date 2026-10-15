@@ -424,17 +424,24 @@ export function codingAgentsLabel(slug) {
 }
 
 /**
- * A search-result URL (`…/brain/{scope}/{slug}`) to its two halves, or null
- * when the path does not name both. Relative URLs are judged against the
- * site's own host, which is where the server says these links live.
+ * A page URL the server built to its two halves, or null when it does not
+ * name both. The server cites the web app's own page address,
+ * `…/wiki?slug={slug}&scope={scope}` (`livingbrain_pages::page_url`); the
+ * older `…/brain/{scope}/{slug}` form is still read, so a link copied before
+ * the change keeps working. A `?slug=` with no scope names the slug alone
+ * (scope ""), which is all the page route needs to open it. Relative URLs
+ * are judged against the app's host.
  */
 export function parseBrainUrl(url) {
   let parsed;
   try {
-    parsed = new URL(String(url == null ? "" : url), "https://livingbrain.wiki");
+    parsed = new URL(String(url == null ? "" : url), "https://app.livingbrain.wiki");
   } catch {
     return null;
   }
+  const querySlug = parsed.searchParams.get("slug");
+  const queryScope = parsed.searchParams.get("scope");
+  if (querySlug) return { scope: queryScope || "", slug: querySlug };
   const parts = parsed.pathname.split("/").filter(Boolean);
   const at = parts.indexOf("brain");
   if (at === -1 || parts.length - at < 3) return null;

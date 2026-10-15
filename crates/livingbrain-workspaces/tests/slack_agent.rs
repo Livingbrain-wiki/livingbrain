@@ -179,7 +179,10 @@ async fn a_mention_is_answered_in_its_own_thread_with_a_citation() {
     let link = context.as_str().expect("a link block");
     let shared = page_scope(TEAM, &Scope::Shared);
     assert!(
-        link.contains(&format!("{WIKI}/brain/{shared}/refund-window")),
+        // Slack's mrkdwn escapes `&`, so the link's query separator does too.
+        link.contains(
+            &livingbrain_pages::page_url(WIKI, &shared, "refund-window").replace('&', "&amp;")
+        ),
         "{link}"
     );
     assert!(link.contains("Refund window"), "{link}");

@@ -103,7 +103,7 @@ async fn list(
                 "entity_type": summary.entity_type.as_str(),
                 "version": summary.version,
                 "updated_at": summary.updated_at,
-                "url": wiki_url(&summary.scope, &summary.slug),
+                "url": wiki_url(&state.base(), &summary.scope, &summary.slug),
             })
         })
         .collect();
@@ -180,7 +180,7 @@ async fn page_view(
         .map(|link| {
             json!({
                 "title": link,
-                "url": wiki_url(&page.scope, link),
+                "url": wiki_url(&state.base(), &page.scope, link),
             })
         })
         .collect();
@@ -212,7 +212,7 @@ async fn page_view(
         "slug": page.slug,
         "title": title_of(page),
         "markdown": page.markdown,
-        "url": wiki_url(&page.scope, &page.slug),
+        "url": wiki_url(&state.base(), &page.scope, &page.slug),
         "version": page.version,
         "entity_type": page.entity_type.as_str(),
         "backlinks": backlinks,

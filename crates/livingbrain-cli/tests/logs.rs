@@ -118,7 +118,7 @@ fn sources_mock() -> Mock {
             pages.insert(slug.to_owned(), (content, version));
             let reply = json!({
                 "id": format!("user-scope/{slug}"),
-                "url": format!("https://livingbrain.wiki/brain/user-scope/{slug}"),
+                "url": format!("https://app.livingbrain.wiki/wiki?slug={slug}&scope=user-scope"),
                 "version": version,
                 "redacted": 0,
                 "unchanged": unchanged,

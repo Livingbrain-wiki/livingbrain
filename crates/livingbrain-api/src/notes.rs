@@ -209,7 +209,7 @@ async fn note(
         let facts = record_facts(&state, &scope, fact_inputs, &asker.user_id).await?;
         return Ok(Json(json!({
             "id": reference,
-            "url": wiki_url(&scope, &slug),
+            "url": wiki_url(&state.base(), &scope, &slug),
             "version": page.version,
             "redacted": findings.len(),
             "unchanged": true,
@@ -233,7 +233,7 @@ async fn note(
     let facts = record_facts(&state, &scope, fact_inputs, &asker.user_id).await?;
     Ok(Json(json!({
         "id": reference,
-        "url": wiki_url(&scope, &slug),
+        "url": wiki_url(&state.base(), &scope, &slug),
         "version": meta.version,
         "redacted": findings.len(),
         "unchanged": false,
