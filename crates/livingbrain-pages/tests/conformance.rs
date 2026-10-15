@@ -16,9 +16,10 @@ mod common;
 use std::sync::Arc;
 
 use cratefield_core::UlidIdGen;
-use cratefield_testing::{MemoryBlob, TestHarness, assert_wasm_safe_deps, conformance};
+use cratefield_testing::{FixedClock, MemoryBlob, TestHarness, assert_wasm_safe_deps, conformance};
 use livingbrain_pages::{
-    Pages, ProjectCount, SourceError, SourceFilter, SourceKind, SourceStore, SourceWrite,
+    Author, EntityType, PageStore, PageWrite, Pages, ProjectCount, SearchHit, SourceError,
+    SourceFilter, SourceKind, SourceStore, SourceWrite,
 };
 
 #[test]
@@ -349,6 +350,144 @@ fn the_fact_store_holds_on_every_dialect() {
                 "{dialect}: 40 is back"
             );
             assert_eq!(facts[0].range(), "2001..now", "{dialect}");
+        });
+    }
+}
+
+/// The ranked search (`PageStore::search`) is SQL this module writes by hand
+/// — a `GROUP BY` over a derived table, `CASE` weights, a join, an ordered
+/// limit — so it runs on every dialect: a natural-language question finds the
+/// page that answers it, any query word is enough, a title match outranks a
+/// body mention, a rarer word outranks a common one, recency breaks a tie,
+/// the limit applies after the ranking, and another member's scope never
+/// contributes a candidate.
+#[test]
+fn the_ranked_search_holds_on_every_dialect() {
+    for kit in TestHarness::all_dialects(|| vec![Box::new(Pages::new())]) {
+        let dialect = kit.dialect;
+        let blob = Arc::new(MemoryBlob::new());
+        // A store per minute, so `updated_at` orders the writes.
+        let at = |minutes: i64| {
+            PageStore::new(
+                kit.db.clone(),
+                blob.clone(),
+                common::kms(),
+                Arc::new(FixedClock(kit.clock.0 + time::Duration::minutes(minutes))),
+                Arc::new(UlidIdGen),
+            )
+        };
+        let note = |title: &str, body: &str| PageWrite {
+            entity_type: EntityType::Project,
+            markdown: format!("---\nname: {title}\n---\n{body}"),
+            author: Author::Human {
+                id: "u-a".to_owned(),
+            },
+            base_version: None,
+        };
+        let hit = |scope: &str, slug: &str| SearchHit {
+            scope: scope.to_owned(),
+            slug: slug.to_owned(),
+        };
+        pollster::block_on(async {
+            let writes = [
+                (
+                    A_SCOPE,
+                    "agent-log-earthos",
+                    "claude_code session 1",
+                    "Coding agent session in earthos. Reviewed the codebase and listed the issues: \
+                  a stale lockfile, a flaky test.",
+                ),
+                (
+                    A_SCOPE,
+                    "ledger",
+                    "Ledger",
+                    "Quarterly numbers. Nothing about the code.",
+                ),
+                (
+                    A_SCOPE,
+                    "issue-tracker",
+                    "Issue tracker",
+                    "Where issues go.",
+                ),
+                (
+                    A_SCOPE,
+                    "mentions-tracker",
+                    "Weekly notes",
+                    "The issue tracker moved.",
+                ),
+                (A_SCOPE, "older", "Older", "kestrel kestrel"),
+                (A_SCOPE, "newer", "Newer", "kestrel"),
+                // Another member's page names every query word, in its title.
+                (
+                    B_SCOPE,
+                    "earthos-issues",
+                    "EarthOS issues codebase",
+                    "earthos issues codebase earthos",
+                ),
+            ];
+            for (minute, (scope, slug, title, body)) in writes.iter().enumerate() {
+                at(i64::try_from(minute).expect("a small index"))
+                    .write(scope, slug, note(title, body))
+                    .await
+                    .unwrap_or_else(|error| panic!("{dialect}: write {slug}: {error}"));
+            }
+            let store = at(100);
+            let search = |query: &'static str, limit: usize| {
+                let store = &store;
+                async move {
+                    store
+                        .search(&[A_SCOPE, SHARED_ONE], query, limit)
+                        .await
+                        .unwrap_or_else(|error| panic!("{dialect}: {query}: {error}"))
+                }
+            };
+
+            // The production failure: a question full of stopwords.
+            let found = search("What issues were found in the EarthOS codebase?", 10).await;
+            assert_eq!(
+                found.first(),
+                Some(&hit(A_SCOPE, "agent-log-earthos")),
+                "{dialect}: {found:?}"
+            );
+            assert!(
+                found.iter().all(|hit| hit.scope == A_SCOPE),
+                "{dialect}: another member's page entered the candidates: {found:?}"
+            );
+
+            // Only stopwords: nothing, and no error.
+            assert!(
+                search("what were the ones that it was?", 10)
+                    .await
+                    .is_empty(),
+                "{dialect}"
+            );
+
+            // A title match outranks a body mention of the same word; the
+            // plural in the query finds the singular in the page.
+            let found = search("tracker issues", 10).await;
+            assert_eq!(
+                found.first(),
+                Some(&hit(A_SCOPE, "issue-tracker")),
+                "{dialect}: {found:?}"
+            );
+            assert!(
+                found.contains(&hit(A_SCOPE, "mentions-tracker")),
+                "{dialect}"
+            );
+
+            // Equal scores: the most recently updated page first.
+            assert_eq!(
+                search("kestrel", 10).await,
+                vec![hit(A_SCOPE, "newer"), hit(A_SCOPE, "older")],
+                "{dialect}"
+            );
+
+            // The limit comes after the ranking, not before it.
+            assert_eq!(
+                search("issues earthos lockfile", 1).await,
+                vec![hit(A_SCOPE, "agent-log-earthos")],
+                "{dialect}"
+            );
         });
     }
 }

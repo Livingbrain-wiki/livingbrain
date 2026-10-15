@@ -82,12 +82,44 @@ pub struct ChatReply {
 }
 
 /// The connection a job for `role` would run on, without its key: the
-/// role the resolver picked, the provider and the model.
+/// role the resolver picked, the provider, the model, and the model's context
+/// window in tokens when the connection probe read one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Serving {
     pub role: String,
     pub provider: String,
     pub model: String,
+    /// The context window the provider reported at connect time
+    /// ([`parse_context_size`] of the stored value); `None` when it named
+    /// none.
+    pub context_size: Option<u64>,
+}
+
+/// A stored `context_size` as a token count. The probe stores whatever JSON
+/// value the provider answered with — a number (`1000000`) or a string
+/// (`"1000000"`, `"128k"`, `"1M"`) — so this reads all of those, and answers
+/// `None` for anything else rather than guessing.
+#[must_use]
+pub fn parse_context_size(raw: &str) -> Option<u64> {
+    let cleaned: String = raw
+        .trim()
+        .trim_matches('"')
+        .chars()
+        .filter(|c| !matches!(c, ',' | '_' | ' '))
+        .collect();
+    let lower = cleaned.to_ascii_lowercase();
+    let (digits, scale) = if let Some(number) = lower.strip_suffix('k') {
+        (number, 1_000)
+    } else if let Some(number) = lower.strip_suffix('m') {
+        (number, 1_000_000)
+    } else {
+        (lower.as_str(), 1)
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| value.checked_mul(scale))
+        .filter(|value| *value > 0)
 }
 
 /// Why a call did not happen, or did not answer.
@@ -169,6 +201,7 @@ pub async fn serving(
         role: row.role.clone(),
         provider: row.provider.clone(),
         model: row.model.clone(),
+        context_size: row.context_size.as_deref().and_then(parse_context_size),
     }))
 }
 
@@ -381,6 +414,18 @@ fn usage(parsed: &Value, wire: Wire) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_context_size_reads_as_tokens() {
+        assert_eq!(parse_context_size("1000000"), Some(1_000_000));
+        assert_eq!(parse_context_size("\"1000000\""), Some(1_000_000));
+        assert_eq!(parse_context_size("\"128k\""), Some(128_000));
+        assert_eq!(parse_context_size("1M"), Some(1_000_000));
+        assert_eq!(parse_context_size("1,048,576"), Some(1_048_576));
+        assert_eq!(parse_context_size("0"), None);
+        assert_eq!(parse_context_size("unknown"), None);
+        assert_eq!(parse_context_size(""), None);
+    }
 
     #[test]
     fn the_openai_body_asks_for_json_only_when_told() {

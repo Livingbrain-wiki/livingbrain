@@ -114,6 +114,12 @@ the $9/mo hosted Teams plan at a ~2/3 margin (pricing v3 in
 token spend is the workspace's own; the ledger records the tokens anyway, for
 credit accounting.
 
+`POST /v1/ask` sizes the sources it sends a model to that model's own context
+window (the `context_size` the connection probe stored): a quarter of the
+window, never more than `ASK_CONTEXT_CHARS_MAX` characters (200,000 by
+default), and 32,000 when the provider reported no window. Lower the ceiling
+to cut per-question token spend on a large-window model.
+
 Honesty notes: D1 cost has no per-workspace attribution yet, so while the
 pilot is single-workspace, read account-level D1 from the Cloudflare
 dashboard once a day and note it in the log; the `d1_queries` column is

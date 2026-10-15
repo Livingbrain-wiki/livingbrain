@@ -48,10 +48,12 @@ pub(crate) fn descriptors() -> Value {
     json!([
         tool(
             "brain_search",
-            "Search the pages you are allowed to read. A page must hold every word of \
-             the query: this is a recall of facts, not a fuzzy match.",
+            "Search the pages you are allowed to read, best match first. A page matches \
+             when it holds any of the query's words (stopwords like \"what\" or \"the\" \
+             are ignored, plurals fold); pages holding more of the words, rarer ones, or \
+             the words in their title rank higher.",
             json!({
-                "query": { "type": "string", "description": "Words every matching page must contain." },
+                "query": { "type": "string", "description": "The words or question to look for." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
                            "description": "How many pages to return." },
             }),
@@ -247,7 +249,7 @@ async fn search(
     }
     if found.is_empty() {
         text.push_str(
-            "No page you can read holds every word of that query. Try fewer, \
+            "No page you can read mentions any word of that query. Try other, \
              more specific words, or call brain_context_for instead.\n",
         );
     }
@@ -298,9 +300,9 @@ async fn page(
 /// `brain_context_for`: a brief for a task, out of the asker's own pages.
 ///
 /// Two queries — the task's own words, then the repository's — and the union
-/// of their hits, because the store's index intersects a query's tokens: a
-/// page mentioning every word of "api retry refund policy" is a rarer thing
-/// than one mentioning the task.
+/// of their hits, the task's first: the store ranks pages by how many of a
+/// query's words they hold, so a page about the repository but not the
+/// task's words would otherwise sort below every task match.
 async fn context_for(
     store: &PageStore,
     facts: &FactStore,

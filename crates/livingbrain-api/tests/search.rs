@@ -1,6 +1,6 @@
 //! The search route: the same recall `brain_search` gives an agent, as
-//! data — every page in the asker's scopes whose body holds every word of
-//! the query, as a title, a citation URL and a snippet, with the optional
+//! data — the pages in the asker's scopes that mention the query's words,
+//! best first, as a title, a citation URL and a snippet, with the optional
 //! `project` filter over the frontmatter a note carries.
 
 mod common;
@@ -24,7 +24,7 @@ fn results(fixture: &common::Fixture, token: &str, query: &str) -> Vec<Value> {
 }
 
 #[test]
-fn a_search_finds_the_pages_whose_body_holds_every_word() {
+fn a_search_finds_the_pages_that_mention_the_words_best_first() {
     let fixture = fixture();
     seed(&fixture, WORKSPACE, &user("user-a"), "kestrel", KESTREL);
     seed(&fixture, WORKSPACE, &user("user-a"), "tamar", TAMAR);
@@ -36,8 +36,21 @@ fn a_search_finds_the_pages_whose_body_holds_every_word() {
     assert_eq!(harbour.len(), 1, "{harbour:?}");
     assert_eq!(harbour[0]["title"], "Kestrel routes", "{harbour:?}");
 
-    // Two words are an AND, not an OR: "dusk harbour" is on no one page.
-    let none = results(&fixture, TOKEN_A, "/v1/search?q=dusk%20harbour");
+    // Any word is enough, and the page holding more of them, and the rarer
+    // ones, comes first: "dusk harbour" is on no one page, but each word is
+    // on one.
+    let either = results(&fixture, TOKEN_A, "/v1/search?q=dusk%20harbour");
+    assert_eq!(either.len(), 2, "{either:?}");
+    let ranked = results(
+        &fixture,
+        TOKEN_A,
+        "/v1/search?q=Which%20kestrel%20routes%20run%20near%20the%20harbour%3F",
+    );
+    assert_eq!(ranked.len(), 2, "{ranked:?}");
+    assert_eq!(ranked[0]["title"], "Kestrel routes", "{ranked:?}");
+
+    // A question of nothing but stopwords finds nothing, and is no error.
+    let none = results(&fixture, TOKEN_A, "/v1/search?q=what%20were%20they%3F");
     assert_eq!(none.len(), 0, "{none:?}");
 }
 

@@ -647,9 +647,9 @@ proptest::proptest! {
 
 /// A blind index cannot say "any page": a query with no token in it matches
 /// nothing, and neither does a zero limit. A scope nobody wrote contributes
-/// nothing rather than failing, and one that is not a slug is refused. AND
-/// across tokens, and case and punctuation are the tokenizer's business, not
-/// the caller's.
+/// nothing rather than failing, and one that is not a slug is refused. ANY
+/// of the tokens is a hit, a page holding more of them ranks first, and case,
+/// punctuation and stopwords are the tokenizer's business, not the caller's.
 #[test]
 fn search_is_a_blind_index_not_a_text_search() {
     pollster::block_on(async {
@@ -667,10 +667,11 @@ fn search_is_a_blind_index_not_a_text_search() {
             scope: "team".to_owned(),
             slug: slug.to_owned(),
         };
-        // A page that has one of two words is not a hit for a query naming both.
+        // A page that has one of two words is still a hit for a query naming
+        // both, ranked below the page that has both.
         assert_eq!(
             hits(&store, &["team"], "zephyrmoor reykjavik").await,
-            vec![hit("both")]
+            vec![hit("both"), hit("neither"), hit("one")]
         );
         assert_eq!(
             hits(&store, &["team"], "Zephyrmoor.").await,
@@ -678,6 +679,7 @@ fn search_is_a_blind_index_not_a_text_search() {
         );
         for (scopes, query, limit) in [
             (["team"], "  ...  ", 10),
+            (["team"], "what were the", 10),
             (["team"], "zephyrmoor", 0),
             (["nowhere"], "zephyrmoor", 10),
         ] {
