@@ -128,9 +128,23 @@ fn schema(entity: EntityType) -> Schema {
         // `project` is optional and Decision-only (issue #121): notes recorded
         // by the CLI/API carry the caller's `--project` association in their
         // frontmatter, and GET /v1/search?project= filters on it.
+        //
+        // The temporal keys (docs/temporal-facts.md §7): when it was decided,
+        // the span it holds for, and the decision pages it replaced or was
+        // replaced by — so a reversed decision reads as history rather than
+        // as a contradiction.
         EntityType::Decision => Schema {
             required: &["title"],
-            optional: &["status", "date", "project"],
+            optional: &[
+                "status",
+                "date",
+                "project",
+                "decided_at",
+                "valid_from",
+                "valid_to",
+                "supersedes",
+                "superseded_by",
+            ],
             enums: &[("status", &["proposed", "accepted", "superseded"])],
         },
         EntityType::Customer => Schema {

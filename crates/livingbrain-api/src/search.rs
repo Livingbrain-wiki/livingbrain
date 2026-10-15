@@ -17,6 +17,7 @@ use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Po
 use serde_json::{Value, json};
 
 use crate::Wiki;
+use crate::facts::{relevant, timeline_json};
 use crate::recipes::{DEFAULT_LIMIT, MAX_LIMIT, find_in_project, result_json};
 use crate::service::Service;
 
@@ -116,7 +117,16 @@ async fn search(
     let scopes = state.scopes(&asker);
     let found = find_in_project(&store, &scopes, q, limit, project).await?;
     let results: Vec<Value> = found.iter().map(result_json).collect();
-    Ok(Json(json!({ "results": results })))
+    // The facts `q` is about, as of now (docs/temporal-facts.md §5): what
+    // holds today, with the history beside it.
+    let facts = state.facts_store()?;
+    let now = facts.now();
+    let fact_keys: Vec<Value> = relevant(&facts, &asker, &scopes, q)
+        .await?
+        .iter()
+        .map(|timeline| timeline_json(timeline, now, &|fact| fact.source.clone()))
+        .collect();
+    Ok(Json(json!({ "results": results, "facts": fact_keys })))
 }
 
 /// A caller-supplied limit, capped rather than refused: 1..=[`MAX_LIMIT`],

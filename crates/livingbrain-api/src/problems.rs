@@ -9,7 +9,7 @@
 
 use cratefield_core::axum::http::StatusCode;
 use cratefield_core::{Problem, ProblemDef};
-use livingbrain_pages::PageError;
+use livingbrain_pages::{FactError, PageError};
 
 /// A missing or rejected credential — one definition for both, so the body
 /// says the same thing either way and a stranger learns nothing about
@@ -89,6 +89,51 @@ pub(crate) const EXPORT_FORMAT: ProblemDef = ProblemDef {
     description: "The export speaks one format: `obsidian`. Name it with \
                   `?format=obsidian`, or send no `format` at all.",
 };
+
+/// A fact outside the format (docs/temporal-facts.md): a subject that is
+/// not `<entity_type>/<slug>`, a date that does not parse, a cardinality
+/// that disagrees with the attribute's. The detail says which. Nothing was
+/// stored for the refused fact.
+pub(crate) const FACT_REFUSED: ProblemDef = ProblemDef {
+    slug: "api/fact-refused",
+    status: StatusCode::UNPROCESSABLE_ENTITY,
+    title: "The fact was refused",
+    description: "The fact does not follow the temporal facts format \
+                  (docs/temporal-facts.md); the `detail` says which field. Facts before \
+                  it in the same request were recorded; it and the ones after were not.",
+};
+
+/// A fact id no readable scope holds — unknown and somebody else's are the
+/// same answer, the [`PAGE_NOT_FOUND`] rule.
+pub(crate) const FACT_NOT_FOUND: ProblemDef = ProblemDef {
+    slug: "api/fact-not-found",
+    status: StatusCode::NOT_FOUND,
+    title: "No such fact",
+    description: "No fact the caller can read carries that id. It may not exist, \
+                  or it may belong to somebody else — this surface does not say which.",
+};
+
+/// A write aimed at a memory the credential does not grant: a token
+/// narrowed away from the personal or the shared scope.
+pub(crate) const SCOPE_NOT_GRANTED: ProblemDef = ProblemDef {
+    slug: "api/scope-not-granted",
+    status: StatusCode::FORBIDDEN,
+    title: "This credential cannot write there",
+    description: "The credential was narrowed to scopes that do not include the memory \
+                  this write is aimed at. Nothing was written.",
+};
+
+/// Maps a fact store failure to the problem the caller sees: the caller's
+/// own mistakes say what they were, everything else is the store's.
+pub(crate) fn fact_error(error: FactError) -> Problem {
+    match error {
+        FactError::Invalid(message) => Problem::new(&FACT_REFUSED).with_detail(message),
+        error @ FactError::CardinalityMismatch { .. } => {
+            Problem::new(&FACT_REFUSED).with_detail(error.to_string())
+        }
+        FactError::Store(error) => page_read_error(error),
+    }
+}
 
 /// The problem for content redaction refused, in one place so every write
 /// path says the same thing.

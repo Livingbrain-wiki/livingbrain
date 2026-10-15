@@ -25,7 +25,7 @@ use cratefield_core::axum::routing::get;
 use cratefield_core::axum::{Json, Router};
 use cratefield_core::{ModuleContext, Problem};
 use livingbrain_access::{Scope, UserId};
-use livingbrain_mcp::page_scope;
+use livingbrain_mcp::{Asker, page_scope};
 use livingbrain_pages::{
     Author, EntityType, Page, PageStore, PageWrite, is_slug, parse_frontmatter,
 };
@@ -34,8 +34,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Wiki;
+use crate::facts::timeline_json;
 use crate::problems::{
-    PAGE_CONFLICT, PAGE_NOT_FOUND, PAGE_REFUSED, page_read_error, page_write_error,
+    PAGE_CONFLICT, PAGE_NOT_FOUND, PAGE_REFUSED, fact_error, page_read_error, page_write_error,
     redaction_refused, slug_not_found, slug_refused,
 };
 use crate::recipes::{one_line, title_of, wiki_url};
@@ -134,7 +135,7 @@ async fn read_one(
     let page = read_first(&store, &scopes, &slug)
         .await?
         .ok_or_else(|| Problem::new(&PAGE_NOT_FOUND))?;
-    Ok(Json(page_view(&store, &page).await?))
+    Ok(Json(page_view(&state, &asker, &store, &page).await?))
 }
 
 /// The first readable page of `slug` across the asker's scopes, most
@@ -163,7 +164,12 @@ async fn read_first(
 ///
 /// [`Problem::internal`] when the backlink query fails — the page itself is
 /// already read, so a `PageError` here is infrastructure.
-async fn page_view(store: &PageStore, page: &Page) -> Result<Value, Problem> {
+async fn page_view(
+    state: &Service,
+    asker: &Asker,
+    store: &PageStore,
+    page: &Page,
+) -> Result<Value, Problem> {
     let backlinks = store
         .backlinks(&page.scope, &page.slug)
         .await
@@ -178,6 +184,30 @@ async fn page_view(store: &PageStore, page: &Page) -> Result<Value, Problem> {
             })
         })
         .collect();
+    // The entity's temporal facts (docs/temporal-facts.md §7), from every
+    // scope the asker may read: generated beside the body, never stored in
+    // it, so an edit cannot desynchronise them. `facts_markdown` is the
+    // deterministic section a reader appends below the body.
+    let subject = format!("{}/{}", page.entity_type.as_str(), page.slug);
+    let facts = state.facts_store()?;
+    let now = facts.now();
+    let scopes = state.scopes(asker);
+    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let timelines = facts
+        .timelines(&names, Some(&subject), None)
+        .await
+        .map_err(fact_error)?;
+    let fact_keys: Vec<Value> = timelines
+        .iter()
+        .map(|timeline| timeline_json(timeline, now, &|fact| fact.source.clone()))
+        .collect();
+    let facts_markdown = livingbrain_memory::timeline::render_markdown(
+        &timelines
+            .into_iter()
+            .map(|timeline| timeline.facts)
+            .collect::<Vec<_>>(),
+        now,
+    );
     Ok(json!({
         "slug": page.slug,
         "title": title_of(page),
@@ -187,6 +217,9 @@ async fn page_view(store: &PageStore, page: &Page) -> Result<Value, Problem> {
         "entity_type": page.entity_type.as_str(),
         "backlinks": backlinks,
         "citations": citations,
+        "subject": subject,
+        "facts": fact_keys,
+        "facts_markdown": facts_markdown,
     }))
 }
 
@@ -308,7 +341,7 @@ async fn edit(
         .await
         .map_err(page_read_error)?
         .ok_or_else(Problem::internal)?;
-    Ok(Json(page_view(&store, &page).await?))
+    Ok(Json(page_view(&state, &asker, &store, &page).await?))
 }
 
 /// Whether a body opens with a closed `---` frontmatter fence.

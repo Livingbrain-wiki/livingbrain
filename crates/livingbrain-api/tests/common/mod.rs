@@ -24,7 +24,7 @@ use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Notes, PagesRebind, Search, Sources, Wiki, pages_routes,
+    Ask, CodingAgents, Export, Facts, Notes, PagesRebind, Search, Sources, Wiki, pages_routes,
 };
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
 use livingbrain_pages::{
@@ -144,6 +144,7 @@ pub fn fixture() -> Fixture {
         Box::new(Search::new(wiki.clone())),
         Box::new(Ask::new(wiki.clone())),
         Box::new(Export::new(wiki.clone())),
+        Box::new(Facts::new(wiki.clone())),
         Box::new(Sources::new(wiki.clone())),
         Box::new(CodingAgents::new(wiki)),
         // The two tables the compiler reads beside its own: which model

@@ -27,6 +27,10 @@ livingbrain-access = { path = "../livingbrain-access" }
 # Redaction, so a question carrying a secret is cleaned before it becomes a
 # search query (issue #108).
 livingbrain-redact = { path = "../livingbrain-redact" }
+# The temporal-facts model (docs/temporal-facts.md): partial dates, the
+# deterministic timeline resolution and its renderings. Pure Rust, no I/O,
+# wasm-safe; the fact store here is its storage half.
+livingbrain-memory = { path = "../livingbrain-memory" }
 # `Answers` is an `async` trait a sibling module holds as `dyn`, which needs
 # the attribute macro to be object-safe. Already in the tree.
 async-trait = { workspace = true }

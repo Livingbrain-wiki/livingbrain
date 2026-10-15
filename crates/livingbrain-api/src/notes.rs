@@ -31,6 +31,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::Wiki;
+use crate::facts::{FactRequest, inputs, record_all};
 use crate::problems::{page_read_error, page_write_error, redaction_refused};
 use crate::recipes::{note_slug, one_line, wiki_url};
 use crate::service::Service;
@@ -104,6 +105,10 @@ struct NoteRequest {
     project: Option<String>,
     #[serde(default)]
     slug: Option<String>,
+    /// Temporal facts the note states (docs/temporal-facts.md, format v1),
+    /// recorded in the same personal scope with the note as their source.
+    #[serde(default)]
+    facts: Option<Vec<FactRequest>>,
 }
 
 /// `POST /` — one note, redacted and filed in the asker's own scope.
@@ -162,6 +167,12 @@ async fn note(
     } else {
         title
     };
+    // The facts are checked before anything is written, so a malformed one
+    // refuses the whole note rather than leaving half of it stored.
+    let facts = match request.facts {
+        Some(facts) if !facts.is_empty() => Some(facts),
+        _ => None,
+    };
     let project = request
         .project
         .as_deref()
@@ -177,6 +188,10 @@ async fn note(
     let store = state.store()?;
     let head = store.read(&scope, &slug).await.map_err(page_read_error)?;
     let reference = format!("{scope}/{slug}");
+    let fact_inputs = match facts {
+        Some(facts) => inputs(&asker, facts, Some(&format!("note:{reference}")))?,
+        None => Vec::new(),
+    };
     // A keyed note that already says exactly this is left alone: re-sending
     // the same session is how a sync proves it has nothing new.
     if keyed.is_some()
@@ -184,12 +199,14 @@ async fn note(
         && page.entity_type == EntityType::Decision
         && page.markdown == markdown
     {
+        let facts = record_facts(&state, &scope, fact_inputs, &asker.user_id).await?;
         return Ok(Json(json!({
             "id": reference,
             "url": wiki_url(&scope, &slug),
             "version": page.version,
             "redacted": findings.len(),
             "unchanged": true,
+            "facts": facts,
         })));
     }
     let meta = store
@@ -206,13 +223,29 @@ async fn note(
         .await
         .map_err(page_write_error)?;
 
+    let facts = record_facts(&state, &scope, fact_inputs, &asker.user_id).await?;
     Ok(Json(json!({
         "id": reference,
         "url": wiki_url(&scope, &slug),
         "version": meta.version,
         "redacted": findings.len(),
         "unchanged": false,
+        "facts": facts,
     })))
+}
+
+/// The note's facts, recorded in the note's own scope; no store is built
+/// for a note that states none.
+async fn record_facts(
+    state: &Service,
+    scope: &str,
+    inputs: Vec<livingbrain_pages::FactInput>,
+    written_by: &str,
+) -> Result<Vec<Value>, Problem> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    record_all(&state.facts_store()?, scope, inputs, written_by).await
 }
 
 /// The note's markdown: the same fence `brain_note` writes, plus the
