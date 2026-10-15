@@ -43,24 +43,50 @@ impl Drain {
     }
 }
 
-/// The scheduled entry point (`Module::scheduled`). It mints the [`Drain`]
-/// and does the housekeeping that needs no GitHub call: forgetting expired
-/// state tokens and deliveries past their retention.
-///
-/// TODO(Part C): claim queued work ([`claim`]) and advance due backfills
-/// ([`repos_due`] → [`save_backfill_progress`]) within
-/// `ctx.scheduled`'s budget, using the installation token minted from
-/// [`crate::app_credentials`]. Part A's `livingbrain-github` crate supplies
-/// the backfill planner and the payload → page mapping.
-pub(crate) async fn run(ctx: &ModuleContext, _cron: &str) -> Result<(), StoreError> {
+/// The scheduled entry point (`Module::scheduled`). It mints the [`Drain`],
+/// does the housekeeping that needs no GitHub call (forgetting expired
+/// state tokens and deliveries past their retention), then hands the
+/// `Drain` to the backfill and queue work in `sync.rs`, which runs within
+/// `ctx.scheduled`'s budget and Part A's per-tick planner budget.
+pub(crate) async fn run(
+    ctx: &ModuleContext,
+    _cron: &str,
+    shared: &crate::Shared,
+) -> Result<(), StoreError> {
     let (Some(db), Some(clock)) = (ctx.ports.db.clone(), ctx.ports.clock.clone()) else {
         return Ok(());
     };
-    let _drain = Drain::for_scheduled_run();
+    let drain = Drain::for_scheduled_run();
     let now = clock.now();
     crate::deliveries::prune_deliveries(&*db, now).await?;
     crate::app::prune_states(&*db, now).await?;
-    Ok(())
+    crate::sync::run(ctx, &drain, shared).await
+}
+
+/// Puts repositories whose backfill finished more than `older_than_secs`
+/// ago back to `running`, so their stored incremental cursor (the
+/// planner's `next_run`) catches anything a lost webhook missed. Only
+/// included, active, not-removed repositories.
+///
+/// # Errors
+///
+/// A storage failure.
+pub async fn reopen_stale(
+    db: &dyn Database,
+    _drain: &Drain,
+    now: time::OffsetDateTime,
+    older_than_secs: i64,
+) -> Result<u64, StoreError> {
+    let now = unix(now);
+    Ok(db
+        .execute(&Statement::with_values(
+            "UPDATE github_repos SET backfill_state = 'running', backfill_finished_at = NULL, \
+               updated_at = ? \
+             WHERE backfill_state = 'done' AND active = 1 AND included = 1 \
+               AND removed_at IS NULL AND backfill_finished_at < ?",
+            vec![int(now), int(now - older_than_secs)],
+        ))
+        .await?)
 }
 
 /// The longest error text kept on a row or queue item. The drain must

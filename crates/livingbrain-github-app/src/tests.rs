@@ -1184,7 +1184,7 @@ fn only_the_scheduled_drain_mints_a_drain() {
     );
     let lib = std::fs::read_to_string(src.join("lib.rs")).expect("reads");
     assert!(
-        lib.contains("drain::run(ctx, cron)"),
+        lib.contains("drain::run(ctx, cron, &self.shared)"),
         "Module::scheduled is the entry point"
     );
 }
