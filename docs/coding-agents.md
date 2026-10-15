@@ -209,7 +209,7 @@ is held back: `lenient` skips only empty sessions and summarises only
 failing loops; `strict` summarises any session that changed nothing and said
 little (under 4 000 characters from the agent).
 
-**Jev.** When the deployment has a `TYPESAFE_API_KEY`, the compiler also asks
+**Jev.** When Jev is on for the workspace, the compiler also asks
 Jev — TypeSafe's System One, a purpose-trained classifier at
 `api.typesafe.ai`, called over HTTP from the Worker through the harness's
 `Classifier` port (`cratefield-adapter-typesafe`, model pinned) — **once per
@@ -230,8 +230,27 @@ leaves the rule's decision. What Jev reads is a redacted digest, at most
 24 000 characters: the counts, the person's and the agent's words cut short,
 and one line per tool call (tool, file, failed or not, the command's head) —
 never a tool's output. It costs $0.042 per million input tokens (output is
-free), billed to the operator's TypeSafe account, and the data is hosted in
-the US.
+free), billed to the TypeSafe account the key belongs to, and the data is
+hosted in the US.
+
+**Which key Jev runs on** is decided per workspace, on Settings → Models →
+Jev (TypeSafe), an optional card:
+
+1. the workspace's switch — an owner or admin can turn Jev **off** even when
+   the deployment has a key; the free rule still triages;
+2. the workspace's own TypeSafe key, stored encrypted like a model key
+   (AES-256-GCM under `MODEL_KEYS_SECRET`, bound to the workspace), shown
+   only as `…` and its last four characters;
+3. the deployment's `TYPESAFE_API_KEY`;
+4. otherwise off.
+
+The model defaults to the adapter's pinned version (or the deployment's
+`TYPESAFE_MODEL`); a workspace may choose its own. The routes are
+`GET`/`PUT /v1/models/jev`, `DELETE /v1/models/jev/key` and
+`POST /v1/models/jev/test` (one yes/no classification of a fixed two-line
+state); writes and the test are owner or admin only. The queue's `triage`
+block names where it runs now as `classifier_source` (`off`, `deployment`
+or `workspace`).
 
 **Compaction** shrinks what the model is sent, never the source:
 

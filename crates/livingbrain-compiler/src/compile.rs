@@ -106,6 +106,28 @@ impl Tuning for NoTuning {
     }
 }
 
+/// Which triage classifier (Jev) a workspace's compiles ask, if any. The
+/// composition wires one over the workspace's own Jev settings (its switch,
+/// its own TypeSafe key, else the deployment's); a compiler without one
+/// asks no classifier and the free rule triages alone.
+#[async_trait::async_trait]
+pub trait Classifiers: Send + Sync {
+    /// The workspace's classifier, or `None` (switched off, no key, or a
+    /// read that failed).
+    async fn for_workspace(&self, workspace: &str) -> Option<Arc<dyn Classifier>>;
+}
+
+/// One classifier for every workspace: what [`Compiler::with_classifier`]
+/// wires.
+struct OneClassifier(Arc<dyn Classifier>);
+
+#[async_trait::async_trait]
+impl Classifiers for OneClassifier {
+    async fn for_workspace(&self, _workspace: &str) -> Option<Arc<dyn Classifier>> {
+        Some(self.0.clone())
+    }
+}
+
 /// The knobs, all from config (`CODING_AGENTS_*`), all with defaults that
 /// keep one session's compile small and a workspace's month bounded. A
 /// workspace's own [`Overrides`] apply on top ([`Settings::with_overrides`]).
@@ -379,8 +401,9 @@ pub struct Compiler {
     clock: Arc<dyn Clock>,
     settings: Settings,
     tuning: Arc<dyn Tuning>,
-    /// The triage classifier (Jev), when the venture wires one.
-    classifier: Option<Arc<dyn Classifier>>,
+    /// The triage classifiers (Jev, per workspace), when the venture wires
+    /// them.
+    classifiers: Option<Arc<dyn Classifiers>>,
 }
 
 /// What one job accumulated across its calls.
@@ -441,7 +464,7 @@ impl Compiler {
             clock,
             settings,
             tuning: Arc::new(NoTuning),
-            classifier: None,
+            classifiers: None,
         }
     }
 
@@ -451,7 +474,17 @@ impl Compiler {
     /// ([`crate::triage::Plan::ask`]). Without one, the free rule decides.
     #[must_use]
     pub fn with_classifier(mut self, classifier: Option<Arc<dyn Classifier>>) -> Self {
-        self.classifier = classifier;
+        self.classifiers =
+            classifier.map(|one| Arc::new(OneClassifier(one)) as Arc<dyn Classifiers>);
+        self
+    }
+
+    /// The same compiler, asking each workspace's own classifier
+    /// ([`Classifiers::for_workspace`]) — the workspace's switch and key
+    /// decide, per compile.
+    #[must_use]
+    pub fn with_classifiers(mut self, classifiers: Option<Arc<dyn Classifiers>>) -> Self {
+        self.classifiers = classifiers;
         self
     }
 
@@ -718,7 +751,7 @@ impl Compiler {
         }
         // A cron tick's share is counted in subrequest-shaped steps; a
         // compile is several (the source, the pages, the model calls).
-        if !budget.try_spend(if self.classifier.is_some() { 9 } else { 8 }) {
+        if !budget.try_spend(if self.classifiers.is_some() { 9 } else { 8 }) {
             return Ok(Admit::Stop);
         }
         if !self.queue.claim(&job, now, self.settings.lease).await? {
@@ -1214,9 +1247,13 @@ impl Compiler {
             Decision::new(Triage::Full, "triage-off")
         };
         let mut plan = Plan::from_rule(rule.clone());
-        if let Some(classifier) = &self.classifier
-            && (settings.triage || settings.compaction)
-        {
+        let classifier = match &self.classifiers {
+            Some(classifiers) if settings.triage || settings.compaction => {
+                classifiers.for_workspace(&job.workspace).await
+            }
+            _ => None,
+        };
+        if let Some(classifier) = &classifier {
             let candidates = self
                 .topic_candidates(&job.scope, allowed)
                 .await

@@ -58,6 +58,7 @@ use livingbrain_github_app::GithubApp;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_models::deadline::ModelDeadlineHttpClient;
+use livingbrain_models::jev::{JevConnector, JevKey};
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
 use livingbrain_tokens::{Avatars, DevicePorts, Me, Tokens};
 use livingbrain_tools::Tools;
@@ -147,33 +148,65 @@ fn build_captcha(env: &Env) -> Option<Turnstile> {
     )
 }
 
-/// Jev (TypeSafe's System One) as the coding-agents compiler's triage
-/// classifier when the `TYPESAFE_API_KEY` secret is set, pinned to
-/// `TYPESAFE_MODEL` when that var names a model (the adapter's pinned
-/// default otherwise). No key is no classifier: the compiler's free rule
-/// triages alone, and nothing is sent to TypeSafe. With a key, one call per
-/// session sends a redacted digest (counts, the person's and the agent's
-/// words cut short, one line per tool call) to `api.typesafe.ai` (US).
+/// Jev (TypeSafe's System One), the coding-agents compiler's optional
+/// triage classifier, as a connector the models module and the compiler
+/// build it through. Which key a workspace's compiles run on is decided per
+/// workspace (`livingbrain_models::jev::effective`): its own switch (an
+/// owner can turn Jev off), then its own TypeSafe key (Settings → Models →
+/// Jev, sealed like a model key), then this deployment's `TYPESAFE_API_KEY`
+/// secret, else none — and with none, the compiler's free rule triages
+/// alone and nothing is sent to TypeSafe. `TYPESAFE_MODEL` pins the default
+/// model (the adapter's pinned default otherwise); a workspace may choose
+/// its own. With a key, one call per session sends a redacted digest
+/// (counts, the person's and the agent's words cut short, one line per tool
+/// call; at most 24k characters) to `api.typesafe.ai` (US).
 ///
-/// Only the compiler gets it. The Slack judge's `Classifier` port stays
-/// unwired (issue #123), so wiring a key here does not change what the
-/// Slack agent answers.
-fn build_classifier(env: &Env) -> Option<Arc<dyn Classifier>> {
-    let key = env
-        .secret("TYPESAFE_API_KEY")
-        .ok()
-        .map(|secret| secret.to_string())
-        .filter(|key| !key.trim().is_empty())?;
-    let mut adapter = TypeSafe::new(Arc::new(FetchClient), Arc::new(WorkersClock), Some(key));
-    if let Some(model) = env
-        .var("TYPESAFE_MODEL")
-        .ok()
-        .map(|model| model.to_string())
-        .filter(|model| !model.trim().is_empty())
-    {
-        adapter = adapter.with_model(model.trim());
+/// Only the compiler (and the settings page's Test) gets it. The Slack
+/// judge's `Classifier` port stays unwired (issue #123), so a key here does
+/// not change what the Slack agent answers.
+struct TypeSafeJev {
+    /// The deployment's own key, when the secret is set.
+    key: Option<String>,
+    /// `TYPESAFE_MODEL`, else the adapter's pinned default.
+    model: String,
+}
+
+impl TypeSafeJev {
+    fn from_env(env: &Env) -> Self {
+        let key = env
+            .secret("TYPESAFE_API_KEY")
+            .ok()
+            .map(|secret| secret.to_string())
+            .filter(|key| !key.trim().is_empty());
+        let model = env
+            .var("TYPESAFE_MODEL")
+            .ok()
+            .map(|model| model.to_string().trim().to_owned())
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| cratefield_adapter_typesafe::DEFAULT_MODEL.to_owned());
+        Self { key, model }
     }
-    Some(Arc::new(adapter))
+}
+
+impl JevConnector for TypeSafeJev {
+    fn deployment_key(&self) -> bool {
+        self.key.is_some()
+    }
+
+    fn default_model(&self) -> String {
+        self.model.clone()
+    }
+
+    fn classifier(&self, key: JevKey<'_>, model: &str) -> Option<Arc<dyn Classifier>> {
+        let key = match key {
+            JevKey::Deployment => self.key.clone()?,
+            JevKey::Workspace(key) => key.to_owned(),
+        };
+        Some(Arc::new(
+            TypeSafe::new(Arc::new(FetchClient), Arc::new(WorkersClock), Some(key))
+                .with_model(model),
+        ))
+    }
 }
 
 static INSTANCE: OnceLock<(Harness, Cloudflare, TurnsCell)> = OnceLock::new();
@@ -319,7 +352,7 @@ fn build(
     mail: MailSettings,
     captcha: Option<Turnstile>,
     kms: Option<Arc<dyn Kms>>,
-    classifier: Option<Arc<dyn Classifier>>,
+    jev: Option<Arc<dyn JevConnector>>,
 ) -> (Harness, Cloudflare, TurnsCell) {
     let runtime = Cloudflare::new()
         // The bindings `wrangler.toml` declares. `workspaces` and `waitlist`
@@ -389,7 +422,10 @@ fn build(
                     // only refused, so re-admitting them revives nothing.
                     .on_member_removed(Arc::new(RevokeOnRemoval)),
             )
-            .module(Models::new())
+            .module(match &jev {
+                Some(jev) => Models::new().with_jev(jev.clone()),
+                None => Models::new(),
+            })
             .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
@@ -416,7 +452,7 @@ fn build(
             .module(BudgetSettings::new());
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
-        let builder = cli_modules(kms.clone(), classifier)
+        let builder = cli_modules(kms.clone(), jev)
             .into_iter()
             .fold(builder, HarnessBuilder::module_arc);
         // The GitHub connection (docs/github.md): the manifest flow, the
@@ -455,14 +491,14 @@ fn build(
 /// of them is mounted and every other route keeps working.
 fn cli_modules(
     kms: Option<Arc<dyn Kms>>,
-    classifier: Option<Arc<dyn Classifier>>,
+    jev: Option<Arc<dyn JevConnector>>,
 ) -> Vec<Arc<dyn Module>> {
     let Some(kms) = kms else {
         return Vec::new();
     };
     // The compiler's triage classifier rides on the same `Wiki`; only the
     // coding-agents compiler asks it.
-    let wiki = wiki(kms).with_classifier(classifier);
+    let wiki = wiki(kms).with_jev(jev);
     vec![
         Arc::new(Notes::new(wiki.clone())),
         Arc::new(Search::new(wiki.clone())),
@@ -835,7 +871,7 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
             MailSettings::from_env(env),
             build_captcha(env),
             build_kms(env),
-            build_classifier(env),
+            Some(Arc::new(TypeSafeJev::from_env(env))),
         )
     })
 }

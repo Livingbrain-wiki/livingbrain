@@ -30,6 +30,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::catalog::{self, Auth, Wire};
 use crate::crypto;
 use crate::curated;
+use crate::jev::{self, JevConnector, JevKey, Source};
 use crate::jobs;
 use crate::probe;
 use crate::selection;
@@ -94,14 +95,21 @@ const NO_SECRET: ProblemDef = ProblemDef {
 /// encryption key resolved lazily per request.
 struct ModuleState {
     ctx: ModuleContext,
+    /// How Jev's classifier is built, when the venture wires TypeSafe.
+    jev: Option<Arc<dyn JevConnector>>,
 }
 
 /// The module's routes.
-pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
-    let state = Arc::new(ModuleState { ctx });
+pub(crate) fn router(ctx: ModuleContext, jev: Option<Arc<dyn JevConnector>>) -> axum::Router {
+    let state = Arc::new(ModuleState { ctx, jev });
     axum::Router::new()
         .route("/", get(list))
         .route("/discover", post(discover))
+        // Jev, the compiler's optional triage classifier: static segments,
+        // so they win over `/{role}` the way `/discover` does.
+        .route("/jev", get(jev_status).put(jev_set))
+        .route("/jev/key", axum::routing::delete(jev_remove_key))
+        .route("/jev/test", post(jev_test))
         // A member's own runner (`crate::jobs`): static segments, so they win
         // over `/{role}` the way `/discover` does.
         .route("/mine", get(mine))
@@ -792,4 +800,330 @@ async fn remove_mine(
         .await
         .map_err(database)?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/* --- Jev ---------------------------------------------------------------- */
+
+/// `POST /jev/test` while Jev is off for the workspace and no key was sent.
+const JEV_OFF: ProblemDef = ProblemDef {
+    slug: "models/jev-off",
+    status: StatusCode::CONFLICT,
+    title: "Jev is off",
+    description: "Jev is switched off, or no TypeSafe key is set for this workspace or deployment.",
+};
+
+/// TypeSafe refused the test call (a bad key, an unknown model).
+const JEV_REFUSED: ProblemDef = ProblemDef {
+    slug: "models/jev-refused",
+    status: StatusCode::UNPROCESSABLE_ENTITY,
+    title: "TypeSafe refused the call",
+    description: "TypeSafe refused the classification: the key is wrong or revoked, or the model is unknown.",
+};
+
+/// TypeSafe could not be reached, or asked to retry.
+const JEV_UNREACHABLE: ProblemDef = ProblemDef {
+    slug: "models/jev-unreachable",
+    status: StatusCode::BAD_GATEWAY,
+    title: "TypeSafe unreachable",
+    description: "TypeSafe did not answer the classification; try again later.",
+};
+
+/// What every Jev route answers: where the workspace's Jev runs from, and
+/// what a member may change. The workspace key shows `…` and four
+/// characters, never more.
+#[derive(Debug, Serialize)]
+struct JevView {
+    /// The workspace's switch (on unless someone turned it off).
+    enabled: bool,
+    /// `off`, `deployment` or `workspace`: what a compile runs on now.
+    source: &'static str,
+    /// Whether the deployment carries its own `TYPESAFE_API_KEY`.
+    deployment_key: bool,
+    /// The workspace's own key, as `…abcd`, or `null`.
+    workspace_key: Option<String>,
+    /// The model Jev runs, and the one it runs when none is chosen.
+    model: String,
+    default_model: String,
+    /// Whether the workspace chose its own model.
+    custom_model: bool,
+    /// Whether this server can call TypeSafe at all (the venture wired it).
+    available: bool,
+    updated_at: Option<String>,
+}
+
+/// The view for `workspace`, from its row and the connector.
+async fn jev_view(state: &ModuleState, workspace: &str) -> Result<JevView, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let stored = jev::read(&*db, workspace)
+        .await
+        .map_err(database)?
+        .unwrap_or_default();
+    let (deployment_key, default_model) = state.jev.as_ref().map_or((false, String::new()), |c| {
+        (c.deployment_key(), c.default_model())
+    });
+    let source = if state.jev.is_some() {
+        jev::decide(stored.enabled, stored.has_key, deployment_key)
+    } else {
+        Source::Off
+    };
+    Ok(JevView {
+        enabled: stored.enabled != Some(false),
+        source: source.as_str(),
+        deployment_key,
+        workspace_key: stored
+            .has_key
+            .then(|| format!("…{}", stored.key_last4.unwrap_or_default())),
+        model: stored
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model.clone()),
+        default_model,
+        custom_model: stored.model.is_some(),
+        available: state.jev.is_some(),
+        updated_at: stored.updated_at,
+    })
+}
+
+/// `GET /jev` — where the workspace's Jev runs from. Any member may ask.
+async fn jev_status(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    Ok(Json(jev_view(&state, &c.workspace_id).await?).into_response())
+}
+
+/// The body of `PUT /jev`: every field optional, and only what is sent
+/// changes. `model: ""` (or `null`) goes back to the default model.
+#[derive(Debug, Deserialize)]
+struct JevRequest {
+    enabled: Option<bool>,
+    api_key: Option<crypto::ApiKey>,
+    #[serde(default, deserialize_with = "present")]
+    model: Option<Option<String>>,
+}
+
+/// `Some(None)` for an explicit `null`, so "not sent" and "cleared" differ.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// A Jev model id: the adapter sends it as the request's `model`.
+fn jev_model(model: &str) -> Result<Option<&str>, Problem> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Ok(None);
+    }
+    if model.len() > 64
+        || !model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(Problem::validation_failed(
+            "model must be a TypeSafe model id: letters, digits and - _ .",
+        ));
+    }
+    Ok(Some(model))
+}
+
+/// A TypeSafe key as sent: trimmed, non-empty, printable, bounded.
+fn jev_key(key: &crypto::ApiKey) -> Result<crypto::ApiKey, Problem> {
+    let trimmed = key.as_str().trim();
+    if trimmed.is_empty() || trimmed.len() > 512 || trimmed.chars().any(char::is_control) {
+        return Err(Problem::validation_failed(
+            "api_key must be the TypeSafe API key, at most 512 characters",
+        ));
+    }
+    Ok(crypto::ApiKey::new(trimmed.to_owned()))
+}
+
+/// `PUT /jev` — switch Jev on or off, store or replace the workspace's own
+/// TypeSafe key, choose the model. Admin or owner only. The key is sealed
+/// before it is stored, exactly like a model connection's, and the answer
+/// shows its last four characters only.
+async fn jev_set(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+    Json(body): Json<JevRequest>,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let id_gen = port(state.ctx.ports.id_gen.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !c.is_admin {
+        return Err(Problem::new(&FORBIDDEN));
+    }
+    let model = match &body.model {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(model)) => Some(jev_model(model)?),
+    };
+    let sealed = match &body.api_key {
+        None => None,
+        Some(key) => {
+            let key = jev_key(key)?;
+            let secret =
+                crypto::derive_key(&*state.ctx.config).ok_or_else(|| Problem::new(&NO_SECRET))?;
+            let blob = crypto::encrypt(
+                &secret,
+                key.as_str().as_bytes(),
+                &c.workspace_id,
+                jev::AAD_ROLE,
+                &*id_gen,
+            )
+            .map_err(|_| Problem::internal())?;
+            Some((blob.blob, key.last4().to_owned()))
+        }
+    };
+    let now = clock.now().format(&Rfc3339).unwrap_or_default();
+    jev::write(
+        &*db,
+        &c.workspace_id,
+        jev::Change {
+            enabled: body.enabled,
+            model,
+            key: sealed
+                .as_ref()
+                .map(|(blob, last4)| Some((blob.as_slice(), last4.as_str()))),
+        },
+        &c.user_id,
+        &now,
+    )
+    .await
+    .map_err(database)?;
+    Ok(Json(jev_view(&state, &c.workspace_id).await?).into_response())
+}
+
+/// `DELETE /jev/key` — forget the workspace's own TypeSafe key. Admin or
+/// owner only. The switch and the model stay; the deployment's key (if
+/// any) serves again.
+async fn jev_remove_key(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !c.is_admin {
+        return Err(Problem::new(&FORBIDDEN));
+    }
+    let now = clock.now().format(&Rfc3339).unwrap_or_default();
+    jev::write(
+        &*db,
+        &c.workspace_id,
+        jev::Change {
+            key: Some(None),
+            ..jev::Change::default()
+        },
+        &c.user_id,
+        &now,
+    )
+    .await
+    .map_err(database)?;
+    Ok(Json(jev_view(&state, &c.workspace_id).await?).into_response())
+}
+
+/// The body of `POST /jev/test`: optionally a key and a model to try
+/// before saving them. Without a key, the workspace's effective Jev is
+/// tested.
+#[derive(Debug, Deserialize, Default)]
+struct JevTestRequest {
+    api_key: Option<crypto::ApiKey>,
+    model: Option<String>,
+}
+
+/// What the test call reads: invented, short, and nothing of anyone's.
+const TEST_STATE: &str = "A test call from Living Brain's settings page. A coding agent \
+    edited src/lib.rs, ran the test suite, and every test passed.";
+
+/// `POST /jev/test` — one cheap classification call: one yes/no question
+/// about a fixed two-line state. Admin or owner only. Nothing is stored;
+/// a refusal names the kind of failure, never TypeSafe's response text.
+async fn jev_test(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, Problem> {
+    let db = port(state.ctx.ports.db.clone())?;
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !c.is_admin {
+        return Err(Problem::new(&FORBIDDEN));
+    }
+    let body: JevTestRequest = if body.is_empty() {
+        JevTestRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|_| Problem::validation_failed("the body is not a Jev test request"))?
+    };
+    let Some(connector) = state.jev.clone() else {
+        return Err(
+            Problem::new(&JEV_OFF).with_detail("This server has no TypeSafe adapter wired.")
+        );
+    };
+    let chosen_model = match body.model.as_deref() {
+        Some(model) => jev_model(model)?.map(str::to_owned),
+        None => None,
+    };
+    let (source, model, classifier) = if let Some(key) = &body.api_key {
+        let key = jev_key(key)?;
+        let model = chosen_model.unwrap_or_else(|| connector.default_model());
+        let classifier = connector.classifier(JevKey::Workspace(key.as_str()), &model);
+        (Source::Workspace, model, classifier)
+    } else {
+        let effective = jev::effective(&*db, &*state.ctx.config, &c.workspace_id, &*connector)
+            .await
+            .map_err(database)?;
+        if effective.source == Source::Off {
+            return Err(Problem::new(&JEV_OFF).with_detail(
+                "Jev is off for this workspace: switch it on, or add a TypeSafe key.",
+            ));
+        }
+        match chosen_model {
+            // The test names another model than the saved one: the same
+            // key, that model.
+            Some(model) if model != effective.model => {
+                let classifier = if effective.source == Source::Workspace {
+                    jev::open_key(&*db, &*state.ctx.config, &c.workspace_id)
+                        .await
+                        .map_err(database)?
+                        .and_then(|key| connector.classifier(JevKey::Workspace(&key), &model))
+                } else {
+                    connector.classifier(JevKey::Deployment, &model)
+                };
+                (effective.source, model, classifier)
+            }
+            _ => (effective.source, effective.model, effective.classifier),
+        }
+    };
+    let classifier = classifier.ok_or_else(|| Problem::new(&JEV_OFF))?;
+    let mut questions = std::collections::BTreeMap::new();
+    questions.insert(
+        "changed_files".to_owned(),
+        cratefield_core::Question::Noul {
+            instructions: "Did the coding agent change any files in this session?".to_owned(),
+        },
+    );
+    let answers = classifier
+        .ask(TEST_STATE, &questions)
+        .await
+        .map_err(|error| match error {
+            cratefield_core::ClassifierError::Rejected(_) => Problem::new(&JEV_REFUSED),
+            cratefield_core::ClassifierError::NotConfigured => Problem::new(&JEV_OFF),
+            _ => Problem::new(&JEV_UNREACHABLE),
+        })?;
+    let answer = answers.get("changed_files");
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "source": source.as_str(),
+        "model": answer.and_then(|a| a.model.clone()).unwrap_or(model),
+        "answer": answer.map(|a| match &a.value {
+            cratefield_core::AnswerValue::Noul(yes) => Value::Bool(*yes),
+            cratefield_core::AnswerValue::Choice(label) => Value::String(label.clone()),
+            cratefield_core::AnswerValue::Score(score) => serde_json::json!(score),
+        }),
+        "confidence": answer.map(|a| a.confidence),
+    }))
+    .into_response())
 }

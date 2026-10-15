@@ -567,3 +567,52 @@ fn a_refused_fact_is_skipped_and_logged_not_a_failed_job() {
         "{line}"
     );
 }
+
+/// A classifier that is never asked here: the status route only resolves
+/// which key Jev would run on.
+struct Unasked;
+
+#[async_trait::async_trait]
+impl cratefield_core::Classifier for Unasked {
+    fn profile(&self) -> cratefield_core::ClassifierProfile {
+        cratefield_core::ClassifierProfile::new(cratefield_core::Calibration::Classifier, 24_000)
+    }
+    async fn ask(
+        &self,
+        _state: &str,
+        _questions: &std::collections::BTreeMap<String, cratefield_core::Question>,
+    ) -> Result<
+        std::collections::BTreeMap<String, cratefield_core::Answer>,
+        cratefield_core::ClassifierError,
+    > {
+        Err(cratefield_core::ClassifierError::NotConfigured)
+    }
+}
+
+#[test]
+fn the_queue_names_where_the_workspaces_jev_runs_and_its_switch_turns_it_off() {
+    let fx = common::fixture_with_jev(Arc::new(livingbrain_models::jev::FixedJev::new(
+        Arc::new(Unasked),
+        "jev-1.13.0",
+    )));
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(queue["triage"]["classifier"], true, "{queue}");
+    assert_eq!(queue["triage"]["classifier_source"], "deployment");
+
+    // The owner switches Jev off: the deployment's key no longer serves.
+    pollster::block_on(fx.db().execute(&cratefield_core::Statement::new(format!(
+        "INSERT INTO jev_settings (workspace_id, enabled, updated_by, updated_at) \
+         VALUES ('{WORKSPACE}', 0, 'user-a', '2026-10-16T00:00:00Z')"
+    ))))
+    .expect("the switch row seeds");
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(queue["triage"]["classifier"], false, "{queue}");
+    assert_eq!(queue["triage"]["classifier_source"], "off");
+
+    // Another workspace's switch is its own.
+    let other = get(&fx, TOKEN_A_ELSEWHERE, "/v1/coding-agents/queue").json();
+    assert_eq!(
+        other["triage"]["classifier_source"], "deployment",
+        "{other}"
+    );
+}

@@ -184,14 +184,21 @@ pub fn slug_in(url: &str) -> Option<&str> {
 /// One workspace with two people, and the first person's id again in a
 /// second workspace.
 pub fn fixture() -> Fixture {
-    fixture_with(None, None)
+    fixture_with(None, None, None)
+}
+
+/// [`fixture`], with Jev built through `connector` — the workspace's own
+/// switch and key decide whether it runs.
+#[allow(dead_code)]
+pub fn fixture_with_jev(connector: Arc<dyn livingbrain_models::jev::JevConnector>) -> Fixture {
+    fixture_with(None, None, Some(connector))
 }
 
 /// [`fixture`], with `POST /v1/ask` answering through `model` — a test's
 /// scripted stand-in for the workspace's connected model.
 #[allow(dead_code)]
 pub fn fixture_with_ask_model(model: Arc<dyn livingbrain_api::AskModel>) -> Fixture {
-    fixture_with(Some(model), None)
+    fixture_with(Some(model), None, None)
 }
 
 /// [`fixture_with_ask_model`], also answering to a session cookie through
@@ -201,12 +208,13 @@ pub fn fixture_with_session(
     model: Arc<dyn livingbrain_api::AskModel>,
     session: Arc<dyn livingbrain_api::SessionAuth>,
 ) -> Fixture {
-    fixture_with(Some(model), Some(session))
+    fixture_with(Some(model), Some(session), None)
 }
 
 fn fixture_with(
     ask_model: Option<Arc<dyn livingbrain_api::AskModel>>,
     session: Option<Arc<dyn livingbrain_api::SessionAuth>>,
+    jev: Option<Arc<dyn livingbrain_models::jev::JevConnector>>,
 ) -> Fixture {
     let askers = [
         (TOKEN_A, WORKSPACE, "user-a"),
@@ -244,7 +252,7 @@ fn fixture_with(
     // handle to `pages` — so a page a test seeds is a page every module's
     // routes can open.
     let memory: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
-    let wiki = Wiki::new(Arc::clone(&key), Arc::clone(&auth));
+    let wiki = Wiki::new(Arc::clone(&key), Arc::clone(&auth)).with_jev(jev);
     let wiki = match session {
         Some(session) => wiki.with_session(session),
         None => wiki,

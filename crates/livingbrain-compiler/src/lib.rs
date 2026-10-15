@@ -50,7 +50,7 @@ pub mod record;
 pub mod triage;
 
 pub use compile::{
-    BATCH_CEILING, CHUNK_CHARS_CEILING, Call, Compiler, Gate, JOB_TOKENS_CEILING,
+    BATCH_CEILING, CHUNK_CHARS_CEILING, Call, Classifiers, Compiler, Gate, JOB_TOKENS_CEILING,
     MAX_CHUNKS_CEILING, MAX_OUTPUT_TOKENS_CEILING, Model, ModelFailure, NoGate, NoTuning,
     Overrides, Processed, Reply, Settings, Tuning,
 };

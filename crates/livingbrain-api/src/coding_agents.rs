@@ -64,7 +64,7 @@ use cratefield_core::{
     SqlMigration,
 };
 use livingbrain_compiler::{
-    Call, ClaimFilter, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model,
+    Call, ClaimFilter, Classifiers, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model,
     ModelFailure, Queue, Reply, Settings,
 };
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError};
@@ -349,9 +349,34 @@ pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
             clock,
             Settings::from_config(&*ctx.config),
         )
-        .with_tuning(Arc::new(StoredTuning { db }))
-        .with_classifier(wiki.classifier.clone()),
+        .with_tuning(Arc::new(StoredTuning { db: db.clone() }))
+        .with_classifiers(wiki.jev.clone().map(|connector| {
+            Arc::new(WorkspaceJev {
+                db,
+                config: Arc::clone(&ctx.config),
+                connector,
+            }) as Arc<dyn Classifiers>
+        })),
     )
+}
+
+/// Each workspace's own Jev ([`livingbrain_models::jev::effective`]): its
+/// switch, its own TypeSafe key, else the deployment's, else none. A read
+/// that fails is no classifier — the free rule triages alone.
+struct WorkspaceJev {
+    db: Arc<dyn Database>,
+    config: Arc<dyn Config>,
+    connector: Arc<dyn livingbrain_models::jev::JevConnector>,
+}
+
+#[async_trait::async_trait]
+impl Classifiers for WorkspaceJev {
+    async fn for_workspace(&self, workspace: &str) -> Option<Arc<dyn cratefield_core::Classifier>> {
+        livingbrain_models::jev::effective(&*self.db, &*self.config, workspace, &*self.connector)
+            .await
+            .ok()
+            .and_then(|effective| effective.classifier)
+    }
 }
 
 /// Who the fact store records as the writer of a compiled fact.
@@ -627,6 +652,17 @@ async fn queue(
     let runner = jobs::runner_for(&*db, &asker.workspace_id, &asker.user_id, MODEL_ROLE)
         .await
         .map_err(|_| Problem::internal())?;
+    // Where this workspace's Jev runs from now: `off`, `deployment` or
+    // `workspace` (Settings → Models → Jev).
+    let jev = match service.wiki().jev {
+        Some(connector) => {
+            livingbrain_models::jev::effective(&*db, &*ctx.config, &asker.workspace_id, &*connector)
+                .await
+                .map_err(|_| Problem::internal())?
+                .source
+        }
+        None => livingbrain_models::jev::Source::Off,
+    };
     Ok(Json(json!({
         "counts": counts
             .iter()
@@ -663,7 +699,8 @@ async fn queue(
             "enabled": settings.triage,
             "compaction": settings.compaction,
             "strictness": settings.strictness.as_str(),
-            "classifier": service.wiki().classifier.is_some(),
+            "classifier": jev != livingbrain_models::jev::Source::Off,
+            "classifier_source": jev.as_str(),
             "skipped": savings.skipped,
             "summarised": savings.summarised,
             "full": savings.full,

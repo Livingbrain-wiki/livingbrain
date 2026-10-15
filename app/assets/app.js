@@ -45,6 +45,11 @@ import {
   providerHost,
   maskedKey,
   statusView,
+  jevView,
+  jevChange,
+  jevTestBody,
+  jevTestMessage,
+  JEV_PRIVACY,
 } from "./models.js";
 import { providerMark } from "./marks.js";
 import {
@@ -356,8 +361,8 @@ export async function setSetting(section, key, value) {
     return { ok: false, sent: false, message: describeOutcome(request, false) };
   }
   try {
-    await api(request.path, { method: request.method, body: request.body });
-    return { ok: true, sent: true, message: describeOutcome(request, true) };
+    const data = await api(request.path, { method: request.method, body: request.body });
+    return { ok: true, sent: true, message: describeOutcome(request, true), data };
   } catch (error) {
     const detail = error instanceof ApiError ? error.message : String(error);
     const status = error instanceof ApiError ? error.status : 0;
@@ -867,10 +872,20 @@ async function wireModels() {
   const runnerModel = $("#runner-model");
   const runnerCustom = $("#runner-model-custom");
   const runnerSave = $("#runner-save");
+  const jevBox = $("#sheet-jev");
+  const jevEnabled = $("#jev-enabled");
+  const jevKey = $("#jev-key");
+  const jevModel = $("#jev-model");
+  const jevSave = $("#jev-save");
+  const jevTest = $("#jev-test");
+  const jevRemoveKey = $("#jev-remove-key");
   const OTHER = "__other";
 
   let rows = [];
   let mine = [];
+  // Jev's state (`GET /v1/models/jev`), or null before it loads or on a
+  // server without the route.
+  let jev = null;
   // Whether this server has the device-runner routes yet (`/v1/models/mine`).
   let runnersAvailable = true;
   let lastSeen = null;
@@ -1255,7 +1270,7 @@ async function wireModels() {
   const paintConnected = () => {
     const box = $("#sheet-connected");
     box.replaceChildren();
-    const view = cardViews(rows, mine).find((v) => v.id === activeCard.id);
+    const view = cardViews(rows, mine, jev).find((v) => v.id === activeCard.id);
     if (!view || !view.slots.length) return;
     const heading = document.createElement("h3");
     heading.textContent = "In use";
@@ -1300,7 +1315,7 @@ async function wireModels() {
   const paintSheet = () => {
     const card = activeCard;
     $("#sheet-name").textContent = card.name;
-    $("#sheet-desc").textContent = card.description;
+    $("#sheet-desc").textContent = card.detail || card.description;
     const logo = $("#sheet-logo");
     logo.setAttribute("data-logo", String(card.logo || "").replace(/^.*\//, "").replace(/\.svg$/, ""));
     const badges = $("#sheet-badges");
@@ -1315,12 +1330,100 @@ async function wireModels() {
     $("#sheet-protocol").textContent = card.kind === "custom" ? protocolLabel(null, checked(form, "wire")) : protocolLabel(card);
     paintConnected();
     const runner = card.kind === "runner";
-    form.hidden = runner;
+    const classifier = card.kind === "classifier";
+    form.hidden = runner || classifier;
     runnerBox.hidden = !runner;
+    jevBox.hidden = !classifier;
     $("#provider-fieldset").hidden = card.kind !== "custom";
-    if (runner) paintRunner();
+    if (classifier) paintJev();
+    else if (runner) paintRunner();
     else paintCodingPlan();
   };
+
+  /* ---- Jev, the optional triage classifier ---- */
+  const paintJev = () => {
+    const view = jevView(jev);
+    const state = $("#jev-state");
+    state.textContent = jev ? view.line : "Jev's state could not be loaded.";
+    state.dataset.state = view.source;
+    jevEnabled.checked = view.enabled;
+    jevKey.value = "";
+    jevKey.placeholder = view.hasKey ? `Stored: ${view.key} — paste a new key to replace it` : "Paste a TypeSafe API key";
+    $("#jev-key-hint").textContent = view.hasKey
+      ? `This workspace's own key (${view.key}) is used ahead of the deployment's. It is stored encrypted and never shown again.`
+      : view.deploymentKey
+        ? "Optional: this deployment already has a key. Add the workspace's own to use it instead."
+        : "Stored encrypted for this workspace; only its last four characters are ever shown.";
+    jevRemoveKey.hidden = !view.hasKey;
+    jevModel.value = view.model;
+    jevModel.placeholder = view.defaultModel;
+    $("#jev-model-hint").textContent = `Default: ${view.defaultModel}, the version the adapter pins. Leave it to follow the default.`;
+    $("#jev-privacy").textContent = JEV_PRIVACY;
+    fieldError("jev-key", "", jevKey);
+    fieldError("jev-model", "", jevModel);
+    jevSave.disabled = !jev;
+    jevTest.disabled = !jev || !view.available;
+  };
+  // The token savers live on another tab: close the sheet on the way there.
+  $("#jev-savers").addEventListener("click", () => {
+    if (sheet.open) sheet.close();
+  });
+  const jevForm = () => ({ enabled: jevEnabled.checked, apiKey: jevKey.value, model: jevModel.value });
+  jevSave.addEventListener("click", async () => {
+    const check = jevChange(jevForm(), jev);
+    fieldError("jev-key", check.errors.apiKey, jevKey);
+    fieldError("jev-model", check.errors.model, jevModel);
+    if (!check.ok) return;
+    if (!Object.keys(check.value).length) {
+      toast("Nothing to save.", "ok");
+      return;
+    }
+    jevSave.disabled = true;
+    try {
+      const outcome = await setSetting("jev", "settings", check.value);
+      if (outcome.ok) {
+        jev = outcome.data || jev;
+        toast(jevView(jev).on ? "Jev saved — it is on." : "Jev saved — it is off.", "ok");
+      } else {
+        toast(`Not saved: ${outcome.message}`, "bad");
+      }
+    } finally {
+      jevKey.value = "";
+      renderModelCards(cardsBox, cardViews(rows, mine, jev));
+      if (sheet.open) paintSheet();
+    }
+  });
+  jevTest.addEventListener("click", async () => {
+    jevTest.disabled = true;
+    jevTest.textContent = "Testing…";
+    try {
+      const outcome = await setSetting("jev-test", "test", jevTestBody(jevForm(), jev));
+      if (outcome.ok) toast(jevTestMessage(outcome.data), "ok");
+      else toast(`Test failed: ${outcome.message}`, "bad");
+    } finally {
+      jevTest.disabled = false;
+      jevTest.textContent = "Test";
+    }
+  });
+  jevRemoveKey.addEventListener("click", async () => {
+    const ok = await confirmAction({
+      title: "Remove the workspace's TypeSafe key?",
+      body: "The key is deleted. Jev then runs on the deployment's key if it has one, and is off if not.",
+      confirm: "Remove",
+    });
+    if (!ok) return;
+    jevRemoveKey.disabled = true;
+    const outcome = await setSetting("jev", "key", null);
+    jevRemoveKey.disabled = false;
+    if (outcome.ok) {
+      jev = outcome.data || jev;
+      toast("Workspace key removed.", "ok");
+    } else {
+      toast(`Not removed: ${outcome.message}`, "bad");
+    }
+    renderModelCards(cardsBox, cardViews(rows, mine, jev));
+    if (sheet.open) paintSheet();
+  });
 
   /** Opens a card's sheet, for `role` when one is named (a slot's Change). */
   const openCard = (cardId, role) => {
@@ -1337,7 +1440,7 @@ async function wireModels() {
     const targetRole = role && roleInfo(role) ? role : "main";
     roleSelect.value = targetRole;
     runnerRole.value = targetRole;
-    if (activeCard.kind !== "runner") {
+    if (activeCard.kind !== "runner" && activeCard.kind !== "classifier") {
       const row = rows.find((r) => r.role === targetRole && cardForConnection(r) === activeCard);
       const providerId = activeCard.kind === "custom" ? (row ? row.provider : "custom") : activeCard.provider;
       renderList();
@@ -1525,10 +1628,13 @@ async function wireModels() {
   });
 
   const load = async () => {
-    const [connections, own] = await Promise.allSettled([
+    const [connections, own, classifier] = await Promise.allSettled([
       api("/v1/models"),
       api("/v1/models/mine"),
+      api("/v1/models/jev"),
     ]);
+    // An older server without the Jev routes: the card shows no state.
+    jev = classifier.status === "fulfilled" ? classifier.value : null;
     if (connections.status === "fulfilled") {
       rows = Array.isArray(connections.value) ? connections.value : [];
       notice(modelsStatus, "");
@@ -1548,7 +1654,7 @@ async function wireModels() {
       mine = [];
       lastSeen = null;
     }
-    renderModelCards(cardsBox, cardViews(rows, mine));
+    renderModelCards(cardsBox, cardViews(rows, mine, jev));
     renderModelSlots(slots, slotViews(rows, mine));
     paintMainPick();
   };

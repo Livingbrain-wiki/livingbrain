@@ -20,6 +20,8 @@ export const SECTIONS = [
   "models",
   "model-switch",
   "model-runner",
+  "jev",
+  "jev-test",
   "budgets",
   "proactivity",
   "tools",
@@ -63,6 +65,18 @@ const ENDPOINTS = {
     method: value === null ? "DELETE" : "PUT",
     path: `/v1/models/mine/${encodeURIComponent(key)}`,
   }),
+  // Jev, the coding-agents compiler's optional triage classifier (owner or
+  // admin): `PUT /v1/models/jev` with only what changed (`enabled`,
+  // `api_key`, `model`); key `key` with `null` forgets the workspace's own
+  // TypeSafe key — `DELETE /v1/models/jev/key`.
+  jev: (key, value) =>
+    key === "key" && value === null
+      ? { method: "DELETE", path: "/v1/models/jev/key" }
+      : { method: "PUT", path: "/v1/models/jev" },
+  // One cheap classification call (`POST /v1/models/jev/test`): changes
+  // nothing, but goes through the same choke point so a key typed into the
+  // sheet and tried is accounted for like a save.
+  "jev-test": () => ({ method: "POST", path: "/v1/models/jev/test" }),
   // The workspace's budgets and limits (Settings → Usage & limits): one
   // `PATCH /v1/settings/budgets` carrying only what changed, owner or admin
   // only. The value is the patch itself (`{coding_agents, ask, spend}`),
@@ -80,7 +94,7 @@ const ENDPOINTS = {
 };
 
 /** The sections whose handler reads its fields flat, beside the audit triple. */
-const FLAT_SECTIONS = ["models", "model-switch", "model-runner", "budgets"];
+const FLAT_SECTIONS = ["models", "model-switch", "model-runner", "jev", "jev-test", "budgets"];
 
 /** The model roles the server accepts (`livingbrain-models` `ROLES`). */
 export const MODEL_ROLES = ["triage", "main", "research"];

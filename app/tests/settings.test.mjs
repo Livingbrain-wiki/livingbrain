@@ -90,6 +90,8 @@ test("the sections the issue asks for are present", () => {
     "models",
     "model-switch",
     "model-runner",
+    "jev",
+    "jev-test",
     "budgets",
     "proactivity",
     "tools",

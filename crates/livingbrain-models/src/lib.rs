@@ -37,6 +37,9 @@ mod curated;
 // honours it (wired by the venture).
 pub mod deadline;
 mod handlers;
+// Jev, the compiler's optional triage classifier: the per-workspace switch,
+// key and model, and the precedence that picks the classifier a compile runs.
+pub mod jev;
 // The local runner: a member's jobs run on their own device, under their own
 // subscription, through their own `claude` / `codex` CLI.
 pub mod jobs;
@@ -105,16 +108,49 @@ const MIGRATION_LOCAL_RUNNER_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0003_local_runner.sql"),
 );
 
+/// The fourth migration: Jev's per-workspace settings (`jev_settings`).
+const MIGRATION_JEV: SqlMigration = SqlMigration::new(
+    "0004",
+    "jev",
+    include_str!("../migrations/sqlite/0004_jev.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_JEV`]: `BYTEA` for the sealed key.
+const MIGRATION_JEV_POSTGRES: SqlMigration = SqlMigration::new(
+    "0004",
+    "jev",
+    include_str!("../migrations/postgres/0004_jev.sql"),
+);
+
 /// Bring your own model, with a capability check.
-#[derive(Debug, Default)]
-pub struct Models;
+#[derive(Default)]
+pub struct Models {
+    /// How Jev's classifier is built, when the venture wires TypeSafe.
+    jev: Option<std::sync::Arc<dyn jev::JevConnector>>,
+}
+
+impl std::fmt::Debug for Models {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Models")
+            .field("jev", &self.jev.is_some())
+            .finish()
+    }
+}
 
 impl Models {
-    /// A new models module. There is nothing to configure in the builder;
-    /// the encryption secret comes from config at router build.
+    /// A new models module. The encryption secret comes from config at
+    /// router build.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// The same module, able to test Jev (`POST /v1/models/jev/test`) and
+    /// to say whether the deployment carries a TypeSafe key.
+    #[must_use]
+    pub fn with_jev(mut self, connector: std::sync::Arc<dyn jev::JevConnector>) -> Self {
+        self.jev = Some(connector);
+        self
     }
 }
 
@@ -142,7 +178,12 @@ impl Module for Models {
     }
 
     fn tables(&self) -> &'static [&'static str] {
-        &["model_connections", "model_runners", "model_jobs"]
+        &[
+            "model_connections",
+            "model_runners",
+            "model_jobs",
+            "jev_settings",
+        ]
     }
 
     /// The ciphertext column holds a provider API key (a credential).
@@ -183,21 +224,35 @@ impl Module for Models {
                 redacted: &["payload", "result"],
                 subject_via: None,
             },
+            PersonalDataSet {
+                table: "jev_settings",
+                subject: "updated_by",
+                kind: DataKind::Identifier,
+                disposition: Disposition::Erase,
+                description: "Whether the workspace uses Jev (the triage classifier), the Jev \
+                          model, the workspace's own TypeSafe API key (ciphertext) and its last \
+                          four characters, and the Slack user id of the member who last changed \
+                          them.",
+                redacted: &["key_ciphertext", "key_last4"],
+                subject_via: None,
+            },
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 3] = [
+        const MIGRATIONS: [SqlMigration; 4] = [
             MIGRATION_INIT,
             MIGRATION_PROVIDER_WIRE,
             MIGRATION_LOCAL_RUNNER,
+            MIGRATION_JEV,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 4] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_PROVIDER_WIRE_POSTGRES,
             MIGRATION_LOCAL_RUNNER_POSTGRES,
+            MIGRATION_JEV_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
@@ -238,7 +293,7 @@ impl Module for Models {
     }
 
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        handlers::router(ctx)
+        handlers::router(ctx, self.jev.clone())
     }
 }
 

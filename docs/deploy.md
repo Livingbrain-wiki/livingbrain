@@ -110,8 +110,10 @@ free rule and nothing goes to TypeSafe. With it, one Jev call per compiled
 session sends a redacted digest (counts, short excerpts, one line per tool
 call, never tool output) to `api.typesafe.ai` (US-hosted, billed to the
 TypeSafe account the key belongs to). The model is pinned by the adapter;
-set the `TYPESAFE_MODEL` var to pin a different version. Only the compiler
-uses it — the Slack judge stays unwired. See `docs/coding-agents.md`,
+set the `TYPESAFE_MODEL` var to pin a different version. A workspace can
+also bring its own TypeSafe key, or switch Jev off, on Settings → Models →
+Jev; its own key wins over this one. Only the compiler uses it — the Slack
+judge stays unwired. See `docs/coding-agents.md`,
 "Triage and compaction".
 
 Never reuse a staging secret value in production, and never rotate a KEK

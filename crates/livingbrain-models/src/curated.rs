@@ -185,6 +185,9 @@ mod tests {
                     assert!(!card.models.is_empty(), "{provider} has no curated models");
                 }
                 "custom" => assert_eq!(card.provider.as_deref(), Some("custom")),
+                // Jev: the compiler's triage classifier, not a model for a
+                // job slot, so no provider is listed or called through it.
+                "classifier" => assert!(card.provider.is_none()),
                 other => panic!("unknown card kind {other}"),
             }
             if let Some(listing) = card.listing.as_deref() {
