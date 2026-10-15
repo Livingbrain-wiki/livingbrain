@@ -45,7 +45,10 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/models` | `settings.html` | **yes** |
 | `PUT /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, connection)` |
 | `DELETE /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, null)` |
-| `POST /v1/models/discover` | `settings.html` | **yes** — the provider's model list, fetched server-side with the key the form holds; nothing stored |
+| `PATCH /v1/models/{role}` | `settings.html` | **yes** — body `{model}`: the top "Main model" picker and a sheet's **Test** switch (or re-probe) a connection's model on the key already stored; via `LB.setting("model-switch", role, {model})` |
+| `POST /v1/models/discover` | `settings.html` | **yes** — `{models:[{id, label?, context?, price?}], listed, note?}`: the provider's model list, fetched server-side with the key the form holds; nothing stored. A provider with no list of its own (a `404`/`405` from it, or a card that says so) answers its curated models from `assets/model-cards.json` with `listed: false` and a note; only a refused key (`401`/`403`) is an error |
+| `GET /v1/models/mine` | `settings.html` | **yes** — `{runners:[{role, kind, agent, model, settings, last_seen_at}]}`: the member's own subscription runners. A `404` (a server without the routes yet) hides the runner choices |
+| `PUT /v1/models/mine/{role}` / `DELETE` | `settings.html` | **yes** — `{kind:"local_runner", agent:"claude"\|"codex", model, settings}`; via `LB.setting("model-runner", role, value)`. No credential is ever sent: the member's own CLI on their own device does the call |
 | `GET /v1/workspaces/members` | `settings.html` | **yes** — `[{user_id, name, timezone, is_admin, role}]` |
 | `PATCH /v1/workspaces/members/{id}` | `settings.html` | **yes** — body `{role}`; owner/admin only, only an owner touches owners, `409` for the last owner |
 | `DELETE /v1/workspaces/members/{id}` | `settings.html` | **yes** — remove (owner/admin) or leave (yourself); `409` for the last owner |

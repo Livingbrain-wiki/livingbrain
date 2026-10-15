@@ -2266,6 +2266,380 @@ main > p.tiny:last-child {
   width: 100%;
 }
 
+/*   models: the Main picker, the provider cards and the detail sheet
+   ---------------------------------------------------------------- */
+
+#models {
+  container-type: inline-size;
+}
+
+.model-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  margin: 0 0 var(--space-3);
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.model-bar > label {
+  margin: 0;
+}
+
+.model-bar select,
+.sheet select {
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.model-bar > .hint {
+  margin: 0;
+}
+
+.models__sub {
+  margin: var(--space-3) 0 4px;
+  font-size: 18px;
+}
+
+/* The grid: square cards, two across on a phone, three, then four. */
+.mcards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+@container (min-width: 34rem) {
+  .mcards {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+}
+
+@container (min-width: 46rem) {
+  .mcards {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.mcards__item {
+  display: block;
+  min-width: 0;
+}
+
+.mcard {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  min-height: 0;
+  padding: clamp(10px, 3.2cqi, 16px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg);
+  color: var(--ink);
+  text-align: start;
+  font-weight: 400;
+}
+
+.mcard:hover:not(:disabled) {
+  border-color: var(--ink3);
+  background: var(--bg3);
+}
+
+.mcard:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mcard--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mcard__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mcard__top .pill {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The logo: the self-hosted SVG as a mask, filled with the text colour, so
+   one file reads in both themes. */
+.mcard__logo {
+  flex: none;
+  display: block;
+  width: clamp(26px, 7cqi, 36px);
+  height: clamp(26px, 7cqi, 36px);
+  background-color: currentColor;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+[data-logo="anthropic"] {
+  -webkit-mask-image: url(logos/anthropic.svg);
+  mask-image: url(logos/anthropic.svg);
+}
+[data-logo="claude"] {
+  -webkit-mask-image: url(logos/claude.svg);
+  mask-image: url(logos/claude.svg);
+}
+[data-logo="openai"] {
+  -webkit-mask-image: url(logos/openai.svg);
+  mask-image: url(logos/openai.svg);
+}
+[data-logo="zai"] {
+  -webkit-mask-image: url(logos/zai.svg);
+  mask-image: url(logos/zai.svg);
+}
+[data-logo="deepseek"] {
+  -webkit-mask-image: url(logos/deepseek.svg);
+  mask-image: url(logos/deepseek.svg);
+}
+[data-logo="openrouter"] {
+  -webkit-mask-image: url(logos/openrouter.svg);
+  mask-image: url(logos/openrouter.svg);
+}
+[data-logo="minimax"] {
+  -webkit-mask-image: url(logos/minimax.svg);
+  mask-image: url(logos/minimax.svg);
+}
+[data-logo="kimi"] {
+  -webkit-mask-image: url(logos/kimi.svg);
+  mask-image: url(logos/kimi.svg);
+}
+[data-logo="qwen"] {
+  -webkit-mask-image: url(logos/qwen.svg);
+  mask-image: url(logos/qwen.svg);
+}
+[data-logo="custom"] {
+  -webkit-mask-image: url(logos/custom.svg);
+  mask-image: url(logos/custom.svg);
+}
+
+.mcard__name {
+  margin-top: auto;
+  font-family: var(--f-display);
+  font-size: clamp(15px, 3.6cqi, 18px);
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.mcard > * {
+  flex-shrink: 0;
+}
+
+.mcard__desc {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  font-size: clamp(12px, 2.9cqi, 14px);
+  line-height: 1.35;
+  color: var(--ink3);
+}
+
+.mcard__badges,
+.sheet__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.sheet__badges {
+  margin: 0 0 6px;
+}
+
+.mcard__badge {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--ink2);
+  background: var(--bg2);
+  overflow-wrap: anywhere;
+}
+
+.mcard__badge[data-badge="1"] {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.mcard__badge[data-badge="2"] {
+  border-color: var(--warn);
+}
+
+/* On a phone the cards are small: one line of description, smaller badges. */
+@container (max-width: 25rem) {
+  .mcard__desc {
+    -webkit-line-clamp: 1;
+  }
+  .mcard__badge {
+    padding: 1px 6px;
+    font-size: 10.5px;
+  }
+}
+
+/* the detail sheet */
+.sheet {
+  width: min(40rem, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+
+.sheet__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.sheet__logo {
+  width: 36px;
+  height: 36px;
+  margin-top: 2px;
+}
+
+.sheet__title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sheet__title h2 {
+  margin: 0 0 2px;
+}
+
+.sheet__title p {
+  margin: 0;
+}
+
+.sheet__close-form {
+  flex: none;
+}
+
+#sheet-protocol:empty {
+  display: none;
+}
+
+.sheet__connected h3,
+.sheet__runner h3 {
+  margin: var(--space-3) 0 6px;
+  font-size: 16px;
+}
+
+.sheet__uses {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sheet__uses li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+
+.sheet__use-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.sheet .connect {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+.sheet__runner {
+  display: grid;
+  gap: 14px;
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line2);
+}
+
+.sheet__runner .hint {
+  margin: 0;
+}
+
+/* The Z.AI Coding Plan switch: with it on, the key form steps aside. */
+.sheet__form.plan-on > :not(h3):not(.coding-plan) {
+  display: none;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.check input {
+  width: 20px;
+  min-height: 20px;
+  height: 20px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.coding-plan .hint {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-inline-start: 3px solid var(--warn);
+  background: var(--bg3);
+  border-radius: 6px;
+}
+
+.model-pick {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.model-pick select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.model-pick .btn-sm {
+  flex: none;
+  min-height: 50px;
+}
+
 @media print {
   .hd,
   .ft,

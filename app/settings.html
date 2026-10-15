@@ -85,142 +85,27 @@
               </header>
 
               <div id="models-status" class="notice" role="status"></div>
+
+              <div class="model-bar">
+                <label for="main-model">Main model</label>
+                <select id="main-model" aria-describedby="main-model-line"></select>
+                <p class="hint" id="main-model-line"></p>
+              </div>
+
+              <h3 class="models__sub" id="providers-h">Providers</h3>
+              <p class="hint slots__note">
+                Pick a provider to connect it, test it or switch its model. A
+                subscription runs on your own device, through the app you already
+                use for it.
+              </p>
+              <ul id="model-cards" class="mcards" aria-labelledby="providers-h"></ul>
+
+              <h3 class="models__sub">Jobs</h3>
               <p class="hint slots__note">
                 Three jobs, one model each. An unset slot uses Main, and with
                 nothing connected the managed model answers.
               </p>
               <div id="model-rows" class="slots" aria-live="polite"></div>
-
-              <form id="model-form" class="connect" novalidate>
-                <h3 id="connect-title">Connect Main</h3>
-
-                <fieldset class="choice" aria-describedby="err-provider">
-                  <legend>Provider</legend>
-                  <div class="choice__grid choice__grid--providers" id="provider-popular"></div>
-                  <details class="picker" id="provider-all">
-                    <summary>
-                      <span>All providers</span>
-                      <span class="picker__count" id="provider-count"></span>
-                    </summary>
-                    <div class="picker__body">
-                      <label class="sr" for="provider-search">Search providers</label>
-                      <input
-                        id="provider-search"
-                        type="search"
-                        autocomplete="off"
-                        spellcheck="false"
-                        placeholder="Search by name or host"
-                        aria-controls="provider-list"
-                      />
-                      <div
-                        class="choice__grid choice__grid--providers picker__cards"
-                        id="provider-list"
-                      ></div>
-                      <p class="hint" id="provider-empty" hidden>
-                        Nothing matches. Choose Custom endpoint for anything not
-                        listed.
-                      </p>
-                      <p class="hint picker__source">
-                        The list Colonizer supports, from
-                        <a id="provider-source" rel="noopener noreferrer">its provider catalog</a>.
-                        Listing a service is not an endorsement.
-                      </p>
-                    </div>
-                  </details>
-                  <p class="field-error" id="err-provider"></p>
-                </fieldset>
-
-                <p class="picked" id="provider-picked" aria-live="polite"></p>
-
-                <div id="provider-vars" class="vars"></div>
-
-                <div class="field" id="base-url-field">
-                  <label for="base-url">Endpoint</label>
-                  <div class="secret">
-                    <input
-                      id="base-url"
-                      type="url"
-                      inputmode="url"
-                      autocomplete="off"
-                      spellcheck="false"
-                      placeholder="https://api.example.com"
-                      aria-describedby="base-url-hint err-baseUrl"
-                    />
-                    <button type="button" id="edit-endpoint" class="btn-sm" aria-pressed="false"
-                      aria-controls="base-url">Edit</button>
-                  </div>
-                  <p class="hint" id="base-url-hint"></p>
-                  <p class="field-error" id="err-baseUrl"></p>
-                </div>
-
-                <div id="custom-fields" class="custom-fields" hidden>
-                  <fieldset class="choice" aria-describedby="err-wire">
-                    <legend>API it speaks</legend>
-                    <div class="choice__grid choice__grid--two" id="wire-choices"></div>
-                    <p class="field-error" id="err-wire"></p>
-                  </fieldset>
-                  <fieldset class="choice" aria-describedby="err-auth">
-                    <legend>How the key is sent</legend>
-                    <div class="choice__grid choice__grid--two" id="auth-choices"></div>
-                    <p class="field-error" id="err-auth"></p>
-                  </fieldset>
-                </div>
-
-                <div class="field">
-                  <label for="api-key">API key</label>
-                  <div class="secret">
-                    <input
-                      id="api-key"
-                      type="password"
-                      autocomplete="off"
-                      spellcheck="false"
-                      aria-describedby="api-key-hint err-apiKey"
-                    />
-                    <button type="button" id="toggle-key" class="btn-sm" aria-pressed="false"
-                      aria-controls="api-key">Show</button>
-                  </div>
-                  <p class="hint" id="api-key-hint">
-                    <span id="api-key-kind"></span> Needed again for every
-                    connect or change — a stored key never comes back. It is
-                    encrypted, and only the last 4 characters are ever shown.
-                  </p>
-                  <p class="field-error" id="err-apiKey"></p>
-                </div>
-
-                <div class="field">
-                  <label for="model-name">Model</label>
-                  <input
-                    id="model-name"
-                    type="text"
-                    autocomplete="off"
-                    spellcheck="false"
-                    list="model-suggestions"
-                    aria-describedby="model-hint err-model"
-                  />
-                  <datalist id="model-suggestions"></datalist>
-                  <div class="chips" id="model-chips" aria-label="Models this provider offers"></div>
-                  <div class="model-tools">
-                    <p class="hint" id="model-hint">
-                      The exact model name your provider uses.
-                    </p>
-                    <button type="button" id="discover-models" class="btn-sm" hidden>
-                      List models
-                    </button>
-                  </div>
-                  <p class="field-error" id="err-model"></p>
-                </div>
-
-                <div class="form-actions">
-                  <button type="submit" data-variant="primary" id="connect-model">
-                    Connect model
-                  </button>
-                  <button type="button" id="cancel-replace" hidden>Cancel</button>
-                  <p class="hint">
-                    We send a few test requests first, so this can take a few
-                    seconds. Only workspace owners and admins can connect models.
-                  </p>
-                </div>
-              </form>
             </section>
 
             <!-- api tokens. The token value lives in exactly one element
@@ -468,6 +353,188 @@
         </div>
       </main>
       <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+      <dialog id="model-sheet" class="dialog sheet" aria-labelledby="sheet-name" aria-describedby="sheet-desc">
+        <header class="sheet__head">
+          <span class="mcard__logo sheet__logo" id="sheet-logo" aria-hidden="true"></span>
+          <div class="sheet__title">
+            <h2 id="sheet-name"></h2>
+            <p id="sheet-desc" class="muted"></p>
+          </div>
+          <form method="dialog" class="sheet__close-form">
+            <button type="submit" class="btn-sm sheet__close" aria-label="Close">Close</button>
+          </form>
+        </header>
+        <p class="sheet__badges" id="sheet-badges"></p>
+        <p class="hint" id="sheet-protocol"></p>
+        <div id="sheet-connected" class="sheet__connected"></div>
+
+        <form id="model-form" class="connect sheet__form" novalidate>
+          <h3 id="connect-title">Connect with an API key</h3>
+
+          <div class="field">
+            <label for="model-role">Job</label>
+            <select id="model-role" aria-describedby="model-role-hint"></select>
+            <p class="hint" id="model-role-hint"></p>
+          </div>
+
+          <div class="coding-plan" id="coding-plan-field" hidden>
+            <label class="check">
+              <input type="checkbox" id="coding-plan" />
+              <span id="coding-plan-label"></span>
+            </label>
+            <p class="hint" id="coding-plan-note" hidden></p>
+          </div>
+
+          <fieldset class="choice" id="provider-fieldset" aria-describedby="err-provider">
+            <legend>Provider</legend>
+            <div class="choice__grid choice__grid--providers" id="provider-popular"></div>
+            <details class="picker" id="provider-all">
+              <summary>
+                <span>All providers</span>
+                <span class="picker__count" id="provider-count"></span>
+              </summary>
+              <div class="picker__body">
+                <label class="sr" for="provider-search">Search providers</label>
+                <input
+                  id="provider-search"
+                  type="search"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="Search by name or host"
+                  aria-controls="provider-list"
+                />
+                <div
+                  class="choice__grid choice__grid--providers picker__cards"
+                  id="provider-list"
+                ></div>
+                <p class="hint" id="provider-empty" hidden>
+                  Nothing matches. Choose Custom endpoint for anything not
+                  listed.
+                </p>
+                <p class="hint picker__source">
+                  The list Colonizer supports, from
+                  <a id="provider-source" rel="noopener noreferrer">its provider catalog</a>.
+                  Listing a service is not an endorsement.
+                </p>
+              </div>
+            </details>
+            <p class="field-error" id="err-provider"></p>
+          </fieldset>
+
+          <p class="picked" id="provider-picked" aria-live="polite"></p>
+
+          <div id="provider-vars" class="vars"></div>
+
+          <div class="field" id="base-url-field">
+            <label for="base-url">Endpoint</label>
+            <div class="secret">
+              <input
+                id="base-url"
+                type="url"
+                inputmode="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="https://api.example.com"
+                aria-describedby="base-url-hint err-baseUrl"
+              />
+              <button type="button" id="edit-endpoint" class="btn-sm" aria-pressed="false"
+                aria-controls="base-url">Edit</button>
+            </div>
+            <p class="hint" id="base-url-hint"></p>
+            <p class="field-error" id="err-baseUrl"></p>
+          </div>
+
+          <div id="custom-fields" class="custom-fields" hidden>
+            <fieldset class="choice" aria-describedby="err-wire">
+              <legend>API it speaks</legend>
+              <div class="choice__grid choice__grid--two" id="wire-choices"></div>
+              <p class="field-error" id="err-wire"></p>
+            </fieldset>
+            <fieldset class="choice" aria-describedby="err-auth">
+              <legend>How the key is sent</legend>
+              <div class="choice__grid choice__grid--two" id="auth-choices"></div>
+              <p class="field-error" id="err-auth"></p>
+            </fieldset>
+          </div>
+
+          <div class="field">
+            <label for="api-key">API key</label>
+            <div class="secret">
+              <input
+                id="api-key"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                aria-describedby="api-key-hint err-apiKey"
+              />
+              <button type="button" id="toggle-key" class="btn-sm" aria-pressed="false"
+                aria-controls="api-key">Show</button>
+            </div>
+            <p class="hint" id="api-key-hint">
+              <span id="api-key-kind"></span> Needed again for every
+              connect or change — a stored key never comes back. It is
+              encrypted, and only the last 4 characters are ever shown.
+            </p>
+            <p class="field-error" id="err-apiKey"></p>
+          </div>
+
+          <div class="field">
+            <label for="model-select">Model</label>
+            <div class="model-pick">
+              <select id="model-select" aria-describedby="model-hint"></select>
+              <button type="button" id="discover-models" class="btn-sm">
+                List models
+              </button>
+            </div>
+            <label class="sr" for="model-name">Model id</label>
+            <input
+              id="model-name"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="The exact model id"
+              aria-describedby="model-hint err-model"
+              hidden
+            />
+            <p class="hint" id="model-hint">
+              Pick one, or choose "Other model id" to type the exact name.
+            </p>
+            <p class="hint" id="model-note" hidden></p>
+            <p class="field-error" id="err-model"></p>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" data-variant="primary" id="connect-model">
+              Connect model
+            </button>
+            <p class="hint">
+              We send a few test requests first, so this can take a few
+              seconds. Only workspace owners and admins can connect models.
+            </p>
+          </div>
+        </form>
+
+        <section id="sheet-runner" class="sheet__runner" aria-labelledby="runner-title" hidden>
+          <h3 id="runner-title">Run on your device</h3>
+          <p class="hint" id="runner-explain"></p>
+          <div class="field">
+            <label for="runner-role">Job</label>
+            <select id="runner-role"></select>
+          </div>
+          <div class="field">
+            <label for="runner-model">Model</label>
+            <select id="runner-model"></select>
+            <label class="sr" for="runner-model-custom">Model id</label>
+            <input id="runner-model-custom" type="text" autocomplete="off" spellcheck="false"
+              placeholder="The exact model id" hidden />
+          </div>
+          <p class="hint" id="runner-seen"></p>
+          <p class="hint" id="runner-how"></p>
+          <div class="form-actions">
+            <button type="button" data-variant="primary" id="runner-save">Run this job on my device</button>
+          </div>
+        </section>
+      </dialog>
       <dialog id="confirm" class="dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
         <form method="dialog">
           <h2 id="confirm-title"></h2>

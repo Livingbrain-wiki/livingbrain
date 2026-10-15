@@ -26,6 +26,8 @@ const SHELL = [
   "./assets/models.js",
   // models.js imports the provider catalog statically, like stack.json.
   "./assets/providers.json",
+  // ...and the provider cards' curated models, the same way.
+  "./assets/model-cards.json",
   // app.js and models.js import the provider marks beside the names.
   "./assets/marks.js",
   "./assets/tokens.js",

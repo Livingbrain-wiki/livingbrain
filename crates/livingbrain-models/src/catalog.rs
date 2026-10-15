@@ -91,6 +91,10 @@ pub(crate) struct Entry {
     pub(crate) wire: Wire,
     #[serde(default)]
     pub(crate) variables: Vec<Variable>,
+    /// The models the catalog names for this provider, if any: the curated
+    /// fallback when a provider without a card publishes no list.
+    #[serde(default)]
+    pub(crate) models: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

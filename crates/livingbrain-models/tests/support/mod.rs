@@ -148,6 +148,11 @@ struct Script {
     sent: Vec<Sent>,
     /// The status `GET …/models` (the list) answers with.
     list_status: u16,
+    /// The body the list answers with, when not the default three ids.
+    list_body: Option<String>,
+    /// A thinking model: every reply leads with its reasoning (a `thinking`
+    /// block on the Anthropic wire, `reasoning_content` on the OpenAI one).
+    thinking: bool,
 }
 
 /// How one request to the model host was signed.
@@ -170,6 +175,8 @@ impl Default for Script {
             requests: Vec::new(),
             sent: Vec::new(),
             list_status: 200,
+            list_body: None,
+            thinking: false,
         }
     }
 }
@@ -211,6 +218,18 @@ impl FakeHttp {
     /// The status the model list answers with.
     pub fn listing_with(&self, status: u16) -> &Self {
         self.inner.lock().expect("lock").list_status = status;
+        self
+    }
+
+    /// The body the model list answers with.
+    pub fn listing_body(&self, body: &str) -> &Self {
+        self.inner.lock().expect("lock").list_body = Some(body.to_owned());
+        self
+    }
+
+    /// Replies lead with reasoning, the way GLM-5.3 answers.
+    pub fn thinking_first(&self) -> &Self {
+        self.inner.lock().expect("lock").thinking = true;
         self
     }
 
@@ -274,12 +293,15 @@ impl HttpClient for FakeHttp {
                 .to_string()
             }
         } else if uri.ends_with("/chat/completions") {
-            chat_completion(inner.tools && wants_tools)
+            chat_completion(inner.tools && wants_tools, inner.thinking)
         } else if uri.ends_with("/messages") {
-            messages_reply(inner.tools && wants_tools)
+            messages_reply(inner.tools && wants_tools, inner.thinking)
         } else if uri.ends_with("/models") {
             status = inner.list_status;
-            json!({"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-a"}]}).to_string()
+            inner.list_body.clone().unwrap_or_else(|| {
+                json!({"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-a"}]})
+                    .to_string()
+            })
         } else if uri.contains("/models/") {
             match &inner.context {
                 Some(size) => {
@@ -304,25 +326,40 @@ impl HttpClient for FakeHttp {
 /// A chat completion that either calls the tool or answers in JSON. The
 /// JSON leg is always a JSON object, so a model that does not call tools
 /// is "answers only" for tool calling and nothing else.
-fn chat_completion(calls_tool: bool) -> String {
-    let message = if calls_tool {
+fn chat_completion(calls_tool: bool, thinking: bool) -> String {
+    let mut message = if calls_tool {
         json!({"content": null, "tool_calls": [{"id": "1", "type": "function",
             "function": {"name": "calculate", "arguments": "{}"}}]})
+    } else if thinking {
+        // A thinking model's JSON, fenced the way they often fence it.
+        json!({"content": "```json\n{\"ok\":true}\n```"})
     } else {
         json!({"content": "{\"ok\":true}"})
     };
-    json!({"choices": [{"message": message}]}).to_string()
+    if thinking {
+        message["reasoning_content"] = json!("The user wants 2+2. I should call the tool.");
+    }
+    json!({"choices": [{"message": message, "finish_reason": "stop"}]}).to_string()
 }
 
 /// An Anthropic Messages reply: a `tool_use` block, or a text block holding
 /// a JSON object.
-fn messages_reply(calls_tool: bool) -> String {
+fn messages_reply(calls_tool: bool, thinking: bool) -> String {
     let block = if calls_tool {
         json!({"type": "tool_use", "id": "t1", "name": "calculate", "input": {}})
     } else {
         json!({"type": "text", "text": "{\"ok\":true}"})
     };
-    json!({"type": "message", "role": "assistant", "content": [block]}).to_string()
+    let content = if thinking {
+        json!([
+            {"type": "thinking", "thinking": "Reason first.", "signature": "sig"},
+            {"type": "redacted_thinking", "data": "opaque"},
+            block,
+        ])
+    } else {
+        json!([block])
+    };
+    json!({"type": "message", "role": "assistant", "content": content}).to_string()
 }
 
 /// One query parameter out of a URL, or the empty string.

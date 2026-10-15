@@ -18,6 +18,8 @@ import { isSafeHref } from "./markdown.js";
 /** The sections the settings page renders, in the order the page shows them. */
 export const SECTIONS = [
   "models",
+  "model-switch",
+  "model-runner",
   "proactivity",
   "tools",
   "automations",
@@ -44,6 +46,20 @@ const ENDPOINTS = {
     method: value === null ? "DELETE" : "PUT",
     path: `/v1/models/${encodeURIComponent(key)}`,
   }),
+  // Switches the model of a role's existing connection on the key already
+  // stored for it (`PATCH /v1/models/{role}`, `{model}`): the top "Main
+  // model" picker, which never asks for the key again.
+  "model-switch": (key) => ({
+    method: "PATCH",
+    path: `/v1/models/${encodeURIComponent(key)}`,
+  }),
+  // The member's own device runner for a role — their Claude or ChatGPT
+  // subscription, run by their own CLI on their own machine. Any member sets
+  // their own; `null` turns it off for that role.
+  "model-runner": (key, value) => ({
+    method: value === null ? "DELETE" : "PUT",
+    path: `/v1/models/mine/${encodeURIComponent(key)}`,
+  }),
   proactivity: null,
   tools: null,
   automations: null,
@@ -51,6 +67,9 @@ const ENDPOINTS = {
   colonizer: null,
   stack: null,
 };
+
+/** The sections whose handler reads its fields flat, beside the audit triple. */
+const FLAT_SECTIONS = ["models", "model-switch", "model-runner"];
 
 /** The model roles the server accepts (`livingbrain-models` `ROLES`). */
 export const MODEL_ROLES = ["triage", "main", "research"];
@@ -101,7 +120,7 @@ export function settingRequest(section, key, value) {
   // level next to the audit triple. Serde ignores the extra keys it does not
   // know, and `section`/`key`/`value` are what the audit reads.
   const payload =
-    section === "models" && value && typeof value === "object" && !Array.isArray(value)
+    FLAT_SECTIONS.includes(section) && value && typeof value === "object" && !Array.isArray(value)
       ? { ...value, section, key: name, value }
       : body;
 

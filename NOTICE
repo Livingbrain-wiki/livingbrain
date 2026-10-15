@@ -31,6 +31,14 @@ Most of the path data comes from the Simple Icons project
 Universal public domain dedication
 (https://creativecommons.org/publicdomain/zero/1.0/).
 
+The provider cards on the same page draw the self-hosted SVG files in
+app/assets/logos/ (each file's source is recorded as `logo_source` in
+app/assets/model-cards.json). anthropic, claude, deepseek, kimi, minimax,
+openrouter and qwen are Simple Icons 16.35.0 and openai is Simple Icons
+13.21.0, all under the same CC0 1.0 dedication; zai.svg is the glyph of
+Z.AI's own mark (https://z-cdn.chatglm.cn/z-ai/static/logo.svg) with its
+background tile removed; custom.svg is Living Brain's own.
+
 The Z.AI/Zhipu, Meta and BytePlus marks are not from Simple Icons. Their SVG
 paths are copied from @lobehub/icons (https://github.com/lobehub/lobe-icons);
 the package itself is not a dependency. It is MIT licensed:

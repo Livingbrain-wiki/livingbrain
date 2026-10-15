@@ -29,6 +29,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::catalog::{self, Auth, Wire};
 use crate::crypto;
+use crate::curated;
 use crate::jobs;
 use crate::probe;
 use crate::selection;
@@ -72,6 +73,15 @@ const UNREACHABLE: ProblemDef = ProblemDef {
     description: "The model endpoint did not respond successfully.",
 };
 
+/// `PATCH /{role}` on a role with no connection (or one whose key no
+/// longer opens): there is no key to switch the model on.
+const NOT_CONNECTED: ProblemDef = ProblemDef {
+    slug: "models/not-connected",
+    status: StatusCode::CONFLICT,
+    title: "No connection to switch",
+    description: "This role has no connection with a usable key.",
+};
+
 /// The encryption secret is missing: keys cannot be stored safely.
 const NO_SECRET: ProblemDef = ProblemDef {
     slug: "models/no-encryption-secret",
@@ -99,7 +109,13 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
         // `/discover` above is a static segment, so it wins the match: a
         // `GET /v1/models/discover` is the method router's 405, and every
         // other non-role path reaches `effective`'s role check.
-        .route("/{role}", get(effective).put(connect).delete(remove))
+        .route(
+            "/{role}",
+            get(effective)
+                .put(connect)
+                .patch(switch_model)
+                .delete(remove),
+        )
         .with_state(state)
 }
 
@@ -202,7 +218,8 @@ async fn connect(
         auth: endpoint.auth,
         api_key: api_key.as_str(),
     };
-    let probe_result = probe::probe(&*http, target, &body.model)
+    let documented = curated::context(&endpoint.provider, &body.model);
+    let probe_result = probe::probe(&*http, target, &body.model, documented)
         .await
         .map_err(unreachable_error)?;
 
@@ -373,16 +390,34 @@ struct DiscoverRequest {
     api_key: crypto::ApiKey,
 }
 
+/// What `POST /discover` answers: the models to offer, whether the
+/// provider listed them itself (`false` is the curated list, so the picker
+/// is never empty), and a sentence to show when it did not.
 #[derive(Debug, Serialize)]
 struct DiscoverView {
-    models: Vec<String>,
+    models: Vec<curated::Model>,
+    listed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'static str>,
 }
+
+/// The note under a curated list.
+const NOT_LISTED: &str = "This provider doesn't publish a model list; showing known models.";
+/// The note when there is no curated list either.
+const NOT_LISTED_NONE_KNOWN: &str =
+    "This provider doesn't publish a model list; enter the model id it gives you.";
 
 /// `POST /discover` — the models a provider lists for a key, fetched here so
 /// the browser never calls a provider with the key itself. The same guards
 /// as a connect: admin or owner only, the SSRF check before any request, and
 /// a refusal that names the HTTP status and never the provider's body.
 /// Nothing is stored.
+///
+/// Many Anthropic-compatible endpoints (Z.AI, MiniMax, Kimi, Qwen,
+/// DeepSeek's) serve no model list at all, and answer the request with a
+/// `404` or a `405`. That is not an error: the answer is the curated list
+/// for the provider ([`crate::curated`]) with `listed: false`. Only a
+/// refused key (`401`/`403`) is a 422.
 async fn discover(
     State(state): State<Arc<ModuleState>>,
     headers: HeaderMap,
@@ -404,10 +439,149 @@ async fn discover(
         auth: endpoint.auth,
         api_key: body.api_key.as_str(),
     };
-    let models = probe::list_models(&*http, target)
+    let listing = curated::listing(&endpoint.provider);
+    let listed = probe::list_models(&*http, target, &listing)
         .await
-        .map_err(unreachable_error)?;
-    Ok(Json(DiscoverView { models }).into_response())
+        .map_err(refused_key)?;
+    let view = match listed {
+        probe::Listed::Models(models) if !models.is_empty() => DiscoverView {
+            models: curated::annotate(&endpoint.provider, models),
+            listed: true,
+            note: None,
+        },
+        _ => {
+            let models = curated::models(&endpoint.provider);
+            let note = if models.is_empty() {
+                NOT_LISTED_NONE_KNOWN
+            } else {
+                NOT_LISTED
+            };
+            DiscoverView {
+                models,
+                listed: false,
+                note: Some(note),
+            }
+        }
+    };
+    Ok(Json(view).into_response())
+}
+
+/// The request body for `PATCH /{role}`.
+#[derive(Debug, Deserialize)]
+struct SwitchRequest {
+    model: String,
+}
+
+/// `PATCH /{role}` — switch the model of an existing connection, on the key
+/// already stored for it, so the settings page can change what Main runs
+/// without asking for the key again. Admin or owner only, like a connect;
+/// the stored base URL passes the SSRF guard again and the new model is
+/// probed before anything is written. The key is decrypted for the probe
+/// and dropped; the row keeps its ciphertext, so nothing about the key
+/// changes.
+async fn switch_model(
+    State(state): State<Arc<ModuleState>>,
+    Path(role): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<SwitchRequest>,
+) -> Result<Response, Problem> {
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let db = port(state.ctx.ports.db.clone())?;
+    let http = port(state.ctx.ports.http.clone())?;
+
+    let c = authenticate(&state.ctx.ports, &headers).await?;
+    if !c.is_admin {
+        return Err(Problem::new(&FORBIDDEN));
+    }
+    if !ROLES.contains(&role.as_str()) {
+        return Err(Problem::validation_failed(format!(
+            "role must be one of triage|main|research, got {role:?}"
+        )));
+    }
+    let model = body.model.trim();
+    if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
+        return Err(Problem::validation_failed(
+            "model must be a model id of at most 200 characters",
+        ));
+    }
+    let row = store::get(&*db, &c.workspace_id, &role)
+        .await
+        .map_err(database)?
+        .ok_or_else(|| {
+            Problem::new(&NOT_CONNECTED)
+                .with_detail("Connect this role before switching its model.")
+        })?;
+    let (Some(wire), Some(auth)) = (Wire::parse(&row.wire), Auth::parse(&row.auth)) else {
+        return Err(Problem::internal());
+    };
+    let secret = crypto::derive_key(&*state.ctx.config).ok_or_else(|| Problem::new(&NO_SECRET))?;
+    let ciphertext = store::key_ciphertext(&*db, &c.workspace_id, &role)
+        .await
+        .map_err(database)?
+        .ok_or_else(Problem::internal)?;
+    let key = crypto::decrypt(&secret, &ciphertext, &c.workspace_id, &role)
+        .ok()
+        .and_then(|key| String::from_utf8(key).ok())
+        .ok_or_else(|| {
+            Problem::new(&NOT_CONNECTED)
+                .with_detail("The stored key could not be opened; connect this role again.")
+        })?;
+
+    let url = ssrf::validate_url(&row.base_url).map_err(ssrf_refused)?;
+    ssrf::check_destination(&*http, &url)
+        .await
+        .map_err(ssrf_refused)?;
+    let target = probe::Target {
+        base: &url,
+        wire,
+        auth,
+        api_key: key.as_str(),
+    };
+    let documented = curated::context(&row.provider, model);
+    let probe_result = probe::probe(&*http, target, model, documented).await;
+    drop(key);
+    let probe_result = probe_result.map_err(unreachable_error)?;
+    if let Some(usage) = probe_result.usage {
+        let _ = livingbrain_usage::record_model(
+            &*db,
+            clock.now(),
+            &c.workspace_id,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+        )
+        .await;
+    }
+
+    let now = clock.now().format(&Rfc3339).unwrap_or_default();
+    let missing_json =
+        serde_json::to_string(&probe_result.missing).unwrap_or_else(|_| "[]".to_owned());
+    store::upsert(
+        &*db,
+        &c.workspace_id,
+        &role,
+        store::ConnectionFields {
+            provider: &row.provider,
+            base_url: &row.base_url,
+            auth: &row.auth,
+            wire: &row.wire,
+            model,
+            key_ciphertext: &ciphertext,
+            key_last4: &row.key_last4,
+            fallback_to_managed: row.fallback_to_managed,
+            status: probe_result.status,
+            missing: &missing_json,
+            context_size: probe_result.context_size.as_deref(),
+            checked_at: &now,
+            updated_by: &c.user_id,
+        },
+    )
+    .await
+    .map_err(database)?;
+    let row = store::get(&*db, &c.workspace_id, &role)
+        .await
+        .map_err(database)?
+        .ok_or_else(Problem::internal)?;
+    Ok(Json(view(row)).into_response())
 }
 
 /// The request body for `PUT /{role}`. `Debug` is safe because the key
@@ -462,6 +636,21 @@ fn view(row: store::ModelConnection) -> ConnectionView {
 
 fn ssrf_refused(error: ssrf::SsrfError) -> Problem {
     Problem::new(&SSRF_REFUSED).with_detail(error.to_string())
+}
+
+/// The provider refused the key while listing its models.
+const KEY_REFUSED: ProblemDef = ProblemDef {
+    slug: "models/key-refused",
+    status: StatusCode::UNPROCESSABLE_ENTITY,
+    title: "The provider refused the key",
+    description: "The provider answered 401 or 403: the API key is wrong, revoked or not allowed.",
+};
+
+fn refused_key(error: probe::Unreachable) -> Problem {
+    let status = error.0.map_or_else(String::new, |s| format!(" (HTTP {s})"));
+    Problem::new(&KEY_REFUSED).with_detail(format!(
+        "The provider refused this API key{status}. Check the key and that it belongs to this provider."
+    ))
 }
 
 fn unreachable_error(error: probe::Unreachable) -> Problem {
