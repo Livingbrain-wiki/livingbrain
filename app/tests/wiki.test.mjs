@@ -367,6 +367,12 @@ const {
   validProject,
   searchPath,
   sessionsPath,
+  sourcePath,
+  transcriptHref,
+  latestSessions,
+  parseSessionRecord,
+  sessionStats,
+  transcriptNodes,
 } = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
@@ -1438,4 +1444,183 @@ test("agent sessions: signed out says sign in and sends no listing", async () =>
     false,
     "nothing about sources is asked signed out",
   );
+});
+
+/* ---------------------------------------------------------- transcripts */
+
+/** A version-2 session record: messages, reasoning, an event, and tool
+ * calls with input and output — the shape `livingbrain logs sync` uploads. */
+const RECORD = {
+  schema_version: 2,
+  agent: "codex",
+  collector_version: 2,
+  detail: "full",
+  session_id: "019d1127-b465-7a23-8678-31c5a98a39fe",
+  repo: "~/code/demo",
+  branch: "main",
+  models: ["gpt-5.4"],
+  started_at: "2026-10-02T09:00:00.000Z",
+  ended_at: "2026-10-02T09:00:10.000Z",
+  turns: [
+    { role: "user", at: "2026-10-02T09:00:01.000Z", text: "Fix all the TODOs\n<b>not html</b>", tool_calls: [] },
+    { role: "reasoning", at: "2026-10-02T09:00:02.000Z", text: "Search first.", tool_calls: [] },
+    {
+      role: "assistant",
+      at: "2026-10-02T09:00:03.000Z",
+      text: "",
+      tool_calls: [
+        { name: "exec_command", format: "shell", input: "rg -n TODO", output: "src/a.rs:3\n", status: "ok", exit_code: 0 },
+        { name: "apply_patch", format: "diff", input: "*** Begin Patch\n+// done\n*** End Patch", status: "error", exit_code: 1 },
+      ],
+    },
+    { role: "assistant", at: "2026-10-02T09:00:08.000Z", text: "Done: **one** TODO resolved.", tool_calls: [] },
+    { role: "event", at: "2026-10-02T09:00:10.000Z", text: "Turn interrupted by the user", tool_calls: [] },
+  ],
+  totals: { input_tokens: 1500, output_tokens: 200, cache_read_tokens: 300, cache_creation_tokens: 0, reasoning_tokens: 64, cost_usd: null },
+  outcome: null,
+  truncated: false,
+  omitted_turns: 0,
+};
+
+/** Every text leaf under a node description, joined. */
+function textOf(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [nodes];
+  return list
+    .map((node) => (node == null ? "" : node.type === "text" ? node.value : textOf(node.children || [])))
+    .join("");
+}
+
+/** Every element description with `tag`, depth first. */
+function tagged(nodes, tag) {
+  const out = [];
+  const visit = (list) => {
+    for (const node of list || []) {
+      if (!node || node.type !== "element") continue;
+      if (node.tag === tag) out.push(node);
+      visit(node.children);
+    }
+  };
+  visit(Array.isArray(nodes) ? nodes : [nodes]);
+  return out;
+}
+
+test("transcript helpers: paths, newest row per session, record parsing, stats", () => {
+  assert.equal(sourcePath("01J0/x"), "/v1/sources/01J0%2Fx");
+  assert.equal(transcriptHref("01JB"), "wiki.html?view=sessions&source=01JB");
+  assert.deepEqual(
+    latestSessions([
+      { id: "new", path: "codex session a" },
+      { id: "old", path: "codex session a" },
+      { id: "b", path: "codex session b" },
+    ]).map((row) => row.id),
+    ["new", "b"],
+  );
+  assert.equal(parseSessionRecord("not json"), null);
+  assert.equal(parseSessionRecord('{"turns":3}'), null);
+  assert.equal(parseSessionRecord(JSON.stringify(RECORD)).agent, "codex");
+  assert.deepEqual(sessionStats(RECORD), { user: 1, assistant: 1, tools: 2 });
+});
+
+test("transcript nodes: every turn in order, tool calls as blocks, text never markup", () => {
+  const nodes = transcriptNodes(RECORD);
+  const all = textOf(nodes);
+  assert.match(all, /Agent: codex/);
+  assert.match(all, /Tool calls: 2/);
+  assert.match(all, /Detail: full/);
+  // In order: the prompt, the reasoning, both calls, the answer, the event.
+  const order = ["Fix all the TODOs", "Search first.", "rg -n TODO", "+// done", "Done: ", "Turn interrupted"];
+  let at = -1;
+  for (const piece of order) {
+    const next = all.indexOf(piece);
+    assert.ok(next > at, `${piece} out of order in ${all}`);
+    at = next;
+  }
+  // The person's angle brackets are text, not a tag.
+  assert.match(all, /<b>not html<\/b>/);
+  assert.equal(tagged(nodes, "b").length, 0);
+  // The assistant's markdown is rendered; the calls' inputs are fenced.
+  assert.equal(tagged(nodes, "strong").some((n) => textOf(n) === "one"), true);
+  const pres = tagged(nodes, "pre");
+  assert.equal(pres[0].attrs["data-lang"], "sh");
+  assert.equal(pres[2].attrs["data-lang"], "diff");
+  // A short output is open; the failed call says so.
+  const details = tagged(nodes, "details").filter((n) => n.attrs.class === "transcript-call__output");
+  assert.equal(details.length, 1);
+  assert.equal("open" in details[0].attrs, true);
+  assert.match(all, /error · exit 1/);
+});
+
+test("transcript nodes: a version-1 record (names only) still reads", () => {
+  const v1 = {
+    schema_version: 1,
+    agent: "claude_code",
+    session_id: "3f2a",
+    repo: "~/code/demo",
+    models: [],
+    turns: [
+      { role: "user", text: "hi", tool_calls: [] },
+      { role: "assistant", text: "", tool_calls: [{ name: "Bash" }] },
+    ],
+    totals: {},
+    truncated: true,
+  };
+  const all = textOf(transcriptNodes(v1));
+  assert.match(all, /hi/);
+  assert.match(all, /Bash/);
+  assert.match(all, /version 1 record/);
+  assert.match(all, /left out to fit/);
+});
+
+test("agent sessions: ?view=sessions&source= opens the transcript from GET /v1/sources/{id}", async () => {
+  reset({ search: "?view=sessions&source=01J0000000000000000000000B" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources/01J0000000000000000000000B") {
+      return json({
+        id: "01J0000000000000000000000B",
+        kind: "agent_log",
+        project: "demo",
+        body: JSON.stringify(RECORD),
+      });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("transcript-view").hidden, false);
+  assert.equal(el("sessions-view").hidden, true);
+  assert.match(el("transcript-title").textContent, /codex session 019d1127 · demo/);
+  const body = el("transcript-body").textContent;
+  assert.match(body, /rg -n TODO/);
+  assert.match(body, /Done: /);
+  assert.equal(
+    calls.some((call) => call.url === "/v1/sources/01J0000000000000000000000B"),
+    true,
+  );
+});
+
+test("agent sessions: each row links to its transcript, one row per session", async () => {
+  reset({ search: "?view=sessions" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources?kind=agent_log&limit=50") {
+      return json({
+        sources: [
+          { ...SESSIONS.sources[0], id: "01J0000000000000000000000C" },
+          SESSIONS.sources[0],
+        ],
+        next_cursor: null,
+      });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  const links = walk(el("sessions-list"), "a");
+  assert.equal(links.length, 1, "the older source of the same session is folded away");
+  assert.equal(links[0].href, "wiki.html?view=sessions&source=01J0000000000000000000000C");
 });

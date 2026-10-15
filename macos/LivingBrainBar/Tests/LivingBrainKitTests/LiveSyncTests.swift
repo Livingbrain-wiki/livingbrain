@@ -100,6 +100,39 @@ final class SessionsTests: XCTestCase {
         XCTAssertEqual(raw.body, #"{"x":"\[REDACTED:email]"}"#)
     }
 
+    /// A version-2 record from `logs show`: tool calls carry their input and
+    /// (clipped) output, reasoning and events are turns of their own, and the
+    /// secret inside a tool's output arrives redacted.
+    func testShowDecodesToolCallsFromAVersion2Record() throws {
+        let shown = try CLIOutput.sessionShow(fixture("logs-show-v2"))
+        let record = try XCTUnwrap(shown.record)
+        XCTAssertEqual(record.schemaVersion, 2)
+        XCTAssertEqual(record.detail, "full")
+        XCTAssertEqual(record.omittedTurns, 0)
+        XCTAssertEqual(record.turns.map(\.role),
+                       ["user", "reasoning", "assistant", "assistant", "assistant", "event", "user", "assistant"])
+        let run = try XCTUnwrap(record.turns[2].calls.first)
+        XCTAssertEqual(run.name, "Bash")
+        XCTAssertEqual(run.format, "shell")
+        XCTAssertEqual(run.input, "cargo test -p demo")
+        XCTAssertEqual(run.status, "error")
+        XCTAssertEqual(run.exitCode, 101)
+        XCTAssertTrue(run.output?.contains("bytes omitted") ?? false)
+        XCTAssertEqual(ToolCallSummary.outcome(run), "error · exit 101")
+        let edit = try XCTUnwrap(record.turns[3].calls.first)
+        XCTAssertEqual(edit.path, "~/code/demo/src/lib.rs")
+        XCTAssertTrue(edit.hasDetail)
+        let env = try XCTUnwrap(record.turns[4].calls.first?.output)
+        XCTAssertTrue(env.contains("[REDACTED:"))
+        XCTAssertFalse(env.contains("sk-ant"))
+        XCTAssertEqual(record.turns[5].text, "Interrupted by the user during a tool call")
+        XCTAssertEqual(ToolCallSummary.lineCount("a\nb\n"), 2)
+        XCTAssertEqual(ToolCallSummary.lineCount(""), 0)
+        // A version-1 record's names-only calls have nothing more to show.
+        let v1 = try CLIOutput.sessionShow(fixture("logs-show"))
+        XCTAssertFalse(try XCTUnwrap(v1.record).turns[1].calls[0].hasDetail)
+    }
+
     func testUnsupportedDetection() {
         XCTAssertTrue(CLIOutput.isUnsupported("error: unexpected argument '--session' found\n"))
         XCTAssertTrue(CLIOutput.isUnsupported("error: unrecognized subcommand 'show'"))

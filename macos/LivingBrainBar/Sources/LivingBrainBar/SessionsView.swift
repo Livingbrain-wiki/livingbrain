@@ -283,8 +283,27 @@ struct TurnBubble: View {
     let turn: SessionRecord.Turn
 
     var body: some View {
+        switch turn.role {
+        case "event":
+            Text("— \(turn.text) —")
+                .font(.caption.italic()).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+        case "reasoning":
+            DisclosureGroup {
+                Text(turn.text).font(.callout).foregroundStyle(.secondary)
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            } label: {
+                Label("Reasoning", systemImage: "brain").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+        default:
+            bubble
+        }
+    }
+
+    private var bubble: some View {
         let isUser = turn.role == "user"
-        VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label(isUser ? "You" : "Agent", systemImage: isUser ? "person.fill" : "cpu")
                     .font(.caption.weight(.semibold))
@@ -297,7 +316,9 @@ struct TurnBubble: View {
             if !turn.text.isEmpty {
                 Text(turn.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             }
-            if !turn.toolCalls.isEmpty {
+            if turn.calls.contains(where: \.hasDetail) {
+                ForEach(Array(turn.calls.enumerated()), id: \.offset) { _, call in ToolCallBlock(call: call) }
+            } else if !turn.calls.isEmpty {
                 FlowTools(names: turn.toolCalls)
             }
         }
@@ -306,7 +327,53 @@ struct TurnBubble: View {
     }
 }
 
-/// Tool names as small capsules (inputs and results never leave the Mac).
+/// One tool call with what it ran and what came back: the command or patch
+/// in monospace, the output folded away when it is long.
+struct ToolCallBlock: View {
+    let call: SessionRecord.ToolCall
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "wrench.and.screwdriver").font(.caption2).foregroundStyle(.secondary)
+                Text(call.name).font(.caption.monospaced().weight(.semibold))
+                if let path = call.path {
+                    Text(path).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer()
+                if let status = ToolCallSummary.outcome(call) {
+                    Text(status).font(.caption2).foregroundStyle(call.status == "error" ? .red : .secondary)
+                }
+            }
+            if let input = call.input {
+                Text(input)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
+            }
+            if let output = call.output {
+                let lines = ToolCallSummary.lineCount(output)
+                DisclosureGroup(isExpanded: $expanded) {
+                    Text(output)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } label: {
+                    Text("Output · \(lines) line\(lines == 1 ? "" : "s")").font(.caption2).foregroundStyle(.secondary)
+                }
+                .onAppear { expanded = lines <= 8 }
+            }
+        }
+        .padding(.leading, 6)
+        .overlay(alignment: .leading) { Rectangle().fill(Color.secondary.opacity(0.25)).frame(width: 2) }
+    }
+}
+
+/// Tool names as small capsules, for a record that carries nothing more
+/// (detail `messages` or `summary`, or a version-1 record).
 struct FlowTools: View {
     let names: [String]
 

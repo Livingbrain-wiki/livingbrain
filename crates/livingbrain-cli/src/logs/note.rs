@@ -1,19 +1,25 @@
-//! The searchable side of a synced session: one note per session, filed
+//! The readable side of a synced session: one note per session, filed
 //! under the session's project.
 //!
 //! A source in the ledger is not a page — nothing extracts sources into
 //! pages yet — so an uploaded session is invisible to `search` and `ask`.
-//! Beside each session's source, `logs sync` therefore writes a compact
-//! note through `POST /v1/notes`: who, where, when, with what, at what
-//! cost, and the conversation excerpted. The note carries `project: <repo
-//! basename>` in its frontmatter, which is what `livingbrain search
-//! --project <repo>` and `livingbrain ask --project <repo>` filter on.
+//! Beside each session's source, `logs sync` therefore writes a note through
+//! `POST /v1/notes`: who, where, when, with what, at what cost, and the
+//! conversation itself — every message, reasoning summary and event in
+//! order, and each tool call as a compact block (its command or patch
+//! fenced, its result clipped to head and tail). The notes route sits under
+//! the 64 KiB request limit, so a long session's page quotes less of each
+//! call, and past that keeps its opening and its most recent turns and links
+//! the full transcript in the web app's Agent sessions view. The note carries
+//! `project: <repo basename>` in its frontmatter, which is what `livingbrain
+//! search --project <repo>` and `livingbrain ask --project <repo>` filter on.
 //!
 //! The note is keyed: its slug is `agent-log-<agent>-<session-id>`, so a
 //! re-sync updates the one page in place, and a re-sync of an unchanged
 //! session sends the same markdown and the server writes nothing. It is
-//! built from the record the source was built from — home-elided, capped,
-//! tool names only — and redacted here, on this machine, before it is sent.
+//! built from the record the source was built from — at the repository's
+//! detail level, home-elided, redacted value by value — and redacted again
+//! here, on this machine, before it is sent.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,16 +27,47 @@ use std::path::Path;
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
 
-use super::{SessionRecord, Turn};
+use super::clean::clip;
+use super::{Role, SessionRecord, Turn};
 use crate::api::Client;
 
-/// How much of one turn's text the note quotes, in characters.
-const NOTE_TURN_CHARS: usize = 400;
+/// The most the note's markdown may be once escaped into the JSON request
+/// that carries it. The notes route sits under the harness's 64 KiB request
+/// limit; this leaves room for the title, slug, project and any growth
+/// redaction's replacement tokens cause.
+const NOTE_BUDGET_BYTES: usize = 48 * 1024;
 
-/// The budget for the excerpted conversation, in bytes. Far under the
-/// notes route's ceiling (redaction's 1 MiB input cap): a note is a
-/// summary to find the session by, and the full record is in the source.
-const NOTE_EXCERPT_BYTES: usize = 12 * 1024;
+/// How much of each message, tool input and tool result the note quotes
+/// (head and tail), tried in order until the whole conversation fits the
+/// page: generous first, then commands with short results, then commands
+/// alone. The page is for reading and finding; the transcript view has
+/// everything.
+const NOTE_LIMITS: [Limits; 5] = [
+    Limits::new(6 * 1024, 1536, 1024),
+    Limits::new(4 * 1024, 1024, 512),
+    Limits::new(3 * 1024, 768, 256),
+    Limits::new(2 * 1024, 512, 128),
+    Limits::new(2 * 1024, 384, 0),
+];
+
+/// One rung of [`NOTE_LIMITS`], in bytes; an `output` of 0 shows a call's
+/// outcome without its result.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    text: usize,
+    input: usize,
+    output: usize,
+}
+
+impl Limits {
+    const fn new(text: usize, input: usize, output: usize) -> Self {
+        Self {
+            text,
+            input,
+            output,
+        }
+    }
+}
 
 /// The slug prefix every session note is filed under.
 const SLUG_PREFIX: &str = "agent-log";
@@ -138,7 +175,74 @@ fn defuse_links(text: &str) -> String {
 /// The note's markdown, before redaction. Everything here is a pure
 /// function of the record, so the same session renders the same bytes and
 /// the server's unchanged check holds.
+///
+/// The whole conversation, in order, when it fits [`NOTE_BUDGET_BYTES`]:
+/// messages in full, reasoning summaries quoted, events as a line, and each
+/// tool call as a compact block — its input fenced, its result fenced and
+/// clipped to head and tail. A conversation past the budget keeps its
+/// opening and its most recent stretch, with a line saying how many turns
+/// sit between them and where the whole transcript is.
 fn render(record: &SessionRecord, source: Option<&str>) -> String {
+    let mut out = header(record, source);
+    out.push_str("\n## Conversation\n\n");
+    let budget = NOTE_BUDGET_BYTES.saturating_sub(escaped_len(&out));
+    let mut blocks: Vec<String> = Vec::new();
+    let mut sizes: Vec<usize> = Vec::new();
+    for limits in NOTE_LIMITS {
+        blocks = record
+            .turns
+            .iter()
+            .map(|turn| turn_block(turn, limits))
+            .filter(|block| !block.is_empty())
+            .collect();
+        sizes = blocks.iter().map(|block| escaped_len(block)).collect();
+        if sizes.iter().sum::<usize>() <= budget {
+            for block in &blocks {
+                out.push_str(block);
+            }
+            if blocks.is_empty() {
+                out.push_str("_No text turns._\n");
+            }
+            return out;
+        }
+    }
+    // The opening third, then as much of the end as the rest holds.
+    let marker_room = 512;
+    let head_budget = budget / 3;
+    let mut used = 0usize;
+    let mut head = 0usize;
+    while head < blocks.len() && used + sizes[head] <= head_budget {
+        used += sizes[head];
+        head += 1;
+    }
+    let mut tail = blocks.len();
+    while tail > head && used + sizes[tail - 1] + marker_room <= budget {
+        used += sizes[tail - 1];
+        tail -= 1;
+    }
+    for block in &blocks[..head] {
+        out.push_str(block);
+    }
+    let hidden = tail - head;
+    if hidden > 0 {
+        let link = match source.filter(|source| !source.is_empty()) {
+            Some(source) => format!(
+                "open the [full transcript](wiki.html?view=sessions&source={source}) in Agent sessions"
+            ),
+            None => "the full transcript is in the session's source (Agent sessions)".to_owned(),
+        };
+        out.push_str(&format!(
+            "_… {hidden} turn(s) not shown on this page — {link}._\n\n"
+        ));
+    }
+    for block in &blocks[tail..] {
+        out.push_str(block);
+    }
+    out
+}
+
+/// The stats at the top of the note.
+fn header(record: &SessionRecord, source: Option<&str>) -> String {
     let mut out = String::new();
     let project = project_of(&record.repo).unwrap_or_default();
     out.push_str(&format!(
@@ -161,11 +265,15 @@ fn render(record: &SessionRecord, source: Option<&str>) -> String {
     if !record.models.is_empty() {
         out.push_str(&format!("- Models: {}\n", record.models.join(", ")));
     }
-    let users = record.turns.iter().filter(|t| t.role == "user").count();
+    let count = |role: Role| record.turns.iter().filter(|t| t.role == role).count();
     out.push_str(&format!(
-        "- Turns: {} ({users} user, {} assistant)\n",
-        record.turns.len(),
-        record.turns.len() - users,
+        "- Messages: {} user, {} assistant\n",
+        count(Role::User),
+        record
+            .turns
+            .iter()
+            .filter(|t| t.role == Role::Assistant && !t.text.trim().is_empty())
+            .count(),
     ));
     out.push_str(&format!("- Tool calls: {}\n", tool_summary(&record.turns)));
     let totals = &record.totals;
@@ -180,48 +288,137 @@ fn render(record: &SessionRecord, source: Option<&str>) -> String {
     if let Some(cost) = totals.cost_usd {
         out.push_str(&format!("- Cost: ${cost:.4}\n"));
     }
+    out.push_str(&format!("- Detail: {}\n", record.detail.as_str()));
     if let Some(source) = source.filter(|source| !source.is_empty()) {
         out.push_str(&format!("- Source: {source} (agent_log)\n"));
+        out.push_str(&format!(
+            "- Transcript: [open in Agent sessions](wiki.html?view=sessions&source={source})\n"
+        ));
     }
     if record.truncated {
-        out.push_str("- Truncated: the record lost trailing turns to the size cap\n");
-    }
-
-    out.push_str("\n## Conversation\n\n");
-    let spoken: Vec<&Turn> = record
-        .turns
-        .iter()
-        .filter(|turn| !turn.text.trim().is_empty())
-        .collect();
-    let mut used = 0usize;
-    let mut shown = 0usize;
-    for turn in &spoken {
-        let speaker = if turn.role == "user" {
-            "User"
-        } else {
-            "Assistant"
-        };
-        let line = format!("**{speaker}:** {}\n\n", excerpt(&turn.text));
-        if used + line.len() > NOTE_EXCERPT_BYTES {
-            break;
-        }
-        used += line.len();
-        shown += 1;
-        out.push_str(&line);
-    }
-    if spoken.is_empty() {
-        out.push_str("_No text turns._\n");
-    } else if shown < spoken.len() {
         out.push_str(&format!(
-            "_{} more turn(s) not shown; the full record is the source._\n",
-            spoken.len() - shown
+            "- Truncated: {} turn(s) removed to fit the upload size cap\n",
+            record.omitted_turns
         ));
     }
     out
 }
 
-/// `N (Name ×k, …)`, most-called first, ties by name: the shape of the work
-/// without any of its inputs.
+/// One turn as markdown, ending in a blank line; `""` for a turn with
+/// nothing to show.
+fn turn_block(turn: &Turn, limits: Limits) -> String {
+    let at = turn.at.as_deref().map(short_time).unwrap_or_default();
+    let stamp = if at.is_empty() {
+        String::new()
+    } else {
+        format!(" · {at}")
+    };
+    let mut out = String::new();
+    match turn.role {
+        Role::User => {
+            if turn.text.trim().is_empty() {
+                return String::new();
+            }
+            out.push_str(&format!("**User**{stamp}\n\n"));
+            out.push_str(&message(&turn.text, limits.text));
+        }
+        Role::Assistant => {
+            if !turn.text.trim().is_empty() {
+                out.push_str(&format!("**Assistant**{stamp}\n\n"));
+                out.push_str(&message(&turn.text, limits.text));
+            }
+            for call in &turn.tool_calls {
+                out.push_str(&call_block(call, limits));
+            }
+            if out.is_empty() {
+                return out;
+            }
+        }
+        Role::Reasoning => {
+            let text = clip(turn.text.trim(), limits.text);
+            out.push_str(&format!("_Reasoning{stamp}_\n\n"));
+            for line in text.lines() {
+                out.push_str(&format!("> {line}\n"));
+            }
+            out.push('\n');
+        }
+        Role::Event => {
+            out.push_str(&format!("_— {}{stamp} —_\n\n", one_line(&turn.text)));
+        }
+    }
+    out
+}
+
+/// A message's text as markdown: clipped for the page, and with any code
+/// fence it opened closed again, so it cannot swallow what follows.
+fn message(text: &str, max: usize) -> String {
+    let mut text = clip(text.trim(), max);
+    let fences = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count();
+    if fences % 2 == 1 {
+        text.push_str("\n```");
+    }
+    format!("{text}\n\n")
+}
+
+/// One tool call: its name, file and outcome on a line, then the input and
+/// the result each in a fence.
+fn call_block(call: &super::ToolCall, limits: Limits) -> String {
+    let mut line = format!("- `{}`", call.name.replace('`', "'"));
+    if let Some(path) = &call.path {
+        line.push_str(&format!(" `{}`", one_line(path).replace('`', "'")));
+    }
+    if let Some(status) = call.status {
+        line.push_str(&format!(" · {status}"));
+    }
+    if let Some(code) = call.exit_code {
+        line.push_str(&format!(" · exit {code}"));
+    }
+    let mut out = format!("{line}\n\n");
+    if let Some(input) = &call.input {
+        let lang = match call.format {
+            Some("shell") => "sh",
+            Some(other) => other,
+            None => "text",
+        };
+        out.push_str(&fenced(lang, &clip(input, limits.input)));
+    }
+    if let Some(output) = call.output.as_ref().filter(|_| limits.output > 0) {
+        out.push_str(&fenced("text", &clip(output, limits.output)));
+    }
+    out
+}
+
+/// `body` in a fence, every line of it that could close the fence defused
+/// with a zero-width space in front.
+fn fenced(lang: &str, body: &str) -> String {
+    let mut out = format!("```{lang}\n");
+    for line in body.trim_end_matches('\n').lines() {
+        if line.trim_start().starts_with("```") {
+            out.push('\u{200b}');
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("```\n\n");
+    out
+}
+
+/// `2026-10-01T09:30:05.123Z` as `2026-10-01 09:30:05`; anything else as is.
+fn short_time(at: &str) -> String {
+    let at = at.trim_end_matches('Z');
+    let at = at.split('.').next().unwrap_or(at);
+    at.replacen('T', " ", 1)
+}
+
+/// How long `text` is once escaped into the JSON request it travels in.
+fn escaped_len(text: &str) -> usize {
+    serde_json::to_string(text).map_or(text.len(), |escaped| escaped.len())
+}
+
+/// `N (Name ×k, …)`, most-called first, ties by name.
 fn tool_summary(turns: &[Turn]) -> String {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for call in turns.iter().flat_map(|turn| &turn.tool_calls) {
@@ -238,17 +435,6 @@ fn tool_summary(turns: &[Turn]) -> String {
         .map(|(name, count)| format!("{} ×{count}", one_line(name)))
         .collect();
     format!("{total} ({})", names.join(", "))
-}
-
-/// One turn's text as a single line, cut to [`NOTE_TURN_CHARS`] — a
-/// single line, so no turn can open a heading or a frontmatter fence.
-fn excerpt(text: &str) -> String {
-    let joined = one_line(text);
-    let mut out: String = joined.chars().take(NOTE_TURN_CHARS).collect();
-    if joined.chars().nth(NOTE_TURN_CHARS).is_some() {
-        out.push('…');
-    }
-    out
 }
 
 /// Whitespace collapsed to single spaces.
@@ -330,7 +516,7 @@ pub(super) fn failure_line(planned: Option<&Planned>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{defuse_links, excerpt, project_of, slug_for};
+    use super::{defuse_links, fenced, message, project_of, short_time, slug_for};
 
     #[test]
     fn the_slug_is_the_agent_and_the_session_folded_onto_the_slug_rule() {
@@ -355,11 +541,23 @@ mod tests {
     }
 
     #[test]
-    fn an_excerpt_is_one_capped_line() {
-        assert_eq!(excerpt("if [[ -f x ]];\n\nthen"), "if [[ -f x ]]; then");
-        let long = excerpt(&"a".repeat(1000));
-        assert_eq!(long.chars().count(), super::NOTE_TURN_CHARS + 1);
-        assert!(long.ends_with('…'));
+    fn fences_cannot_be_broken_out_of() {
+        let block = fenced("text", "a\n```\nb");
+        assert_eq!(block, "```text\na\n\u{200b}```\nb\n```\n\n");
+        assert_eq!(
+            message("see\n```rust\nfn x()", 100),
+            "see\n```rust\nfn x()\n```\n\n"
+        );
+        assert_eq!(message("plain", 100), "plain\n\n");
+    }
+
+    #[test]
+    fn times_read_short() {
+        assert_eq!(
+            short_time("2026-10-01T09:30:05.123Z"),
+            "2026-10-01 09:30:05"
+        );
+        assert_eq!(short_time("yesterday"), "yesterday");
     }
 
     #[test]

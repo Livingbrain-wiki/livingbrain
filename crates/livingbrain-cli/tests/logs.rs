@@ -464,7 +464,8 @@ fn a_session_that_moved_repos_needs_both_opted_in() {
 /// (f) Both formats land as one normalised record: the versioned schema
 /// fields, the hand-computed totals (the Claude split message counted once,
 /// the Codex cumulative count taken once, the wrapped bootstrap context
-/// skipped), and nothing but tool names. This run has a real-shaped `HOME`,
+/// skipped), and each tool call with its input and result. This run has a
+/// real-shaped `HOME`,
 /// so the repo fields come out home-elided.
 #[test]
 fn claude_and_codex_sessions_land_in_the_normalised_schema() {
@@ -496,8 +497,9 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     );
 
     // Claude Code: one assistant message streamed as two lines, counted once.
-    assert_eq!(claude["schema_version"], 1);
-    assert_eq!(claude["collector_version"], 1);
+    assert_eq!(claude["schema_version"], 2);
+    assert_eq!(claude["collector_version"], 2);
+    assert_eq!(claude["detail"], "full");
     assert_eq!(claude["session_id"], CLAUDE_SESSION);
     // Elision ran with the real-shaped HOME, so the repo folds to `~` before
     // the body is built — no raw path, and no redaction finding for one.
@@ -520,7 +522,16 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     let claude_turns = claude["turns"].as_array().expect("turns");
     assert_eq!(claude_turns.len(), 2, "{claude}");
     assert_eq!(claude_turns[0]["role"], "user");
-    assert_eq!(claude_turns[1]["tool_calls"], json!([{"name": "Bash"}]));
+    assert_eq!(
+        claude_turns[1]["tool_calls"],
+        json!([{
+            "name": "Bash",
+            "format": "shell",
+            "input": "ls ~/.claude/projects",
+            "output": "demo\nside",
+            "status": "ok",
+        }])
+    );
     assert_eq!(claude["outcome"], Value::Null);
     assert_eq!(claude["truncated"], false);
     // The redaction happened before the body was built, so the record's text
@@ -536,7 +547,7 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     assert!(!claude.to_string().contains(planted_key().as_str()));
 
     // Codex: the last cumulative token count, no cost invented.
-    assert_eq!(codex["schema_version"], 1);
+    assert_eq!(codex["schema_version"], 2);
     assert_eq!(codex["session_id"], CODEX_SESSION);
     assert_eq!(codex["repo"], "~/code/demo", "{codex}");
     assert_eq!(codex["branch"], "main");
@@ -554,16 +565,19 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     );
     let codex_turns = codex["turns"].as_array().expect("turns");
     assert_eq!(codex_turns.len(), 3, "{codex}");
-    assert_eq!(codex_turns[1]["tool_calls"], json!([{"name": "shell"}]));
-    // The call's arguments and its output are nowhere in the record, the
-    // planted AWS key left as a replacement token, not as itself, and the
-    // wrapped `<user_instructions>` opener made no turn.
+    assert_eq!(
+        codex_turns[1]["tool_calls"],
+        json!([{
+            "name": "shell",
+            "format": "shell",
+            "input": "ls",
+            "output": "README.md\nsrc\n",
+        }])
+    );
+    // The planted AWS key is left as a replacement token, not as itself,
+    // and the wrapped `<user_instructions>` opener made no turn.
     let codex_text = codex.to_string();
     assert!(!codex_text.contains(planted_aws_key().as_str()));
-    assert!(
-        !codex_text.contains("cmd"),
-        "tool input leaked: {codex_text}"
-    );
     assert!(
         !codex_text.contains("user_instructions"),
         "bootstrap context leaked: {codex_text}"
@@ -737,7 +751,10 @@ fn each_uploaded_session_gets_a_note_filed_under_its_repo() {
         body.contains("- Tokens: 120 in, 45 out, 30 cache read, 15 cache write, 0 reasoning"),
         "{body}"
     );
-    assert!(body.contains("**User:**"), "{body}");
+    assert!(body.contains("**User**"), "{body}");
+    assert!(body.contains("- `Bash` · ok"), "{body}");
+    assert!(body.contains("```sh\nls ~/.claude/projects\n```"), "{body}");
+    assert!(body.contains("- Detail: full"), "{body}");
     assert!(body.contains("[REDACTED:anthropic_key]"), "{body}");
 
     // The report names each note by where it landed.
@@ -918,4 +935,224 @@ fn show_prints_the_redacted_record_locally() {
     assert!(!text.contains(planted_key().as_str()), "{text}");
     assert!(!text.contains("/home/alice"), "{text}");
     assert!(mock.requests().is_empty(), "logs show touched the network");
+}
+
+/// Plant the full-detail fixtures — tool calls with results, a long output,
+/// boilerplate, interruptions, secrets in tool output — where the agents
+/// would have written them, and return their paths (claude, codex).
+fn plant_full(home: &Path) -> (String, String) {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixtures = manifest.join("tests/fixtures/logs-full");
+    let claude_dir = home.join(".claude/projects/-home-alice-code-demo");
+    let codex_dir = home.join(".codex/sessions/2026/10/02");
+    std::fs::create_dir_all(&claude_dir).expect("claude dir");
+    std::fs::create_dir_all(&codex_dir).expect("codex dir");
+    let claude = claude_dir.join(format!("{FULL_CLAUDE_SESSION}.jsonl"));
+    let codex = codex_dir.join(format!(
+        "rollout-2026-10-02T09-00-00-{FULL_CODEX_SESSION}.jsonl"
+    ));
+    for (from, to) in [
+        (format!("claude-{FULL_CLAUDE_SESSION}.jsonl"), &claude),
+        (format!("codex-{FULL_CODEX_SESSION}.jsonl"), &codex),
+    ] {
+        let raw = std::fs::read_to_string(fixtures.join(from)).expect("read fixture");
+        let planted = raw
+            .replace(PLANTED_KEY_PLACEHOLDER, &planted_key())
+            .replace(PLANTED_AWS_KEY_PLACEHOLDER, &planted_aws_key());
+        std::fs::write(to, planted).expect("plant fixture");
+    }
+    (
+        claude.to_string_lossy().into_owned(),
+        codex.to_string_lossy().into_owned(),
+    )
+}
+
+/// The full-detail fixture session ids.
+const FULL_CLAUDE_SESSION: &str = "5e1f2a3b-4c5d-4e6f-8a7b-9c0d1e2f3a4b";
+const FULL_CODEX_SESSION: &str = "b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e";
+
+/// (n) At `full`, the whole conversation travels — tool inputs and clipped
+/// results in order — with the secrets inside tool output redacted on this
+/// machine, in both the source and the note, and every body still JSON.
+#[test]
+fn full_detail_sends_tool_calls_with_secrets_redacted() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let (claude, codex) = plant_full(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let output = sync(
+        &home,
+        &api_envs(&mock.base),
+        &["--session", &claude, "--session", &codex],
+    );
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 2, "{report}");
+    assert!(report["redacted"].as_u64().unwrap() >= 3, "{report}");
+    for session in report["sessions"].as_array().expect("sessions") {
+        assert_eq!(session["detail"], "full", "{session}");
+    }
+
+    let wire: String = mock
+        .requests()
+        .iter()
+        .map(common::Request::body_text)
+        .collect();
+    assert!(
+        !wire.contains(planted_key().as_str()),
+        "anthropic key on the wire"
+    );
+    assert!(
+        !wire.contains(planted_aws_key().as_str()),
+        "aws key on the wire"
+    );
+    assert!(!wire.contains("bob@example.com"), "address on the wire");
+    assert!(
+        !wire.contains("encryptedreasoning"),
+        "encrypted reasoning on the wire"
+    );
+
+    let records: Vec<Value> = source_bodies(&mock).iter().map(record_of).collect();
+    let claude = records
+        .iter()
+        .find(|record| record["session_id"] == FULL_CLAUDE_SESSION)
+        .expect("the claude session");
+    let calls: Vec<&Value> = claude["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|turn| turn["tool_calls"].as_array().unwrap())
+        .collect();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0]["input"], "cargo test -p demo");
+    assert_eq!(calls[0]["exit_code"], 101);
+    assert!(
+        calls[0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("bytes omitted")
+    );
+    assert_eq!(calls[1]["name"], "Edit");
+    assert!(calls[2]["output"].as_str().unwrap().contains("[REDACTED:"));
+    let roles: Vec<&str> = claude["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["role"].as_str().unwrap())
+        .collect();
+    assert!(
+        roles.contains(&"reasoning") && roles.contains(&"event"),
+        "{roles:?}"
+    );
+
+    let codex = records
+        .iter()
+        .find(|record| record["session_id"] == FULL_CODEX_SESSION)
+        .expect("the codex session");
+    assert!(
+        !codex.to_string().contains("AGENTS.md"),
+        "bootstrap leaked: {codex}"
+    );
+
+    for note in note_bodies(&mock) {
+        let body = note["body"].as_str().expect("a body");
+        assert!(body.contains("- `"), "{body}");
+        assert!(!body.contains(planted_key().as_str()), "{body}");
+        assert!(!body.contains(planted_aws_key().as_str()), "{body}");
+    }
+}
+
+/// (o) `--detail messages` keeps every message and drops tool I/O; the
+/// level is stored per path, reported by `status`, kept by a bare
+/// re-`allow`, and changed by an explicit one.
+#[test]
+fn the_detail_level_is_per_repository() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let (claude, _) = plant_full(&home);
+    let cwd = temp_dir("logs-cwd");
+    let allowed = run(
+        &cwd,
+        &home,
+        &["logs", "allow", DEMO_REPO, "--detail", "messages", "--json"],
+        &[],
+        None,
+    );
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    assert_eq!(json_of(&allowed)["detail"][DEMO_REPO], "messages");
+
+    let again = allow(&home, DEMO_REPO);
+    assert_eq!(json_of(&again)["changed"], false, "{}", again.stdout);
+    assert_eq!(json_of(&again)["detail"][DEMO_REPO], "messages");
+    let status = run(&cwd, &home, &["logs", "status", "--json"], &[], None);
+    assert_eq!(json_of(&status)["detail"][DEMO_REPO], "messages");
+
+    let output = sync(&home, &api_envs(&mock.base), &["--session", &claude]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let record = record_of(&source_bodies(&mock)[0]);
+    assert_eq!(record["detail"], "messages");
+    let text = record.to_string();
+    assert!(!text.contains("cargo test -p demo"), "{text}");
+    assert!(!text.contains("\"output\""), "{text}");
+    assert!(text.contains("Fixed: the assertion"), "{text}");
+
+    let full = run(
+        &cwd,
+        &home,
+        &["logs", "allow", DEMO_REPO, "--detail", "full", "--json"],
+        &[],
+        None,
+    );
+    assert_eq!(json_of(&full)["changed"], true, "{}", full.stdout);
+}
+
+/// (p) Upgrading re-sends what changed: a session synced at one level and
+/// synced again after its record changed (as the schema bump changes every
+/// record) uploads a new source and replaces its note in place — the same
+/// slug, a new version — rather than being skipped as already there.
+#[test]
+fn a_changed_record_re_uploads_and_replaces_its_note() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let cwd = temp_dir("logs-cwd");
+    let summary = run(
+        &cwd,
+        &home,
+        &["logs", "allow", DEMO_REPO, "--detail", "summary", "--json"],
+        &[],
+        None,
+    );
+    assert!(summary.status.success(), "stderr: {}", summary.stderr);
+    let first = sync(&home, &api_envs(&mock.base), &[]);
+    assert_eq!(json_of(&first)["uploaded"], 2, "{}", first.stdout);
+
+    run(
+        &cwd,
+        &home,
+        &["logs", "allow", DEMO_REPO, "--detail", "full", "--json"],
+        &[],
+        None,
+    );
+    let second = sync(&home, &api_envs(&mock.base), &[]);
+    let report = json_of(&second);
+    assert_eq!(report["uploaded"], 2, "{report}");
+    assert_eq!(report["notes"], json!({ "written": 2 }), "{report}");
+    let notes = note_bodies(&mock);
+    let first_slugs: HashSet<&str> = notes[..2]
+        .iter()
+        .map(|n| n["slug"].as_str().unwrap())
+        .collect();
+    let second_slugs: HashSet<&str> = notes[2..]
+        .iter()
+        .map(|n| n["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        first_slugs, second_slugs,
+        "the same pages, updated in place"
+    );
 }

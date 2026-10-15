@@ -10,22 +10,29 @@
 //! locally — and only then read a token and open a socket. With nothing opted
 //! in, `logs sync` makes no request at all, the auth one included.
 //!
-//! Two rules are absolute. **Only tool names travel** — a call's input and its
-//! result are dropped at parse time, not redacted afterwards. **Redaction is
-//! local and not optional** — the home prefix becomes `~`, and the serialised
-//! body then goes through `livingbrain_redact`, the library the server runs on
-//! arrival, so the bytes that cross the socket are the redacted ones. The body
-//! is also the identity: a record serialises deterministically, so the
-//! ledger's `(scope, sha256)` key makes a re-sync read rows back instead of
-//! sealing copies.
+//! What a record carries is the repository's **detail level** (`logs allow
+//! --detail`): `full` — every message, reasoning summary and tool call with
+//! its input and a clipped result; `messages` — the messages, tool names only;
+//! `summary` — the messages cut to 2 000 characters, tool names only.
+//! **Redaction is local and not optional** — the home prefix becomes `~`, and
+//! every string of the record then goes through `livingbrain_redact`, the
+//! library the server runs on arrival, *before* it is serialised, so the bytes
+//! that cross the socket are the redacted ones and always parse. The body is
+//! also the identity: a record serialises deterministically, so the ledger's
+//! `(scope, sha256)` key makes a re-sync read rows back instead of sealing
+//! copies.
 //!
 //! Each uploaded session also gets a searchable note filed under its repo's
 //! project ([`note`]), because a source alone is not a page and `search`
 //! and `ask` read pages.
 
+mod claude;
+mod clean;
+mod codex;
 mod note;
+mod tools;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
@@ -38,20 +45,37 @@ use crate::api::Client;
 use crate::{CliResult, Out, err};
 
 /// The version of the normalised session schema this build writes: adding a
-/// field is a bump of this number, not an edit in place.
-pub(crate) const LOG_SCHEMA_VERSION: u32 = 1;
+/// field is a bump of this number, not an edit in place. 2: tool calls carry
+/// their input and result, `reasoning` and `event` turns, `detail`,
+/// `omitted_turns`. A version-1 record still reads: every field it has kept
+/// its name and meaning.
+pub(crate) const LOG_SCHEMA_VERSION: u32 = 2;
 
-/// The most text one turn keeps, in characters.
-const MAX_TURN_TEXT_CHARS: usize = 2000;
+/// The most text one turn keeps under `summary`, in characters — the cut
+/// every turn took before detail levels existed.
+const SUMMARY_TURN_CHARS: usize = 2000;
+
+/// The most of one message (or reasoning summary) any level keeps: its first
+/// and last 128 KiB. Far past a real message; what it bounds is a pasted log,
+/// and what it guarantees is that every string fits redaction's input cap.
+const MAX_TEXT_BYTES: usize = 256 * 1024;
 
 /// The most tool calls one turn names; the body cap is what bounds a loop.
 const MAX_TOOL_CALLS: usize = 128;
 
 /// The largest body this module builds: three quarters of redaction's input
-/// cap — the headroom `import` leaves for redaction's replacement tokens — and
-/// under the ledger's own ceiling besides. A session over it loses its
-/// trailing turns ([`cap`]) and says so.
+/// cap, because the server redacts the whole body again on arrival and a
+/// replacement token can be longer than what it replaced — and under the
+/// ledger's own ceiling besides. A session over it loses turns ([`cap`]) and
+/// says so.
 const MAX_SESSION_BODY_BYTES: usize = livingbrain_redact::MAX_INPUT_BYTES * 3 / 4;
+
+/// The largest the body may be once escaped into a JSON string: what
+/// `GET /v1/sources/{id}` answers it inside, under the edge's 1 MiB response
+/// buffer, with room for the envelope around it. A body of quotes and
+/// newlines grows when escaped, so this binds before [`MAX_SESSION_BODY_BYTES`]
+/// does for a tool-heavy session.
+const MAX_ESCAPED_BODY_BYTES: usize = 1024 * 1024 - 32 * 1024;
 
 /// The `kind` agent sessions are filed under on the wire.
 const SOURCE_KIND: &str = "agent_log";
@@ -63,7 +87,8 @@ const SCOPE: &str = "personal";
 const ALLOWLIST_FILE: &str = "logs-allow.json";
 
 /// The opt-in file's own shape version, so a future format is migrated rather
-/// than guessed at.
+/// than guessed at. The `detail` map is an optional field of version 1: a
+/// build that predates it ignores it and sends no more than `summary`.
 const ALLOWLIST_VERSION: u32 = 1;
 
 /// The agents this build reads. The name is the schema's `agent` value and
@@ -85,6 +110,31 @@ impl Agent {
     }
 }
 
+/// How much of a session a repository sends. Ordered from least to most, so
+/// the most restrictive of several is their minimum.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Detail {
+    /// Messages cut to 2 000 characters, tool names only
+    Summary,
+    /// Every message in full, tool names only — no tool input or output
+    Messages,
+    /// Every message, reasoning summary and tool call with input and result
+    Full,
+}
+
+impl Detail {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Messages => "messages",
+            Self::Full => "full",
+        }
+    }
+}
+
 /// The `livingbrain logs` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -92,6 +142,9 @@ pub enum Command {
     Allow {
         /// The repository to allow (default: the current directory)
         path: Option<String>,
+        /// How much of each session to send (default for a new allow: full)
+        #[arg(long, value_enum)]
+        detail: Option<Detail>,
     },
     /// Revoke a path `logs allow` added
     Deny {
@@ -133,8 +186,8 @@ pub enum Command {
 /// Run one `logs` subcommand.
 pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
     match command {
-        Command::Allow { path } => set_allowlist(path.as_deref(), true, out),
-        Command::Deny { path } => set_allowlist(path.as_deref(), false, out),
+        Command::Allow { path, detail } => allow(path.as_deref(), *detail, out),
+        Command::Deny { path } => deny(path.as_deref(), out),
         Command::Status => status(out),
         Command::Sync {
             claude_dir,
@@ -168,6 +221,8 @@ struct SessionRecord {
     schema_version: u32,
     agent: &'static str,
     collector_version: u32,
+    /// The detail level the record was built at.
+    detail: Detail,
     session_id: String,
     /// The first working directory the log recorded, with the home prefix
     /// rewritten to `~` ([`elide_home`]) before anything serialises.
@@ -182,30 +237,77 @@ struct SessionRecord {
     models: Vec<String>,
     started_at: Option<String>,
     ended_at: Option<String>,
+    /// The conversation in order: messages, reasoning summaries, events, and
+    /// each assistant step's tool calls.
     turns: Vec<Turn>,
     totals: Totals,
     /// How the session ended, when its log says. No format this build reads
     /// records one; the field is here from version 1 so a collector that
     /// learns it does not move every field after it.
     outcome: Option<String>,
+    /// Whether anything was cut to fit the size cap.
     truncated: bool,
+    /// How many turns the size cap removed; an `event` turn marks where.
+    omitted_turns: usize,
 }
 
-/// One turn of the conversation. Tool inputs and tool results live only in
-/// the fields the parsers never copy; there is no field here to hide them in.
+/// Who a turn is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Role {
+    /// The person.
+    User,
+    /// The agent: its text, and the tool calls of that step.
+    Assistant,
+    /// A reasoning summary the log carried in the clear.
+    Reasoning,
+    /// Something that happened, not something said — an interruption, a
+    /// compaction, turns the size cap removed.
+    Event,
+}
+
+/// One turn of the conversation.
 #[derive(Debug, Serialize)]
 struct Turn {
-    role: String,
+    role: Role,
     at: Option<String>,
-    /// Truncated to [`MAX_TURN_TEXT_CHARS`] characters.
     text: String,
     tool_calls: Vec<ToolCall>,
 }
 
-/// A tool the agent called, by name and nothing else.
-#[derive(Debug, Serialize)]
+impl Turn {
+    fn new(role: Role, at: &str, text: &str) -> Self {
+        Self {
+            role,
+            at: present(at),
+            text: text.to_owned(),
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
+/// A tool the agent called. Under `full`, what it was called with and what
+/// came back ([`tools`]); under the other levels, its name and nothing else.
+#[derive(Debug, Default, Serialize)]
 struct ToolCall {
     name: String,
+    /// How to show `input`: `shell`, `diff`, `json` or `text`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'static str>,
+    /// The file the call read or changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    /// The command, patch or arguments, clipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<String>,
+    /// The result, clipped to its head and tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+    /// `ok`, `error` or `interrupted`, when the log says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
 }
 
 /// What the session cost, as its own log reports it: a collector that reads a
@@ -227,6 +329,7 @@ fn empty_record(agent: Agent, collector_version: u32) -> SessionRecord {
         schema_version: LOG_SCHEMA_VERSION,
         agent: agent.as_str(),
         collector_version,
+        detail: Detail::Full,
         session_id: String::new(),
         repo: String::new(),
         cwds: Vec::new(),
@@ -238,6 +341,7 @@ fn empty_record(agent: Agent, collector_version: u32) -> SessionRecord {
         totals: Totals::default(),
         outcome: None,
         truncated: false,
+        omitted_turns: 0,
     }
 }
 
@@ -279,6 +383,18 @@ fn note_model(record: &mut SessionRecord, model: &str) {
     }
 }
 
+/// An event turn — unless the turn before it is the same event, which both
+/// agents write twice for one interruption.
+fn push_event(record: &mut SessionRecord, at: &str, text: &str) {
+    if let Some(last) = record.turns.last()
+        && last.role == Role::Event
+        && last.text == text
+    {
+        return;
+    }
+    record.turns.push(Turn::new(Role::Event, at, text));
+}
+
 /// The string at `key`, or `""` — every field of every line type is optional,
 /// because the formats are read forward-compatibly.
 fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -304,363 +420,145 @@ fn collect(text: &str, agent: Agent) -> Option<SessionRecord> {
     }
 }
 
-mod claude {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use serde_json::Value;
-
-    use super::{
-        Agent, SessionRecord, ToolCall, Turn, empty_record, note_cwd, note_model, note_once,
-        note_time, num_field, present, str_field,
-    };
-
-    /// The Claude Code reader's version: bumped when reading the format
-    /// changes in a way that changes the record it produces.
-    pub(super) const COLLECTOR_VERSION: u32 = 1;
-
-    /// Read one `~/.claude/projects/<project>/<session>.jsonl`. One assistant
-    /// message streamed as several lines repeats the same `message.id`, the
-    /// same usage and the same `costUSD`; all three are counted once per id.
-    /// Lines this build does not know are skipped, never fatal — a live log
-    /// is read while its writer may still be running.
-    pub(super) fn collect(text: &str) -> Option<SessionRecord> {
-        let mut record = empty_record(Agent::ClaudeCode, COLLECTOR_VERSION);
-        // Message ids whose usage has been counted, and the turn each id's
-        // blocks belong to.
-        let mut counted: BTreeSet<String> = BTreeSet::new();
-        let mut opened: BTreeMap<String, usize> = BTreeMap::new();
-
-        for line in text.lines() {
-            let Ok(line) = serde_json::from_str::<Value>(line) else {
-                continue; // a torn write in a live log is not a failed sync
-            };
-            let role = match str_field(&line, "type") {
-                "user" => "user",
-                "assistant" => "assistant",
-                _ => continue,
-            };
-            note_once(&mut record.session_id, str_field(&line, "sessionId"));
-            note_cwd(&mut record, str_field(&line, "cwd"));
-            if record.branch.is_none() {
-                record.branch = match str_field(&line, "gitBranch") {
-                    "" => None,
-                    branch => Some(branch.to_owned()),
-                };
-            }
-            let at = str_field(&line, "timestamp").to_owned();
-            note_time(&mut record, &at);
-            let Some(message) = line.get("message") else {
-                continue;
-            };
-            note_model(&mut record, str_field(message, "model"));
-            let message_id = str_field(message, "id").to_owned();
-
-            match role {
-                "user" => {
-                    let text = user_text(message);
-                    // A user line whose only content is a tool result is the
-                    // tool's output coming back — no turn, by design.
-                    if !text.is_empty() {
-                        record.turns.push(Turn {
-                            role: "user".to_owned(),
-                            at: present(&at),
-                            text,
-                            tool_calls: Vec::new(),
-                        });
-                    }
-                }
-                "assistant" => {
-                    let mut text_parts: Vec<String> = Vec::new();
-                    let mut tool_names: Vec<String> = Vec::new();
-                    for block in message
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
-                        match str_field(block, "type") {
-                            "text" if !str_field(block, "text").is_empty() => {
-                                text_parts.push(str_field(block, "text").to_owned());
-                            }
-                            // The input object stays on the machine; the name
-                            // is all that travels.
-                            "tool_use" if !str_field(block, "name").is_empty() => {
-                                tool_names.push(str_field(block, "name").to_owned());
-                            }
-                            // `thinking` blocks and anything newer: dropped.
-                            _ => {}
-                        }
-                    }
-                    // One message streamed as several lines is one turn; the
-                    // id says which. An id-less line is a turn of its own.
-                    let index = match opened.get(&message_id) {
-                        Some(index) => *index,
-                        None => {
-                            record.turns.push(Turn {
-                                role: "assistant".to_owned(),
-                                at: present(&at),
-                                text: String::new(),
-                                tool_calls: Vec::new(),
-                            });
-                            let index = record.turns.len() - 1;
-                            if !message_id.is_empty() {
-                                opened.insert(message_id.clone(), index);
-                            }
-                            index
-                        }
-                    };
-                    {
-                        let turn = &mut record.turns[index];
-                        for part in text_parts {
-                            if !turn.text.is_empty() {
-                                turn.text.push('\n');
-                            }
-                            turn.text.push_str(&part);
-                        }
-                        for name in tool_names {
-                            if turn.tool_calls.len() >= super::MAX_TOOL_CALLS {
-                                break;
-                            }
-                            turn.tool_calls.push(ToolCall { name });
-                        }
-                    }
-                    // Usage and cost are per request, and the request is the
-                    // message: count them on the line that first carries the
-                    // id. A line with no id cannot be deduplicated and is
-                    // taken at its word.
-                    let first_of_its_message = message_id.is_empty() || counted.insert(message_id);
-                    if first_of_its_message {
-                        if let Some(usage) = message.get("usage") {
-                            record.totals.input_tokens += num_field(usage, "input_tokens");
-                            record.totals.output_tokens += num_field(usage, "output_tokens");
-                            record.totals.cache_read_tokens +=
-                                num_field(usage, "cache_read_input_tokens");
-                            record.totals.cache_creation_tokens +=
-                                num_field(usage, "cache_creation_input_tokens");
-                        }
-                        if let Some(cost) = line.get("costUSD").and_then(Value::as_f64) {
-                            record.totals.cost_usd =
-                                Some(record.totals.cost_usd.unwrap_or(0.0) + cost);
-                        }
-                    }
-                }
-                _ => unreachable!("the match above only yields user and assistant"),
-            }
-        }
-        (!record.session_id.is_empty()).then_some(record)
-    }
-
-    /// The text of a user line: a bare string, or the `text` blocks of an
-    /// array. A `tool_result` block is dropped here, on purpose, before it
-    /// can reach any body.
-    fn user_text(message: &Value) -> String {
-        match message.get("content") {
-            Some(Value::String(text)) => text.clone(),
-            Some(Value::Array(blocks)) => blocks
-                .iter()
-                .filter(|block| str_field(block, "type") == "text")
-                .map(|block| str_field(block, "text"))
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        }
-    }
-}
-
-mod codex {
-    use serde_json::Value;
-
-    use super::{
-        Agent, SessionRecord, ToolCall, Totals, Turn, empty_record, note_cwd, note_model,
-        note_once, note_time, num_field, present, str_field,
-    };
-
-    /// The Codex reader's version: bumped when reading the format changes in
-    /// a way that changes the record it produces.
-    pub(super) const COLLECTOR_VERSION: u32 = 1;
-
-    /// Read one `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` of
-    /// `{timestamp, type, payload}` lines. `token_count` events carry
-    /// cumulative `total_token_usage`, so the **last** one is the session's
-    /// totals — summing would multiply every turn in. There is no
-    /// cache-creation figure and no cost in this format; none is invented.
-    pub(super) fn collect(text: &str) -> Option<SessionRecord> {
-        let mut record = empty_record(Agent::Codex, COLLECTOR_VERSION);
-        for line in text.lines() {
-            let Ok(line) = serde_json::from_str::<Value>(line) else {
-                continue; // a torn write in a live log is not a failed sync
-            };
-            let Some(payload) = line.get("payload") else {
-                continue;
-            };
-            let at = str_field(&line, "timestamp").to_owned();
-            match str_field(&line, "type") {
-                "session_meta" => {
-                    note_time(&mut record, &at);
-                    note_once(&mut record.session_id, str_field(payload, "id"));
-                    note_cwd(&mut record, str_field(payload, "cwd"));
-                    if record.branch.is_none() {
-                        record.branch = payload
-                            .get("git")
-                            .and_then(|git| git.get("branch"))
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
-                    }
-                }
-                "turn_context" => {
-                    note_time(&mut record, &at);
-                    note_cwd(&mut record, str_field(payload, "cwd"));
-                    note_model(&mut record, str_field(payload, "model"));
-                }
-                "response_item" => response_item(&mut record, payload, &at),
-                "event_msg" if str_field(payload, "type") == "token_count" => {
-                    if let Some(usage) = payload
-                        .get("info")
-                        .and_then(|info| info.get("total_token_usage"))
-                    {
-                        note_time(&mut record, &at);
-                        // Cumulative, so replace rather than add: the last
-                        // count is the session's.
-                        record.totals = Totals {
-                            input_tokens: num_field(usage, "input_tokens"),
-                            output_tokens: num_field(usage, "output_tokens"),
-                            cache_read_tokens: num_field(usage, "cached_input_tokens"),
-                            cache_creation_tokens: 0,
-                            reasoning_tokens: num_field(usage, "reasoning_output_tokens"),
-                            cost_usd: None,
-                        };
-                    }
-                }
-                // Ghost traces, compactions, whatever else a newer Codex
-                // writes: skipped, not fatal.
-                _ => {}
-            }
-        }
-        (!record.session_id.is_empty()).then_some(record)
-    }
-
-    /// One `response_item`: a message becomes a turn; a tool call names
-    /// itself and nothing else; outputs and reasoning are dropped where the
-    /// parser finds them. Only a payload that produced something moves the
-    /// session's clock.
-    fn response_item(record: &mut SessionRecord, item: &Value, at: &str) {
-        match str_field(item, "type") {
-            "message" => {
-                let role = match str_field(item, "role") {
-                    "assistant" => "assistant",
-                    _ => "user",
-                };
-                let text = item
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .map(|blocks| {
-                        blocks
-                            .iter()
-                            .filter(|block| {
-                                matches!(str_field(block, "type"), "input_text" | "output_text")
-                            })
-                            .map(|block| str_field(block, "text"))
-                            .filter(|text| !text.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .unwrap_or_default();
-                // Every session opens with wrapped bootstrap context — the
-                // project's instructions, the environment summary. Boilerplate,
-                // not conversation: skipped.
-                if text.starts_with("<user_instructions>")
-                    || text.starts_with("<environment_context>")
-                {
-                    return;
-                }
-                if !text.is_empty() {
-                    note_time(record, at);
-                    record.turns.push(Turn {
-                        role: role.to_owned(),
-                        at: present(at),
-                        text,
-                        tool_calls: Vec::new(),
-                    });
-                }
-            }
-            // A call attaches to a trailing tool-only turn — several parallel
-            // calls are one action — or starts one. The last message turn is
-            // not its author: the call belongs to the action after it.
-            "function_call" | "custom_tool_call" => {
-                let name = str_field(item, "name");
-                if name.is_empty() {
-                    return;
-                }
-                note_time(record, at);
-                match record.turns.last_mut() {
-                    Some(turn)
-                        if turn.role == "assistant"
-                            && turn.text.is_empty()
-                            && turn.tool_calls.len() < super::MAX_TOOL_CALLS =>
-                    {
-                        turn.tool_calls.push(ToolCall {
-                            name: name.to_owned(),
-                        });
-                    }
-                    _ => record.turns.push(Turn {
-                        role: "assistant".to_owned(),
-                        at: present(at),
-                        text: String::new(),
-                        tool_calls: vec![ToolCall {
-                            name: name.to_owned(),
-                        }],
-                    }),
-                }
-            }
-            // `function_call_output`, `custom_tool_call_output`, `reasoning`
-            // and anything else: the tool's output stays on the machine.
-            _ => {}
-        }
-    }
+/// The tool calls a record names, across every turn.
+fn tool_call_count(record: &SessionRecord) -> usize {
+    record.turns.iter().map(|turn| turn.tool_calls.len()).sum()
 }
 
 // ---------------------------------------------------------------------------
-// Bounding and redacting the body
+// Detail, bounding and redacting the body
 
-/// The record as bytes, ready for redaction. Fields go out in declaration
-/// order and nothing in a record is read from the clock or the environment,
-/// so one session is one byte string wherever it is parsed — the property the
-/// ledger's `(scope, sha256)` idempotency rests on.
+/// Bring a record down to `detail`: `messages` drops the reasoning turns and
+/// every tool call's input and result; `summary` cuts every turn's text to
+/// [`SUMMARY_TURN_CHARS`] besides. Applied before anything else touches the
+/// record, so what a level leaves out is never elided, redacted or sent.
+fn apply_detail(record: &mut SessionRecord, detail: Detail) {
+    record.detail = detail;
+    if detail == Detail::Full {
+        return;
+    }
+    record.turns.retain(|turn| turn.role != Role::Reasoning);
+    for turn in &mut record.turns {
+        for call in &mut turn.tool_calls {
+            *call = ToolCall {
+                name: std::mem::take(&mut call.name),
+                ..ToolCall::default()
+            };
+        }
+        // A step that was only tool calls and said nothing stays: its
+        // names are the shape of the work.
+        if detail == Detail::Summary {
+            truncate_text(&mut turn.text, SUMMARY_TURN_CHARS);
+        }
+    }
+}
+
+/// Every string of the record a person or a tool wrote, mutably — the ones
+/// home elision and redaction run over. Tool names and formats are this
+/// module's vocabulary or the agent's, not content.
+fn content_strings(record: &mut SessionRecord) -> Vec<&mut String> {
+    let mut strings: Vec<&mut String> = vec![&mut record.repo];
+    if let Some(branch) = record.branch.as_mut() {
+        strings.push(branch);
+    }
+    for turn in &mut record.turns {
+        strings.push(&mut turn.text);
+        for call in &mut turn.tool_calls {
+            for field in [&mut call.path, &mut call.input, &mut call.output] {
+                if let Some(value) = field.as_mut() {
+                    strings.push(value);
+                }
+            }
+        }
+    }
+    strings
+}
+
+/// The record as bytes. Fields go out in declaration order and nothing in a
+/// record is read from the clock or the environment, so one session is one
+/// byte string wherever it is parsed — the property the ledger's
+/// `(scope, sha256)` idempotency rests on.
 fn serialise(record: &SessionRecord) -> String {
     serde_json::to_string(record).expect("a session record always serialises")
 }
 
-/// Bound a record for the wire: every turn's text cut to
-/// [`MAX_TURN_TEXT_CHARS`] first, then whole trailing turns off until the
-/// body fits [`MAX_SESSION_BODY_BYTES`] — measured once, subtracted
-/// arithmetically, not one serialisation per pop. The tail goes, the head
-/// stays, and a record that lost anything says so: `truncated` travels with
-/// it.
-fn cap(record: &mut SessionRecord) {
+/// How long `text` is once escaped into a JSON string, quotes excluded.
+fn escaped_len(text: &str) -> usize {
+    serde_json::to_string(text)
+        .expect("a string always serialises")
+        .len()
+        - 2
+}
+
+/// Clip every message to [`MAX_TEXT_BYTES`]: the one per-text bound every
+/// level shares, and the reason every string fits redaction's input.
+fn clip_texts(record: &mut SessionRecord) {
     for turn in &mut record.turns {
-        truncate_text(&mut turn.text, MAX_TURN_TEXT_CHARS);
-    }
-    let full = serialise(record);
-    if full.len() <= MAX_SESSION_BODY_BYTES {
-        return;
-    }
-    // Removing a trailing turn takes its own JSON plus the comma before it.
-    let mut excess = (full.len() - MAX_SESSION_BODY_BYTES) as isize;
-    while excess > 0 {
-        let Some(turn) = record.turns.pop() else {
-            break; // metadata alone is over the cap; nothing more to shed
-        };
-        excess -= turn_bytes(&turn) as isize + 1;
-        record.truncated = true;
+        if turn.text.len() > MAX_TEXT_BYTES {
+            turn.text = clean::clip(&turn.text, MAX_TEXT_BYTES);
+        }
     }
 }
 
-/// The bytes one turn occupies in the serialised body.
-fn turn_bytes(turn: &Turn) -> usize {
-    serde_json::to_string(turn)
-        .expect("a turn always serialises")
-        .len()
+/// Bound a record for the wire: whole turns off until the body fits both
+/// [`MAX_SESSION_BODY_BYTES`] raw and [`MAX_ESCAPED_BODY_BYTES`] escaped —
+/// measured once, subtracted arithmetically, not one serialisation per pop.
+/// The opening turn stays (it is what the session was for), then the oldest
+/// go, so what is kept is the start and the most recent stretch; an `event`
+/// turn after the opening says how many were removed, and the record says so
+/// in `truncated` and `omitted_turns`. Deterministic, like everything else
+/// here: the same session caps to the same bytes.
+fn cap(record: &mut SessionRecord) {
+    let full = serialise(record);
+    let (raw, escaped) = (full.len(), escaped_len(&full));
+    if raw <= MAX_SESSION_BODY_BYTES && escaped <= MAX_ESCAPED_BODY_BYTES {
+        return;
+    }
+    // Room for the marker turn the cut leaves behind.
+    const MARKER_ROOM: usize = 256;
+    let mut excess_raw = (raw + MARKER_ROOM) as isize - MAX_SESSION_BODY_BYTES as isize;
+    let mut excess_escaped = (escaped + 2 * MARKER_ROOM) as isize - MAX_ESCAPED_BODY_BYTES as isize;
+    // Keep the opening turn when there is more than one to shed from.
+    let keep = usize::from(record.turns.len() > 1);
+    let mut cut = keep;
+    while (excess_raw > 0 || excess_escaped > 0) && cut < record.turns.len() {
+        let turn = serde_json::to_string(&record.turns[cut]).expect("a turn always serialises");
+        // A removed turn takes its own JSON plus the comma before it.
+        excess_raw -= turn.len() as isize + 1;
+        excess_escaped -= escaped_len(&turn) as isize + 1;
+        cut += 1;
+    }
+    let omitted = cut - keep;
+    if omitted > 0 {
+        let at = record.turns[keep..cut]
+            .iter()
+            .find_map(|turn| turn.at.clone())
+            .unwrap_or_default();
+        record.turns.drain(keep..cut);
+        record.turns.insert(
+            keep,
+            Turn::new(
+                Role::Event,
+                &at,
+                &format!("{omitted} earlier turn(s) omitted to fit the upload size cap"),
+            ),
+        );
+    }
+    record.truncated = true;
+    record.omitted_turns += omitted;
+    // A single turn over the cap on its own: its text and tool results go,
+    // the shape stays.
+    if serialise(record).len() > MAX_SESSION_BODY_BYTES
+        || escaped_len(&serialise(record)) > MAX_ESCAPED_BODY_BYTES
+    {
+        for turn in &mut record.turns {
+            truncate_text(&mut turn.text, SUMMARY_TURN_CHARS);
+            for call in &mut turn.tool_calls {
+                call.input = None;
+                call.output = None;
+            }
+        }
+    }
 }
 
 /// `text` cut to at most `max` characters, on a char boundary.
@@ -671,11 +569,12 @@ fn truncate_text(text: &mut String, max: usize) {
 }
 
 /// Rewrite the places this machine could leak from a record, before redaction
-/// runs: the home prefix becomes `~`, in the repo and every turn's text, and
-/// so does Claude Code's dash-encoded project-dir form of any path **under
-/// `$HOME`** — that encoding shows up precisely in text that never wrote the
-/// home out. Encoded forms of directories outside `$HOME` are prose as far as
-/// the reader is concerned, and no home means nothing to rewrite.
+/// runs: the home prefix becomes `~`, in the repo and every string a turn
+/// carries, and so does Claude Code's dash-encoded project-dir form of any
+/// path **under `$HOME`** — that encoding shows up precisely in text that
+/// never wrote the home out. Encoded forms of directories outside `$HOME` are
+/// prose as far as the reader is concerned, and no home means nothing to
+/// rewrite.
 fn elide_home(record: &mut SessionRecord, home: &Option<PathBuf>) {
     let Some(home) = home else { return };
     let home_text = home.to_string_lossy();
@@ -693,9 +592,7 @@ fn elide_home(record: &mut SessionRecord, home: &Option<PathBuf>) {
     // than left as `~-demo` by its shorter prefix.
     needles.sort_by_key(|needle| std::cmp::Reverse(needle.len()));
     needles.dedup();
-    for text in
-        std::iter::once(&mut record.repo).chain(record.turns.iter_mut().map(|turn| &mut turn.text))
-    {
+    for text in content_strings(record) {
         for needle in &needles {
             if text.contains(needle.as_str()) {
                 *text = text.replace(needle.as_str(), "~");
@@ -704,25 +601,115 @@ fn elide_home(record: &mut SessionRecord, home: &Option<PathBuf>) {
     }
 }
 
-/// Redact the serialised body, on this machine: what redaction produces is
-/// what the server is sent.
+/// Redact every content string of the record in place, on this machine, one
+/// value at a time — never the serialised JSON, where a match can swallow
+/// half of an escape (`\n` + `name@host` read as `nname@host`) and leave
+/// bytes that no longer parse. Returns the number of findings.
+fn redact_record(record: &mut SessionRecord, file: &Path) -> CliResult<usize> {
+    let mut findings = 0usize;
+    for text in content_strings(record) {
+        if text.is_empty() {
+            continue;
+        }
+        let (clean, found) = redact(text, Policy::Redact)
+            .map_err(|error| err(format!("{}: {error}", file.display())))?;
+        findings += found.len();
+        *text = clean;
+    }
+    Ok(findings)
+}
+
+/// The body for a record whose strings are already redacted: serialised,
+/// then checked as a whole the way the server will read it. Every value was
+/// redacted on its own, so this pass ordinarily finds nothing; a finding only
+/// the serialised form shows (a pattern straddling an escape or two values)
+/// is taken all the same — a secret never travels to keep a body parseable —
+/// and a replacement that broke an escape is repaired ([`repair_escapes`]).
 fn build_body(record: &SessionRecord, file: &Path) -> CliResult<(String, usize)> {
     let body = serialise(record);
     match redact(&body, Policy::Redact) {
-        Ok((clean, findings)) => Ok((clean, findings.len())),
+        Ok((_, findings)) if findings.is_empty() => Ok((body, 0)),
+        Ok((clean, findings)) => {
+            let parses = |text: &str| serde_json::from_str::<Value>(text).is_ok();
+            let clean = if parses(&clean) {
+                clean
+            } else {
+                let repaired = repair_escapes(&clean);
+                if parses(&repaired) { repaired } else { clean }
+            };
+            Ok((clean, findings.len()))
+        }
         Err(error) => Err(err(format!("{}: {error}", file.display()))),
     }
+}
+
+/// Every backslash that does not start a valid JSON escape, doubled — what a
+/// replacement that swallowed half an escape (`\n` + match → `\[REDACTED…`)
+/// leaves behind becomes a literal backslash again.
+fn repair_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => {
+                out.push('\\');
+                out.push(chars.next().expect("peeked"));
+            }
+            _ => out.push_str("\\\\"),
+        }
+    }
+    out
+}
+
+/// Everything between a parsed record and its body, in the one order that is
+/// safe: the level first (what it leaves out is never touched again), then
+/// home elision, the per-text clip, per-value redaction when a body is
+/// wanted, and the size cap last, on the redacted sizes. Returns the body and
+/// its finding count when `build` is set.
+fn prepare(
+    record: &mut SessionRecord,
+    detail: Detail,
+    home: &Option<PathBuf>,
+    build: bool,
+    file: &Path,
+) -> CliResult<Option<(String, usize)>> {
+    apply_detail(record, detail);
+    elide_home(record, home);
+    clip_texts(record);
+    if !build {
+        cap(record);
+        return Ok(None);
+    }
+    let findings = redact_record(record, file)?;
+    cap(record);
+    let (body, more) = build_body(record, file)?;
+    Ok(Some((body, findings + more)))
 }
 
 // ---------------------------------------------------------------------------
 // The opt-in file
 
 /// The opt-in file's shape on disk; the allowed paths as a set, so the file
-/// reads back the same however many times `logs allow` ran.
-#[derive(Debug, Serialize, Deserialize)]
+/// reads back the same however many times `logs allow` ran, and each path's
+/// detail level beside it. A path with no level is `full`; a level this build
+/// does not know makes the file unreadable, never a guess.
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct AllowlistFile {
     version: u32,
     allowed: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    detail: BTreeMap<String, Detail>,
+}
+
+impl AllowlistFile {
+    /// The level an allowed root sends at.
+    fn level(&self, root: &str) -> Detail {
+        self.detail.get(root).copied().unwrap_or(Detail::Full)
+    }
 }
 
 /// The CLI's configuration directory: `$XDG_CONFIG_HOME/livingbrain` when
@@ -755,16 +742,19 @@ fn allowlist_path() -> CliResult<PathBuf> {
 /// nothing-opted-in case; a corrupt one is an error — silently reading a
 /// broken allowlist as empty would sync exactly the sessions the reader meant
 /// to keep off the wire.
-fn read_allowlist() -> CliResult<BTreeSet<String>> {
+fn read_allowlist() -> CliResult<AllowlistFile> {
     let path = allowlist_path()?;
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AllowlistFile {
+                version: ALLOWLIST_VERSION,
+                ..AllowlistFile::default()
+            });
+        }
         Err(error) => return Err(err(format!("could not read {}: {error}", path.display()))),
     };
-    parse_allowlist(&bytes)
-        .map_err(|error| err(format!("{}: {error}", path.display())))
-        .map(|file| file.allowed)
+    parse_allowlist(&bytes).map_err(|error| err(format!("{}: {error}", path.display())))
 }
 
 /// Parse an allowlist file's bytes, refusing a version this build does not
@@ -785,18 +775,14 @@ fn parse_allowlist(bytes: &[u8]) -> Result<AllowlistFile, String> {
 /// Write the allowlist back, creating the config directory if this is the
 /// first thing the CLI has ever persisted there. Returns the path, for the
 /// report.
-fn write_allowlist(allowed: &BTreeSet<String>) -> CliResult<PathBuf> {
+fn write_allowlist(file: &AllowlistFile) -> CliResult<PathBuf> {
     let path = allowlist_path()?;
     let parent = path
         .parent()
         .ok_or_else(|| err("the config path has no parent"))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| err(format!("could not create {}: {error}", parent.display())))?;
-    let body = serde_json::to_vec_pretty(&AllowlistFile {
-        version: ALLOWLIST_VERSION,
-        allowed: allowed.clone(),
-    })
-    .expect("an allowlist always serialises");
+    let body = serde_json::to_vec_pretty(file).expect("an allowlist always serialises");
     std::fs::write(&path, body)
         .map_err(|error| err(format!("could not write {}: {error}", path.display())))?;
     Ok(path)
@@ -869,45 +855,113 @@ fn opted_in(record: &SessionRecord, allowed: &BTreeSet<String>) -> bool {
     !record.cwds.is_empty() && record.cwds.iter().all(|cwd| cwd_opted_in(cwd, allowed))
 }
 
-/// `logs allow` and `logs deny`: insert or remove one path, then print the
-/// list. Both are idempotent, and both write the file even when nothing
-/// changed, so the reader sees where the decision lives.
-fn set_allowlist(path: Option<&str>, add: bool, out: &Out) -> CliResult<()> {
+/// The level a session is sent at: for each working directory, the level
+/// of the most specific allowed root it sits inside (raw or resolved), and
+/// across directories the most restrictive of those. Only meaningful for a
+/// session [`opted_in`] already admitted.
+fn detail_for(record: &SessionRecord, allowlist: &AllowlistFile) -> Detail {
+    record
+        .cwds
+        .iter()
+        .filter_map(|cwd| {
+            let resolved = std::fs::canonicalize(cwd)
+                .map(|path| path.to_string_lossy().into_owned())
+                .ok();
+            allowlist
+                .allowed
+                .iter()
+                .filter(|root| {
+                    is_inside(cwd, root)
+                        || resolved
+                            .as_deref()
+                            .is_some_and(|resolved| is_inside(resolved, root))
+                })
+                .max_by_key(|root| root.len())
+                .map(|root| allowlist.level(root))
+        })
+        .min()
+        .unwrap_or(Detail::Full)
+}
+
+/// `logs allow`: insert one path, at `detail` when given — a new path
+/// otherwise at `full`, an allowed one keeping its level. Idempotent, and it
+/// writes the file even when nothing changed, so the reader sees where the
+/// decision lives.
+fn allow(path: Option<&str>, detail: Option<Detail>, out: &Out) -> CliResult<()> {
     let target = normalise_path(path.unwrap_or("."))?;
-    let mut allowed = read_allowlist()?;
-    let changed = if add {
-        allowed.insert(target.clone())
-    } else {
-        allowed.remove(&target)
-    };
-    let file = write_allowlist(&allowed)?;
-    let list: Vec<&String> = allowed.iter().collect();
+    let mut allowlist = read_allowlist()?;
+    let before = allowlist.level(&target);
+    let added = allowlist.allowed.insert(target.clone());
+    let level = detail.unwrap_or(if added { Detail::Full } else { before });
+    allowlist.detail.insert(target.clone(), level);
+    let changed = added || level != before;
+    let file = write_allowlist(&allowlist)?;
+    print_allowlist(&allowlist, changed, &file, out, || match (added, changed) {
+        (true, _) => println!("Allowed {target} (detail: {}).", level.as_str()),
+        (false, true) => println!("Allowed {target}, now at detail {}.", level.as_str()),
+        (false, false) => println!("Already allowed: {target} (detail: {})", level.as_str()),
+    });
+    Ok(())
+}
+
+/// `logs deny`: remove one path and its level. Idempotent.
+fn deny(path: Option<&str>, out: &Out) -> CliResult<()> {
+    let target = normalise_path(path.unwrap_or("."))?;
+    let mut allowlist = read_allowlist()?;
+    let changed = allowlist.allowed.remove(&target);
+    allowlist.detail.remove(&target);
+    let file = write_allowlist(&allowlist)?;
+    print_allowlist(&allowlist, changed, &file, out, || {
+        if changed {
+            println!("No longer allowed: {target}");
+        } else {
+            println!("Was not opted in: {target}");
+        }
+    });
+    Ok(())
+}
+
+/// The report `allow` and `deny` share: the list, each path's level, whether
+/// anything changed, and where the file is.
+fn print_allowlist(
+    allowlist: &AllowlistFile,
+    changed: bool,
+    file: &Path,
+    out: &Out,
+    human: impl FnOnce(),
+) {
+    let list: Vec<&String> = allowlist.allowed.iter().collect();
     out.json_or(
         &json!({
             "allowed": list,
+            "detail": levels(allowlist),
             "changed": changed,
             "config": file.display().to_string(),
         }),
         || {
-            match (add, changed) {
-                (true, true) => println!("Allowed {target}."),
-                (true, false) => println!("Already allowed: {target}"),
-                (false, true) => println!("No longer allowed: {target}"),
-                (false, false) => println!("Was not opted in: {target}"),
-            }
+            human();
             println!("Opt-in file: {}", file.display());
         },
     );
-    Ok(())
+}
+
+/// Every allowed path's level, `full` filled in where the file names none.
+fn levels(allowlist: &AllowlistFile) -> BTreeMap<&str, &'static str> {
+    allowlist
+        .allowed
+        .iter()
+        .map(|root| (root.as_str(), allowlist.level(root).as_str()))
+        .collect()
 }
 
 fn status(out: &Out) -> CliResult<()> {
-    let allowed = read_allowlist()?;
+    let allowlist = read_allowlist()?;
     let file = allowlist_path()?;
-    let list: Vec<&String> = allowed.iter().collect();
+    let list: Vec<&String> = allowlist.allowed.iter().collect();
     out.json_or(
         &json!({
             "allowed": list,
+            "detail": levels(&allowlist),
             "config": file.display().to_string(),
         }),
         || {
@@ -916,7 +970,7 @@ fn status(out: &Out) -> CliResult<()> {
             } else {
                 println!("Opted in ({}):", list.len());
                 for path in &list {
-                    println!("  {path}");
+                    println!("  {path} (detail: {})", allowlist.level(path).as_str());
                 }
             }
             println!("Opt-in file: {}", file.display());
@@ -962,9 +1016,15 @@ fn sync(
 ) -> CliResult<()> {
     let (home, claude_dir, codex_dir) = session_dirs(claude_dir, codex_dir)?;
     let only = resolve_only(only)?;
-    let allowed = read_allowlist()?;
-    let (mut sessions, unreadable, unparsed) =
-        collect_sessions(&claude_dir, &codex_dir, &allowed, &home, only.as_ref())?;
+    let allowlist = read_allowlist()?;
+    let (mut sessions, unreadable, unparsed) = collect_sessions(
+        &claude_dir,
+        &codex_dir,
+        &allowlist,
+        &home,
+        only.as_ref(),
+        false,
+    )?;
     upload(&mut sessions, dry_run, api_url)?;
     report(
         &sessions,
@@ -1030,22 +1090,27 @@ fn show(
 ) -> CliResult<()> {
     let (home, claude_dir, codex_dir) = session_dirs(claude_dir, codex_dir)?;
     let only = resolve_only(&[file.to_path_buf()])?;
-    let allowed = read_allowlist()?;
-    let (sessions, _, _) =
-        collect_sessions(&claude_dir, &codex_dir, &allowed, &home, only.as_ref())?;
+    let allowlist = read_allowlist()?;
+    let (sessions, _, _) = collect_sessions(
+        &claude_dir,
+        &codex_dir,
+        &allowlist,
+        &home,
+        only.as_ref(),
+        true,
+    )?;
     let Some(session) = sessions.into_iter().next() else {
         return Err(err(format!(
             "{}: no agent session in this file",
             file.display()
         )));
     };
-    let (body, redacted) = match session.body {
-        Some(body) => (body, session.redacted),
-        None => build_body(&session.record, &session.file)?,
-    };
-    // The body is redacted as text, so a replacement can land inside a JSON
-    // escape and leave bytes that no longer parse. `body` is always the exact
-    // text a sync would send; `record` is its parse, or null when it has none.
+    let redacted = session.redacted;
+    let body = session
+        .body
+        .expect("`show` builds a body for every session it reads");
+    // Every value is redacted before serialisation, so the body parses;
+    // `record` stays nullable for the reader's sake (and an older body).
     let record: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     out.json_or(
         &json!({
@@ -1062,15 +1127,17 @@ fn show(
 
 /// Walk both agents' directories, parse every session file, and decide the
 /// opt-in — in that order: a session that is not opted in never produces
-/// bytes. Returns the sessions plus two kinds of failure: `unreadable` files
+/// bytes, unless `show_all` (`logs show`, which prints and sends nothing)
+/// asks for every body; a session that is not opted in is shown at `full`. Returns the sessions plus two kinds of failure: `unreadable` files
 /// could not be read at all, `unparsed` ones were read but yielded no session
 /// (empty or foreign `.jsonl`).
 fn collect_sessions(
     claude_dir: &Path,
     codex_dir: &Path,
-    allowed: &BTreeSet<String>,
+    allowlist: &AllowlistFile,
     home: &Option<PathBuf>,
     only: Option<&BTreeSet<PathBuf>>,
+    show_all: bool,
 ) -> CliResult<(Vec<Prepared>, usize, usize)> {
     let mut sessions = Vec::new();
     let (mut unreadable, mut unparsed) = (0usize, 0usize);
@@ -1105,16 +1172,18 @@ fn collect_sessions(
             };
             // Opt-in is decided on the cwds as the log recorded them, before
             // anything is rewritten for the wire.
-            let opted = opted_in(&record, allowed);
-            elide_home(&mut record, home);
-            cap(&mut record);
-            let (body, redacted) = if opted {
-                let (body, redacted) = build_body(&record, &file)?;
-                (Some(body), redacted)
+            let opted = opted_in(&record, &allowlist.allowed);
+            let detail = if opted {
+                detail_for(&record, allowlist)
             } else {
-                (None, 0)
+                Detail::Full
             };
-            let tool_calls = record.turns.iter().map(|turn| turn.tool_calls.len()).sum();
+            let built = prepare(&mut record, detail, home, opted || show_all, &file)?;
+            let (body, redacted) = match built {
+                Some((body, redacted)) => (Some(body), redacted),
+                None => (None, 0),
+            };
+            let tool_calls = tool_call_count(&record);
             let planned_note = if opted { note::plan(&record) } else { None };
             sessions.push(Prepared {
                 record,
@@ -1253,6 +1322,7 @@ fn report(
             "totals": serde_json::to_value(&session.record.totals)
                 .expect("totals always serialise"),
             "truncated": session.record.truncated,
+            "detail": session.record.detail,
             "status": status,
             "branch": session.record.branch,
             "started_at": session.record.started_at,
@@ -1432,9 +1502,14 @@ fn short_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use serde_json::Value;
+
     use super::{
-        Agent, MAX_SESSION_BODY_BYTES, MAX_TURN_TEXT_CHARS, cap, collect, elide_home, is_inside,
-        parse_allowlist, project_of, serialise, truncate_text,
+        Agent, AllowlistFile, Detail, MAX_ESCAPED_BODY_BYTES, MAX_SESSION_BODY_BYTES, Role,
+        SUMMARY_TURN_CHARS, apply_detail, cap, collect, elide_home, escaped_len, is_inside,
+        parse_allowlist, prepare, project_of, serialise, truncate_text,
     };
 
     /// The fixtures, embedded at compile time: the same bytes the integration
@@ -1445,16 +1520,51 @@ mod tests {
     const CODEX_SESSION: &str = include_str!(
         "../tests/fixtures/logs/codex/sessions/2026/10/01/rollout-2026-10-01T09-31-00-a1b2c3d4-e5f6-4a9b-8c7d-3e5f7a9b1c2d.jsonl"
     );
+    /// The full-detail fixtures: tool calls with inputs and results, a long
+    /// output, boilerplate, interruptions, and secrets inside tool output.
+    const CLAUDE_FULL: &str = include_str!(
+        "../tests/fixtures/logs-full/claude-5e1f2a3b-4c5d-4e6f-8a7b-9c0d1e2f3a4b.jsonl"
+    );
+    const CODEX_FULL: &str = include_str!(
+        "../tests/fixtures/logs-full/codex-b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e.jsonl"
+    );
+
+    /// The fixtures with their placeholders filled by key-shaped values,
+    /// assembled from fragments so no source file carries one.
+    fn planted(text: &str) -> String {
+        text.replace(
+            "__PLANTED_ANTHROPIC_KEY__",
+            &["sk-", "ant-", "api03-fake", &"0".repeat(22)].concat(),
+        )
+        .replace(
+            "__PLANTED_AWS_KEY__",
+            &["AKIA", "IOSFODNN7", "EXAMPLE"].concat(),
+        )
+    }
+
+    /// A record taken all the way to its body, as `logs sync` takes it.
+    fn body_of(text: &str, agent: Agent, detail: Detail) -> (String, usize) {
+        let mut record = collect(&planted(text), agent).expect("a session");
+        prepare(
+            &mut record,
+            detail,
+            &Some("/home/alice".into()),
+            true,
+            Path::new("fixture.jsonl"),
+        )
+        .expect("prepares")
+        .expect("a body")
+    }
 
     /// The Claude fixture's numbers, hand-computed: the one assistant message
     /// is streamed as two lines repeating the same `message.id`, usage and
-    /// `costUSD`, so all three are counted once; the tool-result user line,
-    /// the summary, the progress mark and the torn last line contribute
-    /// nothing.
+    /// `costUSD`, so all three are counted once; the summary, the progress
+    /// mark and the torn last line contribute nothing, and the tool result
+    /// lands on its call.
     #[test]
     fn claude_totals_count_a_split_message_once() {
         let record = collect(CLAUDE_SESSION, Agent::ClaudeCode).expect("a session");
-        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.schema_version, 2);
         assert_eq!(record.agent, "claude_code");
         assert_eq!(record.session_id, "3f2a9c1e-5b7d-4e8a-9c1f-2a4b6d8e0f1a");
         assert_eq!(record.repo, "/home/alice/code/demo");
@@ -1466,28 +1576,20 @@ mod tests {
             Some("2026-10-01T09:30:00.000Z")
         );
         assert_eq!(record.ended_at.as_deref(), Some("2026-10-01T09:30:08.000Z"));
-        // usage: 120 + 45 + 30 + 15, once; cost 0.012, once.
         assert_eq!(record.totals.input_tokens, 120);
         assert_eq!(record.totals.output_tokens, 45);
         assert_eq!(record.totals.cache_read_tokens, 30);
         assert_eq!(record.totals.cache_creation_tokens, 15);
         assert_eq!(record.totals.reasoning_tokens, 0);
         assert_eq!(record.totals.cost_usd, Some(0.012));
-        // user prompt + the one merged assistant message; the tool-result
-        // line, the summary, the progress mark and the torn write all
-        // contributed nothing.
         assert_eq!(record.turns.len(), 2);
-        assert_eq!(record.turns[0].role, "user");
-        assert_eq!(record.turns[1].role, "assistant");
-        assert_eq!(
-            record.turns[1]
-                .tool_calls
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            ["Bash"]
-        );
-        // Both halves of the split message's text landed in the one turn.
+        assert_eq!(record.turns[0].role, Role::User);
+        assert_eq!(record.turns[1].role, Role::Assistant);
+        let call = &record.turns[1].tool_calls[0];
+        assert_eq!(call.name, "Bash");
+        assert_eq!(call.input.as_deref(), Some("ls ~/.claude/projects"));
+        assert_eq!(call.output.as_deref(), Some("demo\nside"));
+        assert_eq!(call.status, Some("ok"));
         assert!(record.turns[1].text.contains("They live under"));
         assert!(record.turns[1].text.contains("livingbrain logs sync"));
         assert!(!record.truncated);
@@ -1495,8 +1597,7 @@ mod tests {
 
     /// The Codex fixture's numbers, hand-computed: two cumulative
     /// `token_count` events, the last one (800/120/96/40) is the session's.
-    /// The wrapped `<user_instructions>` opener makes no turn and moves no
-    /// clock; the tool call's arguments and its output are nowhere.
+    /// The wrapped `<user_instructions>` opener makes no turn.
     #[test]
     fn codex_takes_the_last_cumulative_token_count() {
         let record = collect(CODEX_SESSION, Agent::Codex).expect("a session");
@@ -1509,8 +1610,6 @@ mod tests {
             record.started_at.as_deref(),
             Some("2026-10-01T09:31:00.123Z")
         );
-        // The unknown `ghost_trace` line carries a later timestamp and still
-        // did not move `ended_at`: skipped lines contribute nothing.
         assert_eq!(record.ended_at.as_deref(), Some("2026-10-01T09:31:30.000Z"));
         assert_eq!(record.totals.input_tokens, 800);
         assert_eq!(record.totals.output_tokens, 120);
@@ -1518,32 +1617,241 @@ mod tests {
         assert_eq!(record.totals.cache_creation_tokens, 0);
         assert_eq!(record.totals.reasoning_tokens, 40);
         assert_eq!(record.totals.cost_usd, None);
-        // user prompt, the tool-only turn carrying the call, the answer.
         assert_eq!(record.turns.len(), 3);
-        assert_eq!(record.turns[0].role, "user");
-        assert_eq!(record.turns[1].role, "assistant");
+        assert_eq!(record.turns[1].role, Role::Assistant);
         assert_eq!(record.turns[1].text, "");
+        assert_eq!(record.turns[1].tool_calls[0].name, "shell");
+        assert_eq!(record.turns[1].tool_calls[0].input.as_deref(), Some("ls"));
         assert_eq!(
-            record.turns[1]
-                .tool_calls
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            ["shell"]
+            record.turns[1].tool_calls[0].output.as_deref(),
+            Some("README.md\nsrc\n")
         );
         let everywhere: String = serialise(&record);
         assert!(
             !everywhere.contains("user_instructions"),
             "bootstrap context leaked: {everywhere}"
         );
-        assert!(
-            !everywhere.contains("README.md"),
-            "tool output leaked: {everywhere}"
+    }
+
+    /// The full Claude fixture: boilerplate gone, thinking as reasoning, the
+    /// tool calls in order with inputs and results, the long output clipped
+    /// head and tail, the interruption an event, the slash command a turn.
+    #[test]
+    fn claude_full_detail_reads_the_whole_conversation() {
+        let record = collect(CLAUDE_FULL, Agent::ClaudeCode).expect("a session");
+        let roles: Vec<Role> = record.turns.iter().map(|turn| turn.role).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::User,
+                Role::Reasoning,
+                Role::Assistant,
+                Role::Assistant,
+                Role::Assistant,
+                Role::Event,
+                Role::User,
+                Role::Assistant,
+            ],
+            "{record:#?}"
         );
-        assert!(
-            !everywhere.contains("cmd"),
-            "tool input leaked: {everywhere}"
+        assert_eq!(record.turns[0].text, "Fix the failing test in src/lib.rs");
+        assert_eq!(
+            record.turns[1].text,
+            "The test output will say which assertion fails."
         );
+        let test_run = &record.turns[2].tool_calls[0];
+        assert_eq!(record.turns[2].text, "Running the tests first.");
+        assert_eq!(test_run.input.as_deref(), Some("cargo test -p demo"));
+        assert_eq!(test_run.format, Some("shell"));
+        assert_eq!(test_run.status, Some("error"));
+        assert_eq!(test_run.exit_code, Some(101));
+        let output = test_run.output.as_deref().expect("an output");
+        assert!(
+            output.len() <= super::tools::MAX_TOOL_OUTPUT_BYTES + 64,
+            "{}",
+            output.len()
+        );
+        assert!(output.starts_with("Exit code 101\ntest case_0000"));
+        assert!(output.ends_with("0 passed; 220 failed"));
+        assert!(output.contains("bytes omitted"));
+        let edit = &record.turns[3].tool_calls[0];
+        assert_eq!(edit.name, "Edit");
+        assert_eq!(
+            edit.path.as_deref(),
+            Some("/home/alice/code/demo/src/lib.rs")
+        );
+        assert_eq!(
+            edit.input.as_deref(),
+            Some("-assert_eq!(left, right + 1);\n+assert_eq!(left, right);")
+        );
+        assert_eq!(
+            record.turns[5].text,
+            "Interrupted by the user during a tool call"
+        );
+        assert_eq!(record.turns[6].text, "/review src/lib.rs");
+        let all = serialise(&record);
+        for leaked in [
+            "system-reminder",
+            "IDE",
+            "Image: source",
+            "local-command",
+            "Reviewed.",
+        ] {
+            assert!(!all.contains(leaked), "{leaked} leaked: {all}");
+        }
+    }
+
+    /// The full Codex fixture: developer and bootstrap messages are not
+    /// turns, the reasoning summary is (its encrypted content never), the
+    /// three calls carry their commands, patch and results, and the
+    /// interruption written twice is one event.
+    #[test]
+    fn codex_full_detail_reads_the_whole_conversation() {
+        let record = collect(CODEX_FULL, Agent::Codex).expect("a session");
+        let roles: Vec<Role> = record.turns.iter().map(|turn| turn.role).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::User,
+                Role::Reasoning,
+                Role::Assistant,
+                Role::Assistant,
+                Role::Event,
+            ],
+            "{record:#?}"
+        );
+        assert_eq!(record.turns[0].text, "Fix all the TODOs");
+        assert!(record.turns[1].text.contains("I'll search the tree first."));
+        let calls = &record.turns[2].tool_calls;
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].input.as_deref(), Some("rg -n TODO"));
+        assert_eq!(
+            calls[0].output.as_deref(),
+            Some("src/a.rs:3:// TODO: remove\n")
+        );
+        assert_eq!(calls[0].exit_code, Some(0));
+        assert_eq!(calls[0].status, Some("ok"));
+        assert_eq!(calls[1].name, "apply_patch");
+        assert_eq!(calls[1].format, Some("diff"));
+        assert!(calls[1].input.as_deref().unwrap().contains("+// done"));
+        assert_eq!(
+            calls[1].output.as_deref(),
+            Some("Success. Updated the following files:\nM src/a.rs\n")
+        );
+        assert_eq!(
+            record.turns[3].text,
+            "Done: the one TODO in src/a.rs is resolved."
+        );
+        let all = serialise(&record);
+        for leaked in [
+            "permissions instructions",
+            "environment_context",
+            "AGENTS.md",
+            "Always run the tests",
+            "encrypted",
+            "turn_aborted",
+        ] {
+            assert!(!all.contains(leaked), "{leaked} leaked: {all}");
+        }
+        assert_eq!(record.totals.input_tokens, 1500);
+    }
+
+    /// Secrets inside tool output are redacted on this machine, per value,
+    /// and the body stays valid JSON — the regression where redacting the
+    /// serialised text let an email match swallow the `n` of a `\n` escape.
+    #[test]
+    fn secrets_in_tool_output_are_redacted_and_the_body_still_parses() {
+        let aws = ["AKIA", "IOSFODNN7"].concat();
+        for (text, agent, secret) in [
+            (CLAUDE_FULL, Agent::ClaudeCode, "sk-ant-api03-fake"),
+            (CODEX_FULL, Agent::Codex, aws.as_str()),
+        ] {
+            let (body, findings) = body_of(text, agent, Detail::Full);
+            assert!(findings >= 1, "{body}");
+            assert!(!body.contains(secret), "{body}");
+            assert!(!body.contains("/home/alice"), "{body}");
+            let parsed: Value = serde_json::from_str(&body).expect("the body parses");
+            assert_eq!(parsed["schema_version"], 2);
+            assert_eq!(parsed["detail"], "full");
+        }
+        let (body, _) = body_of(CLAUDE_FULL, Agent::ClaudeCode, Detail::Full);
+        let parsed: Value = serde_json::from_str(&body).expect("the body parses");
+        let output = parsed["turns"][4]["tool_calls"][0]["output"]
+            .as_str()
+            .expect("the .env output");
+        // The newline before the address survives as a newline.
+        assert!(output.contains("contact\n[REDACTED:"), "{output}");
+        assert!(!output.contains("bob@example.com"), "{output}");
+    }
+
+    /// The escape regression on its own: redacting the serialised text
+    /// breaks the JSON; redacting the value first does not.
+    #[test]
+    fn redacting_values_never_breaks_an_escape() {
+        let mut record = super::empty_record(Agent::Codex, 2);
+        record.session_id = "s".to_owned();
+        record.turns.push(super::Turn::new(
+            Role::User,
+            "",
+            "write to\nbob@example.com\tor\r\"carol@example.org\"",
+        ));
+        // The old way — the serialised text redacted as one string — leaves
+        // a body that no longer parses.
+        let (whole, _) =
+            livingbrain_redact::redact(&serialise(&record), livingbrain_redact::Policy::Redact)
+                .expect("redacts");
+        assert!(serde_json::from_str::<Value>(&whole).is_err(), "{whole}");
+        let (body, findings) = prepare(&mut record, Detail::Full, &None, true, Path::new("x"))
+            .expect("prepares")
+            .expect("a body");
+        assert_eq!(findings, 2, "{body}");
+        let parsed: Value = serde_json::from_str(&body).expect("the body parses");
+        let text = parsed["turns"][0]["text"].as_str().expect("text");
+        assert!(text.starts_with("write to\n[REDACTED:"), "{text}");
+        assert!(!text.contains("example."), "{text}");
+    }
+
+    /// `messages` keeps every message and only tool names; `summary` cuts
+    /// the text too; both drop reasoning.
+    #[test]
+    fn detail_levels_decide_what_a_record_carries() {
+        let (full, _) = body_of(CLAUDE_FULL, Agent::ClaudeCode, Detail::Full);
+        assert!(full.contains("cargo test -p demo"));
+        assert!(full.contains("\"output\""));
+        assert!(full.contains("\"reasoning\""));
+
+        let (messages, _) = body_of(CLAUDE_FULL, Agent::ClaudeCode, Detail::Messages);
+        let parsed: Value = serde_json::from_str(&messages).expect("parses");
+        assert_eq!(parsed["detail"], "messages");
+        assert!(!messages.contains("cargo test -p demo"), "{messages}");
+        assert!(!messages.contains("\"output\""), "{messages}");
+        assert!(!messages.contains("\"reasoning\""), "{messages}");
+        assert!(
+            !messages.contains("[REDACTED:"),
+            "nothing to redact: {messages}"
+        );
+        assert_eq!(
+            parsed["turns"][1]["tool_calls"][0],
+            serde_json::json!({"name": "Bash"})
+        );
+
+        let mut long = super::empty_record(Agent::Codex, 2);
+        long.turns
+            .push(super::Turn::new(Role::User, "", &"z".repeat(5000)));
+        apply_detail(&mut long, Detail::Summary);
+        assert_eq!(long.turns[0].text.chars().count(), SUMMARY_TURN_CHARS);
+        assert_eq!(long.detail, Detail::Summary);
+    }
+
+    /// A replacement that swallowed half an escape is repaired into text
+    /// that parses, and valid escapes are left alone.
+    #[test]
+    fn broken_escapes_are_repaired() {
+        let broken = r#"{"t":"line\[REDACTED:email] \n \\ \u00e9 \""}"#;
+        assert!(serde_json::from_str::<Value>(broken).is_err());
+        let repaired = super::repair_escapes(broken);
+        let parsed: Value = serde_json::from_str(&repaired).expect("repaired parses");
+        assert_eq!(parsed["t"], "line\\[REDACTED:email] \n \\ é \"");
     }
 
     /// One session, one byte string, however often it is parsed — the whole
@@ -1553,46 +1861,26 @@ mod tests {
         for (text, agent) in [
             (CLAUDE_SESSION, Agent::ClaudeCode),
             (CODEX_SESSION, Agent::Codex),
+            (CLAUDE_FULL, Agent::ClaudeCode),
+            (CODEX_FULL, Agent::Codex),
         ] {
-            let first = serialise(&collect(text, agent).expect("a session"));
-            let second = serialise(&collect(text, agent).expect("a session"));
+            let first = body_of(text, agent, Detail::Full).0;
+            let second = body_of(text, agent, Detail::Full).0;
             assert_eq!(first, second);
-            // And the declared field order is the wire order.
             assert!(
-                first.starts_with("{\"schema_version\":1,"),
+                first.starts_with("{\"schema_version\":2,"),
                 "schema_version must lead the body: {first}"
             );
         }
     }
 
-    /// A long turn is cut to the cap, on a character boundary.
+    /// A session too big for the wire keeps its opening turn and its most
+    /// recent stretch, marks the cut with an event, and says how much went.
     #[test]
-    fn long_turn_text_is_truncated() {
-        let long = "x".repeat(3000);
-        let line = format!(
-            "{{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/opt/work\",\"message\":{{\"role\":\"user\",\"content\":\"{long}\"}}}}\n"
-        );
-        let mut record = collect(&line, Agent::ClaudeCode).expect("a session");
-        assert_eq!(record.turns[0].text.chars().count(), 3000);
-        cap(&mut record);
-        assert_eq!(record.turns[0].text.chars().count(), MAX_TURN_TEXT_CHARS);
-        assert!(!record.truncated, "text truncation is not body truncation");
-
-        let mut accented = "é".repeat(50);
-        truncate_text(&mut accented, 10);
-        assert_eq!(accented.chars().count(), 10);
-        let mut short = String::from("short");
-        truncate_text(&mut short, 10);
-        assert_eq!(short, "short");
-    }
-
-    /// A session too big for the wire loses trailing turns, keeps its head,
-    /// and says so.
-    #[test]
-    fn an_oversized_session_drops_trailing_turns_and_says_so() {
-        let filler = "y".repeat(MAX_TURN_TEXT_CHARS);
+    fn an_oversized_session_keeps_its_start_and_its_end() {
+        let filler = "y".repeat(4000);
         let mut text = String::new();
-        for index in 0..600 {
+        for index in 0..400 {
             text.push_str(&format!(
                 "{{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/opt/work\",\"timestamp\":\"2026-10-01T09:00:{:02}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"turn {index} {filler}\"}}}}\n",
                 index % 60
@@ -1602,20 +1890,50 @@ mod tests {
         let turns_before = record.turns.len();
         cap(&mut record);
         assert!(record.truncated);
-        assert!(record.turns.len() < turns_before);
+        let body = serialise(&record);
         assert!(
-            serialise(&record).len() <= MAX_SESSION_BODY_BYTES,
+            body.len() <= MAX_SESSION_BODY_BYTES,
             "the body is still over the cap"
         );
+        assert!(escaped_len(&body) <= MAX_ESCAPED_BODY_BYTES);
+        assert!(
+            record.turns[0].text.starts_with("turn 0 "),
+            "the opening stays"
+        );
+        assert_eq!(record.turns[1].role, Role::Event);
+        assert!(record.turns[1].text.contains("omitted"));
+        assert!(
+            record.turns.last().unwrap().text.starts_with("turn 399 "),
+            "the end stays"
+        );
         assert_eq!(
-            record.turns[0].role, "user",
-            "the head of the session stays"
+            record.omitted_turns + record.turns.len() - 1,
+            turns_before,
+            "every turn is kept or counted"
         );
     }
 
+    /// A quote-heavy session is bounded by its escaped size too: what
+    /// `GET /v1/sources/{id}` answers it inside.
+    #[test]
+    fn the_escaped_size_is_bounded_too() {
+        let quotes = "\\\"".repeat(2000);
+        let mut text = String::new();
+        for index in 0..300 {
+            text.push_str(&format!(
+                "{{\"type\":\"user\",\"sessionId\":\"s\",\"cwd\":\"/opt/work\",\"message\":{{\"role\":\"user\",\"content\":\"{index} {quotes}\"}}}}\n"
+            ));
+        }
+        let mut record = collect(&text, Agent::ClaudeCode).expect("a session");
+        cap(&mut record);
+        let body = serialise(&record);
+        assert!(escaped_len(&body) <= MAX_ESCAPED_BODY_BYTES);
+        assert!(record.truncated);
+    }
+
     /// Home elision rewrites the real prefix and the dash-encoded project-dir
-    /// form of directories under `$HOME`; with no home known, nothing is
-    /// rewritten.
+    /// form of directories under `$HOME` — in tool inputs, paths and outputs
+    /// as well as messages; with no home known, nothing is rewritten.
     #[test]
     fn home_elision_rewrites_the_real_and_the_encoded_forms() {
         let mut record = collect(CLAUDE_SESSION, Agent::ClaudeCode).expect("a session");
@@ -1624,9 +1942,13 @@ mod tests {
         let prompt = &record.turns[0].text;
         assert!(!prompt.contains("/home/alice"), "{prompt}");
         assert!(!prompt.contains("-home-alice"), "{prompt}");
-        // The encoded project directory itself is a needle, so it folds
-        // wholly to `~`, and the longest needle wins over its prefixes.
         assert!(prompt.contains("folder ~ under"), "{prompt}");
+
+        let mut full = collect(CLAUDE_FULL, Agent::ClaudeCode).expect("a session");
+        elide_home(&mut full, &Some("/home/alice".into()));
+        let edit = &full.turns[3].tool_calls[0];
+        assert_eq!(edit.path.as_deref(), Some("~/code/demo/src/lib.rs"));
+        assert!(!serialise(&full).contains("/home/alice"));
 
         let mut untouched = collect(CLAUDE_SESSION, Agent::ClaudeCode).expect("a session");
         elide_home(&mut untouched, &None);
@@ -1647,44 +1969,84 @@ mod tests {
         assert!(!is_inside("/home/alan/x", "/home/alice"));
     }
 
-    /// The opt-in file round-trips; a corrupt file and a future version are
-    /// refused, not read as empty.
+    /// The opt-in file round-trips with its levels; a file without levels
+    /// (every file before them) reads as `full`; a corrupt file, a future
+    /// version and an unknown level are refused, not read as empty.
     #[test]
     fn the_allowlist_body_round_trips() {
-        let mut allowed = std::collections::BTreeSet::new();
-        allowed.insert("/home/alice/code/demo".to_owned());
-        allowed.insert("/opt/work".to_owned());
-        let body = serde_json::to_vec_pretty(&super::AllowlistFile {
+        let mut file = AllowlistFile {
             version: super::ALLOWLIST_VERSION,
-            allowed: allowed.clone(),
-        })
-        .expect("serialises");
+            ..AllowlistFile::default()
+        };
+        file.allowed.insert("/home/alice/code/demo".to_owned());
+        file.allowed.insert("/opt/work".to_owned());
+        file.detail.insert("/opt/work".to_owned(), Detail::Messages);
+        let body = serde_json::to_vec_pretty(&file).expect("serialises");
         let parsed = parse_allowlist(&body).expect("parses");
-        assert_eq!(parsed.version, super::ALLOWLIST_VERSION);
-        assert_eq!(parsed.allowed, allowed);
+        assert_eq!(parsed.allowed, file.allowed);
+        assert_eq!(parsed.level("/opt/work"), Detail::Messages);
+        assert_eq!(parsed.level("/home/alice/code/demo"), Detail::Full);
+
+        let old = parse_allowlist(br#"{"version":1,"allowed":["/opt/work"]}"#).expect("parses");
+        assert_eq!(old.level("/opt/work"), Detail::Full);
 
         assert!(parse_allowlist(b"{not json").is_err());
         assert!(parse_allowlist(b"{}").is_err(), "no version, no allowed");
         let error = parse_allowlist(br#"{"version":99,"allowed":[]}"#)
             .expect_err("an unknown version is refused");
         assert!(error.contains("version 99 is not 1"), "{error}");
+        assert!(
+            parse_allowlist(br#"{"version":1,"allowed":["/x"],"detail":{"/x":"everything"}}"#)
+                .is_err(),
+            "an unknown level is refused"
+        );
+    }
+
+    /// The most specific allowed root decides a directory's level, and the
+    /// most restrictive directory decides the session's.
+    #[test]
+    fn the_most_specific_root_and_the_most_restrictive_cwd_win() {
+        let mut file = AllowlistFile {
+            version: super::ALLOWLIST_VERSION,
+            ..AllowlistFile::default()
+        };
+        file.allowed.insert("/opt".to_owned());
+        file.allowed.insert("/opt/work".to_owned());
+        file.detail.insert("/opt".to_owned(), Detail::Summary);
+        file.detail.insert("/opt/work".to_owned(), Detail::Full);
+        let mut record = super::empty_record(Agent::Codex, 2);
+        record.cwds = vec!["/opt/work/sub".to_owned()];
+        assert_eq!(super::detail_for(&record, &file), Detail::Full);
+        record.cwds.push("/opt/other".to_owned());
+        assert_eq!(super::detail_for(&record, &file), Detail::Summary);
     }
 
     /// An empty record serialises with every field the schema promises, in
-    /// order, optionals as nulls — the shape a version-1 reader relies on.
+    /// order, optionals as nulls — the shape a version-2 reader relies on.
     #[test]
     fn the_schema_shape_is_stable() {
-        let record = super::empty_record(Agent::ClaudeCode, 1);
+        let record = super::empty_record(Agent::ClaudeCode, 2);
         assert_eq!(
             serialise(&record),
             concat!(
-                r#"{"schema_version":1,"agent":"claude_code","collector_version":1,"#,
-                r#""session_id":"","repo":"","branch":null,"models":[],"started_at":null,"#,
-                r#""ended_at":null,"turns":[],"totals":{"input_tokens":0,"output_tokens":0,"#,
-                r#""cache_read_tokens":0,"cache_creation_tokens":0,"reasoning_tokens":0,"#,
-                r#""cost_usd":null},"outcome":null,"truncated":false}"#
+                r#"{"schema_version":2,"agent":"claude_code","collector_version":2,"#,
+                r#""detail":"full","session_id":"","repo":"","branch":null,"models":[],"#,
+                r#""started_at":null,"ended_at":null,"turns":[],"totals":{"input_tokens":0,"#,
+                r#""output_tokens":0,"cache_read_tokens":0,"cache_creation_tokens":0,"#,
+                r#""reasoning_tokens":0,"cost_usd":null},"outcome":null,"truncated":false,"#,
+                r#""omitted_turns":0}"#
             )
         );
+    }
+
+    #[test]
+    fn text_truncation_is_on_a_char_boundary() {
+        let mut accented = "é".repeat(50);
+        truncate_text(&mut accented, 10);
+        assert_eq!(accented.chars().count(), 10);
+        let mut short = String::from("short");
+        truncate_text(&mut short, 10);
+        assert_eq!(short, "short");
     }
 
     /// The project a session uploads under is its repository's basename,
