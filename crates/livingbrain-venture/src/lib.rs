@@ -73,6 +73,8 @@ use worker::{Context, Env, ObjectNamespace, Request, Response, event};
 
 mod conversation;
 mod device_pages;
+// The streaming seam for model calls, over `worker::Fetch`.
+mod model_stream;
 
 use conversation::{CONVERSATIONS, DurableTurns};
 
@@ -1119,15 +1121,20 @@ fn copy_headers(worker_headers: &mut worker::Headers, headers: &HeaderMap) {
 /// `livingbrain_models::deadline::ModelDeadline`, which it gives up to
 /// five minutes. Applied where the venture derives the ports itself: the
 /// CLI routes (`/v1/coding-agents/process`, `/v1/ask`, …) and the cron tick.
+///
+/// A model call that asks to stream is opened through
+/// [`model_stream::FetchStreaming`] instead and read as it arrives, so a
+/// thinking model that is slow to answer keeps bytes flowing and is never
+/// cut as idle (Z.AI's 524 at 100 s).
 fn model_deadlines(ports: &mut Ports) {
     let clock: Arc<dyn cratefield_core::Clock> = ports
         .clock
         .clone()
         .unwrap_or_else(|| Arc::new(WorkersClock));
-    ports.http = Some(Arc::new(ModelDeadlineHttpClient::new(
-        Arc::new(FetchClient),
-        clock,
-    )));
+    ports.http = Some(Arc::new(
+        ModelDeadlineHttpClient::new(Arc::new(FetchClient), clock)
+            .with_streaming(Arc::new(model_stream::FetchStreaming)),
+    ));
 }
 
 #[event(scheduled)]

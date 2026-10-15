@@ -61,6 +61,11 @@ livingbrain-tools = { path = "../livingbrain-tools" }
 # admin read endpoint, mounted below beside the modules it bills.
 livingbrain-usage = { path = "../livingbrain-usage" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+# The streaming seam over `worker::Fetch` (`src/model_stream.rs`): the body of
+# the request it opens, and `StreamExt::next` over the response's
+# `ByteStream`. Both already in the tree through core and `worker`.
+bytes = { workspace = true }
+futures-util = { workspace = true }
 # `serve_cli` drives the diverted CLI paths through the harness router.
 tower = { workspace = true }
 worker = { workspace = true }

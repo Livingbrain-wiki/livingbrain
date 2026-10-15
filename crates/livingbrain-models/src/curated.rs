@@ -62,6 +62,11 @@ struct Card {
     models: Vec<Model>,
     #[serde(default)]
     coding_plan: Option<CodingPlan>,
+    /// Whether the provider streams a completion (`"stream": true`). Absent
+    /// is yes: both wires define streaming, and every provider carded today
+    /// serves it. `false` sends that provider's calls unstreamed.
+    #[serde(default)]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +109,13 @@ pub(crate) fn listing(provider: &str) -> Listing {
         Some(url) if url.starts_with("https://") => Listing::Url(url.to_owned()),
         _ => Listing::Native,
     }
+}
+
+/// Whether a model call to `provider` asks to stream: its card's `stream`
+/// flag, else yes (a provider without a card — `custom` included — is
+/// asked to; one that ignores the flag answers JSON, which is read too).
+pub(crate) fn streams(provider: &str) -> bool {
+    card(provider).and_then(|card| card.stream).unwrap_or(true)
 }
 
 /// The models `provider` is known to serve: its card's, else the catalog
@@ -208,6 +220,25 @@ mod tests {
                 .any(|m| m.id == "MiniMax-M2" && m.context.is_none())
         );
         assert!(models("no-such-provider").is_empty());
+    }
+
+    #[test]
+    fn every_provider_streams_unless_its_card_says_not() {
+        for provider in [
+            "anthropic",
+            "openai",
+            "zhipu-glm-en",
+            "custom",
+            "xai-grok",
+            "nope",
+        ] {
+            assert!(streams(provider), "{provider}");
+        }
+        let card: Card = serde_json::from_str(
+            r#"{"kind": "api", "provider": "x", "stream": false, "models": []}"#,
+        )
+        .expect("card");
+        assert_eq!(card.stream, Some(false));
     }
 
     #[test]

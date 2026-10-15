@@ -9,7 +9,8 @@
     "provider's own calls), `none` = the provider publishes no list, so the curated models are the answer.",
     "Model ids, context windows and prices were checked against each provider's own docs on 2026-10-15",
     "(`models_source`); a price is per million input / output tokens, and omitted where the docs gave none.",
-    "Logos are self-hosted under assets/logos/ and drawn in currentColor; `logo_source` names each one."
+    "Logos are self-hosted under assets/logos/ and drawn in currentColor; `logo_source` names each one.",
+    "`stream` (optional, default true): `false` sends this provider's model calls unstreamed (no `\"stream\": true`)."
   ],
   "cards": [
     {

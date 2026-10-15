@@ -75,6 +75,9 @@ async-trait = "0.1.92"
 # wasm-safe by construction.
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 bytes = "1.12.1"
+# `StreamExt` over `worker::ByteStream` in the venture's streaming seam; the
+# version `worker` already resolves.
+futures-util = { version = "0.3.34", default-features = false }
 # The page store's cipher (issue #43): XChaCha20-Poly1305, `alloc` only, safe
 # with random 24-byte nonces. It is the cipher the harness's own KMS port
 # (`cratefield-kms`) seals with, so there is one cipher in the graph and one
