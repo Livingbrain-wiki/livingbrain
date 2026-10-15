@@ -499,3 +499,125 @@ html {
     min-height: 44px;
   }
 }
+
+/* ---------------------------------------------------- agent transcript */
+
+.transcript {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.transcript-facts {
+  list-style: none;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  font-size: 14px;
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.transcript-note,
+.transcript-event {
+  margin: 0;
+  color: var(--ink3);
+  font-size: 14px;
+  font-style: italic;
+}
+
+.transcript-event {
+  text-align: center;
+}
+
+.transcript-turn {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+
+.transcript-turn--user {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.transcript-turn--reasoning {
+  background: transparent;
+  border-style: dashed;
+}
+
+.transcript-turn__head {
+  font-size: 13px;
+  color: var(--ink3);
+}
+
+.transcript-turn__head strong {
+  color: var(--ink);
+}
+
+.transcript-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transcript-md > :first-child {
+  margin-top: 0;
+}
+
+.transcript-md > :last-child {
+  margin-bottom: 0;
+}
+
+.transcript-call {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+
+.transcript-call__head {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.transcript-call__status {
+  color: var(--ink3);
+}
+
+.transcript-call__status.is-bad {
+  color: var(--bad);
+}
+
+.transcript-call pre,
+.transcript pre {
+  margin: 0;
+  max-height: 28rem;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg3);
+  font-family: var(--f-mono);
+  font-size: 12.5px;
+  white-space: pre;
+}
+
+.transcript-call__output summary,
+.transcript-reasoning summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink3);
+}
+
+.transcript-call__output[open] summary,
+.transcript-reasoning[open] summary {
+  margin-bottom: 6px;
+}

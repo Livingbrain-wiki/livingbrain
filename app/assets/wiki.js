@@ -1,6 +1,6 @@
 // The wiki page: home (list + pins), a page, its editor, the new-page form,
-// the agent-sessions list, the ask panel and header search (with its
-// project filter).
+// the agent-sessions list and one session's transcript, the ask panel and
+// header search (with its project filter).
 //
 // `app.js` imports `wikiPage` from here and its boot dispatches it for
 // `body[data-page="wiki"]`, so this file is the one module the wiki page runs
@@ -97,6 +97,197 @@ export function sessionsPath({ project = "", cursor = "", limit = SESSIONS_LIMIT
   if (validProject(project)) params.set("project", project);
   if (cursor) params.set("cursor", cursor);
   return `/v1/sources?${params.toString()}`;
+}
+
+/** One source, body included: the transcript view's request. */
+export function sourcePath(id) {
+  return `/v1/sources/${encodeURIComponent(String(id == null ? "" : id))}`;
+}
+
+/** The address of one session's transcript. */
+export function transcriptHref(id) {
+  return `wiki.html?view=sessions&source=${encodeURIComponent(String(id == null ? "" : id))}`;
+}
+
+/** The newest row per session: a re-sync after an upgrade files a new
+ * source beside the old one under the same `path`, and the listing is
+ * newest first, so the first row of each path is the one to open. */
+export function latestSessions(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows || []) {
+    const key = (row && row.path) || (row && row.id) || "";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
+/** An `agent_log` source body to its record, or null when it is not one.
+ * Version 1 and version 2 records read alike: version 1 simply has no tool
+ * inputs or results, no reasoning and no events. */
+export function parseSessionRecord(body) {
+  let record;
+  try {
+    record = JSON.parse(String(body == null ? "" : body));
+  } catch {
+    return null;
+  }
+  if (!record || typeof record !== "object" || !Array.isArray(record.turns)) return null;
+  return record;
+}
+
+/** A transcript's numbers, for its header line. */
+export function sessionStats(record) {
+  const turns = (record && record.turns) || [];
+  let user = 0;
+  let assistant = 0;
+  let tools = 0;
+  for (const turn of turns) {
+    if (turn.role === "user") user += 1;
+    if (turn.role === "assistant" && String(turn.text || "").trim()) assistant += 1;
+    tools += Array.isArray(turn.tool_calls) ? turn.tool_calls.length : 0;
+  }
+  return { user, assistant, tools };
+}
+
+/** `2026-10-01T09:30:05.123Z` as `2026-10-01 09:30:05`. */
+function shortTime(at) {
+  return String(at || "").replace(/Z$/, "").replace(/\.\d+$/, "").replace("T", " ");
+}
+
+/** How many lines a text has, for an output's summary. */
+function lineCount(text) {
+  const value = String(text || "").replace(/\n$/, "");
+  return value ? value.split("\n").length : 0;
+}
+
+/** One tool call as node descriptions: name, file and outcome on a line,
+ * the input fenced, the result folded away when it is long. */
+function callNodes(call) {
+  const head = [el("code", [tx(call.name || "tool")])];
+  if (call.path) head.push(tx(" "), el("code", [tx(call.path)], { class: "transcript-call__path" }));
+  const outcome = [];
+  if (call.status) outcome.push(call.status);
+  if (call.exit_code != null) outcome.push(`exit ${call.exit_code}`);
+  if (outcome.length) {
+    head.push(
+      el("span", [tx(` · ${outcome.join(" · ")}`)], {
+        class: `transcript-call__status${call.status === "error" ? " is-bad" : ""}`,
+      }),
+    );
+  }
+  const children = [el("div", head, { class: "transcript-call__head" })];
+  if (call.input) {
+    const lang = call.format === "shell" ? "sh" : call.format || "text";
+    children.push(el("pre", [el("code", [tx(call.input)])], { "data-lang": lang }));
+  }
+  if (call.output) {
+    const lines = lineCount(call.output);
+    const attrs = { class: "transcript-call__output" };
+    if (lines <= 12) attrs.open = "";
+    children.push(
+      el("details", [
+        el("summary", [tx(`Output · ${lines} line${lines === 1 ? "" : "s"}`)]),
+        el("pre", [el("code", [tx(call.output)])]),
+      ], attrs),
+    );
+  }
+  return el("div", children, { class: "transcript-call" });
+}
+
+/** One turn as a node description, or null when it shows nothing. */
+function turnNodes(turn) {
+  const role = turn.role || "assistant";
+  const text = String(turn.text || "");
+  const at = turn.at ? shortTime(turn.at) : "";
+  if (role === "event") {
+    return el("p", [tx(`— ${text}${at ? ` · ${at}` : ""} —`)], { class: "transcript-event" });
+  }
+  const label = { user: "User", assistant: "Assistant", reasoning: "Reasoning" }[role] || role;
+  const head = el("div", [el("strong", [tx(label)]), tx(at ? ` · ${at}` : "")], {
+    class: "transcript-turn__head",
+  });
+  const body = [];
+  if (role === "reasoning") {
+    if (!text.trim()) return null;
+    body.push(
+      el("details", [el("summary", [tx("Reasoning summary")]), el("p", [tx(text)], { class: "transcript-text" })], {
+        class: "transcript-reasoning",
+      }),
+    );
+    return el("div", body, { class: "transcript-turn transcript-turn--reasoning" });
+  }
+  if (text.trim()) {
+    // The person's words as they typed them; the agent's as the markdown
+    // they are — through the same renderer as any page, no HTML.
+    if (role === "assistant") body.push(el("div", renderMarkdown(text), { class: "transcript-md" }));
+    else body.push(el("p", [tx(text)], { class: "transcript-text" }));
+  }
+  for (const call of Array.isArray(turn.tool_calls) ? turn.tool_calls : []) {
+    body.push(callNodes(call || {}));
+  }
+  if (!body.length) return null;
+  return el("div", [text.trim() ? head : null, ...body].filter(Boolean), {
+    class: `transcript-turn transcript-turn--${role}`,
+  });
+}
+
+/** The whole transcript as node descriptions: the header facts, then every
+ * turn in order. Pure, so the tests read it without a page. */
+export function transcriptNodes(record) {
+  const stats = sessionStats(record);
+  const totals = record.totals || {};
+  const facts = [
+    ["Agent", record.agent],
+    ["Repo", record.repo],
+    ["Branch", record.branch],
+    [
+      "When",
+      record.started_at && record.ended_at && record.started_at !== record.ended_at
+        ? `${shortTime(record.started_at)} to ${shortTime(record.ended_at)}`
+        : shortTime(record.started_at || record.ended_at || ""),
+    ],
+    ["Models", Array.isArray(record.models) ? record.models.join(", ") : ""],
+    ["Messages", `${stats.user} user, ${stats.assistant} assistant`],
+    ["Tool calls", String(stats.tools)],
+    [
+      "Tokens",
+      totals.input_tokens != null
+        ? `${totals.input_tokens} in, ${totals.output_tokens || 0} out, ${totals.cache_read_tokens || 0} cache read`
+        : "",
+    ],
+    ["Cost", totals.cost_usd != null ? `$${Number(totals.cost_usd).toFixed(4)}` : ""],
+    ["Detail", record.detail || (record.schema_version === 1 ? "summary (version 1 record)" : "")],
+  ].filter(([, value]) => value);
+  const nodes = [
+    el(
+      "ul",
+      facts.map(([name, value]) => el("li", [el("strong", [tx(`${name}: `)]), tx(value)])),
+      { class: "transcript-facts" },
+    ),
+  ];
+  if (record.truncated) {
+    nodes.push(
+      el(
+        "p",
+        [
+          tx(
+            record.omitted_turns
+              ? `${record.omitted_turns} turn(s) were left out to fit the upload size cap.`
+              : "Part of this session was left out to fit the upload size cap.",
+          ),
+        ],
+        { class: "transcript-note" },
+      ),
+    );
+  }
+  for (const turn of record.turns || []) {
+    const node = turnNodes(turn || {});
+    if (node) nodes.push(node);
+  }
+  return nodes;
 }
 
 /**
@@ -298,6 +489,7 @@ export async function wikiPage(api) {
       editor: $("#editor-view"),
       new: $("#new-page-view"),
       sessions: $("#sessions-view"),
+      transcript: $("#transcript-view"),
     },
     notice: $("#wiki-notice"),
     status: $("#wiki-status"),
@@ -344,6 +536,9 @@ export async function wikiPage(api) {
     sessionsList: $("#sessions-list"),
     sessionsEmpty: $("#sessions-empty"),
     sessionsMore: $("#sessions-more"),
+    transcriptTitle: $("#transcript-title"),
+    transcriptStatus: $("#transcript-status"),
+    transcriptBody: $("#transcript-body"),
     drawerToggle: $("#drawer-toggle"),
     drawer: $("#wiki-drawer"),
     drawerSignin: $("#drawer-signin"),
@@ -382,10 +577,12 @@ export async function wikiPage(api) {
 
   /* -- small shared pieces ------------------------------------------ */
 
-  const VIEWS = ["home", "page", "editor", "new", "sessions"];
+  const VIEWS = ["home", "page", "editor", "new", "sessions", "transcript"];
 
   function showView(name) {
-    for (const view of VIEWS) els.views[view].hidden = view !== name;
+    for (const view of VIEWS) {
+      if (els.views[view]) els.views[view].hidden = view !== name;
+    }
   }
 
   /** A plain button with a handler, for the notice area's actions. */
@@ -586,8 +783,11 @@ export async function wikiPage(api) {
   function sessionElement(row) {
     const li = document.createElement("li");
     li.className = "wiki-row";
-    const line = document.createElement("span");
+    // Each session opens its transcript; the address names it, so a reload
+    // or a shared link lands on the same one.
+    const line = document.createElement("a");
     line.className = "wiki-row__link";
+    line.href = transcriptHref(row.id || "");
     const name = document.createElement("span");
     name.className = "wiki-row__slug";
     name.textContent = row.path || row.id || "(unnamed session)";
@@ -609,12 +809,13 @@ export async function wikiPage(api) {
   }
 
   function renderSessions() {
+    const rows = latestSessions(state.sessions);
     els.sessionsList.replaceChildren();
-    for (const row of state.sessions) els.sessionsList.appendChild(sessionElement(row));
-    els.sessionsList.hidden = state.sessions.length === 0;
-    els.sessionsEmpty.hidden = state.sessions.length !== 0;
+    for (const row of rows) els.sessionsList.appendChild(sessionElement(row));
+    els.sessionsList.hidden = rows.length === 0;
+    els.sessionsEmpty.hidden = rows.length !== 0;
     els.sessionsMore.hidden = !state.sessionsCursor;
-    const count = state.sessions.length;
+    const count = rows.length;
     els.sessionsStatus.textContent = `${count}${state.sessionsCursor ? "+" : ""} ${
       count === 1 ? "session" : "sessions"
     }`;
@@ -650,6 +851,54 @@ export async function wikiPage(api) {
       }
       notice(els.notice, `Could not load agent sessions: ${error.message}`, "bad");
       els.notice.appendChild(mkButton("Retry", () => loadSessions({ more })));
+    }
+  }
+
+  /** One session's transcript, read from its source: the record parsed
+   * and drawn turn by turn. A body that is not a session record is shown
+   * as the text it is. */
+  async function loadTranscript(id) {
+    showView("transcript");
+    els.transcriptBody.replaceChildren();
+    els.transcriptTitle.textContent = "Agent session";
+    if (!state.signedIn) {
+      signInNotice("Sign in to see your agent sessions.");
+      return;
+    }
+    els.transcriptStatus.textContent = "Loading…";
+    try {
+      const source = await api(sourcePath(id));
+      els.transcriptTitle.textContent =
+        (source && (source.project ? `${source.project} · ` : "")) +
+        (source && source.kind === "agent_log" ? "agent session" : "source");
+      const record = source && source.kind === "agent_log" ? parseSessionRecord(source.body) : null;
+      if (record) {
+        els.transcriptTitle.textContent = `${record.agent || "agent"} session ${String(
+          record.session_id || "",
+        ).slice(0, 8)}${source.project ? ` · ${source.project}` : ""}`;
+        renderInto(els.transcriptBody, transcriptNodes(record));
+      } else {
+        renderInto(els.transcriptBody, [
+          el("pre", [el("code", [tx((source && source.body) || "")])]),
+        ]);
+      }
+      els.transcriptStatus.textContent = "";
+      clearNotice();
+    } catch (error) {
+      els.transcriptStatus.textContent = "";
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        signInNotice("Sign in to see your agent sessions.");
+        return;
+      }
+      notice(
+        els.notice,
+        error instanceof ApiError && error.status === 404
+          ? "That session is not one you can open."
+          : `Could not load the session: ${error.message}`,
+        "bad",
+      );
     }
   }
 
@@ -1378,6 +1627,7 @@ export async function wikiPage(api) {
   if (state.signedIn) await loadProjects();
 
   if (startSlug) await openPage(startSlug, { edit: startInEdit });
+  else if (startView === "sessions" && params.get("source")) await loadTranscript(params.get("source"));
   else if (startView === "sessions") await loadSessions();
   else await loadHome();
 }

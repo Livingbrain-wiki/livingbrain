@@ -66,8 +66,10 @@ the next one), and the same error at most once every 30 minutes.
   small ledger of past syncs in
   `~/Library/Application Support/Living Brain/sessions-ledger.json`, which
   holds ids and times only). Selecting one shows the transcript of the
-  **redacted record the CLI would send** (`livingbrain logs show <file>`),
-  with tool names only. Actions: Open in Living Brain (the session's note,
+  **redacted record the CLI would send** (`livingbrain logs show <file>`):
+  messages, reasoning summaries, interruptions, and each tool call with its
+  command or patch and its clipped output (at the repository's detail level;
+  `full` for a repository not opted in). Actions: Open in Living Brain (the session's note,
   or the project's session list), Sync This Session, Reveal Log in Finder.
 - **Projects & Sync** — every repository your sessions ran in, with an
   opt-in switch each (`logs allow` / `logs deny`), plus the pause, live-sync,

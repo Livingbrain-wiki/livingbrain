@@ -55,7 +55,9 @@ public struct SessionShow: Decodable, Equatable, Sendable {
     }
 }
 
-/// The normalised session schema, version 1 (logs.rs `SessionRecord`).
+/// The normalised session schema (logs.rs `SessionRecord`), versions 1 and
+/// 2. Version 2 adds tool inputs and results, `reasoning` and `event` turns,
+/// `detail` and `omitted_turns`; a version-1 record decodes with those empty.
 public struct SessionRecord: Decodable, Equatable, Sendable {
     public var schemaVersion: Int
     public var agent: String
@@ -67,37 +69,89 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
     public var endedAt: String?
     public var turns: [Turn]
     public var truncated: Bool
+    /// `full`, `messages` or `summary`; nil on a version-1 record.
+    public var detail: String?
+    /// Turns the size cap removed (an `event` turn marks where).
+    public var omittedTurns: Int
+
+    /// A tool the agent called: under `full`, what it was called with and
+    /// what came back (both clipped by the CLI); otherwise the name alone.
+    public struct ToolCall: Decodable, Equatable, Sendable {
+        public var name: String
+        /// How to show `input`: `shell`, `diff`, `json` or `text`.
+        public var format: String?
+        public var path: String?
+        public var input: String?
+        public var output: String?
+        /// `ok`, `error` or `interrupted`, when the log said.
+        public var status: String?
+        public var exitCode: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case name, format, path, input, output, status
+            case exitCode = "exit_code"
+        }
+
+        public init(name: String, format: String? = nil, path: String? = nil, input: String? = nil,
+                    output: String? = nil, status: String? = nil, exitCode: Int? = nil)
+        {
+            self.name = name
+            self.format = format
+            self.path = path
+            self.input = input
+            self.output = output
+            self.status = status
+            self.exitCode = exitCode
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+            format = try c.decodeIfPresent(String.self, forKey: .format)
+            path = try c.decodeIfPresent(String.self, forKey: .path)
+            input = try c.decodeIfPresent(String.self, forKey: .input)
+            output = try c.decodeIfPresent(String.self, forKey: .output)
+            status = try c.decodeIfPresent(String.self, forKey: .status)
+            exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
+        }
+
+        /// Whether there is anything to show beyond the name.
+        public var hasDetail: Bool { input != nil || output != nil || path != nil }
+    }
 
     public struct Turn: Decodable, Equatable, Sendable, Identifiable {
+        /// `user`, `assistant`, `reasoning` or `event`.
         public var role: String
         public var at: String?
         public var text: String
-        public var toolCalls: [String]
+        public var calls: [ToolCall]
         /// Position in the record; set after decoding.
         public var id: Int = 0
 
+        /// The tool names, in order.
+        public var toolCalls: [String] { calls.map(\.name) }
+
         enum CodingKeys: String, CodingKey {
             case role, at, text
-            case toolCalls = "tool_calls"
+            case calls = "tool_calls"
         }
-
-        struct ToolCall: Decodable { var name: String }
 
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
             at = try c.decodeIfPresent(String.self, forKey: .at)
             text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
-            toolCalls = (try c.decodeIfPresent([ToolCall].self, forKey: .toolCalls) ?? []).map(\.name)
+            calls = try c.decodeIfPresent([ToolCall].self, forKey: .calls) ?? []
         }
     }
 
     enum CodingKeys: String, CodingKey {
-        case agent, repo, branch, models, turns, truncated
+        case agent, repo, branch, models, turns, truncated, detail
         case schemaVersion = "schema_version"
         case sessionId = "session_id"
         case startedAt = "started_at"
         case endedAt = "ended_at"
+        case omittedTurns = "omitted_turns"
     }
 
     public init(from decoder: Decoder) throws {
@@ -111,9 +165,28 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
         endedAt = try c.decodeIfPresent(String.self, forKey: .endedAt)
         truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        omittedTurns = try c.decodeIfPresent(Int.self, forKey: .omittedTurns) ?? 0
         var decoded = try c.decodeIfPresent([Turn].self, forKey: .turns) ?? []
         for index in decoded.indices { decoded[index].id = index }
         turns = decoded
+    }
+}
+
+/// Display helpers for a tool call, kept here so they are tested.
+public enum ToolCallSummary {
+    /// `ok · exit 0`, `error · exit 1`, `interrupted`; nil when the log
+    /// recorded no outcome.
+    public static func outcome(_ call: SessionRecord.ToolCall) -> String? {
+        let parts = [call.status, call.exitCode.map { "exit \($0)" }].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Lines in a text, ignoring one trailing newline.
+    public static func lineCount(_ text: String) -> Int {
+        var value = Substring(text)
+        if value.hasSuffix("\n") { value = value.dropLast() }
+        return value.isEmpty ? 0 : value.split(separator: "\n", omittingEmptySubsequences: false).count
     }
 }
 
