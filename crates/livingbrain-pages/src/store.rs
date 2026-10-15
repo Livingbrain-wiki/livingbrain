@@ -14,8 +14,49 @@ use sea_query::Value as SeaValue;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use base64::Engine as _;
+use cratefield_kms::Dek;
+
 use crate::entity::{self, EntityType, Frontmatter};
 use crate::keys::{self, ScopeKeys};
+use crate::titles;
+
+/// The AAD domain a page title is sealed under (`pages.title_sealed`).
+const TITLE_AAD_DOMAIN: &str = "livingbrain-pages/title/v1";
+
+/// The AAD a title of `slug` in `scope`, sealed under `version`, is bound to
+/// — so a sealed title cannot be moved to another page or scope.
+fn title_aad(scope: &str, slug: &str, version: u32) -> String {
+    format!("{TITLE_AAD_DOMAIN}\0{scope}\0{slug}\0{version}")
+}
+
+/// A title sealed for its `pages` row, base64.
+fn seal_title(
+    dek: &Dek,
+    version: u32,
+    scope: &str,
+    slug: &str,
+    title: &str,
+) -> Result<String, PageError> {
+    let envelope = keys::seal(
+        dek,
+        version,
+        &title_aad(scope, slug, version),
+        title.as_bytes(),
+    )?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(envelope))
+}
+
+/// A sealed title opened, or `None` when it does not open.
+fn open_title(dek: &Dek, version: u32, scope: &str, slug: &str, sealed: &str) -> Option<String> {
+    let envelope = base64::engine::general_purpose::STANDARD
+        .decode(sealed)
+        .ok()?;
+    let plain = keys::open(dek, version, &title_aad(scope, slug, version), &envelope).ok()?;
+    String::from_utf8(plain)
+        .ok()
+        .filter(|title| !title.is_empty())
+}
 
 /// How long a key version has to have been superseded before a re-encryption
 /// pass will destroy it. A Worker request commits its batch in seconds, and the
@@ -158,6 +199,33 @@ pub struct PageSummary {
     /// When the head was written, RFC 3339 — the storage format for every
     /// timestamp.
     pub updated_at: String,
+    /// The page's title (its frontmatter `name`, `title` or `term`), opened
+    /// from the row's sealed copy; `None` for a page with no title, or one
+    /// written before titles were kept and not yet backfilled.
+    pub title: Option<String>,
+}
+
+/// Which pages a [`PageStore::list_filtered`] answers with. The default is
+/// every page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageFilter {
+    /// Only pages of these types; empty is every type.
+    pub types: Vec<EntityType>,
+    /// Never pages of these types.
+    pub exclude: Vec<EntityType>,
+    /// Only the compiled coding-agents pages of this project key
+    /// ([`crate::project_key`]): its folder under every agent, and its
+    /// cross-agent rollup.
+    pub project: Option<String>,
+}
+
+/// A page whose title the backfill has not set, or a session log still
+/// filed as a decision: what [`PageStore::title_candidates`] hands back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleCandidate {
+    pub scope: String,
+    pub slug: String,
+    pub entity_type: EntityType,
 }
 
 /// What a [`PageStore::reencrypt_scope`] pass did.
@@ -348,8 +416,9 @@ impl PageStore {
             return Err(PageError::InvalidSlug(slug.to_owned()));
         }
 
-        let (_, body) = entity::parse_frontmatter(&write.markdown, write.entity_type)?;
+        let (frontmatter, body) = entity::parse_frontmatter(&write.markdown, write.entity_type)?;
         let links = entity::extract_links(&body)?;
+        let title = titles::frontmatter_title(&frontmatter).unwrap_or_default();
 
         let head = self.head_row(scope, slug).await?;
         let version = match &head {
@@ -425,6 +494,17 @@ impl PageStore {
         let index_key = keys::IndexKey::derive(&active.dek);
         let terms: Vec<String> = index_key.page_terms(slug, &write.markdown);
         let key_version = active.version;
+        // The title rides on the head row, sealed like the body, so a
+        // listing names the page without opening it. An empty title is kept
+        // as "" at version 0: nothing to seal, and nothing to backfill.
+        let (title_sealed, title_version) = if title.is_empty() {
+            (String::new(), 0)
+        } else {
+            (
+                seal_title(&active.dek, key_version, scope, slug, &title)?,
+                key_version,
+            )
+        };
         drop(active);
         self.blob
             .put(&body_key, &envelope, keys::SEALED_CONTENT_TYPE)
@@ -457,8 +537,9 @@ impl PageStore {
         match &head {
             None => statements.push(Statement::with_values(
                 "INSERT INTO pages \
-                 (scope, slug, entity_type, head_version, human_pending_version, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                 (scope, slug, entity_type, head_version, human_pending_version, updated_at, \
+                  title_sealed, title_key_version) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     text(scope),
                     text(slug),
@@ -466,6 +547,8 @@ impl PageStore {
                     int(version),
                     opt_int(pending),
                     text(&now),
+                    text(&title_sealed),
+                    int(title_version),
                 ],
             )),
             // The head guard alone cannot stop a race: `batch_atomic` rolls
@@ -473,12 +556,15 @@ impl PageStore {
             // primary key does — two writers of the same next version collide
             // on the insert above, and that failure is read back as a conflict.
             Some(row) => statements.push(Statement::with_values(
-                "UPDATE pages SET head_version = ?, human_pending_version = ?, updated_at = ? \
+                "UPDATE pages SET head_version = ?, human_pending_version = ?, updated_at = ?, \
+                 title_sealed = ?, title_key_version = ? \
                  WHERE scope = ? AND slug = ? AND head_version = ?",
                 vec![
                     int(version),
                     opt_int(pending),
                     text(&now),
+                    text(&title_sealed),
+                    int(title_version),
                     text(scope),
                     text(slug),
                     int(row.head_version),
@@ -605,6 +691,28 @@ impl PageStore {
     ///
     /// [`PageError::Store`] if the database fails.
     pub async fn list(&self, scopes: &[&str], limit: usize) -> Result<Vec<PageSummary>, PageError> {
+        self.list_filtered(scopes, &PageFilter::default(), limit)
+            .await
+    }
+
+    /// [`PageStore::list`], narrowed by `filter` in the query itself — so a
+    /// listing that leaves the session logs out is still `limit` pages of
+    /// everything else, not `limit` rows of which most were sessions.
+    ///
+    /// Each row's title is opened from its sealed copy with the scope key it
+    /// names, one unwrap per key version however many rows share it. A title
+    /// that does not open (a forgotten scope, a retired key) is `None`, never
+    /// an error: a listing answers with what it can name.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Store`] if the database fails.
+    pub async fn list_filtered(
+        &self,
+        scopes: &[&str],
+        filter: &PageFilter,
+        limit: usize,
+    ) -> Result<Vec<PageSummary>, PageError> {
         if scopes.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -617,18 +725,108 @@ impl PageStore {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let mut sql = format!(
+            "SELECT scope, slug, entity_type, head_version, updated_at, title_sealed, \
+             title_key_version FROM pages WHERE scope IN ({placeholders})"
+        );
+        if !filter.types.is_empty() {
+            let marks = filter
+                .types
+                .iter()
+                .map(|kind| {
+                    values.push(text(kind.as_str()));
+                    "?"
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND entity_type IN ({marks})"));
+        }
+        if !filter.exclude.is_empty() {
+            let marks = filter
+                .exclude
+                .iter()
+                .map(|kind| {
+                    values.push(text(kind.as_str()));
+                    "?"
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND entity_type NOT IN ({marks})"));
+        }
+        if let Some(project) = &filter.project {
+            // A project key is `[a-z0-9-]`, so it carries no LIKE wildcard;
+            // anything else matches nothing rather than everything.
+            if titles::project_key(project).as_deref() != Some(project.as_str()) {
+                return Ok(Vec::new());
+            }
+            sql.push_str(" AND (slug LIKE ? OR slug = ?)");
+            values.push(text(&format!("coding-agents--%--{project}--%")));
+            values.push(text(&format!("coding-agents--projects--{project}")));
+        }
+        sql.push_str(" ORDER BY updated_at DESC, slug ASC LIMIT ?");
         values.push(SeaValue::BigInt(Some(
             i64::try_from(limit).unwrap_or(i64::MAX),
         )));
         let rows = self
             .db
+            .query(&Statement::with_values(sql, values))
+            .await
+            .map_err(PageError::Store)?;
+        let mut keys: BTreeMap<(String, u32), Option<Dek>> = BTreeMap::new();
+        let mut out = Vec::with_capacity(rows.rows.len());
+        for row in &rows.rows {
+            let raw = row
+                .get::<String>("entity_type")
+                .ok_or_else(|| PageError::Corrupt("pages.entity_type is not text".to_owned()))?;
+            let scope = row.get::<String>("scope").unwrap_or_default();
+            let slug = row.get::<String>("slug").unwrap_or_default();
+            let sealed = row.get::<String>("title_sealed").unwrap_or_default();
+            let key_version = row.get::<u32>("title_key_version").unwrap_or_default();
+            let title = if sealed.is_empty() || key_version == 0 {
+                None
+            } else {
+                let key = keys.entry((scope.clone(), key_version)).or_insert(None);
+                if key.is_none() {
+                    *key = self.keys.dek(&scope, key_version).await.ok();
+                }
+                key.as_ref()
+                    .and_then(|dek| open_title(dek, key_version, &scope, &slug, &sealed))
+            };
+            out.push(PageSummary {
+                entity_type: EntityType::parse(&raw)
+                    .ok_or_else(|| PageError::Corrupt(format!("unknown entity type `{raw}`")))?,
+                version: row.get::<u32>("head_version").unwrap_or_default(),
+                updated_at: row.get::<String>("updated_at").unwrap_or_default(),
+                scope,
+                slug,
+                title,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Up to `limit` pages, across every scope, whose title has never been
+    /// set: every page written before migration 0007, which includes every
+    /// session log still filed as a decision. The notes module's cron works
+    /// through them; once each has been handled (its title set, to "" when
+    /// there is nothing to show) it is never answered again, so the pass is
+    /// idempotent.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Store`] if the database fails.
+    pub async fn title_candidates(&self, limit: usize) -> Result<Vec<TitleCandidate>, PageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .db
             .query(&Statement::with_values(
-                format!(
-                    "SELECT scope, slug, entity_type, head_version, updated_at FROM pages \
-                     WHERE scope IN ({placeholders}) \
-                     ORDER BY updated_at DESC, slug ASC LIMIT ?"
-                ),
-                values,
+                "SELECT scope, slug, entity_type FROM pages WHERE title_sealed IS NULL \
+                 ORDER BY updated_at DESC, scope ASC, slug ASC LIMIT ?",
+                vec![SeaValue::BigInt(Some(
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ))],
             ))
             .await
             .map_err(PageError::Store)?;
@@ -638,17 +836,96 @@ impl PageStore {
                 let raw = row.get::<String>("entity_type").ok_or_else(|| {
                     PageError::Corrupt("pages.entity_type is not text".to_owned())
                 })?;
-                Ok(PageSummary {
+                Ok(TitleCandidate {
                     scope: row.get::<String>("scope").unwrap_or_default(),
                     slug: row.get::<String>("slug").unwrap_or_default(),
                     entity_type: EntityType::parse(&raw).ok_or_else(|| {
                         PageError::Corrupt(format!("unknown entity type `{raw}`"))
                     })?,
-                    version: row.get::<u32>("head_version").unwrap_or_default(),
-                    updated_at: row.get::<String>("updated_at").unwrap_or_default(),
                 })
             })
             .collect()
+    }
+
+    /// Sets a page's listed title without writing a version: the backfill's
+    /// write for a page whose title is already right in its body. `None`
+    /// (a page with no title, or one whose body cannot be opened) marks the
+    /// row as handled with nothing to show.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::InvalidScope`], and whatever sealing or the database can
+    /// fail with.
+    pub async fn set_title(
+        &self,
+        scope: &str,
+        slug: &str,
+        title: Option<&str>,
+    ) -> Result<(), PageError> {
+        if !entity::is_slug(scope) {
+            return Err(PageError::InvalidScope(scope.to_owned()));
+        }
+        let (sealed, version) = match title.map(str::trim).filter(|t| !t.is_empty()) {
+            None => (String::new(), 0),
+            Some(title) => {
+                let active = self.keys.active(scope).await?;
+                let sealed = seal_title(&active.dek, active.version, scope, slug, title)?;
+                (sealed, active.version)
+            }
+        };
+        self.db
+            .execute(&Statement::with_values(
+                "UPDATE pages SET title_sealed = ?, title_key_version = ? \
+                 WHERE scope = ? AND slug = ?",
+                vec![text(&sealed), int(version), text(scope), text(slug)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(())
+    }
+
+    /// Moves a page from one entity type to another in place, without a new
+    /// version — the one sanctioned exception to "a page cannot change its
+    /// type", for session logs written as decisions before the `session`
+    /// type existed. The head body must already be valid as `to` (every key
+    /// a decision may carry, a session may too), so nothing a reader parses
+    /// can break. Answers whether the row moved: `false` when it was not of
+    /// type `from` (already moved, or never one).
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Frontmatter`] when the head would not parse as `to`, and
+    /// whatever reading the head or the database can fail with.
+    pub async fn retype(
+        &self,
+        scope: &str,
+        slug: &str,
+        from: EntityType,
+        to: EntityType,
+    ) -> Result<bool, PageError> {
+        let Some(page) = self.read(scope, slug).await? else {
+            return Ok(false);
+        };
+        if page.entity_type != from {
+            return Ok(false);
+        }
+        // The fence may name its own type; a `type: decision` line would
+        // make the body invalid as `to`, which is a refusal, not a move.
+        entity::parse_frontmatter(&page.markdown, to)?;
+        let moved = self
+            .db
+            .execute(&Statement::with_values(
+                "UPDATE pages SET entity_type = ? WHERE scope = ? AND slug = ? AND entity_type = ?",
+                vec![
+                    text(to.as_str()),
+                    text(scope),
+                    text(slug),
+                    text(from.as_str()),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(moved > 0)
     }
 
     /// The `pages` row for a page, or `None`.
@@ -1186,6 +1463,63 @@ impl PageStore {
                 .await
                 .map_err(PageError::Store)?;
             report.rewritten += 1;
+        }
+        drop(old_key);
+
+        // Titles are sealed on their head rows under the same scope key, so
+        // they move too: each re-sealed and its row repointed. One that no
+        // longer opens is cleared (the backfill names it again from its
+        // body) rather than left pinning a key the rotation must retire.
+        let titled = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT slug, title_sealed, title_key_version FROM pages \
+                 WHERE scope = ? AND title_key_version > 0 AND title_key_version <> ? \
+                 ORDER BY title_key_version ASC, slug ASC",
+                vec![text(scope), int(active.version)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let mut old_version: Option<u32> = None;
+        let mut old_key = None;
+        for row in &titled.rows {
+            let slug = row.get::<String>("slug").unwrap_or_default();
+            let version = row.get::<u32>("title_key_version").unwrap_or_default();
+            if old_version != Some(version) {
+                old_key = Some(self.keys.dek(scope, version).await?);
+                old_version = Some(version);
+            }
+            let key = old_key.as_ref().expect("the key is set with the version");
+            let sealed = row.get::<String>("title_sealed").unwrap_or_default();
+            let (resealed, to) = match open_title(key, version, scope, &slug, &sealed) {
+                Some(title) => (
+                    Some(seal_title(
+                        &active.dek,
+                        active.version,
+                        scope,
+                        &slug,
+                        &title,
+                    )?),
+                    active.version,
+                ),
+                None => (None, 0),
+            };
+            self.db
+                .execute(&Statement::with_values(
+                    "UPDATE pages SET title_sealed = ?, title_key_version = ? \
+                     WHERE scope = ? AND slug = ? AND title_key_version = ?",
+                    vec![
+                        SeaValue::String(resealed.map(Box::new)),
+                        int(to),
+                        text(scope),
+                        text(&slug),
+                        int(version),
+                    ],
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            // Not counted in `rewritten`: a title is a column of the head
+            // row, like its index rows, not a body.
         }
         drop(old_key);
         drop(active);

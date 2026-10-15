@@ -40,6 +40,7 @@ mod query;
 mod scope;
 mod sources;
 mod store;
+mod titles;
 
 pub use answers::{AnswerError, Answered, Answers, Asker, Citation, PageAnswers};
 pub use entity::{
@@ -65,8 +66,12 @@ pub use sources::{
     is_project,
 };
 pub use store::{
-    Author, AuthorKind, Page, PageError, PageStore, PageSummary, PageWrite, ReencryptReport,
-    SearchHit, VersionMeta,
+    Author, AuthorKind, Page, PageError, PageFilter, PageStore, PageSummary, PageWrite,
+    ReencryptReport, SearchHit, TitleCandidate, VersionMeta,
+};
+pub use titles::{
+    SESSION_SLUG_PREFIX, agent_label, frontmatter_title, is_placeholder_title, is_session_slug,
+    prefer_display, project_key, session_title,
 };
 
 use std::sync::Arc;
@@ -120,6 +125,13 @@ const MIGRATION_FACTS: SqlMigration = SqlMigration::new(
     "0006",
     "facts",
     include_str!("../migrations/sqlite/0006_facts.sql"),
+);
+
+/// The sealed page title beside the head row, same portable subset.
+const MIGRATION_PAGE_TITLES: SqlMigration = SqlMigration::new(
+    "0007",
+    "page_titles",
+    include_str!("../migrations/sqlite/0007_page_titles.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -285,7 +297,7 @@ impl Module for Pages {
             PersonalDataSet::unreachable(
                 "pages",
                 DataKind::Content,
-                "A page's current slug, type and Markdown body.",
+                "A page's current slug, type, Markdown body and its title (sealed under the scope key).",
                 WHY,
             ),
             PersonalDataSet::unreachable(
@@ -368,13 +380,14 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 6] = [
+        const MIGRATIONS: [SqlMigration; 7] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
             MIGRATION_SOURCE_LEDGER,
             MIGRATION_SOURCE_PROJECT,
             MIGRATION_FACTS,
+            MIGRATION_PAGE_TITLES,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

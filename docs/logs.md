@@ -111,6 +111,20 @@ note the server refuses — say, because someone edited that page by hand —
 is reported as `failed` with the reason; the session's source is in the
 ledger regardless, and the next sync tries the note again.
 
+A note is a **session** page (entity type `session`), not a wiki page: it is a
+source the coding-agents wiki is compiled from, so the web app lists it under
+Sources → Agent sessions and keeps it out of Pages (search and `ask` still
+find and cite it). Its title names the session the way a person would:
+`EarthOS.world · Claude Code · 2026-10-15 · Fix the login redirect loop` —
+the project, the agent, the day it started and the first thing asked, cut to
+60 characters. A client that sends only an id-shaped title (`colonizer
+session a15f…`) gets one the server reads from the note itself; for a
+Colonizer colony that is the issue it worked on, else its pull request, else
+its outcome (`EarthOS.world · Colony a15fba01 · #123 Fix auth redirect`).
+Notes synced before this were decisions titled by id: the notes module's
+cron moves them to `session` and renames them, a batch every 15 minutes, and
+a session's next sync does the same for its own page.
+
 ## Opt-in is per repository
 
 The opt-in is a small JSON file in the CLI's config directory

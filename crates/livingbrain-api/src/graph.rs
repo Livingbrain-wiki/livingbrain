@@ -305,6 +305,10 @@ pub fn build(rows: &GraphRows, compiled: &[Compiled], query: &GraphQuery, base: 
                 project: Some(seg.clone()),
                 ..Node::default()
             });
+            // One node per project key, named by the spelling a person
+            // knows: a compiled page's folder (`earthos-world`) gives way to
+            // the repository's own name (`EarthOS.world`) from a source.
+            node.label = livingbrain_pages::prefer_display(&node.label, raw).to_owned();
             // The earliest thing filed under a project is when it started.
             if let Some(at) = at
                 && node.created_at.as_deref().is_none_or(|have| at < have)
@@ -650,6 +654,64 @@ mod tests {
         }
     }
 
+    /// One project node per key: the compiler's `earthos-world` folder, a
+    /// session filed under `EarthOS.world` and a clone's `earthos-world` are
+    /// one project, named the way the repository spells it, and filtering by
+    /// any spelling finds all of it.
+    #[test]
+    fn a_project_is_one_node_named_by_its_original_spelling() {
+        let mut rows = rows();
+        rows.pages.push(page(
+            "shared-x",
+            "coding-agents--codex--earthos-world--learnings",
+            "topic",
+            "2026-10-04T00:00:00Z",
+        ));
+        for (id, project) in [("01E", "EarthOS.world"), ("01F", "earthos-world")] {
+            rows.sources.push(GraphSource {
+                id: id.into(),
+                scope: "shared-x".into(),
+                kind: "agent_log".into(),
+                rel_path: format!("codex session {id}"),
+                project: Some(project.into()),
+                created_at: "2026-10-04T00:00:00Z".into(),
+            });
+        }
+        let out = build(&rows, &[], &q(100), "https://app.test");
+        let projects: Vec<&Value> = out["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["kind"] == "project" && n["project"] == "earthos-world")
+            .collect();
+        assert_eq!(projects.len(), 1, "{projects:?}");
+        assert_eq!(projects[0]["label"], "EarthOS.world");
+        let filtered = build(
+            &rows,
+            &[],
+            &GraphQuery {
+                project: Some("EarthOS.world".into()),
+                kinds: None,
+                limit: 100,
+            },
+            "https://app.test",
+        );
+        let ids: Vec<&str> = filtered["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        for want in [
+            "project:earthos-world",
+            "source:01E",
+            "source:01F",
+            "page:shared-x:coding-agents--codex--earthos-world--learnings",
+        ] {
+            assert!(ids.contains(&want), "{want} in {ids:?}");
+        }
+    }
+
     #[test]
     fn nodes_and_edges_are_shaped_from_the_rows() {
         let out = build(&rows(), &[], &q(100), "https://app.test");
@@ -697,8 +759,8 @@ mod tests {
         assert_eq!(node("source:01S")["project"], "demo");
         assert_eq!(
             node("project:demo")["label"],
-            "demo",
-            "the first name it was filed under"
+            "Demo",
+            "the source's own spelling wins over the compiler's folded folder name"
         );
         let edges: Vec<(String, String, String)> = out["edges"]
             .as_array()

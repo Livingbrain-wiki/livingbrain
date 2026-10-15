@@ -244,10 +244,12 @@ fn the_source_listing_holds_on_every_dialect() {
                 vec![
                     ProjectCount {
                         project: "demo".to_owned(),
+                        key: "demo".to_owned(),
                         sources: 2,
                     },
                     ProjectCount {
                         project: "other".to_owned(),
+                        key: "other".to_owned(),
                         sources: 1,
                     },
                 ],

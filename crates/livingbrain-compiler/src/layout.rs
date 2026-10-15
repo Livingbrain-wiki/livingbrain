@@ -31,9 +31,6 @@ pub const PREFIX: &str = "coding-agents";
 pub const SEP: &str = "--";
 /// The folder the cross-agent project rollups live in.
 pub const ROLLUP: &str = "projects";
-/// The most a single segment may take of the 128-byte slug. Four segments
-/// plus three separators and the prefix stay under the slug cap.
-const MAX_SEGMENT: usize = 28;
 
 /// The fixed pages one agent-in-a-project folder holds. A topic page is
 /// anything else the model names inside the folder.
@@ -54,28 +51,15 @@ pub const LINT: &str = "coding-agents--lint";
 
 /// Folds free text onto one slug segment: lowercase ASCII letters and
 /// digits, every other run of characters one `-`, no `-` at either end, at
-/// most [`MAX_SEGMENT`] bytes. `None` when nothing survives.
+/// most 28 bytes. `None` when nothing survives.
+///
+/// This is the canonical project key ([`livingbrain_pages::project_key`]),
+/// one rule for the folder a session compiles into, the project filter of
+/// every listing and the brain map's project node: `EarthOS.world` and a
+/// clone's `earthos-world` are one project.
 #[must_use]
 pub fn segment(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut dash = false;
-    for ch in value.chars() {
-        let lower = ch.to_ascii_lowercase();
-        if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
-            if dash && !out.is_empty() {
-                out.push('-');
-            }
-            dash = false;
-            out.push(lower);
-        } else {
-            dash = true;
-        }
-        if out.len() >= MAX_SEGMENT {
-            break;
-        }
-    }
-    let out = out.trim_matches('-').to_owned();
-    (!out.is_empty()).then_some(out)
+    livingbrain_pages::project_key(value)
 }
 
 /// The folder name for an agent, from the record's `agent` field: Claude
@@ -256,7 +240,7 @@ mod tests {
         assert_eq!(segment("chi--infra").as_deref(), Some("chi-infra"));
         assert_eq!(segment("My_Repo.v2").as_deref(), Some("my-repo-v2"));
         assert_eq!(segment("---"), None);
-        assert!(segment(&"a".repeat(200)).unwrap().len() <= MAX_SEGMENT);
+        assert!(segment(&"a".repeat(200)).unwrap().len() <= 28);
     }
 
     #[test]

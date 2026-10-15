@@ -96,7 +96,7 @@ pub use graph::{
     Compiled, DEFAULT_LIMIT as GRAPH_DEFAULT_LIMIT, Graph, GraphQuery, MAX_LIMIT as GRAPH_MAX_LIMIT,
 };
 pub use model_jobs::ModelJobs;
-pub use notes::Notes;
+pub use notes::{BACKFILL_BATCH, Backfilled, Notes, backfill};
 pub use pages::pages_routes;
 pub use rebind::{PagesRebind, RebindBlob};
 pub use search::Search;

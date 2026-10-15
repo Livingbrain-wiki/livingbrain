@@ -15,6 +15,22 @@
 //! already holds exactly that markdown is not written at all: the answer
 //! says `unchanged: true` and the version does not move, so a re-sync is a
 //! no-op.
+//!
+//! **Session logs.** A keyed note under `agent-log-…` is a coding-agent
+//! session's log (`livingbrain logs sync`, Colonizer): a *source*, so it is
+//! written as a [`EntityType::Session`] page, not a decision, and the web
+//! app keeps it out of the wiki's Pages list. A client that sends only the
+//! id-only placeholder title (`colonizer session a15f…`) gets one named from
+//! the note itself ([`livingbrain_pages::session_title`]): `EarthOS.world ·
+//! Colony a15fba01 · #123 Fix auth redirect`. A session page still filed as
+//! a decision is moved over in place on its next write.
+//!
+//! **The backfill.** This module's cron names the pages written before
+//! titles were kept: each untitled page gets its title from its own body,
+//! and each session log still filed as a decision is moved to `session` and,
+//! when its title is a placeholder, retitled. A bounded batch per tick; a
+//! page once handled is never picked again, so the pass is idempotent and
+//! stops by itself.
 
 use std::sync::Arc;
 
@@ -22,10 +38,16 @@ use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::State;
 use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::post;
-use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_core::{
+    AnyError, BoxFuture, Clock, Config, ConfigError, Migrations, Module, ModuleContext, Port,
+    Problem, ScheduledBudget,
+};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_mcp::page_scope;
-use livingbrain_pages::{Author, EntityType, PageWrite, is_slug};
+use livingbrain_pages::{
+    Author, EntityType, PageStore, PageWrite, frontmatter_title, is_placeholder_title,
+    is_session_slug, is_slug, session_title,
+};
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -91,6 +113,173 @@ impl Module for Notes {
             .route("/", post(note))
             .with_state(state)
     }
+
+    /// The title backfill (see the module docs): one bounded batch a tick.
+    fn scheduled<'a>(
+        &'a self,
+        ctx: &'a ModuleContext,
+        _cron: &'a str,
+    ) -> BoxFuture<'a, Result<(), AnyError>> {
+        Box::pin(async move {
+            let (Some(db), Some(blob), Some(clock), Some(id_gen)) = (
+                ctx.ports.db.clone(),
+                ctx.ports.blob.clone(),
+                ctx.ports.clock.clone(),
+                ctx.ports.id_gen.clone(),
+            ) else {
+                return Ok(());
+            };
+            let store = PageStore::new(db, blob, self.wiki.kms.clone(), clock.clone(), id_gen);
+            backfill(&store, &ctx.scheduled, clock.as_ref(), BACKFILL_BATCH)
+                .await
+                .map(|_| ())
+                .map_err(|error| Box::new(error) as AnyError)
+        })
+    }
+}
+
+/// How many pages one cron tick names at most. Each is a body read and at
+/// most one write; the backlog this exists for (a few hundred session logs)
+/// is gone within the hour.
+pub const BACKFILL_BATCH: usize = 25;
+
+/// What one backfill pass did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Backfilled {
+    /// Session logs moved from `decision` to `session`.
+    pub retyped: usize,
+    /// Session logs given a real title (a new version of the page).
+    pub retitled: usize,
+    /// Pages whose listed title was set from their own body.
+    pub titled: usize,
+    /// Pages whose body could not be opened: marked so they are not tried
+    /// again.
+    pub unreadable: usize,
+}
+
+/// One backfill pass: up to `limit` pages with no listed title, each named
+/// from its own body; a session log still filed as a decision moved to
+/// `session` first, and retitled when its title is a placeholder.
+///
+/// Idempotent: every page it handles leaves the candidate set (its title
+/// column is set, to an empty string when there is nothing to show), so a
+/// second pass over the same store does nothing.
+///
+/// # Errors
+///
+/// Only when the candidate query itself fails; a page that cannot be
+/// handled is marked and skipped, never an error for the rest.
+pub async fn backfill(
+    store: &PageStore,
+    budget: &ScheduledBudget,
+    clock: &dyn Clock,
+    limit: usize,
+) -> Result<Backfilled, livingbrain_pages::PageError> {
+    let mut done = Backfilled::default();
+    for candidate in store.title_candidates(limit).await? {
+        if budget.exhausted(clock.now()) {
+            break;
+        }
+        let (scope, slug) = (candidate.scope.as_str(), candidate.slug.as_str());
+        let mut kind = candidate.entity_type;
+        if kind == EntityType::Decision
+            && is_session_slug(slug)
+            && let Ok(true) = store
+                .retype(scope, slug, EntityType::Decision, EntityType::Session)
+                .await
+        {
+            done.retyped += 1;
+            kind = EntityType::Session;
+        }
+        let page = match store.read(scope, slug).await {
+            Ok(Some(page)) => page,
+            Ok(None) => continue,
+            Err(_) => {
+                // A forgotten scope, a retired key: nothing to name it with.
+                let _ = store.set_title(scope, slug, None).await;
+                done.unreadable += 1;
+                continue;
+            }
+        };
+        let current = frontmatter_title(&page.frontmatter);
+        if kind == EntityType::Session
+            && is_placeholder_title(current.as_deref().unwrap_or(""), slug)
+        {
+            let title = one_line(&session_title(
+                slug,
+                page.frontmatter.get("project"),
+                &page.markdown,
+            ));
+            if !title.is_empty() {
+                let markdown = with_title(&page.markdown, &title);
+                let wrote = store
+                    .write(
+                        scope,
+                        slug,
+                        PageWrite {
+                            entity_type: EntityType::Session,
+                            markdown,
+                            author: Author::Brain { reconciles: None },
+                            base_version: Some(page.version),
+                        },
+                    )
+                    .await;
+                if wrote.is_ok() {
+                    done.retitled += 1;
+                    continue;
+                }
+                // A human edit pending, or a sync racing this pass: the list
+                // shows the derived name, and the next sync writes it.
+                let _ = store.set_title(scope, slug, Some(&title)).await;
+                done.titled += 1;
+                continue;
+            }
+        }
+        if store
+            .set_title(scope, slug, current.as_deref())
+            .await
+            .is_ok()
+        {
+            done.titled += 1;
+        }
+    }
+    Ok(done)
+}
+
+/// A body with its fence's `title:` line replaced (or added): the session
+/// retitle, which changes nothing else in the page.
+fn with_title(markdown: &str, title: &str) -> String {
+    let mut lines = markdown.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return format!("---\ntitle: {title}\n---\n\n");
+    };
+    if first.trim_end() != "---" {
+        return format!("---\ntitle: {title}\n---\n\n{markdown}");
+    }
+    let mut out = String::with_capacity(markdown.len() + title.len());
+    out.push_str(first);
+    let mut replaced = false;
+    let mut in_fence = true;
+    for line in lines {
+        if in_fence && line.trim_end() == "---" {
+            if !replaced {
+                out.push_str(&format!("title: {title}\n"));
+                replaced = true;
+            }
+            in_fence = false;
+            out.push_str(line);
+            continue;
+        }
+        if in_fence && line.trim_start().to_ascii_lowercase().starts_with("title:") {
+            if !replaced {
+                out.push_str(&format!("title: {title}\n"));
+                replaced = true;
+            }
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 /// A `POST /v1/notes` body. `title` is accepted for MCP parity with
@@ -162,6 +351,22 @@ async fn note(
         },
         None => String::new(),
     };
+    // A session log is a source the wiki is compiled from, not a decision,
+    // and a placeholder title is replaced by one read from the note itself.
+    let session = keyed.as_deref().is_some_and(is_session_slug);
+    let entity_type = if session {
+        EntityType::Session
+    } else {
+        EntityType::Decision
+    };
+    let title = match keyed.as_deref() {
+        Some(slug) if session && is_placeholder_title(&title, slug) => one_line(&session_title(
+            slug,
+            request.project.as_deref().map(one_line).as_deref(),
+            &clean,
+        )),
+        _ => title,
+    };
     let title = if title.is_empty() {
         "Note".to_owned()
     } else {
@@ -187,6 +392,15 @@ async fn note(
     let slug = keyed.clone().unwrap_or_else(|| note_slug(&clean));
     let markdown = note_markdown(&title, project.as_deref(), &clean);
     let store = state.store()?;
+    // A session log written before the `session` type existed is moved
+    // over first, so this write keeps its history instead of being refused
+    // as a change of type.
+    if session {
+        store
+            .retype(&scope, &slug, EntityType::Decision, EntityType::Session)
+            .await
+            .map_err(page_write_error)?;
+    }
     let head = store.read(&scope, &slug).await.map_err(page_read_error)?;
     let reference = format!("{scope}/{slug}");
     let fact_inputs = match facts {
@@ -203,7 +417,7 @@ async fn note(
     // the same session is how a sync proves it has nothing new.
     if keyed.is_some()
         && let Some(page) = &head
-        && page.entity_type == EntityType::Decision
+        && page.entity_type == entity_type
         && page.markdown == markdown
     {
         let facts = record_facts(&state, &scope, fact_inputs, &asker.user_id).await?;
@@ -221,7 +435,7 @@ async fn note(
             &scope,
             &slug,
             PageWrite {
-                entity_type: EntityType::Decision,
+                entity_type,
                 markdown,
                 author: Author::Brain { reconciles: None },
                 base_version: head.map(|page| page.version),

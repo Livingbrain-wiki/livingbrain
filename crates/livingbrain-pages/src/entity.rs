@@ -29,11 +29,19 @@ pub enum EntityType {
     /// frontmatter says which collection and folder it belongs to, so a
     /// reader can group compiled pages without parsing a slug.
     Topic,
+    /// One coding-agent session's readable log (`agent-log-<agent>-<id>`,
+    /// written by `livingbrain logs sync` and by Colonizer): a *source* the
+    /// wiki is compiled from, not a page of the wiki itself. Its own type so
+    /// a listing can leave the sessions out of the wiki and file them under
+    /// Sources → Agent sessions, while search and `ask` still find and cite
+    /// them. Before this type existed they were written as decisions, and the
+    /// notes route moves such a page over on its next write.
+    Session,
 }
 
 impl EntityType {
     /// Every variant, so a caller can enumerate them without a `match`.
-    pub const ALL: [EntityType; 8] = [
+    pub const ALL: [EntityType; 9] = [
         EntityType::Person,
         EntityType::Project,
         EntityType::Decision,
@@ -42,6 +50,7 @@ impl EntityType {
         EntityType::Glossary,
         EntityType::Radar,
         EntityType::Topic,
+        EntityType::Session,
     ];
 
     /// The stable wire name, also what a `type:` frontmatter key holds.
@@ -56,6 +65,7 @@ impl EntityType {
             Self::Glossary => "glossary",
             Self::Radar => "radar",
             Self::Topic => "topic",
+            Self::Session => "session",
         }
     }
 
@@ -71,6 +81,7 @@ impl EntityType {
             "glossary" => Some(Self::Glossary),
             "radar" => Some(Self::Radar),
             "topic" => Some(Self::Topic),
+            "session" => Some(Self::Session),
             _ => None,
         }
     }
@@ -192,6 +203,27 @@ fn schema(entity: EntityType) -> Schema {
                 "superseded_by",
             ],
             enums: &[],
+        },
+        // A session log keeps every key a decision note could carry — the
+        // pages written before this type existed are moved over in place
+        // (`PageStore::retype`), so whatever their fences hold must stay
+        // valid — plus who wrote the session and where it came from.
+        EntityType::Session => Schema {
+            required: &["title"],
+            optional: &[
+                "status",
+                "date",
+                "project",
+                "agent",
+                "session",
+                "source",
+                "decided_at",
+                "valid_from",
+                "valid_to",
+                "supersedes",
+                "superseded_by",
+            ],
+            enums: &[("status", &["proposed", "accepted", "superseded"])],
         },
     }
 }
