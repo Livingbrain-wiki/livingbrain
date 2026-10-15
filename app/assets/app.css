@@ -2903,6 +2903,97 @@ main > p.tiny:last-child {
   max-width: 10rem;
 }
 
+/* Avatars: an uploaded picture, or initials on one of eight colours chosen
+   from the person's (or workspace's) id, so the same one is always the same
+   colour (`assets/profile.js`). `.avatar.avatar--tN` outranks the plain
+   `.user__avatar` tint the user button had before. */
+.avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--f-display);
+  font-weight: 650;
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+.avatar--sm {
+  width: 22px;
+  height: 22px;
+  font-size: 10px;
+}
+.avatar--xl {
+  width: 96px;
+  height: 96px;
+  font-size: 36px;
+}
+.avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.avatar.avatar--img {
+  background: var(--bg3);
+}
+.avatar.avatar--t0 { background: oklch(0.72 0.11 25); color: oklch(0.24 0.05 25); }
+.avatar.avatar--t1 { background: oklch(0.76 0.11 65); color: oklch(0.26 0.05 65); }
+.avatar.avatar--t2 { background: oklch(0.8 0.1 100); color: oklch(0.27 0.05 100); }
+.avatar.avatar--t3 { background: oklch(0.76 0.12 150); color: oklch(0.25 0.05 150); }
+.avatar.avatar--t4 { background: oklch(0.75 0.09 195); color: oklch(0.25 0.04 195); }
+.avatar.avatar--t5 { background: oklch(0.72 0.1 240); color: oklch(0.24 0.05 240); }
+.avatar.avatar--t6 { background: oklch(0.72 0.11 290); color: oklch(0.24 0.05 290); }
+.avatar.avatar--t7 { background: oklch(0.73 0.11 335); color: oklch(0.24 0.05 335); }
+.avatar__preview {
+  border: 1px solid var(--line);
+}
+.avatar__preview[hidden],
+.avatar[hidden] {
+  display: none;
+}
+.menu__item .avatar {
+  margin-inline-end: 8px;
+}
+.person {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The picture-and-name editors (Settings → Account, and the workspace's at
+   the head of Members). */
+.profile {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-block: var(--space-2) var(--space-3);
+}
+.profile__pic {
+  flex: 0 0 auto;
+}
+.profile__pic-actions {
+  display: grid;
+  gap: 6px;
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+.profile__pic-actions input[type="file"] {
+  max-width: min(100%, 28rem);
+}
+.profile__name {
+  max-width: 32rem;
+  margin-bottom: var(--space-4);
+}
+
 .menu {
   position: absolute;
   top: calc(100% + 6px);

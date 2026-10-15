@@ -81,8 +81,13 @@ export function sessionView(me, origin) {
   const base = String(origin || "").replace(/\/+$/, "");
   return {
     who: name || member.user_id || "a member",
+    userId: member.user_id || "",
+    // Same-origin avatar paths, or "" for initials (`profile.js` checks the
+    // shape again before any `src` is set).
+    avatarUrl: typeof member.avatar_url === "string" ? member.avatar_url : "",
     workspaceName: workspace.name || "Your workspace",
     workspaceId: workspace.id || "",
+    workspaceAvatarUrl: typeof workspace.avatar_url === "string" ? workspace.avatar_url : "",
     role: me && me.is_owner ? "Owner" : "Member",
     mcpUrl: `${base}${MCP_PATH}`,
     apiBase: base,

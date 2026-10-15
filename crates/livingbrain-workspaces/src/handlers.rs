@@ -39,6 +39,7 @@ use crate::events::events as slack_events;
 use crate::flow::{self, Flow, Session};
 use crate::install;
 use crate::members;
+use crate::profile::AvatarRef;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
 use crate::{EmailLedger, MemberRemoval, SignInMail, SignInMailInput};
@@ -294,6 +295,17 @@ pub(crate) fn router(
         .route("/slack/events", post(slack_events))
         .route("/me", get(me))
         .route("/", get(members::list_workspaces))
+        .route("/current", axum::routing::patch(members::rename_workspace))
+        .route(
+            "/current/avatar",
+            axum::routing::put(members::put_workspace_avatar)
+                .delete(members::delete_workspace_avatar)
+                // The one route here that takes an image; every other route
+                // keeps the harness's 64 KiB through its own extractor.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::profile::AVATAR_BODY_CEILING,
+                )),
+        )
         .route("/switch", post(members::switch))
         .route("/members", get(members))
         .route(
@@ -936,12 +948,19 @@ struct WorkspaceView {
     id: String,
     name: String,
     owner_id: String,
+    /// The same-origin URL of the workspace's avatar, or `null`.
+    avatar_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct MemberView {
     user_id: String,
+    /// The name everybody reads: the chosen one, else the reported one.
     name: String,
+    /// The name the member chose, or `null` when they kept the reported one.
+    display_name: Option<String>,
+    /// The same-origin URL of the member's avatar, or `null`.
+    avatar_url: Option<String>,
     timezone: Option<String>,
     is_admin: bool,
     role: &'static str,
@@ -963,6 +982,7 @@ async fn me(
     let (workspace, member, is_owner) = session_scope(&state, &headers).await?;
     Ok(Json(MeResponse {
         workspace: WorkspaceView {
+            avatar_url: AvatarRef::of(workspace.avatar.as_deref()).map(|avatar| avatar.url),
             id: workspace.id,
             name: workspace.name,
             owner_id: workspace.owner_id,
@@ -1033,10 +1053,17 @@ pub struct Caller {
     pub is_admin: bool,
     /// The member's role (ADR 0004).
     pub role: store::Role,
-    /// The member's display name.
+    /// The member's display name: the one they chose, else the one the
+    /// sign-in method reports.
     pub name: String,
+    /// The name the member chose, or `None` when they kept the reported one.
+    pub display_name: Option<String>,
+    /// The member's avatar, if they uploaded one.
+    pub avatar: Option<AvatarRef>,
     /// The workspace's name.
     pub workspace_name: String,
+    /// The workspace's avatar, if an owner or admin uploaded one.
+    pub workspace_avatar: Option<AvatarRef>,
 }
 
 /// Resolves the caller from the session cookie, through the same
@@ -1065,6 +1092,9 @@ pub async fn caller(
         is_admin: is_owner || member.may_administer(),
         role: member.role,
         name: member.name,
+        display_name: member.display_name,
+        avatar: AvatarRef::of(member.avatar.as_deref()),
+        workspace_avatar: AvatarRef::of(workspace.avatar.as_deref()),
         workspace_name: workspace.name,
         workspace_id: workspace.id,
         user_id: member.user_id,
@@ -1097,6 +1127,9 @@ pub async fn caller_for(
         is_admin: member.may_administer(),
         role: member.role,
         name: member.name,
+        display_name: member.display_name,
+        avatar: AvatarRef::of(member.avatar.as_deref()),
+        workspace_avatar: AvatarRef::of(workspace.avatar.as_deref()),
         workspace_name: workspace.name,
         workspace_id: workspace.id,
         user_id: member.user_id,
@@ -1214,6 +1247,8 @@ fn own_origin(headers: &HeaderMap) -> Option<String> {
 
 fn member_view(member: Member) -> MemberView {
     MemberView {
+        avatar_url: AvatarRef::of(member.avatar.as_deref()).map(|avatar| avatar.url),
+        display_name: member.display_name,
         user_id: member.user_id,
         name: member.name,
         timezone: member.timezone,

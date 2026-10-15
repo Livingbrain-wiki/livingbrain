@@ -11,7 +11,7 @@
  */
 
 
-const CACHE = "lb-app-v14";
+const CACHE = "lb-app-v15";
 
 const SHELL = [
   "./",
@@ -34,6 +34,9 @@ const SHELL = [
   "./assets/tokens.js",
   // app.js imports the members section's helpers statically (ADR 0004).
   "./assets/members.js",
+  // ...and the names-and-avatars helpers, which members.js and shell.js
+  // import too.
+  "./assets/profile.js",
   // ...and the Usage & limits section's, the same way.
   "./assets/budgets.js",
   // wiki.js is app.js's import for the wiki page, and wiki.css its sheet;

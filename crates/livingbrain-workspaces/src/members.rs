@@ -54,6 +54,7 @@ use crate::handlers::{
     ModuleState, database, mail_failed, port, require_same_origin, session_scope, sign_in_token,
     token_hash,
 };
+use crate::profile::{self, AvatarRef};
 use crate::store::{self, Member, Role, RosterOutcome};
 use crate::{Invitation, SignInMailInput};
 
@@ -226,7 +227,12 @@ pub(crate) async fn remove(
 #[derive(Debug, Serialize)]
 pub(crate) struct MemberView {
     pub user_id: String,
+    /// The name everybody reads: the chosen one, else the reported one.
     pub name: String,
+    /// The name the member chose, or `null`.
+    pub display_name: Option<String>,
+    /// The same-origin URL of the member's avatar, or `null`.
+    pub avatar_url: Option<String>,
     pub timezone: Option<String>,
     /// Slack's admin flag.
     pub is_admin: bool,
@@ -237,6 +243,8 @@ pub(crate) struct MemberView {
 impl From<Member> for MemberView {
     fn from(member: Member) -> Self {
         Self {
+            avatar_url: AvatarRef::of(member.avatar.as_deref()).map(|avatar| avatar.url),
+            display_name: member.display_name,
             user_id: member.user_id,
             name: member.name,
             timezone: member.timezone,
@@ -435,12 +443,123 @@ pub(crate) async fn revoke_invite(
 }
 
 // ---------------------------------------------------------------------------
+// The workspace's name and avatar
+
+/// The workspace as its profile routes answer it.
+#[derive(Debug, Serialize)]
+struct WorkspaceProfile {
+    id: String,
+    name: String,
+    avatar_url: Option<String>,
+}
+
+async fn workspace_profile(
+    db: &dyn cratefield_core::Database,
+    workspace_id: &str,
+) -> Result<WorkspaceProfile, Problem> {
+    let workspace = store::workspace(db, workspace_id)
+        .await
+        .map_err(database)?
+        .ok_or_else(|| Problem::new(&NOT_FOUND))?;
+    Ok(WorkspaceProfile {
+        avatar_url: AvatarRef::of(workspace.avatar.as_deref()).map(|avatar| avatar.url),
+        id: workspace.id,
+        name: workspace.name,
+    })
+}
+
+/// The workspace the session names, after checking that its member may
+/// change how the workspace is presented: an owner or admin.
+async fn administered(
+    state: &ModuleState,
+    headers: &HeaderMap,
+) -> Result<store::Workspace, Problem> {
+    require_same_origin(headers)?;
+    let (workspace, actor, is_owner) = session_scope(state, headers).await?;
+    if !(is_owner || actor.may_administer()) {
+        return Err(forbidden());
+    }
+    Ok(workspace)
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WorkspacePatch {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// `PATCH /current` — rename the workspace. Owners and admins only; the
+/// name is 1–64 visible characters, trimmed.
+pub(crate) async fn rename_workspace(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspacePatch>,
+) -> Result<Response, Problem> {
+    let workspace = administered(&state, &headers).await?;
+    let raw = body.name.ok_or_else(profile::nothing_to_change)?;
+    let name = profile::clean_name(&raw).map_err(profile::name_problem)?;
+    let db = port(state.ctx.ports.db.clone())?;
+    profile::set_workspace_name(&*db, &workspace.id, &name)
+        .await
+        .map_err(database)?;
+    Ok(Json(workspace_profile(&*db, &workspace.id).await?).into_response())
+}
+
+/// `PUT /current/avatar` — the workspace's avatar, as the raw image body.
+/// Owners and admins only. The image is checked by its bytes, rewritten
+/// without metadata and stored under a fresh id; the one it replaces is
+/// deleted.
+pub(crate) async fn put_workspace_avatar(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+    body: cratefield_core::axum::body::Bytes,
+) -> Result<Response, Problem> {
+    let workspace = administered(&state, &headers).await?;
+    let blob = state
+        .ctx
+        .ports
+        .blob
+        .clone()
+        .ok_or_else(profile::avatars_unavailable)?;
+    let declared = headers
+        .get(cratefield_core::axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let image = profile::clean_image(&body, declared).map_err(profile::image_problem)?;
+    let id_gen = port(state.ctx.ports.id_gen.clone())?;
+    let db = port(state.ctx.ports.db.clone())?;
+    let id = profile::store_avatar(&*blob, &workspace.id, &id_gen.ulid(), &image).await?;
+    let previous = profile::set_workspace_avatar(&*db, &workspace.id, Some(&id))
+        .await
+        .map_err(database)?;
+    profile::forget_avatar(&*blob, &workspace.id, previous.as_deref(), Some(&id)).await;
+    Ok(Json(workspace_profile(&*db, &workspace.id).await?).into_response())
+}
+
+/// `DELETE /current/avatar` — back to the initials. Owners and admins only.
+pub(crate) async fn delete_workspace_avatar(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let workspace = administered(&state, &headers).await?;
+    let db = port(state.ctx.ports.db.clone())?;
+    let previous = profile::set_workspace_avatar(&*db, &workspace.id, None)
+        .await
+        .map_err(database)?;
+    if let Some(blob) = state.ctx.ports.blob.clone() {
+        profile::forget_avatar(&*blob, &workspace.id, previous.as_deref(), None).await;
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---------------------------------------------------------------------------
 // More than one workspace
 
 #[derive(Debug, Serialize)]
 struct WorkspaceItem {
     id: String,
     name: String,
+    /// The same-origin URL of the workspace's avatar, or `null`.
+    avatar_url: Option<String>,
     role: &'static str,
     current: bool,
 }
@@ -462,6 +581,7 @@ pub(crate) async fn list_workspaces(
         .map_err(database)?
         .into_iter()
         .map(|found| WorkspaceItem {
+            avatar_url: AvatarRef::of(found.workspace_avatar.as_deref()).map(|avatar| avatar.url),
             current: found.workspace_id == workspace.id,
             id: found.workspace_id,
             name: found.workspace_name,
@@ -473,6 +593,7 @@ pub(crate) async fn list_workspaces(
         items.insert(
             0,
             WorkspaceItem {
+                avatar_url: AvatarRef::of(workspace.avatar.as_deref()).map(|avatar| avatar.url),
                 id: workspace.id,
                 name: workspace.name,
                 role: member.role.as_str(),

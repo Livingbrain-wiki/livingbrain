@@ -19,6 +19,7 @@ import {
 } from "./nav.js";
 import { sessionView } from "./session.js";
 import { workspacesRequest, switchRequest } from "./members.js";
+import { avatarNode, paintAvatar } from "./profile.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const COLLAPSE_KEY = "lb-nav-collapsed";
@@ -254,7 +255,10 @@ export function mountShell(deps) {
       const item = doc.createElement("button");
       item.type = "button";
       item.className = "menu__item";
-      item.textContent = String(space.name || space.id || "");
+      const label = String(space.name || space.id || "");
+      const pic = avatarNode(doc, { name: label, id: space.id, url: space.avatar_url }, "avatar--sm");
+      if (pic) item.appendChild(pic);
+      item.appendChild(textEl(doc, "span", label, "menu__text"));
       if (space.current) {
         item.disabled = true;
         item.setAttribute("aria-current", "true");
@@ -268,7 +272,7 @@ export function mountShell(deps) {
             location.assign("/");
           } catch {
             item.disabled = false;
-            item.textContent = `${String(space.name || space.id || "")} — could not switch`;
+            item.appendChild(textEl(doc, "span", " — could not switch", "menu__hint"));
           }
         });
       }
@@ -280,6 +284,11 @@ export function mountShell(deps) {
     manage.setAttribute("href", "settings.html#members");
     manage.textContent = "Members and invitations";
     wsMenu.appendChild(manage);
+    const settings = doc.createElement("a");
+    settings.className = "menu__item";
+    settings.setAttribute("href", "settings.html#workspace");
+    settings.textContent = "Workspace name and picture";
+    wsMenu.appendChild(settings);
   };
   const wsControl = wireMenu(doc, wsButton, wsMenu, fillWorkspaces);
   const userControl = wireMenu(doc, doc.getElementById("user-button"), doc.getElementById("user-menu"));
@@ -290,6 +299,18 @@ export function mountShell(deps) {
       deps.toggleTheme();
     });
   }
+
+  /** The workspace's picture in the switcher button, made once and kept
+   * before the name, so the pages' markup needs no slot for it. */
+  let wsAvatar = null;
+  const workspaceAvatar = () => {
+    if (wsAvatar || !wsButton) return wsAvatar;
+    const name = doc.getElementById("ws-name");
+    wsAvatar = avatarNode(doc, {}, "avatar--sm ws__avatar");
+    if (wsAvatar && name && typeof wsButton.insertBefore === "function") wsButton.insertBefore(wsAvatar, name);
+    else if (wsAvatar) wsButton.appendChild(wsAvatar);
+    return wsAvatar;
+  };
 
   /** Shows who is signed in where: the switcher, the avatar initial, the
    * `[data-session]` slots outside the sign-in page, and `data-session` on
@@ -307,8 +328,11 @@ export function mountShell(deps) {
     if (body.dataset.page === "signin") doc.title = `${view.workspaceName} — Living Brain`;
     const name = doc.getElementById("ws-name");
     if (name) name.textContent = view.workspaceName;
+    paintAvatar(workspaceAvatar(), { name: view.workspaceName, id: view.workspaceId, url: view.workspaceAvatarUrl }, doc);
+    // The user button's picture: the uploaded one, else initials on the
+    // member's own colour.
     const initial = doc.getElementById("user-initial");
-    if (initial) initial.textContent = (view.who || "?").trim().charAt(0).toUpperCase() || "?";
+    if (initial) paintAvatar(initial, { name: view.who, id: view.userId, url: view.avatarUrl }, doc);
     if (body.dataset.page !== "signin") {
       for (const slot of doc.querySelectorAll("[data-session]")) {
         const key = slot.getAttribute("data-session");

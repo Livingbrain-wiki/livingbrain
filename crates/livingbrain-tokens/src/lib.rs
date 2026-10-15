@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod avatars;
 mod device;
 mod handlers;
 mod me;
@@ -30,6 +31,7 @@ use cratefield_core::{
 };
 use livingbrain_access::{Location, Scope, scopes_for};
 
+pub use avatars::Avatars;
 pub use device::{DevicePorts, PatIssuer, SessionApprover};
 pub use me::Me;
 

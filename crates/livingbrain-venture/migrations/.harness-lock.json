@@ -126,5 +126,9 @@
   "github/0002": {
     "file": "0032_github_0002_shared_app.sql",
     "sha256": "5bd3235d2478f5ed3117bb003cc8d8c3341cc708137b236e07ec90f4dbb81551"
+  },
+  "workspaces/0006": {
+    "file": "0033_workspaces_0006_profiles.sql",
+    "sha256": "d75f53116b83d03df857501b773f7a9fbf6f9eeef25b2802f3d62e0b2d569162"
   }
 }

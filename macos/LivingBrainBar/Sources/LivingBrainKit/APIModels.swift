@@ -557,6 +557,14 @@ public struct Me: Decodable, Equatable, Sendable {
     public struct Workspace: Decodable, Equatable, Sendable {
         public var id: String
         public var name: String
+        /// The same-origin path of the workspace's avatar
+        /// (`/v1/avatars/av_…`), or nil. Older servers omit it.
+        public var avatarURL: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, name
+            case avatarURL = "avatar_url"
+        }
     }
 
     public struct Principal: Decodable, Equatable, Sendable {
@@ -568,12 +576,20 @@ public struct Me: Decodable, Equatable, Sendable {
         /// `member` or `agent`.
         public var kind: String
         public var id: String
+        /// The name everybody reads: the one the member chose, else the one
+        /// their sign-in reports.
         public var name: String
+        /// The name the member chose, or nil when they kept the reported one.
+        public var displayName: String?
+        /// The same-origin path of the member's avatar, or nil.
+        public var avatarURL: String?
         public var role: String?
         public var onBehalfOf: Owner?
 
         enum CodingKeys: String, CodingKey {
             case kind, id, name, role
+            case displayName = "display_name"
+            case avatarURL = "avatar_url"
             case onBehalfOf = "on_behalf_of"
         }
     }
@@ -602,5 +618,11 @@ public struct Me: Decodable, Equatable, Sendable {
     /// "Acme (ws_…)".
     public var workspaceLabel: String {
         workspace.name.isEmpty ? workspace.id : "\(workspace.name) (\(workspace.id))"
+    }
+
+    /// The principal's avatar as an absolute URL on `base`, or nil. The
+    /// image is member-only, so it is fetched with the same bearer token.
+    public func avatarURL(relativeTo base: URL) -> URL? {
+        principal.avatarURL.flatMap { URL(string: $0, relativeTo: base)?.absoluteURL }
     }
 }
