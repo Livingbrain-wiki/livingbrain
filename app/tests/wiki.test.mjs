@@ -380,6 +380,7 @@ const {
   queueSummary,
   jobsBySource,
   jobLabel,
+  triageSummary,
   askWithRunner,
   subagentHeader,
   subagentStepNodes,
@@ -1698,6 +1699,35 @@ test("coding-agents helpers: a slug splits into its folder, and a listing into a
     { source_id: "a", status: "queued" },
   ]);
   assert.equal(jobs.get("a").status, "done", "the newest job per source");
+});
+
+test("the queue card says what triage held back and what it saved", () => {
+  assert.equal(jobLabel("skipped-trivial"), "Skipped (trivial)");
+  assert.equal(jobLabel("summary-only"), "Summary only");
+  assert.equal(
+    queueSummary({ done: 2, "skipped-trivial": 3, "summary-only": 1 }),
+    "2 compiled · 3 skipped (trivial) · 1 summary only",
+  );
+  assert.equal(
+    triageSummary({
+      enabled: true,
+      classifier: false,
+      skipped: 3,
+      summarised: 1,
+      full: 2,
+      tokens_raw: 120_000,
+      tokens_sent: 30_000,
+      tokens_saved: 90_000,
+    }),
+    "Triage: 3 skipped · 1 summary only · 2 compiled in full · ~90k tokens saved (75%).",
+  );
+  assert.match(
+    triageSummary({ enabled: true, classifier: true, full: 1, tokens_raw: 10, tokens_saved: 0 }),
+    /Triage by Jev\./,
+  );
+  assert.equal(triageSummary({ enabled: true }), "");
+  assert.equal(triageSummary({ enabled: false }), "Triage is off.");
+  assert.equal(triageSummary(undefined), "");
 });
 
 test("coding-agents: home shows the compiled pages as a folder, not as recent pages", async () => {

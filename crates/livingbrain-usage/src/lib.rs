@@ -210,10 +210,27 @@ impl Module for Usage {
             include_str!("../migrations/postgres/0002_budgets.sql"),
         );
 
-        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_BUDGETS];
+        /// The compiler's triage and compaction switches and the triage
+        /// strictness, nullable like every other setting.
+        const MIGRATION_TRIAGE: SqlMigration = SqlMigration::new(
+            "0003",
+            "triage",
+            include_str!("../migrations/sqlite/0003_triage.sql"),
+        );
+        /// The Postgres form: the strictness is BIGINT like every number.
+        const MIGRATION_TRIAGE_POSTGRES: SqlMigration = SqlMigration::new(
+            "0003",
+            "triage",
+            include_str!("../migrations/postgres/0003_triage.sql"),
+        );
+
+        const MIGRATIONS: [SqlMigration; 3] = [MIGRATION_INIT, MIGRATION_BUDGETS, MIGRATION_TRIAGE];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
-            [MIGRATION_INIT_POSTGRES, MIGRATION_BUDGETS_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+            MIGRATION_INIT_POSTGRES,
+            MIGRATION_BUDGETS_POSTGRES,
+            MIGRATION_TRIAGE_POSTGRES,
+        ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,

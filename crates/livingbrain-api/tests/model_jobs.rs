@@ -24,7 +24,12 @@ fn sync(fx: &common::Fixture, user: &str, session: &str, text: &str) -> String {
         "schema_version": 1, "agent": "codex", "collector_version": 1,
         "session_id": session, "repo": "~/code/demo",
         "started_at": "2026-10-15T01:00:00Z",
-        "turns": [{"role": "user", "text": text, "tool_calls": []}],
+        // A request and an edit: real work, which triage compiles in full.
+        "turns": [
+            {"role": "user", "text": text, "tool_calls": []},
+            {"role": "assistant", "text": "Done.",
+             "tool_calls": [{"name": "apply_patch", "path": "src/db.rs", "status": "ok"}]}
+        ],
         "totals": {}, "truncated": false
     })
     .to_string();

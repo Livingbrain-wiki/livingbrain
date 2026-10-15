@@ -110,5 +110,13 @@
   "github/0001": {
     "file": "0028_github_0001_init.sql",
     "sha256": "ca01e020082913bc302ef21d87940c15904755376bd16bdcf9633a2243d96706"
+  },
+  "coding-agents/0003": {
+    "file": "0029_coding-agents_0003_triage.sql",
+    "sha256": "017f7272d645464eeb587507942d1ef38263586a8788e327012ebec7d69237e2"
+  },
+  "usage/0003": {
+    "file": "0030_usage_0003_triage.sql",
+    "sha256": "17a0aad6f1281cc154c30dccdb5113562abe021adf8ab45a2558426a50c3dce8"
   }
 }

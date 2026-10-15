@@ -54,11 +54,18 @@ pub enum JobStatus {
     /// A model call is out on the owner's own runner (their subscription,
     /// on their device); the compile carries on when the answer arrives.
     WaitingRunner,
+    /// Triage found nothing worth compiling (an empty or trivial session).
+    /// No model call; "Compile fully" compiles it anyway.
+    SkippedTrivial,
+    /// Triage logged the session in one model-free line instead of
+    /// compiling it (a failing loop, a lookup that changed nothing).
+    /// "Compile fully" compiles it anyway.
+    SummaryOnly,
 }
 
 impl JobStatus {
     /// Every status, in the order a status card lists them.
-    pub const ALL: [JobStatus; 9] = [
+    pub const ALL: [JobStatus; 11] = [
         Self::Queued,
         Self::Processing,
         Self::Done,
@@ -68,6 +75,8 @@ impl JobStatus {
         Self::Superseded,
         Self::Skipped,
         Self::WaitingRunner,
+        Self::SkippedTrivial,
+        Self::SummaryOnly,
     ];
 
     /// The stored and wire name.
@@ -83,6 +92,8 @@ impl JobStatus {
             Self::Superseded => "superseded",
             Self::Skipped => "skipped",
             Self::WaitingRunner => "waiting-runner",
+            Self::SkippedTrivial => "skipped-trivial",
+            Self::SummaryOnly => "summary-only",
         }
     }
 
@@ -121,6 +132,19 @@ pub struct Job {
     pub next_attempt_at: Option<String>,
     /// Transcript chunks already applied by earlier runs of this job.
     pub chunks_done: u32,
+    /// What triage decided (`skip`, `summary`, `full`), once a run did.
+    pub triage: Option<String>,
+    /// Why, in a fixed vocabulary (`failing-loop`, `jev:full`, `forced`, …).
+    pub triage_reason: Option<String>,
+    /// The plan a compile runs on, kept so a resumed compile cuts the
+    /// transcript the same way (JSON, ids and flags only).
+    pub triage_plan: Option<String>,
+    /// "Compile fully": no triage, no compaction, on the next run.
+    pub force_full: bool,
+    /// Estimated input tokens the compile would have sent without triage
+    /// and compaction, and what it sent (or will send) with them.
+    pub est_tokens_raw: u64,
+    pub est_tokens_sent: u64,
 }
 
 /// Which jobs a claim may take.
@@ -158,6 +182,11 @@ pub struct Finish {
     /// The run handed a call to the runner and only waits: it does not
     /// count as one of the job's attempts.
     pub refund_attempt: bool,
+    /// The triage this run decided, when it decided one: the decision, the
+    /// reason and the stored plan.
+    pub triage: Option<(String, String, Option<String>)>,
+    /// The token estimate (raw, sent), when this run made one.
+    pub estimate: Option<(u64, u64)>,
 }
 
 impl Finish {
@@ -175,6 +204,8 @@ impl Finish {
             retry_at: None,
             chunks_done: None,
             refund_attempt: false,
+            triage: None,
+            estimate: None,
         }
     }
 }
@@ -401,13 +432,33 @@ impl Queue {
             .chunks_done
             .or_else(|| current.as_ref().map(|j| j.chunks_done))
             .unwrap_or(0);
+        // The triage and the estimate are this run's when it made them,
+        // else what the row already says.
+        let (triage, reason, plan) = match &finish.triage {
+            Some((triage, reason, plan)) => {
+                (Some(triage.clone()), Some(reason.clone()), plan.clone())
+            }
+            None => current.as_ref().map_or((None, None, None), |j| {
+                (
+                    j.triage.clone(),
+                    j.triage_reason.clone(),
+                    j.triage_plan.clone(),
+                )
+            }),
+        };
+        let (raw, sent) = finish.estimate.unwrap_or_else(|| {
+            current
+                .as_ref()
+                .map_or((0, 0), |j| (j.est_tokens_raw, j.est_tokens_sent))
+        });
         self.db
             .execute(&Statement::with_values(
                 "UPDATE coding_agent_jobs SET status = ?, last_error = ?, \
                         prompt_tokens = prompt_tokens + ?, completion_tokens = completion_tokens + ?, \
                         pages = ?, rejected = rejected + ?, facts = facts + ?, \
                         lease_until = NULL, next_attempt_at = ?, updated_at = ?, \
-                        attempts = ?, chunks_done = ? \
+                        attempts = ?, chunks_done = ?, triage = ?, triage_reason = ?, \
+                        triage_plan = ?, est_tokens_raw = ?, est_tokens_sent = ? \
                  WHERE scope = ? AND body_sha256 = ?",
                 vec![
                     text(finish.status.as_str()),
@@ -421,6 +472,11 @@ impl Queue {
                     text(&rfc3339(now)),
                     big(u64::from(attempts)),
                     big(u64::from(chunks_done)),
+                    opt_text(triage.as_deref()),
+                    opt_text(reason.as_deref()),
+                    opt_text(plan.as_deref()),
+                    big(raw),
+                    big(sent),
                     text(&job.scope),
                     text(&job.body_sha256),
                 ],
@@ -561,6 +617,89 @@ impl Queue {
             .await
     }
 
+    /// "Compile fully": puts one of the asker's triaged jobs — a
+    /// `skipped-trivial` or `summary-only` one, found by its source id in
+    /// these scopes of `workspace` — back to `queued`, to be compiled with
+    /// no triage and no compaction. `false` when there is no such job (not
+    /// the asker's, not triaged, or already compiled in full).
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn compile_fully(
+        &self,
+        workspace: &str,
+        scopes: &[String],
+        source_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, DbError> {
+        if scopes.is_empty() {
+            return Ok(false);
+        }
+        let mut values = vec![text(&rfc3339(now)), text(workspace), text(source_id)];
+        values.extend(scopes.iter().map(|scope| text(scope)));
+        let changed = self
+            .db
+            .execute(&Statement::with_values(
+                format!(
+                    "UPDATE coding_agent_jobs SET status = 'queued', force_full = 1, attempts = 0, \
+                            chunks_done = 0, next_attempt_at = NULL, lease_until = NULL, \
+                            updated_at = ? \
+                     WHERE workspace = ? AND source_id = ? AND scope IN ({}) \
+                       AND status IN ('skipped-trivial', 'summary-only')",
+                    placeholders(scopes.len())
+                ),
+                values,
+            ))
+            .await?;
+        Ok(changed > 0)
+    }
+
+    /// What triage and compaction saved across the asker's jobs: how many
+    /// sessions each decision got, and the estimated input tokens without
+    /// them and with them.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn savings(&self, workspace: &str, scopes: &[String]) -> Result<Savings, DbError> {
+        let mut out = Savings::default();
+        if scopes.is_empty() {
+            return Ok(out);
+        }
+        let mut values = vec![text(workspace)];
+        values.extend(scopes.iter().map(|scope| text(scope)));
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                format!(
+                    "SELECT triage, COUNT(*) AS n, CAST(SUM(est_tokens_raw) AS BIGINT) AS raw, \
+                            CAST(SUM(est_tokens_sent) AS BIGINT) AS sent \
+                     FROM coding_agent_jobs WHERE workspace = ? AND scope IN ({}) \
+                       AND triage IS NOT NULL GROUP BY triage",
+                    placeholders(scopes.len())
+                ),
+                values,
+            ))
+            .await?;
+        for row in &rows.rows {
+            let count = |name: &str| {
+                row.get::<i64>(name)
+                    .and_then(|n| u64::try_from(n).ok())
+                    .unwrap_or(0)
+            };
+            match row.get::<String>("triage").as_deref() {
+                Some("skip") => out.skipped = count("n"),
+                Some("summary") => out.summarised = count("n"),
+                Some("full") => out.full = count("n"),
+                _ => continue,
+            }
+            out.tokens_raw += count("raw");
+            out.tokens_sent += count("sent");
+        }
+        Ok(out)
+    }
+
     /// When this session last compiled, if an earlier body of it did: the
     /// compiler tells the model, so a grown session updates the pages
     /// rather than restating them.
@@ -642,10 +781,31 @@ impl Queue {
     }
 }
 
+/// What triage and compaction saved, over a set of jobs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Savings {
+    /// Sessions triage skipped, summarised, and sent to a full compile.
+    pub skipped: u64,
+    pub summarised: u64,
+    pub full: u64,
+    /// Estimated input tokens without triage and compaction, and with them.
+    pub tokens_raw: u64,
+    pub tokens_sent: u64,
+}
+
+impl Savings {
+    /// The estimated tokens saved.
+    #[must_use]
+    pub fn tokens_saved(&self) -> u64 {
+        self.tokens_raw.saturating_sub(self.tokens_sent)
+    }
+}
+
 /// The columns every job read selects, in [`job_from`]'s order.
 const COLUMNS: &str = "scope, body_sha256, source_id, workspace, owner, session_key, project, \
      source_created_at, status, attempts, last_error, prompt_tokens, completion_tokens, pages, \
-     rejected, facts, queued_at, updated_at, lease_until, next_attempt_at, chunks_done";
+     rejected, facts, queued_at, updated_at, lease_until, next_attempt_at, chunks_done, \
+     triage, triage_reason, triage_plan, force_full, est_tokens_raw, est_tokens_sent";
 
 fn job_from(row: &Row) -> Option<Job> {
     let status = JobStatus::parse(&row.get::<String>("status")?)?;
@@ -679,6 +839,12 @@ fn job_from(row: &Row) -> Option<Job> {
         lease_until: row.get::<String>("lease_until"),
         next_attempt_at: row.get::<String>("next_attempt_at"),
         chunks_done: u32::try_from(count("chunks_done")).unwrap_or(0),
+        triage: row.get::<String>("triage"),
+        triage_reason: row.get::<String>("triage_reason"),
+        triage_plan: row.get::<String>("triage_plan"),
+        force_full: count("force_full") != 0,
+        est_tokens_raw: count("est_tokens_raw"),
+        est_tokens_sent: count("est_tokens_sent"),
     })
 }
 

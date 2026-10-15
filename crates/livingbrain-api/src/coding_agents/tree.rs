@@ -173,6 +173,12 @@ mod tests {
             lease_until: None,
             next_attempt_at: None,
             chunks_done: 0,
+            triage: None,
+            triage_reason: None,
+            triage_plan: None,
+            force_full: false,
+            est_tokens_raw: 0,
+            est_tokens_sent: 0,
         }
     }
 

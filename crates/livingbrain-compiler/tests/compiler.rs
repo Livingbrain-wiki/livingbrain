@@ -3,6 +3,9 @@
 //! pipeline — with a fake model whose every input is recorded and whose
 //! answers each test scripts.
 
+mod support;
+
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use cratefield_core::{
@@ -46,9 +49,10 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 2] = [
+        const SET: [cratefield_core::SqlMigration; 3] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
+            livingbrain_compiler::MIGRATION_TRIAGE,
         ];
         Migrations {
             sqlite: &SET,
@@ -247,6 +251,36 @@ impl World {
         .expect("an ingest");
         self.clock.advance(Duration::seconds(1));
         ingested.source.id
+    }
+
+    /// Syncs a whole session record for `user`, through the real ingest
+    /// pipeline, and answers the source id.
+    fn sync_record(&self, user: &str, session_id: &str, body: String) -> String {
+        let ingested = pollster::block_on(
+            Ingestor::new(self.sources(), Arc::new(self.defer.clone())).ingest(SourceIngest {
+                kind: SourceKind::AgentLog,
+                workspace: WORKSPACE.to_owned(),
+                scope: personal(WORKSPACE, user),
+                origin_ref: None,
+                author: None,
+                rel_path: format!("claude-code session {session_id}"),
+                imported_by: user.to_owned(),
+                body,
+                project: Some("demo".to_owned()),
+            }),
+        )
+        .expect("an ingest");
+        self.clock.advance(Duration::seconds(1));
+        ingested.source.id
+    }
+
+    /// The stored body of a source, as the ledger opens it.
+    fn source_body(&self, source_id: &str) -> String {
+        let sources = self.sources();
+        let source = pollster::block_on(sources.by_id(source_id))
+            .expect("a read")
+            .expect("the source");
+        pollster::block_on(sources.open(&source.scope, &source.body_sha256)).expect("the body")
     }
 
     fn drain(&self, compiler: &Compiler) -> Vec<livingbrain_compiler::Processed> {
@@ -1073,5 +1107,207 @@ fn overrides_win_and_the_hard_ceilings_hold() {
     assert_eq!(
         wild.max_output_tokens,
         livingbrain_compiler::MAX_OUTPUT_TOKENS_CEILING
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Triage and compaction
+
+fn job_of(world: &World, source: &str) -> livingbrain_compiler::Job {
+    world
+        .jobs()
+        .into_iter()
+        .find(|job| job.source_id == source)
+        .expect("the job")
+}
+
+fn writes_decisions() -> Fake {
+    let decisions = decisions();
+    Fake::answering(move |_, _| {
+        Ok(reply(&[(
+            &decisions,
+            None,
+            "# Decisions\n\n- **2026-10-15** · Collect every migration for D1",
+        )]))
+    })
+}
+
+#[test]
+fn a_trivial_session_is_skipped_without_a_model_call_and_its_source_kept() {
+    let world = world();
+    let source = world.sync_record("u1", "hi-1", support::sessions::trivial());
+    let before = world.source_body(&source);
+    let model = writes_decisions();
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::SkippedTrivial);
+    assert_eq!(processed[0].error.as_deref(), Some("trivial"));
+    assert_eq!(model.calls(), 0);
+    let job = job_of(&world, &source);
+    assert_eq!(job.triage.as_deref(), Some("skip"));
+    assert!(job.est_tokens_raw > 0 && job.est_tokens_sent == 0);
+    // Nothing written, nothing lost.
+    assert_eq!(world.source_body(&source), before);
+    // A terminal status: the next drain does not pick it up again.
+    assert!(world.drain(&world.compiler(&model)).is_empty());
+}
+
+#[test]
+fn a_failing_loop_is_one_log_line_and_compile_fully_compiles_it_uncompacted() {
+    let world = world();
+    let source = world.sync_record("u1", "loop-1", support::sessions::failing_loop());
+    let model = writes_decisions();
+    let compiler = world.compiler(&model);
+    let processed = world.drain(&compiler);
+    assert_eq!(processed[0].status, JobStatus::SummaryOnly);
+    assert_eq!(processed[0].error.as_deref(), Some("failing-loop"));
+    assert_eq!(model.calls(), 0);
+    let log = world.log("u1");
+    assert!(log.contains("summary only (failing-loop)"), "{log}");
+    assert!(log.contains("7 failed"), "{log}");
+    assert!(log.contains("Compile fully"), "{log}");
+
+    // "Compile fully": requeued with the override, compiled in full.
+    let queue = Queue::new(world.db.clone());
+    let scopes = vec![personal(WORKSPACE, "u1")];
+    let other = vec![personal(WORKSPACE, "u2")];
+    let now = world.clock.now();
+    assert!(
+        !pollster::block_on(queue.compile_fully(WORKSPACE, &other, &source, now)).expect("a write"),
+        "only the owner's own job"
+    );
+    assert!(
+        pollster::block_on(queue.compile_fully(WORKSPACE, &scopes, &source, now)).expect("a write")
+    );
+    let processed = world.drain(&compiler);
+    assert_eq!(processed[0].status, JobStatus::Done);
+    assert_eq!(model.calls(), 1);
+    // No compaction: every retry of the command is in the model's input.
+    let input = &model.inputs()[0];
+    assert_eq!(input.matches("npx playwright test").count(), 7, "{input}");
+    let job = job_of(&world, &source);
+    assert!(job.force_full);
+    assert_eq!(job.triage_reason.as_deref(), Some("forced"));
+    // Only a triaged job can be compiled fully, and only once.
+    assert!(
+        !pollster::block_on(queue.compile_fully(WORKSPACE, &scopes, &source, now))
+            .expect("a write")
+    );
+}
+
+#[test]
+fn a_full_compile_sends_the_compacted_transcript_and_records_the_savings() {
+    let world = world();
+    let source = world.sync_record("u1", "feature-1", support::sessions::feature_work());
+    let model = writes_decisions();
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Done);
+    let input = &model.inputs()[0];
+    assert!(input.contains("panicked at src/store.rs:212:9"), "{input}");
+    assert!(
+        input.contains("$ cargo test -p livingbrain-venture"),
+        "{input}"
+    );
+    assert!(
+        !input.contains("let value_12 = compute"),
+        "file bodies are not sent"
+    );
+    let job = job_of(&world, &source);
+    assert_eq!(job.triage.as_deref(), Some("full"));
+    assert_eq!(job.triage_reason.as_deref(), Some("changes-files"));
+    assert!(
+        job.est_tokens_sent > 0 && job.est_tokens_sent < job.est_tokens_raw,
+        "{job:?}"
+    );
+    let savings = pollster::block_on(
+        Queue::new(world.db.clone()).savings(WORKSPACE, &[personal(WORKSPACE, "u1")]),
+    )
+    .expect("a read");
+    assert_eq!(
+        (savings.skipped, savings.summarised, savings.full),
+        (0, 0, 1)
+    );
+    assert_eq!(
+        savings.tokens_saved(),
+        job.est_tokens_raw - job.est_tokens_sent
+    );
+}
+
+#[test]
+fn with_triage_and_compaction_off_every_session_compiles_as_before() {
+    let world = world();
+    world.sync_record("u1", "hi-1", support::sessions::trivial());
+    let source = world.sync_record("u1", "feature-1", support::sessions::feature_work());
+    // A new topic page per call, so the two compiles never race on one page.
+    let model = Fake::answering(|_, index| {
+        let slug = layout::project_page("claude", "demo", &format!("topic-{index}"));
+        Ok(reply(&[(&slug, None, "# Topic\n\n- a note")]))
+    });
+    let settings = Settings {
+        triage: false,
+        compaction: false,
+        batch: 5,
+        ..Settings::default()
+    };
+    let processed = world.drain(&world.compiler_with(&model, settings, Arc::new(NoGate)));
+    assert_eq!(processed.len(), 2);
+    assert!(
+        processed.iter().all(|p| p.status == JobStatus::Done),
+        "{processed:?}"
+    );
+    assert_eq!(model.calls(), 2);
+    let job = job_of(&world, &source);
+    assert_eq!(job.triage_reason.as_deref(), Some("triage-off"));
+    assert_eq!(job.est_tokens_raw, job.est_tokens_sent);
+}
+
+/// A classifier that answers one triage choice, and counts its calls.
+struct Jev {
+    pick: &'static str,
+    confidence: f32,
+    calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl cratefield_core::Classifier for Jev {
+    fn profile(&self) -> cratefield_core::ClassifierProfile {
+        cratefield_core::ClassifierProfile::new(cratefield_core::Calibration::Classifier, 96_000)
+    }
+    async fn ask(
+        &self,
+        _state: &str,
+        questions: &BTreeMap<String, cratefield_core::Question>,
+    ) -> Result<BTreeMap<String, cratefield_core::Answer>, cratefield_core::ClassifierError> {
+        *self.calls.lock().expect("calls") += 1;
+        assert!(questions.contains_key("triage"));
+        let mut probabilities: BTreeMap<String, f32> = ["skip", "summary", "full"]
+            .into_iter()
+            .map(|label| (label.to_owned(), (1.0 - self.confidence) / 2.0))
+            .collect();
+        probabilities.insert(self.pick.to_owned(), self.confidence);
+        Ok(BTreeMap::from([(
+            "triage".to_owned(),
+            cratefield_core::Answer::choice(self.pick, probabilities),
+        )]))
+    }
+}
+
+#[test]
+fn a_wired_classifier_is_asked_once_per_session_and_can_raise_the_rule() {
+    let world = world();
+    let source = world.sync_record("u1", "lookup-1", support::sessions::no_changes());
+    let model = writes_decisions();
+    let calls = Arc::new(Mutex::new(0));
+    let compiler = world.compiler(&model).with_classifier(Some(Arc::new(Jev {
+        pick: "full",
+        confidence: 0.55,
+        calls: Arc::clone(&calls),
+    })));
+    let processed = world.drain(&compiler);
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    assert_eq!(*calls.lock().expect("calls"), 1);
+    assert_eq!(model.calls(), 1);
+    assert_eq!(
+        job_of(&world, &source).triage_reason.as_deref(),
+        Some("jev:full")
     );
 }

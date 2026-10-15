@@ -46,6 +46,67 @@ pub struct Turn {
     /// One line per tool call: its name, and its detail when the record
     /// carries one.
     pub tools: Vec<String>,
+    /// The same tool calls, field by field, for the compaction pass
+    /// ([`crate::compact`]): which ones failed, what ran, what came back.
+    pub calls: Vec<ToolCall>,
+}
+
+/// One tool call as the record carries it. A version-1 record has only the
+/// name; a `full` record has the rest. A field this build does not know is
+/// kept, on one line, in `extra`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ToolCall {
+    pub name: String,
+    /// How the input reads: `shell`, `diff`, `json` or `text`.
+    pub format: Option<String>,
+    /// The file the call read or changed.
+    pub path: Option<String>,
+    /// The command, patch or arguments (clipped by the collector).
+    pub input: Option<String>,
+    /// The result (clipped to head and tail by the collector).
+    pub output: Option<String>,
+    /// `ok`, `error` or `interrupted`, when the record says.
+    pub status: Option<String>,
+    pub exit_code: Option<i64>,
+    /// Every other field, as one JSON line.
+    pub extra: Option<String>,
+    /// The subagent this call launched, with its own turns (record schema
+    /// 3: an `Agent`/`Task` call, a Codex `spawn_agent`).
+    pub subagent: Option<Box<Subagent>>,
+}
+
+/// A subagent's session, nested in the call that launched it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Subagent {
+    /// The kind of agent (`Explore`, `general-purpose`, a Codex role).
+    pub name: String,
+    /// What it was asked to do.
+    pub description: Option<String>,
+    /// `completed`, `failed`, `stopped` or `running`, when the record says.
+    pub status: Option<String>,
+    pub turns: Vec<Turn>,
+}
+
+impl ToolCall {
+    /// This call, then every call of its subagent (and theirs), in order.
+    #[must_use]
+    pub fn with_nested(&self) -> Vec<&ToolCall> {
+        let mut out = vec![self];
+        if let Some(agent) = &self.subagent {
+            for turn in &agent.turns {
+                for call in &turn.calls {
+                    out.extend(call.with_nested());
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the call failed: an `error` status or a non-zero exit code.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.status.as_deref() == Some("error") || self.exit_code.is_some_and(|code| code != 0)
+    }
 }
 
 /// Why a body is not a session record.
@@ -147,17 +208,22 @@ fn turn(value: &Value) -> Option<Turn> {
         .or_else(|| object.get("content"))
         .map(content_text)
         .unwrap_or_default();
-    let tools = object
+    let raw = object
         .get("tool_calls")
         .or_else(|| object.get("tools"))
-        .and_then(Value::as_array)
+        .and_then(Value::as_array);
+    let tools = raw
         .map(|calls| calls.iter().map(tool_line).collect())
+        .unwrap_or_default();
+    let calls = raw
+        .map(|calls| calls.iter().map(tool_call).collect())
         .unwrap_or_default();
     Some(Turn {
         role,
         at,
         text,
         tools,
+        calls,
     })
 }
 
@@ -202,9 +268,99 @@ fn tool_line(value: &Value) -> String {
     }
 }
 
+/// One tool call, field by field: the fields the collector writes are read
+/// by name (a string or a number where a string is expected is rendered),
+/// and whatever else the call carries is kept in `extra`.
+fn tool_call(value: &Value) -> ToolCall {
+    let Value::Object(map) = value else {
+        return ToolCall {
+            name: value
+                .as_str()
+                .map_or_else(|| cap(&value.to_string(), 80), str::to_owned),
+            ..ToolCall::default()
+        };
+    };
+    let field = |key: &str| {
+        map.get(key).and_then(|value| match value {
+            Value::Null => None,
+            Value::String(text) => Some(text.clone()),
+            other => Some(other.to_string()),
+        })
+    };
+    let mut rest = map.clone();
+    for key in [
+        "name",
+        "format",
+        "path",
+        "input",
+        "output",
+        "status",
+        "exit_code",
+        "subagent",
+    ] {
+        rest.remove(key);
+    }
+    let subagent = map.get("subagent").and_then(Value::as_object).map(|agent| {
+        let text = |key: &str| {
+            agent
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        Box::new(Subagent {
+            name: text("name").unwrap_or_else(|| "subagent".to_owned()),
+            description: text("description"),
+            status: text("status"),
+            turns: agent
+                .get("turns")
+                .and_then(Value::as_array)
+                .map(|turns| turns.iter().filter_map(turn).collect())
+                .unwrap_or_default(),
+        })
+    });
+    ToolCall {
+        name: field("name").unwrap_or_else(|| "tool".to_owned()),
+        format: field("format"),
+        path: field("path"),
+        input: field("input"),
+        output: field("output"),
+        status: field("status"),
+        exit_code: map.get("exit_code").and_then(Value::as_i64),
+        extra: (!rest.is_empty()).then(|| Value::Object(rest).to_string()),
+        subagent,
+    }
+}
+
 /// A JSON value on one line, or `None` for null.
 fn one_line(value: &Value) -> Option<String> {
     (!value.is_null()).then(|| value.to_string())
+}
+
+/// One turn as the transcript shows it: a heading, the text, one line per
+/// tool call.
+fn render_turn(index: usize, turn: &Turn) -> String {
+    let mut rendered = format!(
+        "### turn {} · {}{}\n",
+        index + 1,
+        turn.role,
+        turn.at
+            .as_deref()
+            .map(|at| format!(" · {at}"))
+            .unwrap_or_default()
+    );
+    if !turn.text.trim().is_empty() {
+        rendered.push_str(turn.text.trim());
+        rendered.push('\n');
+    }
+    for tool in &turn.tools {
+        rendered.push_str("- tool: ");
+        rendered.push_str(tool);
+        rendered.push('\n');
+    }
+    rendered.push('\n');
+    rendered
 }
 
 /// At most `max` characters of `text`, with a marker when it was cut.
@@ -237,44 +393,44 @@ impl Session {
         let budget = budget.max(200);
         let mut chunks: Vec<String> = Vec::new();
         let mut current = String::new();
+        // Counted as it grows: re-counting the chunk per turn would be
+        // quadratic in a long transcript.
+        let mut current_chars = 0usize;
         let mut omitted = false;
         for (index, turn) in self.turns.iter().enumerate() {
-            let mut rendered = format!(
-                "### turn {} · {}{}\n",
-                index + 1,
-                turn.role,
-                turn.at
-                    .as_deref()
-                    .map(|at| format!(" · {at}"))
-                    .unwrap_or_default()
-            );
-            if !turn.text.trim().is_empty() {
-                rendered.push_str(turn.text.trim());
-                rendered.push('\n');
-            }
-            for tool in &turn.tools {
-                rendered.push_str("- tool: ");
-                rendered.push_str(tool);
-                rendered.push('\n');
-            }
-            rendered.push('\n');
-            if rendered.chars().count() > budget {
+            let mut rendered = render_turn(index, turn);
+            let mut chars = rendered.chars().count();
+            if chars > budget {
                 rendered = cap(&rendered, budget.saturating_sub(16));
                 rendered.push('\n');
+                chars = rendered.chars().count();
             }
-            if current.chars().count() + rendered.chars().count() > budget && !current.is_empty() {
+            if current_chars + chars > budget && !current.is_empty() {
                 if chunks.len() + 1 >= max_chunks {
                     omitted = true;
                     break;
                 }
                 chunks.push(std::mem::take(&mut current));
+                current_chars = 0;
             }
             current.push_str(&rendered);
+            current_chars += chars;
         }
         if !current.is_empty() {
             chunks.push(current);
         }
         (chunks, omitted || self.truncated)
+    }
+
+    /// The characters the whole transcript renders to, uncut — what
+    /// [`Session::chunks`] would send with no budget.
+    #[must_use]
+    pub fn rendered_chars(&self) -> usize {
+        self.turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| render_turn(index, turn).chars().count())
+            .sum()
     }
 }
 
@@ -328,6 +484,7 @@ mod tests {
                 at: None,
                 text: format!("message {i} {}", "x".repeat(100)),
                 tools: Vec::new(),
+                calls: Vec::new(),
             })
             .collect();
         let (chunks, omitted) = session.chunks(1_000, 3);

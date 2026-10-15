@@ -54,6 +54,8 @@ hook.
 | `superseded` | a newer body of the same session arrived before this one ran |
 | `skipped` | not a session record, empty, or its source is gone |
 | `waiting-runner` | a model call is out on your own device (the local runner, below); the compile carries on the moment the answer arrives, or is checked again within the hour. Waiting does not count as an attempt |
+| `skipped-trivial` | triage found nothing to compile (an empty session, a greeting); `error` says why (`empty`, `trivial`, `jev:skip`). No model call. **Compile fully** compiles it anyway |
+| `summary-only` | triage logged the session in one model-free line instead of compiling it (`failing-loop`, `no-changes`, `jev:summary`). No model call. **Compile fully** compiles it anyway |
 
 A session that grew is re-synced as a new body. If an earlier body of it
 was already compiled, the model is told so and adds only what is new.
@@ -76,13 +78,109 @@ written to the scope's `coding-agents/log` once per distinct reason, and to
 Workers Logs (`coding-agents: job for source … failed …`).
 
 `GET /v1/coding-agents/queue?limit=&source=` returns your jobs, a count per
-status, whether a model is connected, and the budget with what has been
-spent. `GET /v1/coding-agents/tree` returns your synced sessions grouped by
-agent and project — `{agents: [{agent, folder, sessions, compiled, projects:
+status, whether a model is connected, the budget with what has been spent,
+and a `triage` block: whether triage and compaction are on, the strictness,
+whether a classifier (Jev) is wired, how many sessions were skipped,
+summarised and compiled in full, and the estimated input tokens without and
+with triage and compaction (`tokens_raw`, `tokens_sent`, `tokens_saved`).
+Each job carries its `triage` (`decision`, `reason`, `forced`), its
+`estimate` (`raw`, `sent`) and `can_compile_fully`. `GET
+/v1/coding-agents/tree` returns your synced sessions grouped by agent and
+project — `{agents: [{agent, folder, sessions, compiled, projects:
 [{project, sessions, compiled, statuses, latest_at}]}], truncated}`, a session
 counted once (its newest body), compiled when any of its bodies compiled,
-`folder` the wiki folder its pages land in. All three routes only return
+`folder` the wiki folder its pages land in. All these routes only return
 jobs in your own scopes.
+
+`POST /v1/coding-agents/compile-fully` (`{"source_id"}`) is **Compile
+fully**: it puts one of *your* `skipped-trivial` or `summary-only` jobs back
+to `queued` with no triage and no compaction, and compiles it in the
+request. Someone else's job, or one that triage did not hold back, is a 404.
+
+## Triage and compaction
+
+Most of a coding-agent session is tool output, and many sessions teach the
+wiki nothing. Before a session costs a model call, the compiler decides how
+much of a compile it deserves, then cuts what it sends down to what matters:
+
+```
+session → triage (skip | summary | full, + topic pages) → compaction → compile
+```
+
+**Triage** has three outcomes:
+
+- **skip** → `skipped-trivial`: an empty session, or a greeting with no tool
+  call. Nothing is written.
+- **summary** → `summary-only`: a session that changed no file and went round
+  a failing loop (one call failing three or more times, most calls failing),
+  or a short lookup that changed nothing. The server appends one line to
+  `coding-agents/log` saying what the session did (counts, the failing
+  command, "no files changed").
+- **full** → the normal compile, on the compacted transcript.
+
+A session that changed a file (an edit, a write, a patch, a commit or a push)
+is always **full**, whatever else says otherwise. A version-1 record, which
+names its tools and nothing else, is never judged "changed nothing".
+
+**Strictness** (`lenient`, `balanced`, `strict`) sets how readily a session
+is held back: `lenient` skips only empty sessions and summarises only
+failing loops; `strict` summarises any session that changed nothing and said
+little (under 4 000 characters from the agent).
+
+**Jev.** When the deployment has a `TYPESAFE_API_KEY`, the compiler also asks
+Jev — TypeSafe's System One, a purpose-trained classifier at
+`api.typesafe.ai`, called over HTTP from the Worker through the harness's
+`Classifier` port (`cratefield-adapter-typesafe`, model pinned) — **once per
+session**, in one request:
+
+- a `choice` between skip, summary and full;
+- for each of the session's own topic pages (up to 24), whether the session
+  bears on it — only those it picks are shown to the model, beside the
+  fixed pages (index, decisions, learnings, …);
+- for each bulky tool output (up to 32), whether it is needed word for word —
+  kept whole when it is sure, cut to its error lines when it is sure it is
+  not.
+
+Jev may always *raise* the rule's decision; it may *lower* it only when its
+confidence passes the strictness's bar (0.9 / 0.75 / 0.6), and never below
+full for a session that changed files. A slow, failing or unwired Jev
+leaves the rule's decision. What Jev reads is a redacted digest, at most
+24 000 characters: the counts, the person's and the agent's words cut short,
+and one line per tool call (tool, file, failed or not, the command's head) —
+never a tool's output. It costs $0.042 per million input tokens (output is
+free), billed to the operator's TypeSafe account, and the data is hosted in
+the US.
+
+**Compaction** shrinks what the model is sent, never the source:
+
+- every user message whole, and the agent's own text (decisions live there);
+- every tool call's name, file, status and exit code, and its command;
+- from each output, the error lines first, then `file:line` locations and
+  warnings, and the last two lines (test totals, the end of a build); a run
+  of same-shaped lines collapses to one with a count;
+- a read (a file, a search, a listing, a page) keeps how much it read, not
+  what — the source has it;
+- a patch becomes its file and hunk headers and `+N −M lines`;
+- the second and later copies of an identical call become one line ("same
+  call as in turn 2, again, failed with exit 1 (#7)");
+- a subagent (record schema 3) becomes its outline: what it was asked, one
+  line per call of its own that changed or failed something, and its answer
+  — at most 1 500 characters, where the uncompacted renderer cut the whole
+  subagent to one 600-character JSON line. Its edits count as the session's
+  changes for triage;
+- no other compacted call is longer than the uncompacted renderer's own cap
+  (600 characters).
+
+**Nothing is lost.** The source stays in the ledger untouched, and every page
+still cites it. A wrong triage call is undone by **Compile fully** — no
+triage, no compaction. A compile that waits on your own runner resumes on the
+plan it started with (stored on the job), so its chunks line up.
+
+**Accounting.** Each job records an estimate of the input tokens the compile
+would have sent without triage and compaction (`est_tokens_raw`) and with
+them (`est_tokens_sent`): the transcript chunks plus the fixed prompt and the
+conventions per call. The pages shown per call are left out on both sides,
+so the saving it reports is a floor.
 
 ## The model
 
@@ -195,8 +293,8 @@ them. The effective value is, in order:
 3. else the built-in default.
 
 Clearing a setting (`null`, or an empty field in the app) returns the
-workspace to 2 and 3. The table is `usage_budgets` (usage migration 0002);
-NULL means "not set here".
+workspace to 2 and 3. The table is `usage_budgets` (usage migrations 0002
+and 0003); NULL means "not set here".
 
 | Setting (`group.key`) | Env var | Default | Range |
 | --- | --- | --- | --- |
@@ -208,6 +306,9 @@ NULL means "not set here".
 | `coding_agents.max_chunks` | `CODING_AGENTS_MAX_CHUNKS` | 4 | 1 – **20** |
 | `coding_agents.chunk_chars` | `CODING_AGENTS_CHUNK_CHARS` | 32 000 | 1 000 – **200 000** |
 | `coding_agents.max_output_tokens` | `CODING_AGENTS_MAX_OUTPUT_TOKENS` | 6 000 | 256 – **32 000** |
+| `coding_agents.triage` | `CODING_AGENTS_TRIAGE` (`on`/`off`) | on | on / off |
+| `coding_agents.compaction` | `CODING_AGENTS_COMPACTION` (`on`/`off`) | on | on / off |
+| `coding_agents.triage_strictness` | `CODING_AGENTS_TRIAGE_STRICTNESS` | `balanced` | `lenient` / `balanced` / `strict` |
 | `ask.context_chars` | `ASK_CONTEXT_CHARS_MAX` | 200 000 | 2 000 – 1 000 000 |
 | `ask.max_output_tokens` | — | 1 024 | 128 – 8 192 |
 | `spend.monthly_cents` | `USAGE_BUDGET_CENTS_MONTHLY` | 300 | 0 – 100 000 000 |
@@ -215,7 +316,7 @@ NULL means "not set here".
 **Hard ceilings** (bold) hold over the setting *and* the env var: they
 protect the Worker, not the bill. One cron invocation has a fixed wall and
 the Workers subrequest limit (the venture keeps 45 of 50; a compile spends
-8), and a compile — or a "Process now" request — has to finish inside it, so
+8, 9 with Jev), and a compile — or a "Process now" request — has to finish inside it, so
 no number may ask for more sessions per run, calls per session, tokens per
 session or a bigger call than one invocation can complete. A value past a
 ceiling is refused by the API with a 422 that names the setting and its
@@ -244,8 +345,11 @@ the Mac app's Usage view.
   names both.
 - **Agent sessions**: a queue card shows the counts, which model compiles (or
   a link to **Settings → Models** when none is connected), the day's budget,
-  and **Process now**. Each session shows its compile status and links to
-  the pages it wrote. The transcript view shows the same above the session.
+  and **Process now**, and a triage line: how many sessions were skipped,
+  summarised and compiled in full, and the tokens saved. Each session shows
+  its compile status and links to the pages it wrote; a skipped or
+  summarised one has **Compile fully**. Settings → Usage & limits has the
+  token savers: triage on/off, compaction on/off, and the strictness. The transcript view shows the same above the session.
 - **Mac app**: not yet. It is a follow-up.
 
 ## Lint

@@ -32,14 +32,15 @@
 
 use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
+use cratefield_adapter_typesafe::TypeSafe;
 use cratefield_core::axum::body::{Body, to_bytes};
 use cratefield_core::axum::http::{
     HeaderMap, HeaderValue, Method as HttpMethod, Request as HttpRequest, header,
 };
 use cratefield_core::axum::response::Response as AxumResponse;
 use cratefield_core::{
-    Blob, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes, RandomError,
-    Rendered, ScheduledLimits, ScheduledSplit, Template, Venture,
+    Blob, Classifier, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes,
+    RandomError, Rendered, ScheduledLimits, ScheduledSplit, Template, Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
@@ -142,6 +143,35 @@ fn build_captcha(env: &Env) -> Option<Turnstile> {
         Turnstile::new(Arc::new(FetchClient), Arc::new(WorkersClock), secret)
             .expected_hostname("livingbrain.wiki"),
     )
+}
+
+/// Jev (TypeSafe's System One) as the coding-agents compiler's triage
+/// classifier when the `TYPESAFE_API_KEY` secret is set, pinned to
+/// `TYPESAFE_MODEL` when that var names a model (the adapter's pinned
+/// default otherwise). No key is no classifier: the compiler's free rule
+/// triages alone, and nothing is sent to TypeSafe. With a key, one call per
+/// session sends a redacted digest (counts, the person's and the agent's
+/// words cut short, one line per tool call) to `api.typesafe.ai` (US).
+///
+/// Only the compiler gets it. The Slack judge's `Classifier` port stays
+/// unwired (issue #123), so wiring a key here does not change what the
+/// Slack agent answers.
+fn build_classifier(env: &Env) -> Option<Arc<dyn Classifier>> {
+    let key = env
+        .secret("TYPESAFE_API_KEY")
+        .ok()
+        .map(|secret| secret.to_string())
+        .filter(|key| !key.trim().is_empty())?;
+    let mut adapter = TypeSafe::new(Arc::new(FetchClient), Arc::new(WorkersClock), Some(key));
+    if let Some(model) = env
+        .var("TYPESAFE_MODEL")
+        .ok()
+        .map(|model| model.to_string())
+        .filter(|model| !model.trim().is_empty())
+    {
+        adapter = adapter.with_model(model.trim());
+    }
+    Some(Arc::new(adapter))
 }
 
 static INSTANCE: OnceLock<(Harness, Cloudflare, TurnsCell)> = OnceLock::new();
@@ -287,6 +317,7 @@ fn build(
     mail: MailSettings,
     captcha: Option<Turnstile>,
     kms: Option<Arc<dyn Kms>>,
+    classifier: Option<Arc<dyn Classifier>>,
 ) -> (Harness, Cloudflare, TurnsCell) {
     let runtime = Cloudflare::new()
         // The bindings `wrangler.toml` declares. `workspaces` and `waitlist`
@@ -382,7 +413,7 @@ fn build(
             .module(GithubApp::new());
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
-        let builder = cli_modules(kms)
+        let builder = cli_modules(kms, classifier)
             .into_iter()
             .fold(builder, HarnessBuilder::module_arc);
         builder
@@ -406,11 +437,16 @@ fn build(
 /// them ([`PagesRebind`], planted in [`serve_cli`]). With no key custodian
 /// there is nothing to seal a page with, so — like [`pages_module`] — none
 /// of them is mounted and every other route keeps working.
-fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
+fn cli_modules(
+    kms: Option<Arc<dyn Kms>>,
+    classifier: Option<Arc<dyn Classifier>>,
+) -> Vec<Arc<dyn Module>> {
     let Some(kms) = kms else {
         return Vec::new();
     };
-    let wiki = wiki(kms);
+    // The compiler's triage classifier rides on the same `Wiki`; only the
+    // coding-agents compiler asks it.
+    let wiki = wiki(kms).with_classifier(classifier);
     vec![
         Arc::new(Notes::new(wiki.clone())),
         Arc::new(Search::new(wiki.clone())),
@@ -780,6 +816,7 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
             MailSettings::from_env(env),
             build_captcha(env),
             build_kms(env),
+            build_classifier(env),
         )
     })
 }
@@ -1181,7 +1218,7 @@ mod tests {
     fn the_composition_mounts_every_module() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
         let names: Vec<&str> = harness
             .modules()
             .iter()
@@ -1235,7 +1272,7 @@ mod tests {
     fn every_module_migration_is_collected_for_d1() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let lock: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".harness-lock.json")).expect("the lock file"),
@@ -1283,7 +1320,7 @@ mod tests {
     fn the_sources_route_diverts_with_its_id_segment() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
         assert!(
             serves_cli(&harness, "/v1/sources/01HZZZBBBBBBBBBBBBBBBBBBB"),
             "a citation must divert to serve_cli"
@@ -1329,7 +1366,7 @@ mod tests {
     /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
-        let (harness, _, _) = build(unconfigured_mail(), None, None);
+        let (harness, _, _) = build(unconfigured_mail(), None, None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");

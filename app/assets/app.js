@@ -86,6 +86,7 @@ import {
   budgetErrorMessage,
   renderBudgets,
   readInputs,
+  readSavers,
   matchPreset,
   presetInputs,
   FieldError,
@@ -1758,7 +1759,12 @@ async function wireBudgets() {
     let patch;
     try {
       const paused = $("#budget-paused");
-      patch = budgetPatch(view, readInputs(body), paused ? paused.checked : undefined);
+      patch = budgetPatch(
+        view,
+        readInputs(body),
+        paused ? paused.checked : undefined,
+        readSavers(body),
+      );
     } catch (error) {
       if (error instanceof FieldError) {
         const line = body.querySelector(`[data-budget-error="${error.field}"]`);

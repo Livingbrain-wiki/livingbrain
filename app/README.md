@@ -64,9 +64,10 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `POST /v1/ask` | `wiki.html` | **yes** — body `{question}`; `{answer, citations}` rendered in the ask dialog. A `202 {status:"pending", poll}` (your own runner is answering) is polled at `GET /v1/model-jobs/{id}` and the ask re-sent (`askWithRunner`) |
 | `GET /v1/sources/projects` | `wiki.html` | **yes** — `{projects:[{project, sources}]}`; fills the project filter beside the search box and on Agent sessions, hidden when empty or on any failure. With a project chosen, search sends `&project=` |
 | `GET /v1/sources?kind=agent_log&limit=50&project=&cursor=` | `wiki.html?view=sessions` | **yes** — `{sources:[{id, kind, scope, path, project, held, created_at}], next_cursor}`, newest first; "Load more" sends the cursor, and the chosen project is kept in the address (`&project=`) |
-| `GET /v1/coding-agents/queue?limit=100` / `?source=` | `wiki.html?view=sessions` | **yes** — `{counts, model, budget, jobs:[{source_id, status, error, pages, …}]}`; the queue card above the sessions and a status pill plus "Wrote …" links on each session, and the compile line above a transcript. Any failure hides the card and leaves the list |
+| `GET /v1/coding-agents/queue?limit=100` / `?source=` | `wiki.html?view=sessions` | **yes** — `{counts, model, budget, triage, jobs:[{source_id, status, error, pages, triage, estimate, can_compile_fully, …}]}`; the queue card above the sessions (with a triage line: skipped, summarised, compiled in full, tokens saved) and a status pill plus "Wrote …" links on each session, and the compile line above a transcript. Any failure hides the card and leaves the list |
 | `POST /v1/coding-agents/process` | `wiki.html?view=sessions` | **yes** — body `{max: 1}`; the card's **Process now** compiles the next of your sessions and refreshes the list |
 | `POST /v1/coding-agents/retry` | `wiki.html?view=sessions` | **yes** — the card's **Retry failed** (shown when something failed) requeues your failed sessions with their attempts reset |
+| `POST /v1/coding-agents/compile-fully` | `wiki.html?view=sessions` | **yes** — body `{source_id}`; **Compile fully** on a `skipped-trivial` or `summary-only` session compiles it in full (no triage, no compaction) and refreshes the list |
 
 ## What is NOT wired to a backend yet
 

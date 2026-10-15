@@ -717,7 +717,41 @@ export const JOB_LABELS = {
   superseded: "Superseded",
   skipped: "Skipped",
   "waiting-runner": "Waiting for your device",
+  "skipped-trivial": "Skipped (trivial)",
+  "summary-only": "Summary only",
 };
+
+/** A token count a person reads at a glance: 900, 12k, 1.4M. */
+function shortCount(value) {
+  const n = Number(value) || 0;
+  const trim = (x) => String(Number(x.toFixed(1)));
+  if (n >= 1_000_000) return `${trim(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${trim(n / 1_000)}k`;
+  return String(Math.round(n));
+}
+
+/**
+ * The queue's triage block as one line: how many sessions triage skipped,
+ * summarised and compiled in full, and the tokens it and compaction saved
+ * (an estimate of input tokens). Empty when triage has decided nothing yet.
+ */
+export function triageSummary(triage) {
+  if (!triage || typeof triage !== "object") return "";
+  const skipped = Number(triage.skipped) || 0;
+  const summarised = Number(triage.summarised) || 0;
+  const full = Number(triage.full) || 0;
+  const off = triage.enabled === false ? " Triage is off." : "";
+  if (skipped + summarised + full === 0) return off.trim();
+  const parts = [];
+  if (skipped) parts.push(`${skipped} skipped`);
+  if (summarised) parts.push(`${summarised} summary only`);
+  if (full) parts.push(`${full} compiled in full`);
+  const saved = Number(triage.tokens_saved) || 0;
+  const raw = Number(triage.tokens_raw) || 0;
+  const share = raw > 0 ? ` (${Math.round((saved / raw) * 100)}%)` : "";
+  const by = triage.classifier ? " Triage by Jev." : "";
+  return `Triage: ${parts.join(" · ")} · ~${shortCount(saved)} tokens saved${share}.${by}${off}`;
+}
 
 export function jobLabel(status) {
   return JOB_LABELS[status] || String(status || "");
@@ -1017,6 +1051,7 @@ export async function wikiPage(api) {
     caModel: $("#ca-model"),
     caProcess: $("#ca-process"),
     caRetry: $("#ca-retry"),
+    caTriage: $("#ca-triage"),
     caResult: $("#ca-result"),
     caSection: $("#coding-agents-section"),
     caTree: $("#coding-agents-tree"),
@@ -1421,6 +1456,16 @@ export async function wikiPage(api) {
       const pages = compiledPages(job);
       if (pages) li.appendChild(pages);
     }
+    if (job && job.can_compile_fully) {
+      // Triage held this one back; its source is whole, so it can still be
+      // compiled — in full, with no compaction.
+      const full = document.createElement("button");
+      full.type = "button";
+      full.className = "ca-compile-fully";
+      full.textContent = "Compile fully";
+      full.setAttribute("data-compile-fully", row.id || "");
+      li.appendChild(full);
+    }
     return li;
   }
 
@@ -1452,6 +1497,11 @@ export async function wikiPage(api) {
     }
     els.caCard.hidden = false;
     els.caSummary.textContent = queueSummary(data.counts);
+    if (els.caTriage) {
+      const line = triageSummary(data.triage);
+      els.caTriage.textContent = line;
+      els.caTriage.hidden = line === "";
+    }
     if (els.caRetry) els.caRetry.hidden = !((data.counts && data.counts.failed) > 0);
     els.caModel.replaceChildren();
     const model = data.model || {};
@@ -1521,6 +1571,31 @@ export async function wikiPage(api) {
       els.caResult.textContent = `Could not compile: ${error.message}`;
     } finally {
       els.caProcess.disabled = false;
+    }
+    await loadQueue();
+    renderSessions();
+  }
+
+  /** `Compile fully`: one triaged session, compiled in full in the request. */
+  async function compileFully(button) {
+    const source = button.getAttribute("data-compile-fully") || "";
+    if (!source) return;
+    button.disabled = true;
+    els.caResult.textContent = "Compiling in full…";
+    try {
+      const data = await api("/v1/coding-agents/compile-fully", {
+        method: "POST",
+        body: { source_id: source },
+      });
+      const done = data && Array.isArray(data.processed) ? data.processed : [];
+      els.caResult.textContent = done.length
+        ? done
+            .map((job) => `${jobLabel(job.status)}${job.error ? ` (${job.error})` : ""}`)
+            .join(", ")
+        : "Requeued.";
+    } catch (error) {
+      els.caResult.textContent = `Could not compile: ${error.message}`;
+      button.disabled = false;
     }
     await loadQueue();
     renderSessions();
@@ -2405,6 +2480,12 @@ export async function wikiPage(api) {
   }
   if (els.caProcess) els.caProcess.addEventListener("click", processNow);
   if (els.caRetry) els.caRetry.addEventListener("click", retryFailed);
+  if (els.sessionsList) {
+    els.sessionsList.addEventListener("click", (event) => {
+      const button = event.target.closest && event.target.closest("[data-compile-fully]");
+      if (button) compileFully(button);
+    });
+  }
 
   els.listFilter.addEventListener("input", () => {
     state.filter = els.listFilter.value;

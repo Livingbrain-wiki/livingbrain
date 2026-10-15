@@ -48,6 +48,16 @@ function response(overrides = {}) {
         max_chunks: entry(4, 4, "default", 1, 20),
         chunk_chars: entry(32_000, 32_000, "default", 1_000, 200_000),
         max_output_tokens: entry(6_000, 6_000, "default", 256, 32_000),
+        triage: { value: true, inherited: true, source: "default", min: null, max: null },
+        compaction: { value: false, inherited: true, source: "workspace", min: null, max: null },
+        triage_strictness: {
+          value: "balanced",
+          inherited: "balanced",
+          source: "default",
+          min: null,
+          max: null,
+          options: ["lenient", "balanced", "strict"],
+        },
       },
       ask: {
         context_chars: entry(200_000, 200_000, "default", 2_000, 1_000_000),
@@ -328,4 +338,49 @@ test("readInputs reads values, or the default in force when asked", () => {
 test("no HTML is ever assigned in the budgets module", () => {
   const source = readFileSync(new URL("../assets/budgets.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\.(inner|outer)HTML\s*=|insertAdjacentHTML\s*\(|document\.write\s*\(/);
+});
+
+test("the token savers read from the server and patch only what moved", () => {
+  const view = budgetView(response());
+  assert.deepEqual(view.savers.triage, { value: true, source: "default", inherited: true });
+  assert.equal(view.savers.compaction.value, false);
+  assert.equal(view.savers.compaction.source, "workspace");
+  assert.deepEqual(view.savers.strictness.options, ["lenient", "balanced", "strict"]);
+  const inputs = inputsOf(view);
+  // Untouched: nothing to save.
+  assert.equal(
+    budgetPatch(view, inputs, undefined, { triage: true, compaction: false, strictness: "balanced" }),
+    null,
+  );
+  // Triage off pins false; compaction back on is the default again, so it clears;
+  // strict pins the name.
+  assert.deepEqual(
+    budgetPatch(view, inputs, undefined, { triage: false, compaction: true, strictness: "strict" }),
+    { coding_agents: { triage: false, compaction: null, triage_strictness: "strict" } },
+  );
+  assert.throws(
+    () => budgetPatch(view, inputs, undefined, { strictness: "max" }),
+    (error) => error instanceof FieldError && error.field === "coding_agents.triage_strictness",
+  );
+  // An older server without the settings: both on, balanced.
+  const old = budgetView({ settings: { coding_agents: {} } });
+  assert.equal(old.savers.triage.value, true);
+  assert.equal(old.savers.strictness.value, "balanced");
+});
+
+test("the token savers paint as two switches and a select, read-only for a member", () => {
+  const doc = recorderDoc();
+  const root = container();
+  renderBudgets(root, budgetView(response()), doc);
+  const all = walk(root);
+  assert.equal(all.find((n) => n.id === "budget-triage").checked, true);
+  assert.equal(all.find((n) => n.id === "budget-compaction").checked, false);
+  const select = all.find((n) => n.id === "budget-strictness");
+  assert.equal(select.tag, "select");
+  assert.equal(all.filter((n) => n.tag === "option").length, 3);
+  const memberRoot = container();
+  renderBudgets(memberRoot, budgetView(response({ editable: false, role: "member" })), doc);
+  const seen = walk(memberRoot);
+  assert.ok(seen.find((n) => n.id === "budget-triage").disabled);
+  assert.ok(seen.find((n) => n.id === "budget-strictness").disabled);
 });

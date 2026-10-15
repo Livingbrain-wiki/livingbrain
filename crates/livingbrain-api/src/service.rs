@@ -76,6 +76,8 @@ pub(crate) struct Service {
     /// The cookie resolver, when the composition wired one; `None` is a
     /// bearer-only surface.
     session: Option<Arc<dyn SessionAuth>>,
+    /// The compiler's triage classifier, when the composition wired one.
+    classifier: Option<Arc<dyn cratefield_core::Classifier>>,
 }
 
 impl Service {
@@ -96,6 +98,7 @@ impl Service {
             kms: wiki.kms.clone(),
             auth: wiki.auth.clone(),
             session: wiki.session.clone(),
+            classifier: wiki.classifier.clone(),
         }
     }
 
@@ -231,6 +234,7 @@ impl Service {
             kms: self.kms.clone(),
             auth: self.auth.clone(),
             session: self.session.clone(),
+            classifier: self.classifier.clone(),
         }
     }
 

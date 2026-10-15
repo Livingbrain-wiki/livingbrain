@@ -134,6 +134,10 @@ pub struct Wiki {
     pub auth: Arc<dyn BearerAuth>,
     /// Resolves the web app's session cookie, when one is wired.
     pub session: Option<Arc<dyn SessionAuth>>,
+    /// The coding-agents compiler's triage classifier (Jev, TypeSafe's
+    /// System One), when the deployment has a key for one. Only the
+    /// compiler asks it; nothing else here does.
+    pub classifier: Option<Arc<dyn cratefield_core::Classifier>>,
 }
 
 impl Wiki {
@@ -146,6 +150,7 @@ impl Wiki {
             kms,
             auth,
             session: None,
+            classifier: None,
         }
     }
 
@@ -154,6 +159,16 @@ impl Wiki {
     #[must_use]
     pub fn with_session(mut self, session: Arc<dyn SessionAuth>) -> Self {
         self.session = Some(session);
+        self
+    }
+
+    /// The same `Wiki`, with the compiler's triage classifier (or none).
+    #[must_use]
+    pub fn with_classifier(
+        mut self,
+        classifier: Option<Arc<dyn cratefield_core::Classifier>>,
+    ) -> Self {
+        self.classifier = classifier;
         self
     }
 }
