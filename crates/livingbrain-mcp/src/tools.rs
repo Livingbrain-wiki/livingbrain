@@ -5,17 +5,20 @@
 //! it is not found, because answering "you do not have access to this" is
 //! itself an answer about somebody else's page.
 
-use livingbrain_access::{Scope, UserId};
+use cratefield_module_orgs::grants::Permission;
+use livingbrain_pages::access::{
+    AccessPlan, KIND_FACTS, KIND_PAGES, ScopeFilter, personal, space_scope, subject_path,
+};
 use livingbrain_pages::{
     Author, EntityType, FactError, FactInput, FactStore, Frontmatter, Page, PageError, PageStore,
-    PageWrite, brief_lines, brief_section, fact_json, page_url, parse_frontmatter, person_subject,
-    reference_url, relevant,
+    PageWrite, Timeline, brief_lines, brief_section, fact_json, page_url, parse_frontmatter,
+    person_subject, reference_url, relevant_where,
 };
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::auth::{Asker, page_scope};
+use crate::auth::Asker;
 
 /// How many hits `brain_search` returns when the caller names no limit.
 const DEFAULT_LIMIT: usize = 10;
@@ -192,20 +195,30 @@ pub(crate) async fn run(
     facts: &FactStore,
     base: &str,
     asker: &Asker,
-    scopes: &[String],
+    plan: &AccessPlan,
     call: Call,
 ) -> Result<Value, String> {
+    // The pages the asker may read, each scope with its slug filter (ADR
+    // 0004). Every read below goes through these and nothing else.
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
     match call {
-        Call::Search { query, limit } => search(store, base, scopes, &query, limit).await,
-        Call::Page { slug } => page(store, base, scopes, &slug).await,
+        Call::Search { query, limit } => search(store, base, &filters, &query, limit).await,
+        Call::Page { slug } => page(store, base, &filters, &slug).await,
         Call::ContextFor { repo, task } => {
-            context_for(store, facts, base, asker, scopes, &repo, &task).await
+            context_for(store, facts, base, asker, plan, &repo, &task).await
         }
         Call::Note {
             text,
             title,
             facts: stated,
-        } => note(store, facts, base, asker, &text, title.as_deref(), stated).await,
+        } => {
+            let said = Said {
+                text: &text,
+                title: title.as_deref(),
+                facts: stated,
+            };
+            note(store, facts, base, asker, plan, said).await
+        }
         Call::Facts {
             subject,
             attribute,
@@ -214,7 +227,7 @@ pub(crate) async fn run(
             read_facts(
                 facts,
                 asker,
-                scopes,
+                plan,
                 subject.as_deref(),
                 attribute.as_deref(),
                 as_of.as_deref(),
@@ -232,11 +245,11 @@ pub(crate) async fn run(
 async fn search(
     store: &PageStore,
     base: &str,
-    scopes: &[String],
+    filters: &[ScopeFilter],
     query: &str,
     limit: usize,
 ) -> Result<Value, String> {
-    let found = find(store, base, scopes, query, limit).await?;
+    let found = find(store, base, filters, query, limit).await?;
     let mut text = String::new();
     for (index, page) in found.iter().enumerate() {
         text.push_str(&format!(
@@ -273,14 +286,19 @@ async fn search(
 async fn page(
     store: &PageStore,
     base: &str,
-    scopes: &[String],
+    filters: &[ScopeFilter],
     slug: &str,
 ) -> Result<Value, String> {
-    for scope in scopes {
-        let Ok(Some(hit)) = store.read(scope, slug).await else {
+    for filter in filters {
+        // A slug outside the grant is not looked up at all: no read, no
+        // timing, no "it exists".
+        if !filter.matches(slug) {
+            continue;
+        }
+        let Ok(Some(hit)) = store.read(&filter.scope, slug).await else {
             continue;
         };
-        let found = Found::new(base, scope, slug, &hit);
+        let found = Found::new(base, &filter.scope, slug, &hit);
         return Ok(answer(
             format!("# {}\n\n{}", found.title, found.body),
             json!({
@@ -308,12 +326,13 @@ async fn context_for(
     facts: &FactStore,
     base: &str,
     asker: &Asker,
-    scopes: &[String],
+    plan: &AccessPlan,
     repo: &str,
     task: &str,
 ) -> Result<Value, String> {
-    let mut found = find(store, base, scopes, task, CONTEXT_PAGES).await?;
-    for page in find(store, base, scopes, repo, CONTEXT_PAGES).await? {
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
+    let mut found = find(store, base, &filters, task, CONTEXT_PAGES).await?;
+    for page in find(store, base, &filters, repo, CONTEXT_PAGES).await? {
         if !found.contains(&page) {
             found.push(page);
         }
@@ -323,9 +342,16 @@ async fn context_for(
     // The facts the task is about, as of now, ahead of the pages
     // (docs/temporal-facts.md §7): the convention, then one line each.
     let now = facts.now();
-    let timelines = relevant(facts, &asker.user_id, scopes, task)
-        .await
-        .map_err(facts_failed)?;
+    let fact_scopes = plan.scopes(KIND_FACTS, Permission::Read);
+    let timelines = relevant_where(
+        facts,
+        &asker.user_id,
+        &fact_scopes,
+        task,
+        |scope, subject| plan.allows(KIND_FACTS, scope, &subject_path(subject), Permission::Read),
+    )
+    .await
+    .map_err(facts_failed)?;
     let (lines, fact_citations) = brief_lines(&timelines, now);
     let mut text = brief_section(&lines, now);
     for (index, page) in found.iter().enumerate() {
@@ -367,10 +393,14 @@ async fn note(
     facts: &FactStore,
     base: &str,
     asker: &Asker,
-    text: &str,
-    title: Option<&str>,
-    stated: Vec<Value>,
+    plan: &AccessPlan,
+    said: Said<'_>,
 ) -> Result<Value, String> {
+    let Said {
+        text,
+        title,
+        facts: stated,
+    } = said;
     // The facts are read before anything is written, so a malformed one
     // refuses the note rather than leaving half of it stored.
     let inputs = stated
@@ -396,11 +426,8 @@ async fn note(
         title
     };
 
-    let scope = page_scope(
-        &asker.workspace_id,
-        &Scope::User(UserId::new(asker.user_id.clone())),
-    );
     let slug = note_slug(&clean);
+    let scope = note_scope(asker, plan, &slug, !inputs.is_empty())?;
     let head = store
         .read(&scope, &slug)
         .await
@@ -468,7 +495,7 @@ async fn note(
 async fn read_facts(
     facts: &FactStore,
     asker: &Asker,
-    scopes: &[String],
+    plan: &AccessPlan,
     subject: Option<&str>,
     attribute: Option<&str>,
     as_of: Option<&str>,
@@ -498,11 +525,24 @@ async fn read_facts(
             .min(now),
         None => now,
     };
+    let scopes = plan.scopes(KIND_FACTS, Permission::Read);
     let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let timelines = facts
+    let timelines: Vec<Timeline> = facts
         .timelines(&names, subject.as_deref(), attribute.as_deref())
         .await
-        .map_err(facts_failed)?;
+        .map_err(facts_failed)?
+        .into_iter()
+        // A subject-prefix grant: timelines outside it are dropped before
+        // anything is rendered or cited.
+        .filter(|timeline| {
+            plan.allows(
+                KIND_FACTS,
+                &timeline.scope,
+                &subject_path(&timeline.subject),
+                Permission::Read,
+            )
+        })
+        .collect();
     let (lines, citations) = brief_lines(&timelines, at);
     let text = if lines.is_empty() {
         "No fact you can read matches that. Facts are recorded with brain_note's \
@@ -636,13 +676,12 @@ impl Found {
 async fn find(
     store: &PageStore,
     base: &str,
-    scopes: &[String],
+    filters: &[ScopeFilter],
     query: &str,
     limit: usize,
 ) -> Result<Vec<Found>, String> {
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let hits = store
-        .search(&names, query, limit)
+        .search_in(filters, query, limit)
         .await
         .map_err(store_failed)?;
     let mut found = Vec::with_capacity(hits.len());
@@ -656,6 +695,48 @@ async fn find(
         }
     }
     Ok(found)
+}
+
+/// What a `brain_note` call says: the text, its title, and the facts it
+/// states.
+struct Said<'a> {
+    text: &'a str,
+    title: Option<&'a str>,
+    facts: Vec<Value>,
+}
+
+/// Where `brain_note` writes (ADR 0004). A member writes into their own
+/// memory, as always. An agent account has no memory of its own: its note
+/// lands in its owner's personal space, else the shared one — whichever it
+/// holds `write` on for this slug (and on facts, when it states any).
+fn note_scope(
+    asker: &Asker,
+    plan: &AccessPlan,
+    slug: &str,
+    with_facts: bool,
+) -> Result<String, String> {
+    if let Some(own) = plan.own_scope() {
+        return Ok(own);
+    }
+    let owner = asker.agent_owner.as_deref().unwrap_or_default();
+    for space in [
+        personal(owner),
+        livingbrain_pages::access::SHARED.to_owned(),
+    ] {
+        let Some(scope) = space_scope(&asker.workspace_id, &space) else {
+            continue;
+        };
+        if plan.allows_page(&scope, slug, Permission::Write)
+            && (!with_facts || plan.allows(KIND_FACTS, &scope, &[], Permission::Write))
+        {
+            return Ok(scope);
+        }
+    }
+    Err(
+        "nothing was written: this agent account has not been granted write access to \
+         its owner's notes or to the shared space"
+            .to_owned(),
+    )
 }
 
 /// The note slug for a body: SHA-256, hex-truncated to [`SLUG_HEX`]. The same

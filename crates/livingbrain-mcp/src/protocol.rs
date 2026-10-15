@@ -10,7 +10,7 @@ use cratefield_core::axum::http::{HeaderMap, header};
 use serde_json::{Value, json};
 
 use crate::McpState;
-use crate::auth::{Asker, page_scopes};
+use crate::auth::Asker;
 use crate::tools::{self, Call};
 
 /// The revision this server speaks when a client asks for one it does not.
@@ -162,8 +162,16 @@ async fn call(state: &McpState, asker: &Asker, id: &Value, params: Option<&Value
         Ok(parsed) => parsed,
         Err(message) => return error(id, Refusal::Params(message)),
     };
-    // The caller's scopes, resolved once: a tool never learns anyone else's.
-    let scopes = page_scopes(asker);
+    // The caller's access, resolved once (ADR 0004): a tool never learns
+    // anyone else's, and a plan that cannot be read is a refusal, never "no
+    // grants".
+    let plan = match (state.ctx.ports.db.clone(), state.ctx.ports.clock.clone()) {
+        (Some(db), Some(clock)) => match asker.access(&*db, clock.now()).await {
+            Ok(plan) => plan,
+            Err(_) => return error(id, Refusal::Internal("access could not be read".to_owned())),
+        },
+        _ => return error(id, Refusal::Internal("access could not be read".to_owned())),
+    };
     // A page store this module cannot build is its own fault and the caller's
     // cannot fix it, so it is the one thing that is an error object rather
     // than a result.
@@ -184,7 +192,12 @@ async fn call(state: &McpState, asker: &Asker, id: &Value, params: Option<&Value
     // Where the cited pages are read: the deployment's own web app, from
     // the one setting every surface shares.
     let base = livingbrain_pages::app_base(state.ctx.config.as_ref());
-    match tools::run(&store, &facts, &base, asker, &scopes, parsed).await {
+    let writes = matches!(parsed, Call::Note { .. });
+    let ran = tools::run(&store, &facts, &base, asker, &plan, parsed).await;
+    if writes && ran.is_ok() {
+        crate::auth::audit_agent(&state.ctx.ports, asker, "note.write", "mcp:brain_note").await;
+    }
+    match ran {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(text) => json!({
             "jsonrpc": "2.0",

@@ -24,8 +24,8 @@ use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::axum::{Json, Router};
 use cratefield_core::{ModuleContext, Problem};
-use livingbrain_access::{Scope, UserId};
-use livingbrain_mcp::{Asker, page_scope};
+use cratefield_module_orgs::grants::Permission;
+use livingbrain_pages::access::{AccessPlan, KIND_FACTS, KIND_PAGES, ScopeFilter, subject_path};
 use livingbrain_pages::{
     Author, EntityType, Page, PageFilter, PageStore, PageWrite, is_project, is_slug,
     parse_frontmatter, project_key,
@@ -120,10 +120,10 @@ async fn list(
         },
     };
     let store = state.store()?;
-    let scopes = state.scopes(&asker);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let plan = state.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
     let listed = store
-        .list_filtered(&names, &filter, limit)
+        .list_in_filtered(&filters, &filter, limit)
         .await
         .map_err(page_read_error)?;
     let pages: Vec<Value> = listed
@@ -183,11 +183,12 @@ async fn read_one(
         return Err(slug_not_found());
     }
     let store = state.store()?;
-    let scopes = state.scopes(&asker);
-    let page = read_first(&store, &scopes, &slug)
+    let plan = state.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
+    let page = read_first(&store, &filters, &slug)
         .await?
         .ok_or_else(|| Problem::new(&PAGE_NOT_FOUND))?;
-    Ok(Json(page_view(&state, &asker, &store, &page).await?))
+    Ok(Json(page_view(&state, &plan, &store, &page).await?))
 }
 
 /// The first readable page of `slug` across the asker's scopes, most
@@ -195,11 +196,16 @@ async fn read_one(
 /// scope in order, and the first hit wins.
 async fn read_first(
     store: &PageStore,
-    scopes: &[String],
+    filters: &[ScopeFilter],
     slug: &str,
 ) -> Result<Option<Page>, Problem> {
-    for scope in scopes {
-        match store.read(scope, slug).await {
+    for filter in filters {
+        // A slug outside the grant is never looked up: the answer for it is
+        // the same 404 an absent page gets, with no read behind it.
+        if !filter.matches(slug) {
+            continue;
+        }
+        match store.read(&filter.scope, slug).await {
             Ok(Some(page)) => return Ok(Some(page)),
             Ok(None) => {}
             Err(error) => return Err(page_read_error(error)),
@@ -218,17 +224,24 @@ async fn read_first(
 /// already read, so a `PageError` here is infrastructure.
 async fn page_view(
     state: &Service,
-    asker: &Asker,
+    plan: &AccessPlan,
     store: &PageStore,
     page: &Page,
 ) -> Result<Value, Problem> {
-    let backlinks = store
+    // Only what the asker may read is named (ADR 0004): a backlink from a
+    // page outside their grant, or a citation to one, is left out, so the
+    // view never reveals a slug they could not open.
+    let backlinks: Vec<String> = store
         .backlinks(&page.scope, &page.slug)
         .await
-        .map_err(page_read_error)?;
+        .map_err(page_read_error)?
+        .into_iter()
+        .filter(|from| plan.allows_page(&page.scope, from, Permission::Read))
+        .collect();
     let citations: Vec<Value> = page
         .links
         .iter()
+        .filter(|link| plan.allows_page(&page.scope, link, Permission::Read))
         .map(|link| {
             json!({
                 "title": link,
@@ -243,12 +256,22 @@ async fn page_view(
     let subject = format!("{}/{}", page.entity_type.as_str(), page.slug);
     let facts = state.facts_store()?;
     let now = facts.now();
-    let scopes = state.scopes(asker);
+    let scopes = plan.scopes(KIND_FACTS, Permission::Read);
     let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let timelines = facts
+    let timelines: Vec<_> = facts
         .timelines(&names, Some(&subject), None)
         .await
-        .map_err(fact_error)?;
+        .map_err(fact_error)?
+        .into_iter()
+        .filter(|timeline| {
+            plan.allows(
+                KIND_FACTS,
+                &timeline.scope,
+                &subject_path(&timeline.subject),
+                Permission::Read,
+            )
+        })
+        .collect();
     let fact_keys: Vec<Value> = timelines
         .iter()
         .map(|timeline| timeline_json(timeline, now, &|fact| fact.source.clone()))
@@ -328,11 +351,17 @@ async fn edit(
     };
 
     let store = state.store()?;
-    let scopes = state.scopes(&asker);
-    let existing = read_first(&store, &scopes, &slug).await?;
+    let plan = state.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
+    let existing = read_first(&store, &filters, &slug).await?;
 
     let (scope, entity_type, markdown, base_version) = match existing {
         Some(page) => {
+            // Reading a page is not editing it: the grant decides (ADR 0004).
+            if !plan.allows_page(&page.scope, &slug, Permission::Write) {
+                return Err(Problem::new(&PAGE_REFUSED)
+                    .with_detail("nothing was written: you may read this page, not edit it"));
+            }
             // An edit must say what it read: a null base_version here means
             // the caller never saw the page, and writing would be a bet
             // against whoever did.
@@ -354,10 +383,8 @@ async fn edit(
                     "a new page cannot carry a base_version; leave it null to create one",
                 ));
             }
-            let scope = page_scope(
-                &asker.workspace_id,
-                &Scope::User(UserId::new(asker.user_id.clone())),
-            );
+            let scope = crate::recipes::new_page_scope(&plan, &asker, &slug)
+                .ok_or_else(|| Problem::new(&PAGE_NOT_FOUND))?;
             // A new page's title goes in the fence it needs anyway; a body
             // that carries its own fence keeps it.
             let markdown = match title.as_deref() {
@@ -386,6 +413,11 @@ async fn edit(
         .await
         .map_err(page_write_error)?;
 
+    if asker.is_agent() {
+        state
+            .audit(&asker, "page.write", &format!("page:{scope}/{slug}"))
+            .await;
+    }
     // Re-read, so the answer carries the backlinks and citations of the
     // version the store actually kept — the same shape `GET` answers with.
     let page = store
@@ -393,7 +425,7 @@ async fn edit(
         .await
         .map_err(page_read_error)?
         .ok_or_else(Problem::internal)?;
-    Ok(Json(page_view(&state, &asker, &store, &page).await?))
+    Ok(Json(page_view(&state, &plan, &store, &page).await?))
 }
 
 /// Whether a body opens with a closed `---` frontmatter fence.

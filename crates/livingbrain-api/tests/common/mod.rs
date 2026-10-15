@@ -54,6 +54,19 @@ pub const TOKEN_A_NARROW: &str = "user-a-narrow";
 /// The deployment key-encryption secret the models module seals with.
 pub const MODEL_KEYS_SECRET: &str = "a-test-encryption-secret-of-32-bytes";
 
+/// An agent account `user-a` owns (ADR 0004).
+pub const AGENT: &str = "agt_one";
+/// The bearer key that speaks for [`AGENT`], uncut.
+pub const TOKEN_AGENT: &str = "agent-key";
+/// The same agent, its key cut down to reading `coding-agents/claude/` in
+/// `user-a`'s space.
+pub const TOKEN_AGENT_NARROW: &str = "agent-key-narrow";
+/// user-a, by a token cut to reading their own space (ADR 0004 `read:`).
+#[allow(dead_code)]
+pub const TOKEN_A_READ: &str = "token-a-read";
+/// `user-b` with a token cut down to the shared space.
+pub const TOKEN_B_SHARED: &str = "user-b-shared";
+
 /// A bearer resolver over a fixed table: a known token names an asker, an
 /// unknown one names nobody. That is the whole of what #72 replaces.
 #[derive(Default)]
@@ -216,7 +229,7 @@ fn fixture_with(
     session: Option<Arc<dyn livingbrain_api::SessionAuth>>,
     jev: Option<Arc<dyn livingbrain_models::jev::JevConnector>>,
 ) -> Fixture {
-    let askers = [
+    let mut askers = [
         (TOKEN_A, WORKSPACE, "user-a"),
         (TOKEN_B, WORKSPACE, "user-b"),
         (TOKEN_A_ELSEWHERE, OTHER_WORKSPACE, "user-a"),
@@ -231,6 +244,9 @@ fn fixture_with(
                 // The fixed table stands for a full member credential: `None`
                 // carries every scope the member holds (issue #72).
                 token_scopes: None,
+                agent_owner: None,
+                role: None,
+                credential: None,
             },
         )
     })
@@ -240,9 +256,46 @@ fn fixture_with(
             workspace_id: WORKSPACE.to_owned(),
             user_id: "user-a".to_owned(),
             token_scopes: Some(vec!["shared".to_owned()]),
+            agent_owner: None,
+            role: None,
+            credential: None,
         },
     )))
     .collect::<BTreeMap<_, _>>();
+    // ADR 0004: an agent account user-a owns, with a whole key and with one
+    // cut down to reading one folder; and user-b with a shared-only token.
+    askers.insert(
+        TOKEN_AGENT.to_owned(),
+        Asker {
+            workspace_id: WORKSPACE.to_owned(),
+            user_id: AGENT.to_owned(),
+            token_scopes: None,
+            agent_owner: Some("user-a".to_owned()),
+            role: None,
+            credential: Some("lba_0011223344556677".to_owned()),
+        },
+    );
+    askers.insert(
+        TOKEN_AGENT_NARROW.to_owned(),
+        Asker {
+            token_scopes: Some(vec!["read:personal:user-a/coding-agents/claude".to_owned()]),
+            ..askers[TOKEN_AGENT].clone()
+        },
+    );
+    askers.insert(
+        TOKEN_A_READ.to_owned(),
+        Asker {
+            token_scopes: Some(vec!["read:personal:user-a".to_owned()]),
+            ..askers[TOKEN_A].clone()
+        },
+    );
+    askers.insert(
+        TOKEN_B_SHARED.to_owned(),
+        Asker {
+            token_scopes: Some(vec!["shared".to_owned()]),
+            ..askers[TOKEN_B].clone()
+        },
+    );
 
     let auth: Arc<dyn BearerAuth> = Arc::new(Tokens(askers));
     let key = kms();
@@ -278,6 +331,9 @@ fn fixture_with(
         // serves the workspace, and the usage ledger its budget gate reads.
         Box::new(livingbrain_models::Models::new()),
         Box::new(livingbrain_usage::Usage::new()),
+        // The grants tables (ADR 0004): every route reads its access plan
+        // from them, and refuses when they cannot be read.
+        Box::new(livingbrain_accounts::Access::new()),
     ];
 
     let kit = TestHarness::with_ports(modules, |ports| {
@@ -384,6 +440,50 @@ pub fn seed(fixture: &Fixture, workspace: &str, scope: &Scope, slug: &str, body:
     pollster::block_on(fixture.store.read(&scope, slug))
         .expect("a read")
         .expect("the page is there")
+}
+
+/// Stores one grant (ADR 0004) in `workspace`.
+#[allow(clippy::too_many_arguments)]
+pub fn grant(
+    fixture: &Fixture,
+    workspace: &str,
+    principal: &str,
+    space: &str,
+    path: &str,
+    kind: &str,
+    permission: cratefield_module_orgs::grants::Permission,
+    deny: bool,
+) {
+    use cratefield_module_orgs::grants::{self, Effect, NewGrant, Selector, split_path};
+    pollster::block_on(grants::put_grant(
+        &*fixture.db,
+        workspace,
+        &format!("grt_{}", cratefield_core::IdGen::ulid(&UlidIdGen)),
+        &NewGrant {
+            principal: principal.to_owned(),
+            selector: Selector::new(kind, space, split_path(path)).expect("a valid selector"),
+            permission,
+            effect: if deny { Effect::Deny } else { Effect::Allow },
+            expires_at: None,
+            created_by: "test".to_owned(),
+        },
+        time::OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("in range"),
+    ))
+    .expect("the grant stores");
+}
+
+/// The audit log's actions for `workspace`, newest first.
+pub fn audit_actions(fixture: &Fixture, workspace: &str) -> Vec<(String, String, Option<String>)> {
+    pollster::block_on(cratefield_module_orgs::audit::list(
+        &*fixture.db,
+        workspace,
+        None,
+        200,
+    ))
+    .expect("the log reads")
+    .into_iter()
+    .map(|entry| (entry.actor_id, entry.action, entry.on_behalf_of))
+    .collect()
 }
 
 /// The user's own scope in a workspace — the `Scope` half of a seed.

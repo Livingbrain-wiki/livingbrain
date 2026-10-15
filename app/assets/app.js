@@ -96,6 +96,32 @@ import {
   presetInputs,
   FieldError,
 } from "./budgets.js";
+import {
+  agentListRequest,
+  agentCreateRequest,
+  agentUpdateRequest,
+  agentDeleteRequest,
+  agentKeysRequest,
+  agentKeyMintRequest,
+  agentKeyRotateRequest,
+  agentKeyRevokeRequest,
+  grantListRequest,
+  grantCreateRequest,
+  grantDeleteRequest,
+  auditRequest,
+  agentViews,
+  keyViews,
+  mintedKey,
+  grantViews,
+  principalLabel,
+  accessErrorMessage,
+  renderAgentRows,
+  renderKeyRows,
+  renderGrantRows,
+  renderAuditRows,
+  revealAgentKey,
+  clearAgentKey,
+} from "./access.js";
 import { isSafeHref } from "./markdown.js";
 import {
   checkSession,
@@ -625,6 +651,8 @@ const TAB_HEADS = Object.freeze({
   integrations: ["Settings", "Integrations", "Connect your coding agent, GitHub, the CLI and the tools that read from the brain."],
   tokens: ["Settings", "API tokens", "Tokens let a coding agent or the CLI read your brain without a browser."],
   members: ["Workspace", "Members", "The workspace's name and picture, who is in it, and what they may do."],
+  agents: ["Workspace", "Agent accounts", "Non-human accounts for your agents and services: each signs in only with its own API keys, and reads nothing until you grant it."],
+  access: ["Workspace", "Access & audit", "Who may read and write which part of the brain, and the log of who did what."],
   account: ["Settings", "Account", "Your name and picture, your workspaces, and signing out."],
 });
 
@@ -635,7 +663,8 @@ export function showSettingsTab(hash) {
     for (const id of sections) {
       const section = document.getElementById(id);
       if (!section) continue;
-      section.hidden = !shown.has(id);
+      section.hidden =
+        !shown.has(id) || (section.hasAttribute("data-admin-only") && section.dataset.allowed !== "true");
       // A tab of one section: its own heading repeats the page's, so it is
       // kept for screen readers (the section's label) and hidden from view.
       section.classList.toggle("sect--solo", shown.size === 1);
@@ -681,6 +710,7 @@ pages.settings = async function settings() {
     wireModels(),
     wireTokens(),
     wireMembers(),
+    wireAccess(),
     wireProfile(),
     wireBudgets(),
     mountGithub({
@@ -2264,6 +2294,263 @@ async function wireBudgets() {
   });
 
   return load();
+}
+
+/* --- agent accounts, access, audit (ADR 0004) ------------------------ */
+
+/**
+ * The three access sections. The server decides every permission; the page
+ * hides only what would be refused. An agent key is written into
+ * `#agent-key-value` by `revealAgentKey` and nowhere else, and dismissing it —
+ * or leaving the page — takes it back out.
+ */
+async function wireAccess() {
+  const send = (request) =>
+    api(request.path, request.body === undefined
+      ? { method: request.method }
+      : { method: request.method, body: request.body });
+
+  const agentsStatus = $("#agents-status");
+  const agentRows = $("#agent-rows");
+  const keysBox = $("#agent-keys");
+  const keysTitle = $("#agent-keys-title");
+  const keyRows = $("#agent-key-rows");
+  const keyForm = $("#agent-key-form");
+  const reveal = $("#agent-key-reveal");
+  const keyValue = $("#agent-key-value");
+  const agentForm = $("#agent-form");
+  const accessStatus = $("#access-status");
+  const grantRows = $("#grant-rows");
+  const grantForm = $("#grant-form");
+  const principal = $("#grant-principal");
+  const auditSection = $("#audit");
+  const auditRows = $("#audit-rows");
+  const auditMore = $("#audit-more");
+  let me = null;
+  let members = [];
+  let agents = [];
+  let openAgent = null;
+  let auditCursor = "";
+
+  const forget = () => {
+    clearAgentKey(keyValue);
+    reveal.hidden = true;
+  };
+  const showKey = (response) => {
+    revealAgentKey(keyValue, mintedKey(response));
+    reveal.hidden = false;
+    reveal.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast("Key created. Copy it now.", "ok");
+  };
+
+  const fillPrincipals = () => {
+    principal.replaceChildren();
+    const add = (value, label) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      principal.appendChild(option);
+    };
+    for (const agent of agents) add(`agent:${agent.id}`, `${agent.name} (agent)`);
+    for (const member of members) {
+      if (me && me.member && member.user_id === me.member.user_id) continue;
+      add(`member:${member.user_id}`, member.name || member.user_id);
+    }
+    for (const role of ["member", "admin", "viewer"]) add(`role:${role}`, `Everyone with the ${role} role`);
+  };
+
+  const loadKeys = async () => {
+    if (!openAgent) return;
+    try {
+      renderKeyRows(keyRows, keyViews(await send(agentKeysRequest(openAgent.id))));
+    } catch (error) {
+      toast(accessErrorMessage(error, "load the keys"), "bad");
+    }
+  };
+
+  const loadAgents = async () => {
+    try {
+      agents = agentViews(await send(agentListRequest()));
+      renderAgentRows(agentRows, agents);
+      notice(agentsStatus, "");
+    } catch (error) {
+      notice(agentsStatus, accessErrorMessage(error, "load agent accounts"), "warn");
+    }
+  };
+
+  const loadGrants = async () => {
+    try {
+      renderGrantRows(grantRows, grantViews(await send(grantListRequest())), members, agents);
+      notice(accessStatus, "");
+    } catch (error) {
+      notice(accessStatus, accessErrorMessage(error, "load access"), "warn");
+    }
+  };
+
+  const loadAudit = async (more) => {
+    if (!more) {
+      auditRows.replaceChildren();
+      auditCursor = "";
+    }
+    try {
+      const page = await send(auditRequest(auditCursor));
+      renderAuditRows(auditRows, page.entries);
+      auditCursor = page.next || "";
+      auditMore.hidden = !auditCursor;
+    } catch (error) {
+      toast(accessErrorMessage(error, "load the audit log"), "bad");
+    }
+  };
+
+  agentForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    let request;
+    try {
+      request = agentCreateRequest($("#agent-name").value, $("#agent-description").value);
+    } catch {
+      fieldError("agentName", "Give it a name.", $("#agent-name"));
+      return;
+    }
+    try {
+      await send(request);
+      agentForm.reset();
+      toast("Agent account created. It has no access until you grant some.", "ok");
+      await loadAgents();
+      fillPrincipals();
+    } catch (error) {
+      toast(accessErrorMessage(error, "create the agent account"), "bad");
+    }
+  });
+
+  agentRows.addEventListener("click", async (event) => {
+    const keys = event.target.closest("[data-agent-keys]");
+    const toggle = event.target.closest("[data-agent-toggle]");
+    const remove = event.target.closest("[data-agent-delete]");
+    try {
+      if (keys) {
+        openAgent = { id: keys.dataset.agentKeys, name: keys.dataset.name };
+        keysTitle.textContent = `Keys of ${openAgent.name}`;
+        keysBox.hidden = false;
+        await loadKeys();
+      } else if (toggle) {
+        const disabled = toggle.dataset.disabled !== "1";
+        await send(agentUpdateRequest(toggle.dataset.agentToggle, { disabled }));
+        toast(disabled ? "Disabled: its keys stop working now." : "Enabled.", "ok");
+        await loadAgents();
+      } else if (remove) {
+        const ok = await confirmAction({
+          title: `Delete ${remove.dataset.name}?`,
+          body: "Its keys stop working and every grant to it is removed. This cannot be undone.",
+          confirm: "Delete",
+        });
+        if (!ok) return;
+        await send(agentDeleteRequest(remove.dataset.agentDelete));
+        if (openAgent && openAgent.id === remove.dataset.agentDelete) keysBox.hidden = true;
+        toast(`Deleted ${remove.dataset.name}.`, "ok");
+        await loadAgents();
+        await loadGrants();
+      }
+    } catch (error) {
+      toast(accessErrorMessage(error, "change the agent account"), "bad");
+    }
+  });
+
+  keyForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!openAgent) return;
+    try {
+      showKey(await send(agentKeyMintRequest(openAgent.id, $("#agent-key-name").value, $("#agent-key-days").value)));
+      keyForm.reset();
+      await loadKeys();
+    } catch (error) {
+      toast(accessErrorMessage(error, "create the key"), "bad");
+    }
+  });
+
+  keyRows.addEventListener("click", async (event) => {
+    const rotate = event.target.closest("[data-key-rotate]");
+    const revoke = event.target.closest("[data-key-revoke]");
+    if (!openAgent || (!rotate && !revoke)) return;
+    try {
+      if (rotate) {
+        showKey(await send(agentKeyRotateRequest(openAgent.id, rotate.dataset.keyRotate)));
+      } else {
+        await send(agentKeyRevokeRequest(openAgent.id, revoke.dataset.keyRevoke));
+        toast("Revoked. Anything using it stops now.", "ok");
+      }
+      await loadKeys();
+    } catch (error) {
+      toast(accessErrorMessage(error, "change the key"), "bad");
+    }
+  });
+
+  $("#copy-agent-key").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(keyValue.textContent);
+      toast("Copied.", "ok");
+    } catch {
+      toast("Copying was blocked. Select the key and copy it by hand.", "warn");
+    }
+  });
+  $("#dismiss-agent-key").addEventListener("click", forget);
+  window.addEventListener("pagehide", forget);
+
+  grantForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const permission = $("#grant-permission").value;
+    let request;
+    try {
+      request = grantCreateRequest({
+        principal: principal.value,
+        space: $("#grant-space").value,
+        folder: $("#grant-folder").value,
+        kind: $("#grant-kind").value,
+        permission: permission === "deny" ? "read" : permission,
+        effect: permission === "deny" ? "deny" : "allow",
+      });
+    } catch (error) {
+      fieldError("grantFolder", error.message, $("#grant-folder"));
+      return;
+    }
+    try {
+      await send(request);
+      toast(`Granted to ${principalLabel(request.body.principal, members, agents)}.`, "ok");
+      grantForm.reset();
+      await loadGrants();
+    } catch (error) {
+      toast(accessErrorMessage(error, "grant that"), "bad");
+    }
+  });
+
+  grantRows.addEventListener("click", async (event) => {
+    const remove = event.target.closest("[data-grant-delete]");
+    if (!remove) return;
+    try {
+      await send(grantDeleteRequest(remove.dataset.grantDelete));
+      toast("Removed.", "ok");
+      await loadGrants();
+    } catch (error) {
+      toast(accessErrorMessage(error, "remove that grant"), "bad");
+    }
+  });
+
+  auditMore.addEventListener("click", () => loadAudit(true));
+
+  try {
+    me = await api("/v1/workspaces/me");
+    members = await send(membersRequest());
+  } catch {
+    members = [];
+  }
+  await loadAgents();
+  fillPrincipals();
+  await loadGrants();
+  const admin = canManage(me);
+  // The audit log is for owners and admins: the Access tab shows it only
+  // when the section is marked allowed (`showSettingsTab`).
+  auditSection.dataset.allowed = admin ? "true" : "false";
+  showSettingsTab(location.hash);
+  if (admin) await loadAudit(false);
 }
 
 /* --- wiki ----------------------------------------------------------- */

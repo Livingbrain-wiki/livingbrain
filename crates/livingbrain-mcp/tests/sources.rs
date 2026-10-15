@@ -54,6 +54,9 @@ fn world() -> Fixture {
                     workspace_id: workspace.to_owned(),
                     user_id: user.to_owned(),
                     token_scopes: None,
+                    agent_owner: None,
+                    role: None,
+                    credential: None,
                 },
             )
         })
@@ -99,11 +102,18 @@ fn fixture(auth: Arc<dyn BearerAuth>) -> Fixture {
                 Arc::clone(&auth_for_sources),
             )
         });
-    let kit = TestHarness::with_ports(vec![Box::new(pages)], |ports| {
-        let store: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
-        ports.blob = Some(store.clone());
-        blob = Some(store);
-    });
+    let kit = TestHarness::with_ports(
+        vec![
+            Box::new(pages),
+            // The grants tables (ADR 0004): every tool reads its plan from them.
+            Box::new(livingbrain_accounts::Access::new()),
+        ],
+        |ports| {
+            let store: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
+            ports.blob = Some(store.clone());
+            blob = Some(store);
+        },
+    );
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
     Fixture {
         router: kit.router.clone(),

@@ -508,11 +508,7 @@ struct Cookie;
 impl SessionAuth for Cookie {
     async fn session(&self, _ports: &Ports, headers: &HeaderMap) -> Result<Asker, AuthError> {
         if headers.contains_key("cookie") {
-            Ok(Asker {
-                workspace_id: WORKSPACE.to_owned(),
-                user_id: "user-a".to_owned(),
-                token_scopes: None,
-            })
+            Ok(Asker::member(WORKSPACE, "user-a", None))
         } else {
             Err(AuthError::Rejected)
         }

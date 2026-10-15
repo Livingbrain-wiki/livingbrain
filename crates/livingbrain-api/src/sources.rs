@@ -37,6 +37,8 @@ use cratefield_core::axum::extract::{Path, Query, State};
 use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_module_orgs::grants::Permission;
+use livingbrain_pages::access::{AccessPlan, KIND_SOURCES, source_path};
 use livingbrain_pages::{SourceFilter, SourceKind, is_project};
 use serde_json::{Value, json};
 
@@ -184,23 +186,53 @@ async fn list(
             .clamp(1, MAX_LIST_LIMIT),
     };
 
-    let scopes = state.scopes(&asker);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let listed = state
-        .sources_store()?
+    let plan = state.access(&asker).await?;
+    let reach = SourceReach::of(&plan);
+    let store = state.sources_store()?;
+    let whole: Vec<&str> = reach.whole.iter().map(String::as_str).collect();
+    let mut listed = store
         .list(
             &asker.workspace_id,
-            &names,
+            &whole,
             &SourceFilter {
                 kind,
-                project,
-                agent,
-                before,
+                project: project.clone(),
+                agent: agent.clone(),
+                before: before.clone(),
             },
             limit,
         )
         .await
         .map_err(source_failed)?;
+    // A scope opened only for some projects (ADR 0004) is read one granted
+    // project at a time, each query already filtered and limited, so no
+    // ungranted source is ever counted, ordered or returned.
+    for (scope, projects) in &reach.by_project {
+        for granted in projects {
+            if project.as_ref().is_some_and(|asked| asked != granted) {
+                continue;
+            }
+            listed.extend(
+                store
+                    .list(
+                        &asker.workspace_id,
+                        &[scope.as_str()],
+                        &SourceFilter {
+                            kind,
+                            project: Some(granted.clone()),
+                            agent: agent.clone(),
+                            before: before.clone(),
+                        },
+                        limit,
+                    )
+                    .await
+                    .map_err(source_failed)?,
+            );
+        }
+    }
+    listed.sort_by(|a, b| b.id.cmp(&a.id));
+    listed.dedup_by(|a, b| a.id == b.id);
+    listed.truncate(limit);
     // A full page may have a next one; a short page is the last. One extra
     // empty request at the very end is the price of not counting.
     let next_cursor = (listed.len() == limit)
@@ -245,13 +277,34 @@ async fn projects(
 ) -> Result<Json<Value>, Problem> {
     let asker = state.asker(&method, &headers).await?;
     let kind = kind_param(&query)?;
-    let scopes = state.scopes(&asker);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let found = state
-        .sources_store()?
-        .projects(&asker.workspace_id, &names, kind)
+    let plan = state.access(&asker).await?;
+    let reach = SourceReach::of(&plan);
+    let store = state.sources_store()?;
+    let whole: Vec<&str> = reach.whole.iter().map(String::as_str).collect();
+    let mut found = store
+        .projects(&asker.workspace_id, &whole, kind)
         .await
         .map_err(source_failed)?;
+    // A project-limited scope contributes only its granted projects' counts.
+    for (scope, projects) in &reach.by_project {
+        for entry in store
+            .projects(&asker.workspace_id, &[scope.as_str()], kind)
+            .await
+            .map_err(source_failed)?
+        {
+            if !projects.contains(&entry.project) {
+                continue;
+            }
+            match found
+                .iter_mut()
+                .find(|known| known.project == entry.project)
+            {
+                Some(known) => known.sources += entry.sources,
+                None => found.push(entry),
+            }
+        }
+    }
+    found.sort_by(|a, b| a.project.cmp(&b.project));
     let projects: Vec<Value> = found
         .iter()
         .map(
@@ -259,6 +312,37 @@ async fn projects(
         )
         .collect();
     Ok(Json(json!({ "projects": projects })))
+}
+
+/// Which source scopes the asker reads whole, and which only for named
+/// projects (ADR 0004).
+pub(crate) struct SourceReach {
+    pub(crate) whole: Vec<String>,
+    pub(crate) by_project: Vec<(String, Vec<String>)>,
+}
+
+impl SourceReach {
+    pub(crate) fn of(plan: &AccessPlan) -> Self {
+        let mut whole = Vec::new();
+        let mut by_project = Vec::new();
+        for filter in plan.filters(KIND_SOURCES, Permission::Read) {
+            if filter.is_whole() {
+                whole.push(filter.scope);
+                continue;
+            }
+            // The filter speaks slug prefixes; a source path is
+            // `project/<name>`, which the filter spells `project--<name>`.
+            let projects: Vec<String> = plan
+                .source_projects(&filter.scope)
+                .into_iter()
+                .filter(|name| filter.matches(&format!("project--{name}")))
+                .collect();
+            if !projects.is_empty() {
+                by_project.push((filter.scope, projects));
+            }
+        }
+        Self { whole, by_project }
+    }
 }
 
 /// The `kind` query parameter: absent, or one of the ledger's kinds.
@@ -305,8 +389,14 @@ async fn one(
     };
     // The three clauses, decided on the row and the credential alone. An id
     // outside both is the same 404 as an id that is not there.
-    let readable =
-        source.workspace == asker.workspace_id && state.scopes(&asker).contains(&source.scope);
+    let plan = state.access(&asker).await?;
+    let readable = source.workspace == asker.workspace_id
+        && plan.allows(
+            KIND_SOURCES,
+            &source.scope,
+            &source_path(source.project.as_deref()),
+            Permission::Read,
+        );
     if !readable {
         return Err(Problem::new(&SOURCE_NOT_FOUND));
     }

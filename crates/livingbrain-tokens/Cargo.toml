@@ -18,6 +18,9 @@ include = ["src/**/*", "migrations/**/*"]
 workspace = true
 
 [dependencies]
+# Agent accounts' API keys (ADR 0004): `authenticate_any` verifies an
+# `lba_` key with the harness's service-account functions. Wasm-safe.
+cratefield-module-orgs = { workspace = true }
 # The only Cratefield dependency a module is allowed. `axum` and `http`
 # arrive through `cratefield_core::axum`, so neither is named directly.
 cratefield-core = { workspace = true }

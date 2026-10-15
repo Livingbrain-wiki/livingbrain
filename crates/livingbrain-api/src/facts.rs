@@ -24,9 +24,11 @@ use cratefield_core::axum::http::{HeaderMap, Method, StatusCode};
 use cratefield_core::axum::response::IntoResponse;
 use cratefield_core::axum::routing::{get, post};
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_module_orgs::grants::Permission;
 use livingbrain_access::{Scope, UserId};
 use livingbrain_mcp::{Asker, page_scope};
 use livingbrain_memory::timeline::{self, PartialDate, TimedFact, normalize_attribute};
+use livingbrain_pages::access::{AccessPlan, KIND_FACTS, subject_path};
 use livingbrain_pages::{FactInput, FactStore, Recorded, Timeline, fact_json, person_subject};
 pub(crate) use livingbrain_pages::{brief_lines, brief_section};
 use serde::Deserialize;
@@ -136,16 +138,36 @@ struct WriteRequest {
 /// The page scope a write lands in: the asker's personal memory, or the
 /// workspace's shared one — and only if the credential grants it, so a
 /// token narrowed to one scope cannot write to another.
-pub(crate) fn write_scope(state: &Service, asker: &Asker, shared: bool) -> Result<String, Problem> {
+pub(crate) fn write_scope(
+    plan: &AccessPlan,
+    asker: &Asker,
+    shared: bool,
+    subjects: &[String],
+) -> Result<String, Problem> {
+    // "Personal" is the asker's own memory; an agent account's is its
+    // owner's, which a grant must still open (ADR 0004).
+    let personal_id = asker
+        .agent_owner
+        .clone()
+        .unwrap_or_else(|| asker.user_id.clone());
     let scope = if shared {
         page_scope(&asker.workspace_id, &Scope::Shared)
     } else {
-        page_scope(
-            &asker.workspace_id,
-            &Scope::User(UserId::new(asker.user_id.clone())),
-        )
+        page_scope(&asker.workspace_id, &Scope::User(UserId::new(personal_id)))
     };
-    if state.scopes(asker).contains(&scope) {
+    let granted = if subjects.is_empty() {
+        plan.allows(KIND_FACTS, &scope, &[], Permission::Write)
+    } else {
+        subjects.iter().all(|subject| {
+            plan.allows(
+                KIND_FACTS,
+                &scope,
+                &subject_path(subject),
+                Permission::Write,
+            )
+        })
+    };
+    if granted {
         Ok(scope)
     } else {
         Err(Problem::new(&SCOPE_NOT_GRANTED))
@@ -261,10 +283,17 @@ async fn write(
     if request.facts.is_empty() {
         return Err(Problem::new(&FACT_REFUSED).with_detail("`facts` is empty"));
     }
-    let scope = write_scope(&state, &asker, request.shared)?;
     let inputs = inputs(&asker, request.facts, None)?;
+    let plan = state.access(&asker).await?;
+    let subjects: Vec<String> = inputs.iter().map(|input| input.subject.clone()).collect();
+    let scope = write_scope(&plan, &asker, request.shared, &subjects)?;
     let store = state.facts_store()?;
     let recorded = record_all(&store, &scope, inputs, &asker.user_id).await?;
+    if asker.is_agent() {
+        state
+            .audit(&asker, "facts.write", &format!("facts:{}", recorded.len()))
+            .await;
+    }
     Ok((StatusCode::CREATED, Json(json!({ "facts": recorded }))))
 }
 
@@ -280,11 +309,24 @@ async fn retract(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Problem> {
     let asker = state.asker(&method, &headers).await?;
-    let scopes = state.scopes(&asker);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let plan = state.access(&asker).await?;
     let store = state.facts_store()?;
+    // Retracting is a write: only scopes the asker may write facts in are
+    // searched, and the fact's own subject must be inside the grant.
+    let scopes = plan.scopes(KIND_FACTS, Permission::Write);
+    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let Some(subject) = store
+        .subject_of(&names, &id)
+        .await
+        .map_err(fact_error)?
+        .filter(|(scope, subject)| {
+            plan.allows(KIND_FACTS, scope, &subject_path(subject), Permission::Write)
+        })
+    else {
+        return Err(Problem::new(&FACT_NOT_FOUND));
+    };
     let (scope, fact) = store
-        .retract(&names, &id)
+        .retract(&[subject.0.as_str()], &id)
         .await
         .map_err(fact_error)?
         .ok_or_else(|| Problem::new(&FACT_NOT_FOUND))?;
@@ -328,12 +370,23 @@ async fn read(
     };
     let store = state.facts_store()?;
     let (as_of_text, at) = as_of(query.get("as_of").map(String::as_str), store.now())?;
-    let scopes = state.scopes(&asker);
+    let plan = state.access(&asker).await?;
+    let scopes = plan.scopes(KIND_FACTS, Permission::Read);
     let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let timelines = store
+    let timelines: Vec<Timeline> = store
         .timelines(&names, subject.as_deref(), attribute.as_deref())
         .await
-        .map_err(fact_error)?;
+        .map_err(fact_error)?
+        .into_iter()
+        .filter(|timeline| {
+            plan.allows(
+                KIND_FACTS,
+                &timeline.scope,
+                &subject_path(&timeline.subject),
+                Permission::Read,
+            )
+        })
+        .collect();
     let keys: Vec<Value> = timelines
         .iter()
         .map(|timeline| timeline_json(timeline, at, &|fact| fact.source.clone()))
@@ -401,10 +454,17 @@ pub(crate) fn timeline_json(
 pub(crate) async fn relevant(
     store: &FactStore,
     asker: &Asker,
-    scopes: &[String],
+    plan: &AccessPlan,
     question: &str,
 ) -> Result<Vec<Timeline>, Problem> {
-    livingbrain_pages::relevant(store, &asker.user_id, scopes, question)
-        .await
-        .map_err(fact_error)
+    let scopes = plan.scopes(KIND_FACTS, Permission::Read);
+    livingbrain_pages::relevant_where(
+        store,
+        &asker.user_id,
+        &scopes,
+        question,
+        |scope, subject| plan.allows(KIND_FACTS, scope, &subject_path(subject), Permission::Read),
+    )
+    .await
+    .map_err(fact_error)
 }

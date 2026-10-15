@@ -49,6 +49,7 @@ use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
+use livingbrain_accounts::{Access, Agents, Audit};
 use livingbrain_api::{
     Ask, BudgetSettings, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind, Search,
     SessionAuth, Sources, Wiki,
@@ -59,7 +60,7 @@ use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_models::jev::{JevConnector, JevKey};
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
-use livingbrain_tokens::{Avatars, DevicePorts, Me, Tokens};
+use livingbrain_tokens::{Authenticated, Avatars, DevicePorts, Me, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
@@ -434,6 +435,11 @@ fn build(
             // `workspaces`'; all three are diverted ([`AVATAR_ROUTES`]) so
             // their blob views share one key space.
             .module(Avatars::new())
+            // ADR 0004: agent accounts and their keys, access grants (and
+            // the tables all three share), and the audit log.
+            .module(Access::new())
+            .module(Agents::new())
+            .module(Audit::new())
             .module(pages_module(kms.clone(), &answers))
             .module(waitlist_module())
             // The cost ledger (issue #12): `GET /v1/usage/daily`, backed by
@@ -560,11 +566,16 @@ impl EmailLedger for UsageLedger {
 }
 
 /// What removing a member does beyond the workspaces module's own tombstone
-/// (ADR 0004): every personal access token they hold is revoked. The
-/// tombstone already refuses them; revoking means a person re-admitted later
-/// with the same member id (a Slack user id is stable) starts with none.
+/// (ADR 0004): every personal access token they hold is revoked, every agent
+/// account they own is disabled and its keys revoked (an admin can hand it to
+/// somebody else and re-enable it), every grant naming them is deleted, and
+/// every grant on their personal space too — so nobody keeps a share of a
+/// space whose owner has gone. The tombstone already refuses their own
+/// credentials; this is what keeps a re-admitted id from finding them again.
 ///
-/// Best effort, per the seam's contract: the removal has happened.
+/// Best effort, per the seam's contract: the removal has happened. A failure
+/// here leaves the agents' keys refused anyway, because `authenticate_any`
+/// requires the owner to be a live member.
 struct RevokeOnRemoval;
 
 #[async_trait::async_trait]
@@ -576,10 +587,29 @@ impl MemberRemoval for RevokeOnRemoval {
         workspace_id: &str,
         user_id: &str,
     ) {
-        let now = now
+        let stamp = now
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
-        let _ = livingbrain_tokens::revoke_member_tokens(db, workspace_id, user_id, &now).await;
+        let _ = livingbrain_tokens::revoke_member_tokens(db, workspace_id, user_id, &stamp).await;
+        let _ = cratefield_module_orgs::service_accounts::disable_owned_by(
+            db,
+            workspace_id,
+            user_id,
+            now,
+        )
+        .await;
+        let _ = cratefield_module_orgs::grants::delete_grants_for(
+            db,
+            workspace_id,
+            &livingbrain_pages::access::member_principal(user_id),
+        )
+        .await;
+        let _ = cratefield_module_orgs::grants::delete_grants_on_space(
+            db,
+            workspace_id,
+            &livingbrain_pages::access::personal(user_id),
+        )
+        .await;
     }
 }
 
@@ -804,12 +834,7 @@ impl SessionAuth for WebSession {
     async fn session(&self, ports: &Ports, headers: &HeaderMap) -> Result<Asker, AuthError> {
         livingbrain_tokens::session(ports, headers)
             .await
-            .map(|member| Asker {
-                workspace_id: member.workspace_id,
-                user_id: member.user_id,
-                // A session is the whole member, never a narrowed subset.
-                token_scopes: member.scopes,
-            })
+            .map(member_asker)
             .map_err(|_| AuthError::Rejected)
     }
 
@@ -848,14 +873,34 @@ impl BearerAuth for TokenBearer {
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value);
-        livingbrain_tokens::authenticate(ports, &headers)
-            .await
-            .map(|member| Asker {
-                workspace_id: member.workspace_id,
-                user_id: member.user_id,
-                token_scopes: member.scopes,
-            })
-            .map_err(|_| AuthError::Rejected)
+        // An agent account's key is accepted here and only here (ADR 0004):
+        // these are the routes whose every read and write goes through the
+        // grants plan, where an agent reaches exactly what it was granted.
+        match livingbrain_tokens::authenticate_any(ports, &headers).await {
+            Ok(Authenticated::Member(member)) => Ok(member_asker(member)),
+            Ok(Authenticated::Agent(agent)) => Ok(Asker {
+                workspace_id: agent.workspace_id,
+                user_id: agent.agent_id,
+                token_scopes: agent.scopes,
+                agent_owner: Some(agent.owner_id),
+                role: None,
+                credential: Some(agent.credential),
+            }),
+            Err(_) => Err(AuthError::Rejected),
+        }
+    }
+}
+
+/// A member as the wiki routes see them: workspace, id, role, and the
+/// credential's scope subset and prefix (a session carries neither).
+fn member_asker(member: livingbrain_tokens::Member) -> Asker {
+    Asker {
+        workspace_id: member.workspace_id,
+        user_id: member.user_id,
+        token_scopes: member.scopes,
+        agent_owner: None,
+        role: Some(member.role.as_str().to_owned()),
+        credential: member.credential,
     }
 }
 

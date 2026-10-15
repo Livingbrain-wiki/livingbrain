@@ -20,6 +20,10 @@ cratefield-core = { workspace = true }
 # above, and it names no `cratefield-core` — so it cannot split the ports in
 # two.
 cratefield-kms = { workspace = true }
+# Access grants (ADR 0004): the deny-by-default engine `access::AccessPlan`
+# evaluates, and the table its grants are read from. A harness module crate,
+# pure Rust and wasm-safe; its routes are not mounted here.
+cratefield-module-orgs = { workspace = true }
 # The access model: this module owns which page scope a scope maps to and
 # which scopes an asker may read (issue #123), so it asks the model rather
 # than reimplementing the rule. Pure Rust, wasm-safe.

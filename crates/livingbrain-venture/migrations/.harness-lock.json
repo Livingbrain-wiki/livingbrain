@@ -146,5 +146,17 @@
   "waitlist/0007": {
     "file": "0037_waitlist_0007_lock_backfill.sql",
     "sha256": "6785fee9ba5dee4ab7eba92f36b42748facae3c92837df3f4b67ff5280a80006"
+  },
+  "access/0001": {
+    "file": "0038_access_0001_service-accounts.sql",
+    "sha256": "1b6a02f028fe3571806e3e2a627d61fe786344eab044aa431b8f27014a15c7be"
+  },
+  "access/0002": {
+    "file": "0039_access_0002_grants.sql",
+    "sha256": "f36a4321d0688232a00e8cd7b566b652a522bb15ad44147750bd27133d9aa8c4"
+  },
+  "access/0003": {
+    "file": "0040_access_0003_audit.sql",
+    "sha256": "30a09580794d2f4445f360d5db1db90edd709ac65e6a29898b0c8ec7011d5e90"
   }
 }

@@ -115,6 +115,15 @@ pub(crate) const FACT_NOT_FOUND: ProblemDef = ProblemDef {
 
 /// A write aimed at a memory the credential does not grant: a token
 /// narrowed away from the personal or the shared scope.
+pub(crate) const AGENT_NOT_ALLOWED: ProblemDef = ProblemDef {
+    slug: "api/agent-not-allowed",
+    status: StatusCode::FORBIDDEN,
+    title: "Agent accounts cannot use this route",
+    description: "This route acts for a member of the workspace (their own queue, their \
+                  own jobs, the workspace's settings). An agent account's key reaches only \
+                  the wiki routes its grants open.",
+};
+
 pub(crate) const SCOPE_NOT_GRANTED: ProblemDef = ProblemDef {
     slug: "api/scope-not-granted",
     status: StatusCode::FORBIDDEN,

@@ -440,6 +440,29 @@
                 <div id="page-citations"></div>
               </section>
             </div>
+            <section id="page-access-card" class="card">
+              <h3>Who can see this</h3>
+              <p class="tiny">Who may read this page, and how they got access.</p>
+              <button id="page-access-load" type="button" class="btn-sm">Show</button>
+              <div id="page-access-status" class="notice" role="status" aria-live="polite"></div>
+              <ul id="page-access-list" class="plain-list"></ul>
+              <form id="page-share-form" class="connect" hidden novalidate>
+                <div class="field">
+                  <label for="page-share-who">Share with</label>
+                  <select id="page-share-who"></select>
+                </div>
+                <div class="field">
+                  <label for="page-share-permission">Access</label>
+                  <select id="page-share-permission">
+                    <option value="read">Read</option>
+                    <option value="write">Read and write</option>
+                  </select>
+                </div>
+                <div class="form-actions">
+                  <button type="submit" data-variant="primary">Share this page</button>
+                </div>
+              </form>
+            </section>
           </div>
           <aside id="toc-desktop" class="wiki-toc wiki-toc--side" hidden>
             <h2>On this page</h2>

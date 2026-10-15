@@ -499,6 +499,41 @@ impl FactStore {
             .map(|fact| (scope, fact)))
     }
 
+    /// The scope and subject of fact `id`, if one of `scopes` holds it —
+    /// what a grant on a subject prefix is checked against before a retract
+    /// (ADR 0004). `None` for an id no scope here holds.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn subject_of(
+        &self,
+        scopes: &[&str],
+        id: &str,
+    ) -> Result<Option<(String, String)>, FactError> {
+        if scopes.is_empty() {
+            return Ok(None);
+        }
+        let mut values = vec![text(id)];
+        let placeholders = in_list(scopes, &mut values);
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                format!(
+                    "SELECT scope, subject FROM facts WHERE id = ? AND scope IN ({placeholders})"
+                ),
+                values,
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows.first().map(|row| {
+            (
+                row.get::<String>("scope").unwrap_or_default(),
+                row.get::<String>("subject").unwrap_or_default(),
+            )
+        }))
+    }
+
     /// The timelines in `scopes`, optionally narrowed to one subject and/or
     /// one attribute, ordered by subject then attribute then scope, each
     /// timeline oldest first. At most [`MAX_FACT_ROWS`] facts.
@@ -956,6 +991,25 @@ pub async fn relevant(
     scopes: &[String],
     question: &str,
 ) -> Result<Vec<Timeline>, FactError> {
+    relevant_where(store, user_id, scopes, question, |_, _| true).await
+}
+
+/// [`relevant`], choosing only among the `(scope, subject)` pairs `allowed`
+/// says yes to (ADR 0004: a subject-prefix grant). The filter runs on the
+/// plaintext index **before** anything is chosen, truncated or decrypted, so
+/// a timeline the asker may not read never crowds out one they may, and is
+/// never opened.
+///
+/// # Errors
+///
+/// [`FactError::Store`].
+pub async fn relevant_where(
+    store: &FactStore,
+    user_id: &str,
+    scopes: &[String],
+    question: &str,
+    allowed: impl Fn(&str, &str) -> bool,
+) -> Result<Vec<Timeline>, FactError> {
     let asked = words(question);
     if asked.is_empty() && !about_self(question) {
         return Ok(Vec::new());
@@ -966,7 +1020,10 @@ pub async fn relevant(
     let index = store.index(&names).await?;
     let mut chosen: Vec<(usize, (String, String, String))> = Vec::new();
     for key in index {
-        let (_, subject, attribute) = &key;
+        let (scope, subject, attribute) = &key;
+        if !allowed(scope, subject) {
+            continue;
+        }
         let slug = subject.split_once('/').map_or("", |(_, slug)| slug);
         let subject_named = slug
             .split('-')

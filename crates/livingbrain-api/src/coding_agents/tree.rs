@@ -129,7 +129,8 @@ pub(super) async fn tree(
     headers: HeaderMap,
 ) -> Result<Json<Value>, Problem> {
     let asker = service.asker(&Method::GET, &headers).await?;
-    let scopes = service.scopes(&asker);
+    // The jobs of every source scope the asker may read whole (ADR 0004).
+    let (scopes, _) = super::job_scopes(&service.access(&asker).await?);
     let ctx = service.ctx();
     let db = port(ctx.ports.db.clone())?;
     let clock = port(ctx.ports.clock.clone())?;

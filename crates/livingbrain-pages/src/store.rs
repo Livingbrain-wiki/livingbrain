@@ -17,6 +17,7 @@ use time::format_description::well_known::Rfc3339;
 use base64::Engine as _;
 use cratefield_kms::Dek;
 
+use crate::access::ScopeFilter;
 use crate::entity::{self, EntityType, Frontmatter};
 use crate::keys::{self, ScopeKeys};
 use crate::titles;
@@ -713,21 +714,58 @@ impl PageStore {
         filter: &PageFilter,
         limit: usize,
     ) -> Result<Vec<PageSummary>, PageError> {
-        if scopes.is_empty() || limit == 0 {
+        let filters: Vec<ScopeFilter> = scopes
+            .iter()
+            .map(|scope| ScopeFilter::whole(*scope, ""))
+            .collect();
+        self.list_in_filtered(&filters, filter, limit).await
+    }
+
+    /// [`PageStore::list`] over grant filters (ADR 0004): only the slugs each
+    /// [`ScopeFilter`] opens, filtered **in the query**, so the order and the
+    /// limit are over what the asker may read and nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Store`] if the database fails.
+    pub async fn list_in(
+        &self,
+        filters: &[ScopeFilter],
+        limit: usize,
+    ) -> Result<Vec<PageSummary>, PageError> {
+        self.list_in_filtered(filters, &PageFilter::default(), limit)
+            .await
+    }
+
+    /// [`PageStore::list_filtered`] over grant filters: the grant's slug
+    /// predicate and `filter` both in the query, before the order and the
+    /// limit.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Store`] if the database fails.
+    pub async fn list_in_filtered(
+        &self,
+        filters: &[ScopeFilter],
+        filter: &PageFilter,
+        limit: usize,
+    ) -> Result<Vec<PageSummary>, PageError> {
+        if filters.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
         let mut values = Vec::new();
-        let placeholders = scopes
+        let predicate = filters
             .iter()
-            .map(|scope| {
-                values.push(text(scope));
-                "?"
+            .map(|filter| {
+                let (sql, binds) = filter.predicate(None);
+                values.extend(binds);
+                sql
             })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(" OR ");
         let mut sql = format!(
             "SELECT scope, slug, entity_type, head_version, updated_at, title_sealed, \
-             title_key_version FROM pages WHERE scope IN ({placeholders})"
+             title_key_version FROM pages WHERE ({predicate})"
         );
         if !filter.types.is_empty() {
             let marks = filter
@@ -1066,9 +1104,31 @@ impl PageStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, PageError> {
-        for scope in scopes {
-            if !entity::is_slug(scope) {
-                return Err(PageError::InvalidScope((*scope).to_owned()));
+        let filters: Vec<ScopeFilter> = scopes
+            .iter()
+            .map(|scope| ScopeFilter::whole(*scope, ""))
+            .collect();
+        self.search_in(&filters, query, limit).await
+    }
+
+    /// [`PageStore::search`] over grant filters (ADR 0004): each scope's
+    /// ranking query carries its filter's slug predicate — the candidates,
+    /// the page count and the document frequencies alike — so a slug the
+    /// asker may not read is never matched, weighed, counted against the
+    /// limit or returned.
+    ///
+    /// # Errors
+    ///
+    /// As [`PageStore::search`].
+    pub async fn search_in(
+        &self,
+        filters: &[ScopeFilter],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, PageError> {
+        for filter in filters {
+            if !entity::is_slug(&filter.scope) {
+                return Err(PageError::InvalidScope(filter.scope.clone()));
             }
         }
         let terms = crate::query::query_terms(query);
@@ -1077,12 +1137,12 @@ impl PageStore {
         }
 
         let mut ranked: Vec<Ranked> = Vec::new();
-        for scope in scopes {
-            let index_keys = self.keys.index_keys(scope).await?;
+        for filter in filters {
+            let index_keys = self.keys.index_keys(&filter.scope).await?;
             if index_keys.is_empty() {
                 continue;
             }
-            ranked.extend(self.rank_scope(scope, &index_keys, &terms, limit).await?);
+            ranked.extend(self.rank_scope(filter, &index_keys, &terms, limit).await?);
         }
         ranked.sort_by(|a, b| {
             b.score
@@ -1119,7 +1179,7 @@ impl PageStore {
     /// bound-parameter ceiling however many forms and keys a query has.
     async fn rank_scope(
         &self,
-        scope: &str,
+        filter: &ScopeFilter,
         index_keys: &[keys::IndexKey],
         terms: &[crate::QueryTerm],
         limit: usize,
@@ -1146,12 +1206,16 @@ impl PageStore {
                 .join(", ")
         };
 
+        let scope = filter.scope.as_str();
         let pages = self
             .db
-            .query(&Statement::with_values(
-                "SELECT COUNT(*) AS n FROM pages WHERE scope = ?",
-                vec![text(scope)],
-            ))
+            .query(&{
+                let (predicate, values) = filter.predicate(None);
+                Statement::with_values(
+                    format!("SELECT COUNT(*) AS n FROM pages WHERE {predicate}"),
+                    values,
+                )
+            })
             .await
             .map_err(PageError::Store)?;
         let total = pages
@@ -1164,14 +1228,17 @@ impl PageStore {
         }
         let frequencies = self
             .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT term, COUNT(*) AS df FROM page_terms \
-                     WHERE scope = ? AND term IN ({}) GROUP BY term",
-                    in_list(&mut body.iter().map(|(_, mac)| mac))
-                ),
-                vec![text(scope)],
-            ))
+            .query(&{
+                let (predicate, values) = filter.predicate(None);
+                Statement::with_values(
+                    format!(
+                        "SELECT term, COUNT(*) AS df FROM page_terms \
+                         WHERE {predicate} AND term IN ({}) GROUP BY term",
+                        in_list(&mut body.iter().map(|(_, mac)| mac))
+                    ),
+                    values,
+                )
+            })
             .await
             .map_err(PageError::Store)?;
         let df_of: BTreeMap<String, i64> = frequencies
@@ -1204,23 +1271,24 @@ impl PageStore {
         }
         group_case.push_str(" END");
         weight_case.push_str(" END");
+        let (predicate, mut values) = filter.predicate(None);
+        values.push(SeaValue::BigInt(Some(
+            i64::try_from(limit).unwrap_or(i64::MAX),
+        )));
         let rows = self
             .db
             .query(&Statement::with_values(
                 format!(
                     "SELECT g.slug AS slug, SUM(g.w) AS score, MAX(p.updated_at) AS recency \
                      FROM (SELECT scope, slug, {group_case} AS grp, MAX({weight_case}) AS w \
-                           FROM page_terms WHERE scope = ? AND term IN ({}) \
+                           FROM page_terms WHERE {predicate} AND term IN ({}) \
                            GROUP BY scope, slug, grp) g \
                      JOIN pages p ON p.scope = g.scope AND p.slug = g.slug \
                      GROUP BY g.slug \
                      ORDER BY score DESC, recency DESC, slug ASC LIMIT ?",
                     in_list(&mut body.iter().chain(&title).map(|(_, mac)| mac))
                 ),
-                vec![
-                    text(scope),
-                    SeaValue::BigInt(Some(i64::try_from(limit).unwrap_or(i64::MAX))),
-                ],
+                values,
             ))
             .await
             .map_err(PageError::Store)?;

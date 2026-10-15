@@ -142,6 +142,8 @@ async fn runner(
     headers: &HeaderMap,
 ) -> Result<livingbrain_mcp::Asker, Problem> {
     let asker = service.asker(method, headers).await?;
+    // A runner is a member's own device (ADR 0004: never an agent account).
+    Service::member_only(&asker)?;
     if asker.token_scopes.is_some() {
         return Err(Problem::new(&NARROWED));
     }
@@ -334,6 +336,7 @@ async fn one(
     headers: HeaderMap,
 ) -> Result<Response, Problem> {
     let asker = service.asker(&Method::GET, &headers).await?;
+    Service::member_only(&asker)?;
     let db = port(service.ctx().ports.db.clone())?;
     let job = jobs::get(&*db, &asker.workspace_id, &asker.user_id, &id)
         .await
@@ -349,6 +352,7 @@ async fn list(
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Result<Response, Problem> {
     let asker = service.asker(&Method::GET, &headers).await?;
+    Service::member_only(&asker)?;
     let db = port(service.ctx().ports.db.clone())?;
     let limit = query
         .get("limit")

@@ -42,8 +42,6 @@ use cratefield_core::{
     AnyError, BoxFuture, Clock, Config, ConfigError, Migrations, Module, ModuleContext, Port,
     Problem, ScheduledBudget,
 };
-use livingbrain_access::{Scope, UserId};
-use livingbrain_mcp::page_scope;
 use livingbrain_pages::{
     Author, EntityType, PageStore, PageWrite, frontmatter_title, is_placeholder_title,
     is_session_slug, is_slug, session_title,
@@ -385,11 +383,12 @@ async fn note(
         .map(one_line)
         .filter(|project| !project.is_empty());
 
-    let scope = page_scope(
-        &asker.workspace_id,
-        &Scope::User(UserId::new(asker.user_id.clone())),
-    );
     let slug = keyed.clone().unwrap_or_else(|| note_slug(&clean));
+    // A member's note is their own memory, as always; an agent account's
+    // lands where a grant lets it write this slug (ADR 0004).
+    let plan = state.access(&asker).await?;
+    let scope = crate::recipes::new_page_scope(&plan, &asker, &slug)
+        .ok_or_else(|| Problem::new(&crate::problems::SCOPE_NOT_GRANTED))?;
     let markdown = note_markdown(&title, project.as_deref(), &clean);
     let store = state.store()?;
     // A session log written before the `session` type existed is moved
@@ -407,6 +406,19 @@ async fn note(
         Some(facts) => inputs(&asker, facts, Some(&format!("note:{reference}")))?,
         None => Vec::new(),
     };
+    // Stated facts land in the same scope, and need a facts grant there too.
+    if !fact_inputs.is_empty()
+        && !fact_inputs.iter().all(|input| {
+            plan.allows(
+                livingbrain_pages::access::KIND_FACTS,
+                &scope,
+                &livingbrain_pages::access::subject_path(&input.subject),
+                cratefield_module_orgs::grants::Permission::Write,
+            )
+        })
+    {
+        return Err(Problem::new(&crate::problems::SCOPE_NOT_GRANTED));
+    }
     if !fact_inputs.is_empty() {
         let checker = state.facts_store()?;
         for input in &fact_inputs {
@@ -443,6 +455,11 @@ async fn note(
         )
         .await
         .map_err(page_write_error)?;
+    if asker.is_agent() {
+        state
+            .audit(&asker, "note.write", &format!("page:{reference}"))
+            .await;
+    }
 
     let facts = record_facts(&state, &scope, fact_inputs, &asker.user_id).await?;
     Ok(Json(json!({

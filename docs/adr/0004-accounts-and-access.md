@@ -149,9 +149,11 @@ created_by, created_at)`, stored in module-orgs' `org_grants`, keyed by
 4. If any applicable **deny** covers the request, refuse. Otherwise allow
    iff some allow covers it with a permission ≥ the one asked.
 
-The one exception to (4): a deny can never remove a member's access to
-**their own** personal space — an owner cannot be locked out of their own
-memory, and no admin can do that to them.
+The exceptions to (4): a deny can never remove a member's access to
+**their own** personal space — nobody can be locked out of their own memory,
+and no admin can do that to them — and a deny can never remove an **owner's**
+access to the shared space, so an admin cannot lock the owners out of the
+space (and the grants) they answer for.
 
 **Why deny-wins and not most-specific-wins.** Deny-wins is monotonic and
 order-free: adding an allow never revokes, adding a deny never grants, and
@@ -311,6 +313,62 @@ All portable SQL (harness ADR 0004), one file per dialect, re-runnable.
   writes none.
 - Removal runs the composition's `MemberRemoval` seam after the tombstone; the
   venture revokes the member's PATs there.
+
+## Implementation notes (phases b and c)
+
+- Engine: `cratefield-module-orgs` (Cratefield/harness#879) — `grants`,
+  `service_accounts`, `audit`, pinned at `=0.1.2` (the Cratefield 0.9 round,
+  `cratefield-core` 0.9; Living Brain moved to it in #204).
+- `livingbrain-pages::access::AccessPlan` is the one authorization function.
+  Every wiki route (`pages`, `search`, `ask`, `notes`, `export`, `sources`
+  incl. the `github_*` and `agent_log` kinds and `/projects`, `facts`,
+  `graph`, `coding-agents` `/tree`) and every MCP tool (and the MCP source
+  import) builds one per request and reads only through it. The map
+  (`GET /v1/graph`) reads pages and `[[link]]` rows through the page filters
+  (both ends of a link), sources through the sources reach (whole scopes, or
+  granted projects) and fact subjects through the facts filters, all before
+  its cap (`livingbrain_pages::graph_rows_in`). Listing and search take
+  `ScopeFilter`s **into the SQL** (`PageStore::list_in`, `search_in`), so a
+  page outside the grant is never counted, ranked, limited, quoted or sent to
+  a model; a read by slug skips scopes whose filter refuses the slug without
+  reading; backlinks and citations are filtered through the plan; facts are
+  filtered on the plaintext index before anything is chosen or decrypted
+  (`relevant_where`).
+- Members keep exactly their pre-ADR reach: their own space and the shared
+  one (proved by the plan's unit test against `page_scopes_for` and by every
+  pre-existing route test passing unchanged). A member's own notes still land
+  in their own space whatever their token's subset, as before.
+- Agent accounts authenticate with `lba_…` keys through
+  `livingbrain_tokens::authenticate_any`, accepted **only** by the wiki/MCP
+  bearer seam and `GET /v1/me`; every other route keeps `authenticate`,
+  which refuses an agent key. A key is refused when revoked, expired, its
+  account disabled or deleted, or its owner no longer a member. An agent's
+  new pages and notes land in its owner's personal space (else the shared
+  one) only where it holds `write`; its writes and every export are audited.
+- Member-only (an agent key gets `403 api/agent-not-allowed`, documented
+  rather than granted, because nothing in them is a resource a grant names):
+  `/v1/coding-agents/queue`, `/process`, `/retry`, `/compile-fully` (a
+  member's own compile queue; the workspace's model, budget and spend) and
+  `/v1/model-jobs*` (a member's own runner). A member's `process` /
+  `compile-fully` / `retry` compile only their own space, and only where the
+  credential may **write** pages there: a `read:` token lists the queue but
+  starts nothing. Session/PAT-only via `authenticate` (an agent key is a
+  401): `/v1/me` writes and avatars, `/v1/avatars/{id}`, `/v1/settings/budgets`,
+  `/v1/github/*` settings, `/v1/models*` incl. `/v1/models/jev*` (members
+  read, owners/admins write), `/v1/usage`, `/v1/workspaces/*`, `/v1/tokens`.
+- New modules (crate `livingbrain-accounts`): `access` (`/v1/access/grants`,
+  `/v1/access/pages/{slug}`; it applies the three harness migrations as
+  `access/0001–0003`, collected as venture migrations 0038–0040), `agents` (`/v1/agents…`), `audit` (`/v1/audit`). All
+  session-only and same-origin for writes.
+- Member removal (the venture's `MemberRemoval`): PATs revoked, owned agents
+  disabled with keys revoked, grants naming the member and grants on their
+  personal space deleted.
+- A stored deny never removes an **owner's** access to the shared space
+  either, so admins cannot lock owners out of it.
+- Not yet wired: the Slack agent's answers (`livingbrain-pages::answers`)
+  still use the channel/DM rule, not grants — grants reach the API, the web
+  app and MCP. The Mac app shows nothing new yet; `GET /v1/me` is ready for
+  its "connected as".
 
 ## Phases
 

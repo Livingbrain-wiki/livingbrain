@@ -39,7 +39,7 @@ use livingbrain_pages::{
 use serde_json::{Value, json};
 
 use crate::McpState;
-use crate::auth::{Asker, BearerAuth, page_scope, page_scopes};
+use crate::auth::{Asker, BearerAuth, page_scope};
 use crate::{port, unauthorized};
 
 /// A `scope` this endpoint does not have. A closed set, like the source kind:
@@ -180,8 +180,14 @@ async fn create(
         }
     };
 
+    // "Personal" is the asker's own memory — for an agent account, its
+    // owner's (ADR 0004), which the grant below must still open.
+    let personal_id = asker
+        .agent_owner
+        .clone()
+        .unwrap_or_else(|| asker.user_id.clone());
     let scope = match request.scope.as_deref().unwrap_or("personal") {
-        "personal" => Scope::User(UserId::new(asker.user_id.clone())),
+        "personal" => Scope::User(UserId::new(personal_id)),
         "shared" => Scope::Shared,
         other => {
             return Err(Problem::new(&UNKNOWN_SCOPE)
@@ -209,7 +215,21 @@ async fn create(
             .with_detail(format!("`{project}` is not a project name")));
     }
     let folded = page_scope(&asker.workspace_id, &scope);
-    if !page_scopes(&asker).contains(&folded) {
+    // Writing a source is a grant decision like any other (ADR 0004): a
+    // member holds their own space and the shared one, a narrowed token or
+    // an agent key only what its scope list and grants open.
+    let db = port(state.ctx.ports.db.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let plan = asker
+        .access(&*db, clock.now())
+        .await
+        .map_err(|_| Problem::internal())?;
+    if !plan.allows(
+        livingbrain_pages::access::KIND_SOURCES,
+        &folded,
+        &livingbrain_pages::access::source_path(project.as_deref()),
+        cratefield_module_orgs::grants::Permission::Write,
+    ) {
         return Err(Problem::new(&NOT_YOURS));
     }
 
@@ -251,6 +271,13 @@ async fn create(
         .await
         .map_err(ingest_failed)?;
     let source = ingested.source;
+    crate::auth::audit_agent(
+        &state.ctx.ports,
+        &asker,
+        "source.ingest",
+        &format!("source:{}", source.id),
+    )
+    .await;
 
     // 201 for the import that created the row (held or not — it is a new
     // source either way) and 200 for the one that found it: the same body is
