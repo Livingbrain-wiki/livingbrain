@@ -2500,6 +2500,11 @@ main > p.tiny:last-child {
   .mcard__desc {
     -webkit-line-clamp: 1;
   }
+  /* A subscription card's two-line name and badge fill it; the sheet says
+     the rest. */
+  .mcard[data-kind="runner"] .mcard__desc {
+    display: none;
+  }
   .mcard__badge {
     padding: 1px 6px;
     font-size: 10.5px;

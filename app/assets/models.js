@@ -584,6 +584,7 @@ export function renderModelCards(
     const card = el("button", view.connected ? "mcard mcard--on" : "mcard");
     card.type = "button";
     card.setAttribute("data-card", view.id);
+    card.setAttribute("data-kind", view.kind);
     card.setAttribute("aria-haspopup", "dialog");
     const top = el("span", "mcard__top");
     const logo = el("span", "mcard__logo");
