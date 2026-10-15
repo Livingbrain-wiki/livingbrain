@@ -61,9 +61,11 @@ was already compiled, the model is told so and adds only what is new.
 Jobs are processed in two places:
 
 - **Cron.** The Worker fires every 15 minutes (`*/15 * * * *` in
-  `wrangler.toml`) and compiles `CODING_AGENTS_BATCH` jobs (default 1)
-  across all workspaces, oldest first. It then runs the lint over the scopes
-  it wrote to.
+  `wrangler.toml`) and compiles, oldest first, up to each workspace's
+  sessions-per-run (its own setting, else `CODING_AGENTS_BATCH`, default 1;
+  never more than 20) under the invocation's subrequest budget. It then runs
+  the lint over the scopes it wrote to. A paused workspace's jobs are parked
+  as `over-budget` (`paused`) and looked at again every 15 minutes.
 - **`POST /v1/coding-agents/process`** (`{"max": 1..3}`) compiles up to
   `max` of *your* jobs inside the request. Cookie callers must be on the
   same origin.
@@ -162,14 +164,58 @@ still finishes `done`.
   already redacted at ingest, but conventions and pages are text people
   typed). Model output is redacted before anything is written: page bodies,
   titles, summaries, and fact values and quotes.
-- **Per-job cap.** `CODING_AGENTS_JOB_TOKENS` (default 80 000) caps one
-  job's tokens, in and out. A transcript longer than
-  `CODING_AGENTS_MAX_CHUNKS` × `CODING_AGENTS_CHUNK_CHARS` (4 × 32 000
-  characters) is cut, and the log says so.
-- **Per-workspace budget.** `CODING_AGENTS_DAILY_TOKENS` (default 400 000)
-  and `CODING_AGENTS_MONTHLY_TOKENS` (default 4 000 000) are counted in
-  `coding_agent_spend`. A workspace whose usage ledger is over
-  `USAGE_BUDGET_CENTS_MONTHLY` also compiles nothing.
+- **Per-job cap.** The per-session cap (default 80 000) caps one job's
+  tokens, in and out. A transcript longer than calls-per-session ×
+  characters-per-call (4 × 32 000 characters) is cut, and the log says so.
+- **Per-workspace budget.** Tokens per day (default 400 000) and per month
+  (default 4 000 000) are counted in `coding_agent_spend`. A workspace past
+  its monthly spend limit also compiles nothing.
+- **Pause.** An owner or admin can pause compiling; synced sessions wait in
+  the queue until it is resumed.
+
+### Budgets are settings
+
+Every number above is a **workspace setting** (Settings → Usage & limits,
+`GET`/`PATCH /v1/settings/budgets`), so an owner or admin raises or lowers
+it without a deploy. Members read the same values and the usage against
+them. The effective value is, in order:
+
+1. the workspace's own setting, when it set one;
+2. else the deployment's env var;
+3. else the built-in default.
+
+Clearing a setting (`null`, or an empty field in the app) returns the
+workspace to 2 and 3. The table is `usage_budgets` (usage migration 0002);
+NULL means "not set here".
+
+| Setting (`group.key`) | Env var | Default | Range |
+| --- | --- | --- | --- |
+| `coding_agents.paused` | — | off | on / off |
+| `coding_agents.daily_tokens` | `CODING_AGENTS_DAILY_TOKENS` | 400 000 | 0 – 10¹² |
+| `coding_agents.monthly_tokens` | `CODING_AGENTS_MONTHLY_TOKENS` | 4 000 000 | 0 – 10¹² |
+| `coding_agents.batch` (sessions per run) | `CODING_AGENTS_BATCH` | 1 | 1 – **20** |
+| `coding_agents.job_tokens` (per-session cap) | `CODING_AGENTS_JOB_TOKENS` | 80 000 | 1 000 – **1 000 000** |
+| `coding_agents.max_chunks` | `CODING_AGENTS_MAX_CHUNKS` | 4 | 1 – **20** |
+| `coding_agents.chunk_chars` | `CODING_AGENTS_CHUNK_CHARS` | 32 000 | 1 000 – **200 000** |
+| `coding_agents.max_output_tokens` | `CODING_AGENTS_MAX_OUTPUT_TOKENS` | 6 000 | 256 – **32 000** |
+| `ask.context_chars` | `ASK_CONTEXT_CHARS_MAX` | 200 000 | 2 000 – 1 000 000 |
+| `ask.max_output_tokens` | — | 1 024 | 128 – 8 192 |
+| `spend.monthly_cents` | `USAGE_BUDGET_CENTS_MONTHLY` | 300 | 0 – 100 000 000 |
+
+**Hard ceilings** (bold) hold over the setting *and* the env var: they
+protect the Worker, not the bill. One cron invocation has a fixed wall and
+the Workers subrequest limit (the venture keeps 45 of 50; a compile spends
+8), and a compile — or a "Process now" request — has to finish inside it, so
+no number may ask for more sessions per run, calls per session, tokens per
+session or a bigger call than one invocation can complete. A value past a
+ceiling is refused by the API with a 422 that names the setting and its
+range, and clamped by the compiler wherever it came from. The token budgets
+and the spend limit have no ceiling: they spend the workspace's own model
+key. `CODING_AGENTS_CONTEXT_CHARS` stays an env var only.
+
+The queue card (`GET /v1/coding-agents/queue`) shows the effective numbers
+(`budget.paused`, `budget.batch`, `budget.daily_tokens`, …), and so does
+the Mac app's Usage view.
 - **Scope.** A job carries its source's scope, and compiled pages are
   written there and nowhere else. Neither a client nor a model can name a
   scope.

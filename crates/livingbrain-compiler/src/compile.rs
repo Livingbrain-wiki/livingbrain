@@ -34,10 +34,69 @@ use crate::prompt::{self, SessionHead, Shown};
 use crate::queue::{ClaimFilter, Finish, Job, JobStatus, MAX_ATTEMPTS, Queue, utc_day};
 use crate::record;
 
+/// The most sessions one cron run may compile for one workspace, whatever
+/// the workspace or the deployment asks for: the scheduled invocation's
+/// subrequest budget (Workers allow 50; the venture keeps 45) is spent eight
+/// steps a compile, so more could never run anyway, and the clamp keeps a
+/// stored or configured number from pretending otherwise.
+pub const BATCH_CEILING: usize = 20;
+/// The most model calls one session may take, a hard ceiling for the same
+/// reason as [`BATCH_CEILING`]: every call is a subrequest and a wait.
+pub const MAX_CHUNKS_CEILING: usize = 20;
+/// The hard cap on one session's tokens, in and out: one compile runs inside
+/// a single cron invocation's wall (minutes) or a single "Process now"
+/// request, so a per-session cap past this would be a compile that times out
+/// half-written rather than one that finishes.
+pub const JOB_TOKENS_CEILING: u64 = 1_000_000;
+/// The largest transcript chunk one call may send, in characters (~50k
+/// tokens): past it a call outgrows the windows most connected models have.
+pub const CHUNK_CHARS_CEILING: usize = 200_000;
+/// The largest completion one compile call may ask for.
+pub const MAX_OUTPUT_TOKENS_CEILING: u32 = 32_000;
+
+/// A workspace's own choices over the compiler's knobs (Settings → Usage &
+/// limits). `None` keeps the deployment's value; whatever is set is clamped
+/// to the same floors and hard ceilings the env vars are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Overrides {
+    pub paused: Option<bool>,
+    pub batch: Option<u64>,
+    pub chunk_chars: Option<u64>,
+    pub max_chunks: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub job_tokens: Option<u64>,
+    pub daily_tokens: Option<u64>,
+    pub monthly_tokens: Option<u64>,
+}
+
+/// Where a workspace's [`Overrides`] come from. The composition wires one
+/// over the workspace settings table; a compiler without one runs every
+/// workspace on the deployment's settings.
+#[async_trait::async_trait]
+pub trait Tuning: Send + Sync {
+    /// The workspace's overrides. A read that fails is no overrides.
+    async fn overrides(&self, workspace: &str) -> Overrides;
+}
+
+/// No overrides: every workspace runs on the deployment's settings.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoTuning;
+
+#[async_trait::async_trait]
+impl Tuning for NoTuning {
+    async fn overrides(&self, _workspace: &str) -> Overrides {
+        Overrides::default()
+    }
+}
+
 /// The knobs, all from config (`CODING_AGENTS_*`), all with defaults that
-/// keep one session's compile small and a workspace's month bounded.
+/// keep one session's compile small and a workspace's month bounded. A
+/// workspace's own [`Overrides`] apply on top ([`Settings::with_overrides`]).
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// Nothing compiles while set (a workspace's own pause; there is no env
+    /// var for it). Default off.
+    pub paused: bool,
     /// Jobs one cron tick compiles (`CODING_AGENTS_BATCH`, default 1).
     pub batch: usize,
     /// Transcript characters per model call (`CODING_AGENTS_CHUNK_CHARS`,
@@ -69,6 +128,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            paused: false,
             batch: 1,
             chunk_chars: 32_000,
             max_chunks: 4,
@@ -98,21 +158,63 @@ impl Settings {
             usize::try_from(number(key, fallback as u64)).unwrap_or(fallback)
         };
         Self {
-            batch: size("CODING_AGENTS_BATCH", default.batch).clamp(1, 20),
-            chunk_chars: size("CODING_AGENTS_CHUNK_CHARS", default.chunk_chars).max(1_000),
-            max_chunks: size("CODING_AGENTS_MAX_CHUNKS", default.max_chunks).clamp(1, 20),
+            paused: false,
+            batch: size("CODING_AGENTS_BATCH", default.batch),
+            chunk_chars: size("CODING_AGENTS_CHUNK_CHARS", default.chunk_chars),
+            max_chunks: size("CODING_AGENTS_MAX_CHUNKS", default.max_chunks),
             context_chars: size("CODING_AGENTS_CONTEXT_CHARS", default.context_chars).max(1_000),
             max_output_tokens: u32::try_from(number(
                 "CODING_AGENTS_MAX_OUTPUT_TOKENS",
                 u64::from(default.max_output_tokens),
             ))
-            .unwrap_or(default.max_output_tokens)
-            .max(256),
+            .unwrap_or(default.max_output_tokens),
             job_tokens: number("CODING_AGENTS_JOB_TOKENS", default.job_tokens),
             daily_tokens: number("CODING_AGENTS_DAILY_TOKENS", default.daily_tokens),
             monthly_tokens: number("CODING_AGENTS_MONTHLY_TOKENS", default.monthly_tokens),
             lease: default.lease,
         }
+        .bounded()
+    }
+
+    /// These settings with a workspace's own choices on top: each one that
+    /// is set replaces the deployment's value, and the result is clamped to
+    /// the same floors and hard ceilings ([`BATCH_CEILING`],
+    /// [`JOB_TOKENS_CEILING`], …), so no stored number can lift a compile
+    /// past what one Worker invocation can finish.
+    #[must_use]
+    pub fn with_overrides(&self, overrides: &Overrides) -> Self {
+        let size = |value: Option<u64>, fallback: usize| {
+            value.map_or(fallback, |value| {
+                usize::try_from(value).unwrap_or(usize::MAX)
+            })
+        };
+        Self {
+            paused: overrides.paused.unwrap_or(self.paused),
+            batch: size(overrides.batch, self.batch),
+            chunk_chars: size(overrides.chunk_chars, self.chunk_chars),
+            max_chunks: size(overrides.max_chunks, self.max_chunks),
+            context_chars: self.context_chars,
+            max_output_tokens: overrides
+                .max_output_tokens
+                .map_or(self.max_output_tokens, |value| {
+                    u32::try_from(value).unwrap_or(MAX_OUTPUT_TOKENS_CEILING)
+                }),
+            job_tokens: overrides.job_tokens.unwrap_or(self.job_tokens),
+            daily_tokens: overrides.daily_tokens.unwrap_or(self.daily_tokens),
+            monthly_tokens: overrides.monthly_tokens.unwrap_or(self.monthly_tokens),
+            lease: self.lease,
+        }
+        .bounded()
+    }
+
+    /// The floors and the hard ceilings, applied to every source alike.
+    fn bounded(mut self) -> Self {
+        self.batch = self.batch.clamp(1, BATCH_CEILING);
+        self.chunk_chars = self.chunk_chars.clamp(1_000, CHUNK_CHARS_CEILING);
+        self.max_chunks = self.max_chunks.clamp(1, MAX_CHUNKS_CEILING);
+        self.max_output_tokens = self.max_output_tokens.clamp(256, MAX_OUTPUT_TOKENS_CEILING);
+        self.job_tokens = self.job_tokens.min(JOB_TOKENS_CEILING);
+        self
     }
 }
 
@@ -207,6 +309,7 @@ pub struct Compiler {
     gate: Arc<dyn Gate>,
     clock: Arc<dyn Clock>,
     settings: Settings,
+    tuning: Arc<dyn Tuning>,
 }
 
 /// What one job accumulated across its calls.
@@ -266,7 +369,23 @@ impl Compiler {
             gate,
             clock,
             settings,
+            tuning: Arc::new(NoTuning),
         }
+    }
+
+    /// The same compiler, reading each workspace's own [`Overrides`] from
+    /// `tuning` before it compiles anything of theirs.
+    #[must_use]
+    pub fn with_tuning(mut self, tuning: Arc<dyn Tuning>) -> Self {
+        self.tuning = tuning;
+        self
+    }
+
+    /// The settings `workspace` compiles under: the deployment's, with the
+    /// workspace's own overrides on top.
+    pub async fn settings_for(&self, workspace: &str) -> Settings {
+        self.settings
+            .with_overrides(&self.tuning.overrides(workspace).await)
     }
 
     /// The queue this compiler drains.
@@ -277,9 +396,13 @@ impl Compiler {
 
     /// Enqueues what the ledger holds, then compiles up to `max_jobs` jobs
     /// the filter allows, oldest first — parking the ones whose workspace
-    /// has no model or no budget left without spending anything on them.
-    /// `budget` is the scheduled invocation's cooperative budget (unbounded
-    /// outside a cron tick); the drain stops when it runs out.
+    /// has no model, no budget left or a paused compiler without spending
+    /// anything on them. Each job compiles under its workspace's own
+    /// settings ([`Compiler::settings_for`]). A drain across every workspace
+    /// (no `filter.workspace`: the cron) also takes at most each
+    /// workspace's own `batch` of jobs. `budget` is the scheduled
+    /// invocation's cooperative budget (unbounded outside a cron tick); the
+    /// drain stops when it runs out.
     ///
     /// # Errors
     ///
@@ -300,6 +423,8 @@ impl Compiler {
             .ready(now, filter, max_jobs.saturating_mul(4).max(4))
             .await?;
         let mut models: BTreeMap<(String, String), bool> = BTreeMap::new();
+        let mut tuned: BTreeMap<String, Settings> = BTreeMap::new();
+        let mut per_workspace: BTreeMap<String, usize> = BTreeMap::new();
         let mut out = Vec::new();
         let mut compiled = 0usize;
         for job in ready {
@@ -307,6 +432,37 @@ impl Compiler {
                 break;
             }
             let now = self.clock.now();
+            let settings = match tuned.get(&job.workspace) {
+                Some(settings) => settings.clone(),
+                None => {
+                    let settings = self.settings_for(&job.workspace).await;
+                    tuned.insert(job.workspace.clone(), settings.clone());
+                    settings
+                }
+            };
+            if settings.paused {
+                // Parked, not skipped: a skipped job would be read again on
+                // every tick and crowd out the workspaces that are running.
+                if self
+                    .queue
+                    .park(
+                        &job,
+                        JobStatus::OverBudget,
+                        now,
+                        now + Duration::minutes(15),
+                        "paused",
+                    )
+                    .await?
+                {
+                    out.push(parked(&job, JobStatus::OverBudget, "paused"));
+                }
+                continue;
+            }
+            if filter.workspace.is_none()
+                && per_workspace.get(&job.workspace).copied().unwrap_or(0) >= settings.batch
+            {
+                continue;
+            }
             let who = (job.workspace.clone(), job.owner.clone());
             let available = match models.get(&who) {
                 Some(known) => *known,
@@ -336,7 +492,7 @@ impl Compiler {
                 }
                 continue;
             }
-            if let Some(until) = self.over_budget(&job.workspace, now).await? {
+            if let Some(until) = self.over_budget(&job.workspace, now, &settings).await? {
                 if self
                     .queue
                     .park(&job, JobStatus::OverBudget, now, until, "over-budget")
@@ -359,11 +515,12 @@ impl Compiler {
                 status: JobStatus::Processing,
                 ..job
             };
-            let finish = self.process(&claimed).await;
+            let finish = self.process(&claimed, &settings).await;
             self.queue
                 .finish(&claimed, &finish, self.clock.now())
                 .await?;
             compiled += 1;
+            *per_workspace.entry(claimed.workspace.clone()).or_default() += 1;
             out.push(Processed {
                 source_id: claimed.source_id.clone(),
                 status: finish.status,
@@ -381,16 +538,17 @@ impl Compiler {
         &self,
         workspace: &str,
         now: OffsetDateTime,
+        settings: &Settings,
     ) -> Result<Option<OffsetDateTime>, DbError> {
         let today = utc_day(now);
         let month_start = format!("{}-01", &today[..7]);
         let spent_today = self.queue.spent(workspace, &today, &today).await?;
         let spent_month = self.queue.spent(workspace, &month_start, &today).await?;
         let tomorrow = start_of_next_day(now);
-        if spent_month >= self.settings.monthly_tokens {
+        if spent_month >= settings.monthly_tokens {
             return Ok(Some(start_of_next_month(now)));
         }
-        if spent_today >= self.settings.daily_tokens {
+        if spent_today >= settings.daily_tokens {
             return Ok(Some(tomorrow));
         }
         if self.gate.over_budget(workspace).await {
@@ -401,7 +559,7 @@ impl Compiler {
 
     /// Compiles one claimed job, and says how it ended. Never fails: every
     /// failure is a status the queue records.
-    async fn process(&self, job: &Job) -> Finish {
+    async fn process(&self, job: &Job, settings: &Settings) -> Finish {
         let now = self.clock.now();
         let source = match self.sources.by_id(&job.source_id).await {
             Ok(Some(source)) if source.scope == job.scope && source.workspace == job.workspace => {
@@ -452,8 +610,7 @@ impl Compiler {
             totals: session.totals.clone(),
             previously_compiled: self.queue.previously_compiled(job).await.ok().flatten(),
         };
-        let (chunks, mut omitted) =
-            session.chunks(self.settings.chunk_chars, self.settings.max_chunks);
+        let (chunks, mut omitted) = session.chunks(settings.chunk_chars, settings.max_chunks);
         if chunks.is_empty() || session.turns.is_empty() {
             return Finish::status(JobStatus::Skipped, Some("empty-session"));
         }
@@ -485,11 +642,11 @@ impl Compiler {
             };
             let estimate = prompt::estimate_tokens(prompt::SYSTEM)
                 + prompt::estimate_tokens(&user)
-                + u64::from(self.settings.max_output_tokens);
+                + u64::from(settings.max_output_tokens);
             if spent_before
                 .saturating_add(tally.tokens())
                 .saturating_add(estimate)
-                > self.settings.job_tokens
+                > settings.job_tokens
             {
                 omitted = true;
                 break;
@@ -502,12 +659,7 @@ impl Compiler {
             };
             let reply = match self
                 .model
-                .complete(
-                    &call,
-                    prompt::SYSTEM,
-                    &user,
-                    self.settings.max_output_tokens,
-                )
+                .complete(&call, prompt::SYSTEM, &user, settings.max_output_tokens)
                 .await
             {
                 Ok(reply) => reply,

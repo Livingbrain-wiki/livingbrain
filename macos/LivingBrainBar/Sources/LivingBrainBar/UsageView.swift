@@ -6,6 +6,7 @@ struct UsageView: View {
     @ObservedObject var workspace: WorkspaceModel
     @State private var days = 14
     @State private var usage: Usage?
+    @State private var limits: BudgetSettings?
     @State private var error: APIError?
     @State private var loading = true
 
@@ -42,6 +43,7 @@ struct UsageView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     tiles(usage)
                     budget(usage)
+                    if let limits { limitsCard(limits) }
                     chartCard("Model requests per day") {
                         Chart(usage.days) { day in
                             BarMark(x: .value("Day", day.date ?? .distantPast, unit: .day),
@@ -105,6 +107,62 @@ struct UsageView: View {
         }
     }
 
+    /// The workspace's budgets and limits, read-only: the effective value of
+    /// each and whether the workspace set it. Changed on the web, in
+    /// Settings → Usage & limits.
+    private func limitsCard(_ limits: BudgetSettings) -> some View {
+        let today = limits.usage?.compileTokensToday ?? 0
+        let month = limits.usage?.compileTokensMonth ?? 0
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Limits").font(.headline)
+                Spacer()
+                if limits.compilerPaused {
+                    Label("Compiling paused", systemImage: "pause.circle.fill")
+                        .foregroundStyle(.orange).font(.callout.weight(.medium))
+                }
+            }
+            limitRow("Compile tokens today", limits.entry("coding_agents", "daily_tokens"), spent: today)
+            limitRow("Compile tokens this month", limits.entry("coding_agents", "monthly_tokens"), spent: month)
+            limitRow("Sessions per run", limits.entry("coding_agents", "batch"))
+            limitRow("Per-session cap (tokens)", limits.entry("coding_agents", "job_tokens"))
+            limitRow("Ask context (characters)", limits.entry("ask", "context_chars"))
+            limitRow("Ask answer length (tokens)", limits.entry("ask", "max_output_tokens"))
+            if let cents = limits.entry("spend", "monthly_cents") {
+                HStack {
+                    Text("Monthly spend limit")
+                    Spacer()
+                    Text((Double(cents.number ?? 0) / 100).formatted(.currency(code: "USD")))
+                        .monospacedDigit()
+                    sourceTag(cents)
+                }
+                .font(.callout)
+            }
+            Text("Owners and admins change these on the web, in Settings → Usage & limits.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.07)))
+    }
+
+    @ViewBuilder private func limitRow(_ title: String, _ entry: BudgetSettings.Entry?, spent: Int? = nil) -> some View {
+        if let entry, let value = entry.number {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(spent.map { "\($0.compact) of \(value.compact)" } ?? value.compact).monospacedDigit()
+                sourceTag(entry)
+            }
+            .font(.callout)
+        }
+    }
+
+    private func sourceTag(_ entry: BudgetSettings.Entry) -> some View {
+        Text(entry.isWorkspaceSetting ? "workspace" : "default")
+            .font(.caption2).foregroundStyle(.secondary)
+            .frame(width: 64, alignment: .trailing)
+    }
+
     private func chartCard<C: View>(_ title: String, @ViewBuilder chart: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.headline)
@@ -121,6 +179,9 @@ struct UsageView: View {
             do {
                 let loaded = try await workspace.call { try await $0.usage(days: range) }
                 usage = loaded
+                // Best effort: an older server has no budgets route, and the
+                // usage view stands without the card.
+                limits = try? await workspace.call { try await $0.budgets() }
                 error = nil
                 workspace.workspaceId = loaded.workspaceId
             } catch let apiError as APIError {

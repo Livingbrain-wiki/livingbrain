@@ -291,6 +291,65 @@ public struct Usage: Decodable, Equatable, Sendable {
     }
 }
 
+/// The workspace's budgets and limits (`GET /v1/settings/budgets`): every
+/// limit's effective value and where it comes from — the workspace's own
+/// setting or the deployment's default — plus the usage so far. Read-only
+/// here; owners and admins change them in Settings → Usage & limits on the web.
+public struct BudgetSettings: Decodable, Equatable, Sendable {
+    /// One limit. `number` for a count, `flag` for the pause switch.
+    public struct Entry: Decodable, Equatable, Sendable {
+        public var number: Int?
+        public var flag: Bool?
+        /// `workspace` (set here) or `default` (the deployment's).
+        public var source: String
+        public var inheritedNumber: Int?
+
+        enum CodingKeys: String, CodingKey { case value, source, inherited }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            number = try? c.decodeIfPresent(Int.self, forKey: .value)
+            flag = try? c.decodeIfPresent(Bool.self, forKey: .value)
+            source = (try? c.decodeIfPresent(String.self, forKey: .source)) ?? "default"
+            inheritedNumber = try? c.decodeIfPresent(Int.self, forKey: .inherited)
+        }
+
+        public var isWorkspaceSetting: Bool { source == "workspace" }
+    }
+
+    public struct UsageSoFar: Decodable, Equatable, Sendable {
+        public var compileTokensToday: Int?
+        public var compileTokensMonth: Int?
+        public var spendMonthUsdMicros: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case compileTokensToday = "compile_tokens_today"
+            case compileTokensMonth = "compile_tokens_month"
+            case spendMonthUsdMicros = "spend_month_usd_micros"
+        }
+    }
+
+    public var editable: Bool
+    public var role: String?
+    /// `group` → `key` → entry: `coding_agents`, `ask`, `spend`.
+    public var settings: [String: [String: Entry]]
+    public var usage: UsageSoFar?
+
+    enum CodingKeys: String, CodingKey { case editable, role, settings, usage }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        editable = (try? c.decodeIfPresent(Bool.self, forKey: .editable)) ?? false
+        role = try? c.decodeIfPresent(String.self, forKey: .role)
+        settings = (try? c.decodeIfPresent([String: [String: Entry]].self, forKey: .settings)) ?? [:]
+        usage = try? c.decodeIfPresent(UsageSoFar.self, forKey: .usage)
+    }
+
+    public func entry(_ group: String, _ key: String) -> Entry? { settings[group]?[key] }
+
+    public var compilerPaused: Bool { entry("coding_agents", "paused")?.flag ?? false }
+}
+
 /// A model connection (`GET /v1/models`, `GET|PUT /v1/models/{role}`).
 public struct ModelConnection: Decodable, Equatable, Sendable, Identifiable {
     public var role: String

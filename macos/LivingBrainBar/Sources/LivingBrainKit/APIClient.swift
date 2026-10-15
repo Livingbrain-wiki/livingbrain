@@ -278,6 +278,11 @@ public struct APIClient: Sendable {
         try await get(Usage.self, "/v1/usage/daily", query: [("days", String(min(max(days, 1), 31)))])
     }
 
+    /// `GET /v1/settings/budgets`: the workspace's budgets and limits, read-only.
+    public func budgets() async throws -> BudgetSettings {
+        try await get(BudgetSettings.self, "/v1/settings/budgets")
+    }
+
     public func models() async throws -> [ModelConnection] {
         try await get([ModelConnection].self, "/v1/models")
     }

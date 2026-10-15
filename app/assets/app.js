@@ -79,6 +79,17 @@ import {
   renderInviteRows,
   renderWorkspaces,
 } from "./members.js";
+import {
+  budgetsRequest,
+  budgetView,
+  budgetPatch,
+  budgetErrorMessage,
+  renderBudgets,
+  readInputs,
+  matchPreset,
+  presetInputs,
+  FieldError,
+} from "./budgets.js";
 import { isSafeHref } from "./markdown.js";
 import {
   checkSession,
@@ -535,7 +546,7 @@ pages.settings = async function settings() {
   wireSectionNav();
   wireCopyButtons();
   fillConnectPanel();
-  await Promise.all([wireModels(), wireTokens(), wireMembers()]);
+  await Promise.all([wireModels(), wireTokens(), wireMembers(), wireBudgets()]);
 };
 
 /* --- small shared pieces ------------------------------------------- */
@@ -1661,6 +1672,117 @@ async function wireMembers() {
       location.assign("/");
     } catch (error) {
       toast(memberErrorMessage(error, "switch workspace"), "bad");
+    }
+  });
+
+  return load();
+}
+
+/* --- usage & limits --------------------------------------------------- */
+
+/**
+ * The Usage & limits section: every budget with its usage bar for everyone,
+ * the presets and inputs for owners and admins. A save sends only what
+ * changed, through the settings choke point; the server checks every range
+ * and every role, and the page shows its one-sentence refusal.
+ */
+async function wireBudgets() {
+  const status = $("#limits-status");
+  const body = $("#limits-body");
+  const form = $("#limits-form");
+  const actions = $("#limits-actions");
+  const readonly = $("#limits-readonly");
+  const reset = $("#limits-reset");
+  if (!body || !form) return undefined;
+  let view = null;
+
+  const clearErrors = () => {
+    for (const line of $$("[data-budget-error]", body)) line.textContent = "";
+  };
+
+  /** Marks the preset the inputs now match (or Custom). */
+  const markPreset = () => {
+    const id = matchPreset(readInputs(body, true));
+    for (const radio of $$('input[name="budget-preset"]', body)) radio.checked = radio.value === id;
+  };
+
+  const paint = (response) => {
+    view = budgetView(response);
+    renderBudgets(body, view);
+    actions.hidden = !view.editable;
+    readonly.hidden = view.editable;
+    markPreset();
+  };
+
+  const load = async () => {
+    try {
+      const request = budgetsRequest();
+      paint(await api(request.path, { method: request.method }));
+      notice(status, "");
+    } catch (error) {
+      body.replaceChildren();
+      actions.hidden = true;
+      notice(status, budgetErrorMessage(error, "load the limits"), "warn");
+    }
+  };
+
+  body.addEventListener("change", (event) => {
+    const radio = event.target.closest('input[name="budget-preset"]');
+    if (!radio || radio.value === "custom") return;
+    const values = presetInputs(radio.value);
+    for (const [name, value] of Object.entries(values || {})) {
+      const input = body.querySelector(`[data-budget="${name}"]`);
+      if (input) input.value = value;
+    }
+    clearErrors();
+  });
+
+  body.addEventListener("input", (event) => {
+    if (!event.target.closest("[data-budget]")) return;
+    clearErrors();
+    markPreset();
+  });
+
+  reset.addEventListener("click", () => {
+    if (view) {
+      renderBudgets(body, view);
+      markPreset();
+    }
+    notice(status, "");
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!view || !view.editable) return;
+    clearErrors();
+    let patch;
+    try {
+      const paused = $("#budget-paused");
+      patch = budgetPatch(view, readInputs(body), paused ? paused.checked : undefined);
+    } catch (error) {
+      if (error instanceof FieldError) {
+        const line = body.querySelector(`[data-budget-error="${error.field}"]`);
+        if (line) line.textContent = error.message;
+        const input = body.querySelector(`[data-budget="${error.field}"]`);
+        if (input) input.focus();
+        return;
+      }
+      throw error;
+    }
+    if (!patch) {
+      toast("Nothing to save — the limits are as they were.", "ok");
+      return;
+    }
+    const outcome = await setSetting("budgets", "limits", patch);
+    if (outcome.ok) {
+      toast("Limits saved.", "ok");
+      await load();
+    } else {
+      const message = budgetErrorMessage(
+        { status: outcome.status, message: outcome.message, body: { detail: outcome.message } },
+        "save the limits",
+      );
+      notice(status, message, "bad");
     }
   });
 

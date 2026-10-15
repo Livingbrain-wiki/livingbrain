@@ -98,5 +98,13 @@
   "coding-agents/0002": {
     "file": "0025_coding-agents_0002_waiting_runner.sql",
     "sha256": "acc417c7c2ef7d655c54ccc7cd87b5a639729f36a3e1d7eba511170d71663d46"
+  },
+  "usage/0002": {
+    "file": "0026_usage_0002_budgets.sql",
+    "sha256": "4ee61f19b0304b8c4708c43e5ef54e8523868039927af5a9bba3069af09b4eb6"
+  },
+  "workspaces/0004": {
+    "file": "0027_workspaces_0004_turn.sql",
+    "sha256": "59203b60ca937e502972dab8dbf4d7f04526c886147cd4927a5ba15883cf2151"
   }
 }

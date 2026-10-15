@@ -65,9 +65,14 @@
 
 #![forbid(unsafe_code)]
 
+mod budgets;
 mod cost;
 mod store;
 
+pub use budgets::{
+    Budgets, StoredBudgets, budget_cents, budgets, budgets_or_default, deployment_budget_cents,
+    save_budgets,
+};
 pub use cost::{
     BudgetStatus, DEFAULT_BUDGET_CENTS_MONTHLY, EMAIL_MICRO_USD_PER_SEND, MICRO_USD_PER_USD,
     email_cost_micro_usd, model_cost_micro_usd, month_to_date, status,
@@ -152,7 +157,7 @@ impl Module for Usage {
     }
 
     fn tables(&self) -> &'static [&'static str] {
-        &["usage_daily"]
+        &["usage_daily", "usage_budgets"]
     }
 
     /// A ledger row names a workspace and a day, and no column names a
@@ -160,11 +165,18 @@ impl Module for Usage {
     /// the activity are the `workspace_members` rows the workspaces module
     /// already declares.
     fn personal_data(&self) -> &'static [PersonalDataSet] {
-        const SETS: &[PersonalDataSet] = &[PersonalDataSet::none(
-            "usage_daily",
-            "the row is one workspace's pooled counts for one UTC day — nothing in \
-             it identifies or describes a person",
-        )];
+        const SETS: &[PersonalDataSet] = &[
+            PersonalDataSet::none(
+                "usage_daily",
+                "the row is one workspace's pooled counts for one UTC day — nothing in \
+                 it identifies or describes a person",
+            ),
+            PersonalDataSet::none(
+                "usage_budgets",
+                "the row is one workspace's own budgets and limits — numbers and a \
+                 timestamp, nothing that identifies or describes a person",
+            ),
+        ];
         SETS
     }
 
@@ -184,9 +196,24 @@ impl Module for Usage {
             include_str!("../migrations/postgres/0001_init.sql"),
         );
 
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        /// The workspace's own budgets and limits (`usage_budgets`): every
+        /// limit nullable, NULL inheriting the deployment's value.
+        const MIGRATION_BUDGETS: SqlMigration = SqlMigration::new(
+            "0002",
+            "budgets",
+            include_str!("../migrations/sqlite/0002_budgets.sql"),
+        );
+        /// The Postgres form: every number BIGINT.
+        const MIGRATION_BUDGETS_POSTGRES: SqlMigration = SqlMigration::new(
+            "0002",
+            "budgets",
+            include_str!("../migrations/postgres/0002_budgets.sql"),
+        );
+
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_BUDGETS];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 1] = [MIGRATION_INIT_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
+            [MIGRATION_INIT_POSTGRES, MIGRATION_BUDGETS_POSTGRES];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,
@@ -241,17 +268,6 @@ fn database(_error: DbError) -> Problem {
 /// caller learns the read failed and nothing more.
 fn ledger(_error: store::UsageError) -> Problem {
     Problem::internal()
-}
-
-/// The monthly budget in cents, from config; unset or unparsable falls
-/// back to [`DEFAULT_BUDGET_CENTS_MONTHLY`]. The unparsable case is
-/// refused at boot by `validate_config` — here it falls back rather than
-/// turn every read into a 500 for a number the read did not break.
-fn budget_cents(cfg: &dyn Config) -> u64 {
-    ModuleConfig::new("usage", cfg)
-        .get_opt(BUDGET_CENTS_MONTHLY)
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BUDGET_CENTS_MONTHLY)
 }
 
 /// `GET /daily?days=14` — the caller's workspace's ledger for the last
@@ -319,7 +335,10 @@ async fn daily(
         .unwrap_or(0);
     let month_to_date_usd_micros = mtd_model_micros + cost::email_cost_micro_usd(mtd.emails_sent);
 
-    let budget = budget_cents(&*state.ctx.config);
+    // The workspace's own limit when it set one (Settings → Usage & limits),
+    // else the deployment's.
+    let own = budgets::budgets_or_default(&*db, &c.workspace_id).await;
+    let budget = budgets::budget_cents(&*state.ctx.config, &own);
     Ok(Json(DailyView {
         workspace_id: c.workspace_id,
         days: rows.iter().map(DayView::of).collect(),
@@ -445,7 +464,7 @@ struct DailyView {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_BUDGET_CENTS_MONTHLY, budget_cents};
+    use super::{Budgets, DEFAULT_BUDGET_CENTS_MONTHLY, budget_cents, deployment_budget_cents};
     use cratefield_core::{EmptyConfig, MapConfig, Module};
 
     /// The budget default: 300 cents, the $3.00 infra share of the $9/mo
@@ -453,7 +472,7 @@ mod tests {
     #[test]
     fn the_default_budget_is_three_dollars() {
         assert_eq!(DEFAULT_BUDGET_CENTS_MONTHLY, 300);
-        assert_eq!(budget_cents(&EmptyConfig), 300);
+        assert_eq!(deployment_budget_cents(&EmptyConfig), 300);
     }
 
     /// A set budget parses; a set-but-unparsable one falls back at read
@@ -461,9 +480,24 @@ mod tests {
     #[test]
     fn the_budget_reads_the_configured_cents() {
         let set = MapConfig::from_pairs([("USAGE_BUDGET_CENTS_MONTHLY", "450")]);
-        assert_eq!(budget_cents(&set), 450);
+        assert_eq!(deployment_budget_cents(&set), 450);
         let broken = MapConfig::from_pairs([("USAGE_BUDGET_CENTS_MONTHLY", "$4.50")]);
-        assert_eq!(budget_cents(&broken), 300);
+        assert_eq!(deployment_budget_cents(&broken), 300);
+    }
+
+    /// The precedence: the workspace's own limit, else the env var, else the
+    /// default — and clearing the workspace's (`None`) inherits again.
+    #[test]
+    fn the_workspace_limit_wins_over_the_env_var_and_the_default() {
+        let env = MapConfig::from_pairs([("USAGE_BUDGET_CENTS_MONTHLY", "450")]);
+        let own = Budgets {
+            spend_cents_monthly: Some(2_500),
+            ..Budgets::default()
+        };
+        assert_eq!(budget_cents(&env, &own), 2_500);
+        assert_eq!(budget_cents(&EmptyConfig, &own), 2_500);
+        assert_eq!(budget_cents(&env, &Budgets::default()), 450);
+        assert_eq!(budget_cents(&EmptyConfig, &Budgets::default()), 300);
     }
 
     /// A malformed budget is a boot error naming the full env key.

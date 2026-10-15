@@ -13,12 +13,15 @@
 //!
 //! - the brief and the question are **redacted** on the way out, and the
 //!   answer on the way back ([`livingbrain_redact`]);
-//! - the call is **budgeted**: a workspace past `USAGE_BUDGET_CENTS_MONTHLY`
-//!   gets no call, and one call is capped at [`MAX_ANSWER_TOKENS`] out and
-//!   at a share of the connected model's own context window in
-//!   ([`context_budget`]: a quarter of the window, never past
-//!   `ASK_CONTEXT_CHARS_MAX`, and [`MAX_CONTEXT_CHARS`] when the model never
-//!   said how large its window is); a long page contributes the passages
+//! - the call is **budgeted**: a workspace past its monthly spend limit
+//!   gets no call, and one call is capped at the workspace's answer length
+//!   ([`MAX_ANSWER_TOKENS`] by default) out and at a share of the connected
+//!   model's own context window in ([`context_budget`]: a quarter of the
+//!   window, never past the workspace's context size — its own setting,
+//!   else `ASK_CONTEXT_CHARS_MAX` — and [`MAX_CONTEXT_CHARS`] when the model
+//!   never said how large its window is). Every one of these is the
+//!   workspace's effective value (`crate::budgets`, Settings → Usage &
+//!   limits); a long page contributes the passages
 //!   that mention the question rather than its first few thousand
 //!   characters ([`passages`]); `invoke::chat` records the tokens in the
 //!   usage ledger;
@@ -572,15 +575,6 @@ pub fn context_budget(context_tokens: Option<u64>, ceiling: usize) -> usize {
     chars.clamp(MIN_CONTEXT_CHARS, ceiling)
 }
 
-/// The configured ceiling ([`ASK_CONTEXT_CHARS_MAX`]), or its default.
-fn context_ceiling(config: &dyn cratefield_core::Config) -> usize {
-    config
-        .get(ASK_CONTEXT_CHARS_MAX)
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|chars| *chars > 0)
-        .unwrap_or(DEFAULT_CONTEXT_CHARS_MAX)
-}
-
 /// The brief the model reads: the same sections and labels as the one a
 /// person reads, the facts first, then each page within its share of
 /// `budget` — the shares fair, and what a short page leaves unused handed on
@@ -824,8 +818,17 @@ async fn answer_with_model(
     };
 
     // The brief, within this connection's budget: a share of the model's
-    // own window, under the configured ceiling.
-    let budget = context_budget(serving.context_size, context_ceiling(&*ctx.config));
+    // own window, under the workspace's ceiling (its own setting, else
+    // `ASK_CONTEXT_CHARS_MAX`, else the default). The answer's length is the
+    // workspace's too.
+    let own = match ctx.ports.db.clone() {
+        Some(db) => livingbrain_usage::budgets_or_default(&*db, workspace).await,
+        None => livingbrain_usage::Budgets::default(),
+    };
+    let budget = context_budget(
+        serving.context_size,
+        crate::budgets::ask_context_ceiling(&*ctx.config, &own),
+    );
     let context = model_context(brief, question, budget);
 
     // Redacted on the way out: pages and facts were redacted when they were
@@ -841,7 +844,7 @@ async fn answer_with_model(
     let request = ChatRequest {
         system: SYSTEM_PROMPT,
         user: &user,
-        max_tokens: MAX_ANSWER_TOKENS,
+        max_tokens: crate::budgets::ask_max_tokens(&own),
         json: false,
         timeout: CALL_TIMEOUT,
     };

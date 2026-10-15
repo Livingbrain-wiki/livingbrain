@@ -1124,7 +1124,17 @@ export async function wikiPage(api) {
       els.caModel.appendChild(document.createTextNode(" (Main)."));
     }
     const budget = data.budget || {};
-    if (budget.daily_tokens != null) {
+    if (budget.paused) {
+      els.caModel.appendChild(
+        document.createTextNode(" Compiling is paused for this workspace — see "),
+      );
+      const limits = document.createElement("a");
+      limits.href = "settings.html#limits";
+      limits.textContent = "Settings → Usage & limits";
+      els.caModel.appendChild(limits);
+      els.caModel.appendChild(document.createTextNode("."));
+    } else if (budget.daily_tokens != null) {
+      // The workspace's effective budget: its own setting, else the default.
       els.caModel.appendChild(
         document.createTextNode(
           ` Budget today: ${budget.spent_today || 0} of ${budget.daily_tokens} tokens.`,

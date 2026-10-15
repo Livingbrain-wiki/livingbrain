@@ -69,6 +69,7 @@
             <a href="#models" aria-current="true">Models</a>
             <a href="#tokens">API tokens</a>
             <a href="#members">Members</a>
+            <a href="#limits">Usage &amp; limits</a>
             <a href="#connect">Connect</a>
             <a href="#soon">Coming soon</a>
           </nav>
@@ -249,6 +250,32 @@
 
               <h3>Your workspaces</h3>
               <ul id="workspace-list" class="plain-list"></ul>
+            </section>
+
+            <!-- usage & limits: the workspace's budgets, painted by
+                 `assets/budgets.js` with elements and text nodes only, and
+                 saved through the one settings write path in `app.js`. -->
+            <section class="card sect" id="limits" aria-labelledby="limits-h">
+              <header class="sect__head">
+                <h2 id="limits-h">Usage &amp; limits</h2>
+                <p class="muted">
+                  How much the brain may spend on the workspace's model: the
+                  coding-agents compiler, questions, and a monthly ceiling.
+                  An empty field uses the default.
+                </p>
+              </header>
+              <div id="limits-status" class="notice" role="status" aria-live="polite"></div>
+              <p id="limits-readonly" class="hint" hidden>
+                Only owners and admins can change these. Ask one if a limit
+                is in your way.
+              </p>
+              <form id="limits-form" class="budget-form" novalidate>
+                <div id="limits-body" class="budget-cards"></div>
+                <div class="form-actions" id="limits-actions" hidden>
+                  <button type="submit" data-variant="primary" id="limits-save">Save limits</button>
+                  <button type="button" id="limits-reset">Discard changes</button>
+                </div>
+              </form>
             </section>
 
             <!-- connect your coding agent -->

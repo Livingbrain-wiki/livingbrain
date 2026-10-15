@@ -20,6 +20,7 @@ export const SECTIONS = [
   "models",
   "model-switch",
   "model-runner",
+  "budgets",
   "proactivity",
   "tools",
   "automations",
@@ -31,9 +32,11 @@ export const SECTIONS = [
 /**
  * Which sections have a server route today.
  *
- * `models` is the only one: `PUT /v1/models/{role}` connects or replaces a
- * model connection for a role (`triage`, `main`, `research`), admin or owner
- * only. The other six are on the page because the issue asks for them and
+ * `models` (and its two siblings) and `budgets` are wired: `PUT
+ * /v1/models/{role}` connects or replaces a model connection for a role
+ * (`triage`, `main`, `research`), admin or owner only, and `PATCH
+ * /v1/settings/budgets` changes the workspace's budgets and limits. The other
+ * five are on the page because the issue asks for them and
  * because a section with no route must look *unavailable*, not broken — so
  * they render as disabled controls rather than as buttons that 404. `stack` is
  * read-only: it is vendored data shown as it is, and nothing is ever sent.
@@ -60,6 +63,14 @@ const ENDPOINTS = {
     method: value === null ? "DELETE" : "PUT",
     path: `/v1/models/mine/${encodeURIComponent(key)}`,
   }),
+  // The workspace's budgets and limits (Settings → Usage & limits): one
+  // `PATCH /v1/settings/budgets` carrying only what changed, owner or admin
+  // only. The value is the patch itself (`{coding_agents, ask, spend}`),
+  // spread beside the audit triple like the models sections.
+  budgets: () => ({
+    method: "PATCH",
+    path: "/v1/settings/budgets",
+  }),
   proactivity: null,
   tools: null,
   automations: null,
@@ -69,7 +80,7 @@ const ENDPOINTS = {
 };
 
 /** The sections whose handler reads its fields flat, beside the audit triple. */
-const FLAT_SECTIONS = ["models", "model-switch", "model-runner"];
+const FLAT_SECTIONS = ["models", "model-switch", "model-runner", "budgets"];
 
 /** The model roles the server accepts (`livingbrain-models` `ROLES`). */
 export const MODEL_ROLES = ["triage", "main", "research"];

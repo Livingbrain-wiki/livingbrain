@@ -115,6 +115,46 @@ fn process_now_with_no_model_parks_the_job_and_says_why() {
     assert_eq!(theirs["processed"].as_array().map(Vec::len), Some(0));
 }
 
+/// The workspace's own budgets (Settings → Usage & limits) are what the
+/// queue card shows and what "Process now" runs under: a paused workspace
+/// parks its job as `over-budget` (`paused`) without asking any model.
+#[test]
+fn the_queue_and_process_now_run_under_the_workspace_s_own_budgets() {
+    let fx = fixture();
+    let mine = sync(&fx, "user-a", "s-a");
+    let own = livingbrain_usage::Budgets {
+        compiler_paused: Some(true),
+        compiler_daily_tokens: Some(7_000_000),
+        compiler_batch: Some(4),
+        ..livingbrain_usage::Budgets::default()
+    };
+    pollster::block_on(livingbrain_usage::save_budgets(
+        &*fx.db(),
+        fx.clock().now(),
+        WORKSPACE,
+        &own,
+    ))
+    .expect("the budgets save");
+
+    let card = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(card["budget"]["paused"], true, "{card}");
+    assert_eq!(card["budget"]["daily_tokens"], 7_000_000, "{card}");
+    assert_eq!(card["budget"]["batch"], 4, "{card}");
+    assert_eq!(
+        card["budget"]["monthly_tokens"], 4_000_000,
+        "the default, unset"
+    );
+
+    let body = post(&fx, TOKEN_A, "/v1/coding-agents/process", json!({"max": 3})).json();
+    assert_eq!(body["processed"][0]["source_id"], mine.as_str(), "{body}");
+    assert_eq!(body["processed"][0]["status"], "over-budget", "{body}");
+    assert_eq!(body["processed"][0]["error"], "paused", "{body}");
+
+    // Another workspace's card is its own.
+    let elsewhere = get(&fx, TOKEN_A_ELSEWHERE, "/v1/coding-agents/queue").json();
+    assert_eq!(elsewhere["budget"]["paused"], false, "{elsewhere}");
+}
+
 #[test]
 fn both_routes_need_a_credential() {
     let fx = fixture();

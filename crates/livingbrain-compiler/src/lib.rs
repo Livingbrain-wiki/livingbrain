@@ -33,7 +33,11 @@ pub mod prompt;
 pub mod queue;
 pub mod record;
 
-pub use compile::{Call, Compiler, Gate, Model, ModelFailure, NoGate, Processed, Reply, Settings};
+pub use compile::{
+    BATCH_CEILING, CHUNK_CHARS_CEILING, Call, Compiler, Gate, JOB_TOKENS_CEILING,
+    MAX_CHUNKS_CEILING, MAX_OUTPUT_TOKENS_CEILING, Model, ModelFailure, NoGate, NoTuning,
+    Overrides, Processed, Reply, Settings, Tuning,
+};
 pub use facts::{Emitted, Fact, FactSink, NoFacts};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, Queue};
 

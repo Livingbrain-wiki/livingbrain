@@ -49,8 +49,8 @@ use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Facts, ModelJobs, Notes, PagesRebind, Search, SessionAuth, Sources,
-    Wiki,
+    Ask, BudgetSettings, CodingAgents, Export, Facts, ModelJobs, Notes, PagesRebind, Search,
+    SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
@@ -367,7 +367,13 @@ fn build(
             // their seams. It needs only what every module here gets — the
             // `DB` binding, the Workers clock and the `HARNESS_SECRET`
             // signer — so the boot gate accepts it where the others stand.
-            .module(Usage::new());
+            .module(Usage::new())
+            // A workspace's budgets and limits as settings
+            // (`GET`/`PATCH /v1/settings/budgets`): the compiler's and the
+            // ask route's numbers and the spend limit, over the usage
+            // module's `usage_budgets` row. No blob, so it is served like
+            // `usage` rather than through the CLI divert.
+            .module(BudgetSettings::new());
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
         let builder = cli_modules(kms)
@@ -1114,7 +1120,8 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
 /// compile does, so the wall is longer — a scheduled Worker may run for
 /// minutes — while the step count stays under the Workers Free plan's 50
 /// subrequests. The compiler checks the budget before each job and takes
-/// `CODING_AGENTS_BATCH` (default 1) jobs a tick at most.
+/// each workspace's own batch (Settings → Usage & limits, else
+/// `CODING_AGENTS_BATCH`, default 1) of jobs a tick at most.
 const SCHEDULED_LIMITS: ScheduledLimits = ScheduledLimits {
     wall: Some(time::Duration::minutes(5)),
     subrequests: Some(45),
@@ -1169,6 +1176,70 @@ mod tests {
         // Issue #72: the grant a CLI logs in through, and its credential.
         assert!(names.contains(&"device-auth"), "{names:?}");
         assert!(names.contains(&"tokens"), "{names:?}");
+        // The budgets and limits, beside the ledger they are read against.
+        assert!(names.contains(&"settings"), "{names:?}");
+        assert!(names.contains(&"usage"), "{names:?}");
+    }
+
+    /// A migration's SQL without its `--` comments, its words joined by
+    /// single spaces: what a database runs.
+    fn statements(sql: &str) -> String {
+        sql.lines()
+            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Every migration a mounted module ships is collected into
+    /// `migrations/` — the directory `wrangler d1 migrations apply` reads —
+    /// with the same statements (comments and spacing aside: a collected
+    /// file is frozen once applied, and a reworded comment in the module's
+    /// copy changes no schema), and pinned in `.harness-lock.json`. A module that
+    /// gains a migration nobody collects passes every module test and then
+    /// fails in production on a missing table (#167, fixed by #170); this
+    /// is the check that would have caught it.
+    #[test]
+    fn every_module_migration_is_collected_for_d1() {
+        let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
+            .expect("a well-formed key");
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)));
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let lock: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".harness-lock.json")).expect("the lock file"),
+        )
+        .expect("the lock is JSON");
+        let mut missing = Vec::new();
+        for module in harness.modules() {
+            for migration in module.migrations().sqlite {
+                let key = format!("{}/{}", module.name(), migration.id);
+                let Some(file) = lock
+                    .get(&key)
+                    .and_then(|entry| entry.get("file"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    missing.push(format!(
+                        "{key} ({}) is not in .harness-lock.json",
+                        migration.name
+                    ));
+                    continue;
+                };
+                let expected =
+                    format!("_{}_{}_{}.sql", module.name(), migration.id, migration.name);
+                assert!(file.ends_with(&expected), "{key} is collected as {file}");
+                match std::fs::read_to_string(dir.join(file)) {
+                    Ok(collected) if statements(&collected) == statements(migration.sql) => {}
+                    Ok(_) => missing.push(format!("{file} differs from {key}'s SQL")),
+                    Err(_) => missing.push(format!("{file} ({key}) is missing")),
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "collect these into crates/livingbrain-venture/migrations (next number, \
+             `<n>_<module>_<id>_<name>.sql`, plus a .harness-lock.json entry):\n{}",
+            missing.join("\n")
+        );
     }
 
     /// The citation route carries the source id as its path segment, so the

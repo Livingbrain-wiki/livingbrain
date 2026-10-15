@@ -530,3 +530,79 @@ fn a_cookie_ask_from_another_origin_is_refused_before_any_model_call() {
     assert_eq!(cookie_ask(&fx, common::APP_BASE), StatusCode::OK);
     assert_eq!(model.calls().len(), 1);
 }
+
+/// The workspace's own budgets (Settings → Usage & limits) are what an ask
+/// runs under: its context size caps the brief however large the model's
+/// window, its answer length is the completion ceiling, and its spend limit
+/// decides "over budget" — each in place of the deployment's.
+#[test]
+fn an_ask_runs_under_the_workspace_s_own_budgets() {
+    let model = Scripted::with_window("Long [1].", 1_000_000);
+    let fx = fixture_with_ask_model(model.clone());
+    for n in 0..5 {
+        seed(
+            &fx,
+            WORKSPACE,
+            &user("user-a"),
+            &format!("kestrel-{n}"),
+            &format!(
+                "---\ntitle: Kestrel {n}\n---\nkestrel {}",
+                "word ".repeat(60_000)
+            ),
+        );
+    }
+    let own = livingbrain_usage::Budgets {
+        ask_context_chars: Some(20_000),
+        ask_max_output_tokens: Some(2_048),
+        ..livingbrain_usage::Budgets::default()
+    };
+    pollster::block_on(livingbrain_usage::save_budgets(
+        &*fx.db(),
+        fx.clock().now(),
+        WORKSPACE,
+        &own,
+    ))
+    .expect("the budgets save");
+    ask(&fx, json!({ "question": "kestrel" }));
+    let call = &model.calls()[0];
+    let sent = call.user.chars().count();
+    assert!(
+        sent <= 20_000 + 500,
+        "{sent} chars, under the workspace's 20k"
+    );
+    assert!(sent > 10_000, "{sent} chars");
+    assert_eq!(call.max_tokens, 2_048, "the workspace's answer length");
+
+    // A spend limit of zero is over at the first priced token.
+    let model = Arc::new(Scripted {
+        serving: Some(serving("deepseek", "deepseek-chat")),
+        reply: Ok("never".to_owned()),
+        seen: Mutex::new(Vec::new()),
+    });
+    let fx = fixture_with_ask_model(model.clone());
+    seed(&fx, WORKSPACE, &user("user-a"), "kestrel", KESTREL);
+    pollster::block_on(livingbrain_usage::record_model(
+        &*fx.db(),
+        fx.clock().now(),
+        WORKSPACE,
+        10_000,
+        10_000,
+    ))
+    .expect("a ledger row");
+    let body = ask(&fx, json!({ "question": "kestrel" }));
+    assert_eq!(body["mode"], "model", "well inside the default $3");
+    let zero = livingbrain_usage::Budgets {
+        spend_cents_monthly: Some(0),
+        ..livingbrain_usage::Budgets::default()
+    };
+    pollster::block_on(livingbrain_usage::save_budgets(
+        &*fx.db(),
+        fx.clock().now(),
+        WORKSPACE,
+        &zero,
+    ))
+    .expect("the budgets save");
+    let body = ask(&fx, json!({ "question": "kestrel" }));
+    assert!(answer_of(&body).starts_with(OVER_BUDGET), "{body}");
+    assert_eq!(model.calls().len(), 1, "no second call once over");
+}
