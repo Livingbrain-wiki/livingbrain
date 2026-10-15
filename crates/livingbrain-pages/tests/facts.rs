@@ -428,3 +428,21 @@ fn the_index_lists_timelines_without_opening_them() {
         assert_eq!(timeline.facts[0].value, "40");
     });
 }
+
+#[test]
+fn a_subject_or_attribute_carrying_personal_data_is_refused() {
+    pollster::block_on(async {
+        let kit = kit();
+        let leaky = FactInput {
+            attribute: "mail ada@example.com".to_owned(),
+            ..shoe("40", None)
+        };
+        assert!(kit.facts.check(&leaky).is_err());
+        assert!(matches!(
+            kit.facts.record("user-a", leaky, "u-a").await,
+            Err(FactError::Invalid(_))
+        ));
+        assert!(kit.facts.check(&shoe("40", Some("2025"))).is_ok());
+        assert!(kit.facts.check(&shoe("40", Some("someday"))).is_err());
+    });
+}

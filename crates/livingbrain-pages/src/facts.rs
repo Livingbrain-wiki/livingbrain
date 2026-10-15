@@ -200,6 +200,21 @@ pub fn fact_json(fact: &TimedFact) -> Value {
     })
 }
 
+/// A fact the format accepted, ready to be placed in its timeline.
+struct Prepared {
+    subject: String,
+    attribute: String,
+    value: String,
+    unit: Option<String>,
+    source: Option<String>,
+    quote: Option<String>,
+    confidence: f64,
+    observed_at: i64,
+    valid_from: PartialDate,
+    stated_valid_to: Option<PartialDate>,
+    asked: Option<Cardinality>,
+}
+
 /// The fact store.
 pub struct FactStore {
     db: Arc<dyn Database>,
@@ -261,30 +276,41 @@ impl FactStore {
         self.clock.now().unix_timestamp()
     }
 
-    /// Records one fact in `scope`, written by `written_by`, and settles its
-    /// timeline. A repeat of a live fact is answered with that fact
-    /// ([`FactOutcome::Corroborated`]) and stores nothing.
-    ///
-    /// Every text field is redacted before it is sealed.
+    /// Checks a fact against the format without touching the store: what
+    /// [`FactStore::record`] would refuse before reading a timeline. A
+    /// caller that writes something else first (a note) checks every fact
+    /// up front, so a malformed one refuses the whole request rather than
+    /// leaving half of it stored.
     ///
     /// # Errors
     ///
-    /// [`FactError::Invalid`] for a field outside the format,
-    /// [`FactError::CardinalityMismatch`], and [`FactError::Store`].
-    pub async fn record(
-        &self,
-        scope: &str,
-        input: FactInput,
-        written_by: &str,
-    ) -> Result<Recorded, FactError> {
-        if !entity::is_slug(scope) {
-            return Err(PageError::InvalidScope(scope.to_owned()).into());
-        }
+    /// [`FactError::Invalid`] for a field outside the format.
+    pub fn check(&self, input: &FactInput) -> Result<(), FactError> {
+        self.prepare(input).map(|_| ())
+    }
+
+    /// The stateless half of a write: every field validated, normalised and
+    /// redacted.
+    fn prepare(&self, input: &FactInput) -> Result<Prepared, FactError> {
         let subject = input.subject.trim().to_owned();
         if !is_subject(&subject) {
             return Err(FactError::Invalid(
                 "`subject` must be `<entity_type>/<slug>`, e.g. `person/nick`".to_owned(),
             ));
+        }
+        // The subject and attribute are stored in plaintext (like a page
+        // slug), so neither may carry anything redaction would have taken
+        // out of a body: refused, not silently rewritten into another key.
+        for (field, raw) in [("subject", &input.subject), ("attribute", &input.attribute)] {
+            match redact(raw, Policy::Redact) {
+                Ok((_, findings)) if findings.is_empty() => {}
+                _ => {
+                    return Err(FactError::Invalid(format!(
+                        "`{field}` looks like it holds a secret or personal data; \
+                         it is stored unencrypted, so name the thing instead"
+                    )));
+                }
+            }
         }
         let attribute = normalize_attribute(&input.attribute).ok_or_else(|| {
             FactError::Invalid("`attribute` must be 1-64 letters, digits or `_`".to_owned())
@@ -326,6 +352,53 @@ impl FactStore {
                 FactError::Invalid("`cardinality` is `one` or `many`".to_owned())
             })?),
         };
+        Ok(Prepared {
+            subject,
+            attribute,
+            value,
+            unit,
+            source,
+            quote,
+            confidence,
+            observed_at,
+            valid_from,
+            stated_valid_to,
+            asked,
+        })
+    }
+
+    /// Records one fact in `scope`, written by `written_by`, and settles its
+    /// timeline. A repeat of a live fact is answered with that fact
+    /// ([`FactOutcome::Corroborated`]) and stores nothing.
+    ///
+    /// Every text field is redacted before it is sealed.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Invalid`] for a field outside the format,
+    /// [`FactError::CardinalityMismatch`], and [`FactError::Store`].
+    pub async fn record(
+        &self,
+        scope: &str,
+        input: FactInput,
+        written_by: &str,
+    ) -> Result<Recorded, FactError> {
+        if !entity::is_slug(scope) {
+            return Err(PageError::InvalidScope(scope.to_owned()).into());
+        }
+        let Prepared {
+            subject,
+            attribute,
+            value,
+            unit,
+            source,
+            quote,
+            confidence,
+            observed_at,
+            valid_from,
+            stated_valid_to,
+            asked,
+        } = self.prepare(&input)?;
 
         let existing = self.load(scope, &subject, &attribute).await?;
         let cardinality = match (existing.first().map(|f| f.cardinality), asked) {

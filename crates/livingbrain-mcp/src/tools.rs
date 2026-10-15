@@ -367,6 +367,9 @@ async fn note(
         .iter()
         .map(|fact| fact_input(asker, fact))
         .collect::<Result<Vec<_>, _>>()?;
+    for input in &inputs {
+        facts.check(input).map_err(facts_failed)?;
+    }
     let (clean, findings) = redact(text, Policy::Redact).map_err(|_| {
         "nothing was written: this note held something redaction refused to handle".to_owned()
     })?;

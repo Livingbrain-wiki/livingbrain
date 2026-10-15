@@ -308,3 +308,19 @@ fn search_and_the_page_view_carry_the_timeline() {
     );
     assert!(markdown.contains("### History"), "{markdown}");
 }
+
+#[test]
+fn a_note_with_a_malformed_fact_is_refused_whole() {
+    let fixture = fixture();
+    let refused = post(
+        &fixture,
+        TOKEN_A,
+        "/v1/notes",
+        json!({ "body": "a note that must not land",
+                "facts": [{ "subject": "me", "attribute": "a", "value": "b",
+                            "valid_from": "someday" }] }),
+    );
+    assert_eq!(u16::from(refused.status), 422, "{}", refused.json());
+    let searched = get(&fixture, TOKEN_A, "/v1/search?q=must%20not%20land").json();
+    assert_eq!(searched["results"], json!([]), "the note was not written");
+}

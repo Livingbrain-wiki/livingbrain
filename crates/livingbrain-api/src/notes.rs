@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::Wiki;
 use crate::facts::{FactRequest, inputs, record_all};
-use crate::problems::{page_read_error, page_write_error, redaction_refused};
+use crate::problems::{fact_error, page_read_error, page_write_error, redaction_refused};
 use crate::recipes::{note_slug, one_line, wiki_url};
 use crate::service::Service;
 
@@ -167,7 +167,8 @@ async fn note(
     } else {
         title
     };
-    // The facts are checked before anything is written, so a malformed one
+    // The facts are checked against the format before anything is written
+    // (below, once the note's reference is known), so a malformed one
     // refuses the whole note rather than leaving half of it stored.
     let facts = match request.facts {
         Some(facts) if !facts.is_empty() => Some(facts),
@@ -192,6 +193,12 @@ async fn note(
         Some(facts) => inputs(&asker, facts, Some(&format!("note:{reference}")))?,
         None => Vec::new(),
     };
+    if !fact_inputs.is_empty() {
+        let checker = state.facts_store()?;
+        for input in &fact_inputs {
+            checker.check(input).map_err(fact_error)?;
+        }
+    }
     // A keyed note that already says exactly this is left alone: re-sending
     // the same session is how a sync proves it has nothing new.
     if keyed.is_some()
