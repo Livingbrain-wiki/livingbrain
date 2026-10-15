@@ -1314,6 +1314,71 @@ fn a_wired_classifier_is_asked_once_per_session_and_can_raise_the_rule() {
     );
 }
 
+/// Each workspace's own classifier: off for some, Jev for others, and
+/// which workspaces were asked about.
+struct PerWorkspace {
+    on: Option<Arc<dyn cratefield_core::Classifier>>,
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl livingbrain_compiler::Classifiers for PerWorkspace {
+    async fn for_workspace(&self, workspace: &str) -> Option<Arc<dyn cratefield_core::Classifier>> {
+        self.asked.lock().expect("asked").push(workspace.to_owned());
+        self.on.clone()
+    }
+}
+
+#[test]
+fn a_workspace_with_jev_off_compiles_on_the_rule_alone() {
+    let world = world();
+    let source = world.sync_record("u1", "lookup-1", support::sessions::no_changes());
+    let model = writes_decisions();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let compiler = world
+        .compiler(&model)
+        .with_classifiers(Some(Arc::new(PerWorkspace {
+            on: None,
+            asked: Arc::clone(&asked),
+        })));
+    let processed = world.drain(&compiler);
+    // The free rule decided it (no changes → the summary only).
+    assert_eq!(processed[0].status, JobStatus::SummaryOnly, "{processed:?}");
+    // The workspace was asked about, said "off", and no classifier ran.
+    assert_eq!(asked.lock().expect("asked").len(), 1);
+    let reason = job_of(&world, &source).triage_reason.unwrap_or_default();
+    assert!(!reason.starts_with("jev:"), "{reason}");
+}
+
+#[test]
+fn a_workspace_with_jev_on_is_asked_through_its_own_classifier() {
+    let world = world();
+    let source = world.sync_record("u1", "lookup-1", support::sessions::no_changes());
+    let model = writes_decisions();
+    let calls = Arc::new(Mutex::new(0));
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let compiler = world
+        .compiler(&model)
+        .with_classifiers(Some(Arc::new(PerWorkspace {
+            on: Some(Arc::new(Jev {
+                pick: "full",
+                confidence: 0.55,
+                calls: Arc::clone(&calls),
+            })),
+            asked: Arc::clone(&asked),
+        })));
+    let processed = world.drain(&compiler);
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    assert_eq!(*calls.lock().expect("calls"), 1);
+    assert_eq!(
+        job_of(&world, &source).triage_reason.as_deref(),
+        Some("jev:full")
+    );
+    let asked = asked.lock().expect("asked").clone();
+    assert_eq!(asked.len(), 1);
+    assert!(!asked[0].is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Parallel compiles
 

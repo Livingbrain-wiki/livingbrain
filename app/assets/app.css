@@ -2500,6 +2500,10 @@ main > p.tiny:last-child {
   -webkit-mask-image: url(logos/custom.svg);
   mask-image: url(logos/custom.svg);
 }
+[data-logo="jev"] {
+  -webkit-mask-image: url(logos/jev.svg);
+  mask-image: url(logos/jev.svg);
+}
 
 .mcard__name {
   margin-top: auto;
@@ -2557,6 +2561,11 @@ main > p.tiny:last-child {
 
 .mcard__badge[data-badge="2"] {
   border-color: var(--warn);
+}
+
+/* "Optional": the Jev card, which no job needs. */
+.mcard__badge[data-badge="3"] {
+  border-style: dashed;
 }
 
 /* On a phone the cards are small: one line of description, smaller badges. */
@@ -2662,6 +2671,29 @@ main > p.tiny:last-child {
 
 .sheet__runner .hint {
   margin: 0;
+}
+
+/* Jev's sheet: its state line, and the privacy note set apart. */
+.jev__state {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.jev__privacy {
+  padding: 10px 12px;
+  border-inline-start: 3px solid var(--line);
+  background: var(--bg3);
+  border-radius: 6px;
+}
+
+.sheet__jev .field {
+  display: grid;
+  gap: 6px;
+}
+
+.sheet__jev .field .btn-sm {
+  justify-self: start;
 }
 
 /* The Z.AI Coding Plan switch: with it on, the key form steps aside. */

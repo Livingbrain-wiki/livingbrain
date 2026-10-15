@@ -138,5 +138,9 @@
   "usage/0004": {
     "file": "0035_usage_0004_concurrency.sql",
     "sha256": "cbc6032312f803183c645f459ecf510d13a2c0dcae88bd5a76f61c2ab35befa3"
+  },
+  "models/0004": {
+    "file": "0036_models_0004_jev.sql",
+    "sha256": "dd9ff4975145a6f0c7140b57def634e33bba7e5fb41b1980e1ed78d0ae8e06bf"
   }
 }

@@ -431,7 +431,7 @@ export function renderModelSlots(
 export const CARDS = Object.freeze(cardFile.cards.map((card) => Object.freeze(card)));
 
 /** The badge every card can wear, in the order a card lists them. */
-export const BADGES = Object.freeze(["API key", "Subscription (runs on your Mac)", "Coding plan"]);
+export const BADGES = Object.freeze(["API key", "Subscription (runs on your Mac)", "Coding plan", "Optional"]);
 
 /** One card by id, or undefined. */
 export function cardInfo(id) {
@@ -440,7 +440,7 @@ export function cardInfo(id) {
 
 /** The API-key card for a catalog provider, or undefined. */
 export function cardForProvider(providerId) {
-  return CARDS.find((card) => card.kind !== "runner" && card.provider === providerId);
+  return CARDS.find((card) => card.kind !== "runner" && card.kind !== "classifier" && card.provider === providerId);
 }
 
 /** The card a stored connection shows on: its provider's, else Custom. */
@@ -526,11 +526,14 @@ export function modelOptions(card, listed, providerId, current) {
  * slots use it — the workspace's connections (`rows`, `GET /v1/models`) and
  * the member's own device runners (`mine`, `GET /v1/models/mine`). A
  * connection to a catalog provider without a card of its own shows on Custom.
+ * The Jev card is no job slot's: its state is `jev` (`GET /v1/models/jev`),
+ * and with none (not loaded yet, or an older server) it shows no state.
  */
-export function cardViews(rows, mine) {
+export function cardViews(rows, mine, jev) {
   const list = Array.isArray(rows) ? rows : [];
   const runners = Array.isArray(mine) ? mine : [];
   return CARDS.map((card) => {
+    if (card.kind === "classifier") return jevCardView(card, jev);
     const slots = [];
     for (const role of ROLES) {
       const runner = runners.find((r) => r && r.role === role.id);
@@ -591,7 +594,11 @@ export function renderModelCards(
     logo.setAttribute("data-logo", view.logo);
     logo.setAttribute("aria-hidden", "true");
     top.appendChild(logo);
-    if (view.connected) {
+    if (view.pill) {
+      const state = el("span", "pill", view.pill.label);
+      state.setAttribute("data-state", view.pill.state);
+      top.appendChild(state);
+    } else if (view.connected) {
       const state = el("span", "pill", view.slots.map((slot) => slot.label).join(" · "));
       state.setAttribute("data-state", "live");
       top.appendChild(state);
@@ -718,4 +725,128 @@ export function runnerValue(card, model, { codingPlan = false } = {}) {
 /** The command that runs a runner headless, for the sheet's hint. */
 export function runnerCommand(agent) {
   return `livingbrain jobs run --agent ${agent === "codex" ? "codex" : "claude"}`;
+}
+
+/* --- Jev, the optional triage classifier ------------------------------- */
+
+/** The Jev card from the card file. */
+export const JEV_CARD = CARDS.find((card) => card.kind === "classifier");
+
+/** What Jev receives and returns, said in the sheet. */
+export const JEV_PRIVACY =
+  "Jev receives a redacted session digest (at most 24,000 characters) on TypeSafe's US servers. " +
+  "What comes back is a classification only.";
+
+/**
+ * Jev's state as the page shows it, from `GET /v1/models/jev`: `off`,
+ * `deployment` (on, on this deployment's key) or `workspace` (on, on the
+ * workspace's own key), with the pill, the one-line explanation and the
+ * masked key. Named fields only: the API never returns the key itself.
+ */
+export function jevView(status) {
+  const s = status && typeof status === "object" ? status : {};
+  const source = ["deployment", "workspace"].includes(s.source) ? s.source : "off";
+  const enabled = s.enabled !== false;
+  const model = String(s.model || s.default_model || (JEV_CARD && JEV_CARD.models[0].id) || "");
+  const key = s.workspace_key ? maskedKey(s.workspace_key) : "";
+  let label;
+  let line;
+  if (source === "workspace") {
+    label = "On · workspace key";
+    line = `On — your workspace's TypeSafe key ${key}, model ${model}.`;
+  } else if (source === "deployment") {
+    label = "On · deployment key";
+    line = `On — this deployment's TypeSafe key, model ${model}. Add your own key to use it instead.`;
+  } else if (!enabled) {
+    label = "Off";
+    line = "Off — switched off for this workspace. The free triage rules still run.";
+  } else if (s.available === false) {
+    label = "Off";
+    line = "Off — this server cannot call TypeSafe.";
+  } else {
+    label = "Off";
+    line = "Off — no TypeSafe key here. Add one to turn Jev on; the free triage rules run meanwhile.";
+  }
+  return {
+    source,
+    on: source !== "off",
+    enabled,
+    model,
+    defaultModel: String(s.default_model || model),
+    customModel: Boolean(s.custom_model),
+    key,
+    hasKey: Boolean(s.workspace_key),
+    deploymentKey: Boolean(s.deployment_key),
+    available: s.available !== false,
+    pill: { state: source === "off" ? "off" : "live", label },
+    line,
+  };
+}
+
+/** The Jev card in the grid: its pill is its state, when the state is known. */
+function jevCardView(card, jev) {
+  const known = jev && typeof jev === "object";
+  const view = known ? jevView(jev) : null;
+  return {
+    id: card.id,
+    kind: card.kind,
+    name: card.name,
+    description: card.description,
+    badges: [...(card.badges || [])],
+    logo: String(card.logo || "").replace(/^.*\//, "").replace(/\.svg$/, ""),
+    slots: [],
+    connected: Boolean(view && view.on),
+    pill: view ? view.pill : null,
+    usage: view ? view.line : "",
+  };
+}
+
+/** A Jev model id: what the server accepts (letters, digits, - _ .). */
+const JEV_MODEL = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * Checks the Jev form and answers `{ok, errors, value}`: `value` is the
+ * `PUT /v1/models/jev` body with only what changed against `status` — the
+ * switch, a key when one was typed (never otherwise), the model (`""` is the
+ * default again).
+ */
+export function jevChange(form, status) {
+  const f = form || {};
+  const now = jevView(status);
+  const errors = {};
+  const value = {};
+  if (typeof f.enabled === "boolean" && f.enabled !== now.enabled) value.enabled = f.enabled;
+  const key = String(f.apiKey || "").trim();
+  if (key) {
+    if (key.length > 512 || /\s/.test(key)) errors.apiKey = "Paste the TypeSafe API key as it was given.";
+    else value.api_key = key;
+  }
+  const model = String(f.model == null ? "" : f.model).trim();
+  if (model && !JEV_MODEL.test(model)) {
+    errors.model = "A TypeSafe model id: letters, digits, '-', '_' or '.'.";
+  } else {
+    const chosen = model === now.defaultModel ? "" : model;
+    const current = now.customModel ? now.model : "";
+    if (chosen !== current) value.model = chosen;
+  }
+  const ok = Object.keys(errors).length === 0;
+  return { ok, errors, value: ok ? value : null };
+}
+
+/** The body of a Jev Test: a key or model typed but not saved yet is tried. */
+export function jevTestBody(form, status) {
+  const f = form || {};
+  const body = {};
+  const key = String(f.apiKey || "").trim();
+  if (key) body.api_key = key;
+  const model = String(f.model || "").trim();
+  if (model && JEV_MODEL.test(model) && model !== jevView(status).model) body.model = model;
+  return body;
+}
+
+/** What a Test's answer says, in a toast. */
+export function jevTestMessage(answer) {
+  const a = answer || {};
+  const where = a.source === "workspace" ? "your key" : "the deployment's key";
+  return `Jev answered on ${where} (${a.model || "its model"}).`;
 }

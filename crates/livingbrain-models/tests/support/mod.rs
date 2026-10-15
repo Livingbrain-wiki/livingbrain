@@ -33,6 +33,12 @@ pub const KEY: &str = "sk-live-SUPERSECRET1234";
 /// A harness with `workspaces` (which owns the session) and `models`
 /// mounted, talking to `http`.
 pub fn harness(http: &FakeHttp) -> TestHarness {
+    harness_with(http, Models::new())
+}
+
+/// [`harness`], with the models module built as the caller says (Jev's
+/// connector wired, say).
+pub fn harness_with(http: &FakeHttp, models: Models) -> TestHarness {
     let config = Arc::new(MapConfig::from_pairs([(
         "MODEL_KEYS_SECRET",
         "a-test-encryption-secret-of-32-bytes",
@@ -40,7 +46,7 @@ pub fn harness(http: &FakeHttp) -> TestHarness {
     let http = http.clone();
     let clock = FixedClock(OffsetDateTime::from_unix_timestamp(NOW).expect("a valid instant"));
     TestHarness::with_ports(
-        vec![Box::new(Workspaces::new()), Box::new(Models::new())],
+        vec![Box::new(Workspaces::new()), Box::new(models)],
         move |ports| {
             ports.config = config;
             ports.http = Some(Arc::new(http));
@@ -51,7 +57,12 @@ pub fn harness(http: &FakeHttp) -> TestHarness {
 
 /// A harness whose seed rows and session cookie already exist.
 pub async fn signed_in(http: &FakeHttp) -> (TestHarness, String) {
-    let kit = harness(http);
+    signed_in_with(http, Models::new()).await
+}
+
+/// [`signed_in`], over [`harness_with`].
+pub async fn signed_in_with(http: &FakeHttp, models: Models) -> (TestHarness, String) {
+    let kit = harness_with(http, models);
     seed_workspace(&kit, WORKSPACE, OWNER).await;
     seed_member(&kit, WORKSPACE, OWNER, true).await;
     seed_member(&kit, WORKSPACE, PLAIN, false).await;

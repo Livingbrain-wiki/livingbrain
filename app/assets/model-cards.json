@@ -10,7 +10,10 @@
     "Model ids, context windows and prices were checked against each provider's own docs on 2026-10-15",
     "(`models_source`); a price is per million input / output tokens, and omitted where the docs gave none.",
     "Logos are self-hosted under assets/logos/ and drawn in currentColor; `logo_source` names each one.",
-    "`stream` (optional, default true): `false` sends this provider's model calls unstreamed (no `\"stream\": true`)."
+    "`stream` (optional, default true): `false` sends this provider's model calls unstreamed (no `\"stream\": true`).",
+    "`classifier` (the Jev card) is not a model for a job slot: it is the coding-agents compiler's optional triage",
+    "classifier, TypeSafe's Jev. Its state is GET /v1/models/jev; `detail` is the sheet's full sentence; the model is the",
+    "one cratefield-adapter-typesafe pins (`DEFAULT_MODEL`)."
   ],
   "cards": [
     {
@@ -219,6 +222,18 @@
       "logo_source": "Living Brain's own glyph",
       "listing": "native",
       "models": []
+    },
+    {
+      "id": "jev",
+      "kind": "classifier",
+      "name": "Jev (TypeSafe)",
+      "description": "Optional · triage classifier that saves tokens on trivial sessions",
+      "detail": "Optional · triage classifier — saves tokens by skipping/condensing trivial sessions before the main model compiles them.",
+      "badges": ["Optional"],
+      "logo": "assets/logos/jev.svg",
+      "logo_source": "Living Brain's own neutral monogram: TypeSafe publishes no vector mark (typesafe.ai serves only a PNG favicon), so none is copied",
+      "models_source": "https://docs.typesafe.ai/api.md",
+      "models": [{ "id": "jev-1.13.0", "label": "Jev 1.13.0 (pinned default)" }]
     }
   ]
 }

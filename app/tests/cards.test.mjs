@@ -28,6 +28,12 @@ import {
   runnerValue,
   runnerCommand,
   slotView,
+  JEV_CARD,
+  JEV_PRIVACY,
+  jevView,
+  jevChange,
+  jevTestBody,
+  jevTestMessage,
 } from "../assets/models.js";
 import { settingRequest } from "../assets/settings.js";
 
@@ -61,6 +67,7 @@ test("the card file is the one the server compiles in, and every card is complet
       "kimi",
       "qwen",
       "custom",
+      "jev",
     ],
   );
   for (const card of cardFile.cards) {
@@ -78,6 +85,12 @@ test("the card file is the one the server compiles in, and every card is complet
       assert.ok(providerInfo(card.provider), `${card.provider} is a catalog provider`);
       assert.ok(["anthropic", "openai"].includes(card.protocol), card.id);
       assert.ok(card.models.length, `${card.id} has curated models`);
+    }
+    if (card.kind === "classifier") {
+      assert.equal(card.provider, undefined, "Jev is no job slot's provider");
+      assert.deepEqual(card.badges, ["Optional"]);
+      assert.match(card.description, /^Optional · triage classifier/);
+      assert.match(card.detail, /saves tokens by skipping\/condensing trivial sessions before the main model compiles them/);
     }
     if (card.kind === "runner") {
       assert.ok(["claude", "codex"].includes(card.runner.agent));
@@ -249,6 +262,106 @@ test("a runner slot reads as yours, and last-seen reads as words", () => {
 test("a provider with no model list never surfaces as a bare HTTP status", () => {
   assert.doesNotMatch(APP, /Could not list models/);
   assert.match(APP, /This provider doesn't publish a model list; showing known models\./);
+});
+
+/* --- Jev ------------------------------------------------------------- */
+
+const JEV_DEPLOYMENT = {
+  enabled: true,
+  source: "deployment",
+  deployment_key: true,
+  workspace_key: null,
+  model: "jev-1.13.0",
+  default_model: "jev-1.13.0",
+  custom_model: false,
+  available: true,
+};
+
+test("the Jev card pins the adapter's model and is the last, optional card", () => {
+  assert.equal(JEV_CARD.id, "jev");
+  assert.equal(CARDS[CARDS.length - 1], JEV_CARD);
+  const ADAPTER = readFileSync(
+    new URL("../../crates/livingbrain-venture/src/lib.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(ADAPTER, /cratefield_adapter_typesafe::DEFAULT_MODEL/);
+  assert.equal(JEV_CARD.models[0].id, "jev-1.13.0");
+  assert.match(JEV_PRIVACY, /redacted session digest/);
+  assert.match(JEV_PRIVACY, /24,000 characters/);
+  assert.match(JEV_PRIVACY, /US servers/);
+  assert.match(JEV_PRIVACY, /classification only/);
+});
+
+test("Jev's three states: off, on the deployment's key, on the workspace's key", () => {
+  const deployment = jevView(JEV_DEPLOYMENT);
+  assert.equal(deployment.source, "deployment");
+  assert.deepEqual(deployment.pill, { state: "live", label: "On · deployment key" });
+  const workspace = jevView({ ...JEV_DEPLOYMENT, source: "workspace", workspace_key: "…9876" });
+  assert.deepEqual(workspace.pill, { state: "live", label: "On · workspace key" });
+  assert.equal(workspace.key, "••••9876");
+  assert.match(workspace.line, /••••9876/);
+  const off = jevView({ ...JEV_DEPLOYMENT, enabled: false, source: "off" });
+  assert.deepEqual(off.pill, { state: "off", label: "Off" });
+  assert.match(off.line, /switched off.*free triage rules still run/);
+  const nokey = jevView({ ...JEV_DEPLOYMENT, source: "off", deployment_key: false });
+  assert.match(nokey.line, /no TypeSafe key/);
+  // Unknown state (an older server): the card shows no pill at all.
+  const texts = [];
+  const doc = fakeDocument(texts);
+  renderModelCards(container(), cardViews([], [], null), doc);
+  assert.ok(!doc.made.some((el) => el.className === "pill"));
+  // Known: the Jev card wears its state, and only it.
+  const known = [];
+  const doc2 = fakeDocument(known);
+  renderModelCards(container(), cardViews([], [], { ...JEV_DEPLOYMENT, source: "workspace", workspace_key: "…9876" }), doc2);
+  const pills = doc2.made.filter((el) => el.className === "pill");
+  assert.deepEqual(pills.map((p) => [p.textContent, p.attrs["data-state"]]), [["On · workspace key", "live"]]);
+  const jevButton = doc2.made.find((el) => el.attrs["data-card"] === "jev");
+  assert.ok(jevButton.className.includes("mcard--on"));
+  assert.ok(known.includes("Optional"));
+  // A key is never in the grid, only its last four.
+  assert.ok(!known.some((t) => /WORKSPACESECRET/.test(t)));
+});
+
+test("Jev's save sends only what changed, and a key only when one was typed", () => {
+  assert.deepEqual(jevChange({ enabled: true, apiKey: "", model: "jev-1.13.0" }, JEV_DEPLOYMENT).value, {});
+  assert.deepEqual(jevChange({ enabled: false, apiKey: "", model: "jev-1.13.0" }, JEV_DEPLOYMENT).value, { enabled: false });
+  assert.deepEqual(
+    jevChange({ enabled: true, apiKey: "  ts-key-1234 ", model: "jev-2.0.0" }, JEV_DEPLOYMENT).value,
+    { api_key: "ts-key-1234", model: "jev-2.0.0" },
+  );
+  // Back to the default model from a custom one.
+  assert.deepEqual(
+    jevChange({ enabled: true, model: "jev-1.13.0" }, { ...JEV_DEPLOYMENT, model: "jev-2.0.0", custom_model: true }).value,
+    { model: "" },
+  );
+  const bad = jevChange({ enabled: true, apiKey: "two words", model: "jev 1; drop" }, JEV_DEPLOYMENT);
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.apiKey && bad.errors.model);
+
+  const put = settingRequest("jev", "settings", { enabled: false });
+  assert.equal(put.method, "PUT");
+  assert.equal(put.path, "/v1/models/jev");
+  assert.equal(put.body.enabled, false);
+  const remove = settingRequest("jev", "key", null);
+  assert.equal(remove.method, "DELETE");
+  assert.equal(remove.path, "/v1/models/jev/key");
+  const probe = settingRequest("jev-test", "test", jevTestBody({ apiKey: "ts-x", model: "jev-1.13.0" }, JEV_DEPLOYMENT));
+  assert.equal(probe.method, "POST");
+  assert.equal(probe.path, "/v1/models/jev/test");
+  assert.equal(probe.body.api_key, "ts-x");
+  assert.equal(probe.body.model, undefined, "the saved model is not resent");
+  assert.equal(jevTestMessage({ source: "workspace", model: "jev-1.13.0" }), "Jev answered on your key (jev-1.13.0).");
+});
+
+test("the Jev sheet is on the page, with the savers link and the privacy note", () => {
+  for (const id of ["sheet-jev", "jev-enabled", "jev-key", "jev-model", "jev-save", "jev-test", "jev-remove-key", "jev-privacy"]) {
+    assert.match(HTML, new RegExp(`id="${id}"`), id);
+  }
+  assert.match(HTML, /<input id="jev-key" type="password"/);
+  assert.match(HTML, /href="#limits" id="jev-savers"/);
+  assert.match(APP, /setSetting\("jev", "settings"/);
+  assert.match(APP, /setSetting\("jev-test", "test"/);
 });
 
 /* --- a recording document -------------------------------------------- */

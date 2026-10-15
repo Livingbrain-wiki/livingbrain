@@ -138,10 +138,12 @@ pub struct Wiki {
     pub auth: Arc<dyn BearerAuth>,
     /// Resolves the web app's session cookie, when one is wired.
     pub session: Option<Arc<dyn SessionAuth>>,
-    /// The coding-agents compiler's triage classifier (Jev, TypeSafe's
-    /// System One), when the deployment has a key for one. Only the
-    /// compiler asks it; nothing else here does.
-    pub classifier: Option<Arc<dyn cratefield_core::Classifier>>,
+    /// How the coding-agents compiler's triage classifier (Jev, TypeSafe's
+    /// System One) is built, when the venture wires TypeSafe. Which key a
+    /// workspace's compiles run on — its own, the deployment's, or none —
+    /// is decided per workspace by `livingbrain_models::jev::effective`.
+    /// Only the compiler asks it; nothing else here does.
+    pub jev: Option<Arc<dyn livingbrain_models::jev::JevConnector>>,
 }
 
 impl Wiki {
@@ -154,7 +156,7 @@ impl Wiki {
             kms,
             auth,
             session: None,
-            classifier: None,
+            jev: None,
         }
     }
 
@@ -166,13 +168,28 @@ impl Wiki {
         self
     }
 
-    /// The same `Wiki`, with the compiler's triage classifier (or none).
+    /// The same `Wiki`, with one fixed triage classifier standing in for
+    /// the deployment's key (or none). A workspace's own switch still turns
+    /// it off.
     #[must_use]
     pub fn with_classifier(
         mut self,
         classifier: Option<Arc<dyn cratefield_core::Classifier>>,
     ) -> Self {
-        self.classifier = classifier;
+        self.jev = classifier.map(|classifier| {
+            Arc::new(livingbrain_models::jev::FixedJev::new(classifier, "fixed"))
+                as Arc<dyn livingbrain_models::jev::JevConnector>
+        });
+        self
+    }
+
+    /// The same `Wiki`, building Jev through `connector` (or not at all).
+    #[must_use]
+    pub fn with_jev(
+        mut self,
+        connector: Option<Arc<dyn livingbrain_models::jev::JevConnector>>,
+    ) -> Self {
+        self.jev = connector;
         self
     }
 }

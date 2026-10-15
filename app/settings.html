@@ -848,6 +848,45 @@
             <button type="button" data-variant="primary" id="runner-save">Run this job on my device</button>
           </div>
         </section>
+
+        <section id="sheet-jev" class="sheet__runner sheet__jev" aria-labelledby="jev-title" hidden>
+          <h3 id="jev-title">Triage classifier</h3>
+          <p id="jev-state" class="jev__state" role="status"></p>
+          <label class="check">
+            <input type="checkbox" id="jev-enabled" aria-describedby="jev-enabled-hint" />
+            <span>Use Jev for this workspace</span>
+          </label>
+          <p class="hint" id="jev-enabled-hint">
+            Off means no session is sent to TypeSafe, even when this deployment has a key. The
+            free triage rules still run.
+          </p>
+          <div class="field">
+            <label for="jev-key">Workspace TypeSafe API key</label>
+            <input id="jev-key" type="password" autocomplete="off" spellcheck="false"
+              placeholder="Leave empty to keep the current key" aria-describedby="jev-key-hint err-jev-key" />
+            <p class="hint" id="jev-key-hint"></p>
+            <p class="field-error" id="err-jev-key"></p>
+            <button type="button" class="btn-sm" id="jev-remove-key" hidden>Remove the workspace key</button>
+          </div>
+          <div class="field">
+            <label for="jev-model">Model</label>
+            <input id="jev-model" type="text" autocomplete="off" spellcheck="false"
+              aria-describedby="jev-model-hint err-jev-model" />
+            <p class="hint" id="jev-model-hint"></p>
+            <p class="field-error" id="err-jev-model"></p>
+          </div>
+          <p class="hint jev__privacy" id="jev-privacy"></p>
+          <p class="hint">
+            Jev works with the token savers under
+            <a href="#limits" id="jev-savers">Usage &amp; limits → Token savers</a>
+            (triage, compaction and strictness).
+          </p>
+          <div class="form-actions">
+            <button type="button" data-variant="primary" id="jev-save">Save</button>
+            <button type="button" id="jev-test">Test</button>
+          </div>
+          <p class="hint">Only workspace owners and admins can change or test Jev.</p>
+        </section>
       </dialog>
       <dialog id="confirm" class="dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
         <form method="dialog">
