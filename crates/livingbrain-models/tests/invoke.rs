@@ -78,13 +78,13 @@ fn a_job_runs_on_the_connected_model_with_its_key() {
         .await;
         assert_eq!(connected.status.as_u16(), 200, "{}", connected.text());
         let before = http.sent().len();
-        // The connect probe asks for its own minute, past the port's 30 s
-        // ceiling, on every request it sent to the model host.
+        // The connect probe asks for the port's whole 30 s ceiling on every
+        // request it sent to the model host.
         assert!(before > 0);
         for probe in &http.sent()[..before] {
             assert_eq!(
                 probe.deadline,
-                Some(Duration::from_secs(60)),
+                Some(Duration::from_secs(30)),
                 "{}",
                 probe.uri
             );
@@ -115,7 +115,8 @@ fn a_job_runs_on_the_connected_model_with_its_key() {
         );
         assert!(call.body.contains("You compile wiki pages."));
         assert!(call.body.contains("json_object"));
-        // The caller's timeout travels as the call's own deadline.
+        // The caller's timeout travels as the streamed call's whole-body
+        // deadline.
         assert_eq!(call.deadline, Some(Duration::from_secs(5)));
         let serving = invoke::serving(&*kit.db, WORKSPACE, "triage")
             .await
@@ -347,37 +348,43 @@ fn an_error_mid_stream_is_a_status_without_the_key() {
     });
 }
 
-/// Where the venture wired the streaming seam, a model call goes through
-/// it: asked as a stream, signed with the key, its events read chunk by
-/// chunk (here seven bytes at a time) into the same reply.
+/// A model call goes through the port's streaming send under the port's
+/// own bounds: asked as a stream, signed with the key, its events read
+/// chunk by chunk (here seven bytes at a time) into the same reply, the
+/// body under the idle gap and the call's own deadline.
 #[test]
-fn the_streaming_seam_carries_the_call_chunk_by_chunk() {
+fn a_model_call_streams_through_the_port_chunk_by_chunk() {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use cratefield_core::axum::http;
-    use cratefield_core::{HttpClient, HttpError};
-    use livingbrain_models::deadline::ModelDeadlineHttpClient;
-    use livingbrain_models::stream::{ChunkStream, StreamHead, StreamingHttp};
+    use cratefield_core::{BoundedHttpClient, ByteStream, HttpClient, HttpError, StreamPolicy};
+    use livingbrain_models::stream::IDLE_GAP;
 
-    struct Chunks(Vec<Bytes>);
+    /// One streamed send: its URI, its key header, its body, its policy.
+    type Seen = (String, Option<String>, String, StreamPolicy);
 
-    #[async_trait]
-    impl ChunkStream for Chunks {
-        async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>> {
-            (!self.0.is_empty()).then(|| Ok(self.0.remove(0)))
-        }
-    }
-
-    #[derive(Default)]
+    /// Everything but the completion goes to the scripted fake; the
+    /// completion is streamed here, seven bytes a chunk.
     struct Streaming {
-        seen: Mutex<Vec<(String, Option<String>, String)>>,
+        fake: FakeHttp,
+        seen: Mutex<Vec<Seen>>,
     }
 
     #[async_trait]
-    impl StreamingHttp for Streaming {
-        async fn open(&self, request: http::Request<Bytes>) -> Result<StreamHead, HttpError> {
+    impl HttpClient for Streaming {
+        async fn send(
+            &self,
+            request: http::Request<Bytes>,
+        ) -> Result<http::Response<Bytes>, HttpError> {
+            self.fake.send(request).await
+        }
+
+        async fn send_streaming(
+            &self,
+            request: http::Request<Bytes>,
+        ) -> Result<http::Response<ByteStream>, HttpError> {
             self.seen.lock().expect("lock").push((
                 request.uri().to_string(),
                 request
@@ -387,33 +394,34 @@ fn the_streaming_seam_carries_the_call_chunk_by_chunk() {
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned),
                 String::from_utf8_lossy(request.body()).into_owned(),
+                StreamPolicy::of_request(&request),
             ));
             let events = glm_stream("{\"pages\":[\"é\"]}", "end_turn").into_bytes();
-            let mut headers = http::HeaderMap::new();
-            headers.insert(
-                http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("text/event-stream"),
-            );
-            Ok(StreamHead {
-                status: http::StatusCode::OK,
-                headers,
-                body: Box::new(Chunks(
-                    events.chunks(7).map(Bytes::copy_from_slice).collect(),
-                )),
-            })
+            let chunks: Vec<Result<Bytes, HttpError>> = events
+                .chunks(7)
+                .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+                .collect();
+            let body: ByteStream = Box::pin(futures_util::stream::iter(chunks));
+            Ok(http::Response::builder()
+                .status(200)
+                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                .body(body)
+                .expect("response"))
         }
     }
 
     pollster::block_on(async {
         let fake = FakeHttp::new();
         let (kit, before) = glm(&fake).await;
-        let streaming = Arc::new(Streaming::default());
+        let streaming = Arc::new(Streaming {
+            fake: fake.clone(),
+            seen: Mutex::default(),
+        });
         let clock = clock();
-        let client = ModelDeadlineHttpClient::new(
-            Arc::new(fake.clone()) as Arc<dyn HttpClient>,
+        let client = BoundedHttpClient::new(
+            Arc::clone(&streaming) as Arc<dyn HttpClient>,
             Arc::new(clock.clone()) as Arc<dyn Clock>,
-        )
-        .with_streaming(Arc::clone(&streaming) as Arc<dyn StreamingHttp>);
+        );
         let reply = invoke::chat(
             &*kit.db,
             &client,
@@ -427,7 +435,7 @@ fn the_streaming_seam_carries_the_call_chunk_by_chunk() {
         .expect("answers");
         assert_eq!(reply.text, "{\"pages\":[\"é\"]}");
         assert_eq!((reply.prompt_tokens, reply.completion_tokens), (120, 30));
-        // The completion went through the seam, not the buffered client.
+        // The completion went through the streaming send, not the buffered one.
         assert!(
             fake.sent()[before..]
                 .iter()
@@ -435,9 +443,11 @@ fn the_streaming_seam_carries_the_call_chunk_by_chunk() {
         );
         let seen = streaming.seen.lock().expect("lock").clone();
         assert_eq!(seen.len(), 1);
-        let (uri, key, body) = &seen[0];
+        let (uri, key, body, policy) = &seen[0];
         assert!(uri.ends_with("/v1/messages"), "{uri}");
         assert!(key.as_deref().is_some_and(|k| k.ends_with(KEY)), "signed");
         assert!(body.contains("\"stream\":true"), "{body}");
+        assert_eq!(policy.idle_timeout, IDLE_GAP);
+        assert_eq!(policy.total_timeout, request().timeout);
     });
 }

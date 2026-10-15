@@ -24,9 +24,10 @@ workspace = true
 # arrive through `cratefield_core::axum`, so neither is named directly.
 cratefield-core = { workspace = true }
 
-# `deadline::ModelDeadlineHttpClient` implements the `HttpClient` port, whose
-# trait is declared with `#[async_trait]`. Already in the graph through core.
-async-trait = { workspace = true }
+# `StreamExt::next` over the `HttpClient` port's streamed body
+# (`HttpClient::send_streaming`, `src/stream.rs`). Pure Rust, wasm-safe, and
+# already in the graph through core.
+futures-util = { workspace = true }
 # The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
 bytes = { workspace = true }
 # Percent-encoding for the DoH query string. Pure Rust, wasm-safe, and the
@@ -66,6 +67,9 @@ livingbrain-usage = { path = "../livingbrain-usage" }
 livingbrain-redact = { path = "../livingbrain-redact" }
 
 [dev-dependencies]
+# The test doubles implement the `HttpClient` port, whose trait is declared
+# with `#[async_trait]`. Already in the graph through core.
+async-trait = { workspace = true }
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
 # (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
 # sqlx and tokio never reach the module's wasm graph.

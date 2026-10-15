@@ -26,11 +26,11 @@
 //! - **Streaming.** A call asks for `"stream": true` unless the provider's
 //!   card says it cannot ([`crate::curated::streams`]), so a thinking model
 //!   sends bytes the whole time it reasons and no front cuts it as idle
-//!   (Z.AI's 524 at 100 s). Where the venture wired the streaming seam the
-//!   events are read as they arrive ([`crate::stream`]); otherwise a
-//!   buffered `text/event-stream` body is read here the same way
-//!   ([`crate::sse`]), and a provider that ignored the flag answers JSON,
-//!   which is read as before.
+//!   (Z.AI's 524 at 100 s). The call goes out through the port's streaming
+//!   send and its events are read as they arrive ([`crate::stream`]), the
+//!   whole body under the call's own [`ChatRequest::timeout`]; a provider
+//!   that ignored the flag answers JSON, which is read as before. An
+//!   unstreamed call is held to the port's buffered ceiling (30 s).
 //!
 //! The text that goes out is the caller's. This module does not redact it:
 //! the caller knows what the text is and is the one that must have redacted
@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cratefield_core::axum::http;
-use cratefield_core::{Clock, Config, Database, HttpClient};
+use cratefield_core::{Clock, Config, Database, HttpClient, HttpPolicy};
 use serde_json::{Value, json};
 
 use crate::catalog::{self, Auth, Wire};
@@ -76,7 +76,9 @@ pub struct ChatRequest<'a> {
     /// it (`response_format` on the OpenAI wire). The Anthropic wire has
     /// none; the prompt has to ask.
     pub json: bool,
-    /// How long one call may take.
+    /// How long one call may take: a streamed call's whole body, capped at
+    /// [`crate::stream::MAX_STREAM_DEADLINE`]; an unstreamed call's
+    /// exchange, clamped by the port to 30 s.
     pub timeout: Duration,
 }
 
@@ -331,6 +333,11 @@ fn transport(error: &cratefield_core::HttpError, key: &str) -> InvokeError {
         HttpError::ResponseTooLarge { limit } => format!("response over {limit} bytes"),
         HttpError::BlockedDestination(_) => return InvokeError::Refused,
         HttpError::Transport(message) => format!("transport: {message}"),
+        // The runtime's outbound budget refused the call before it was sent.
+        HttpError::BudgetExhausted { retry_after, .. } => format!(
+            "outbound budget exhausted, retry after {}s",
+            retry_after.as_secs()
+        ),
     };
     InvokeError::Transport(safe_detail(&message, key))
 }
@@ -416,18 +423,20 @@ pub async fn chat(
         Wire::Openai => &["v1", "chat", "completions"],
     };
     let target = catalog::join(&url, segments).ok_or(InvokeError::Refused)?;
-    // `deadline::policy` carries the call's own timeout past the port's 30 s
-    // ceiling where the venture's client is wired (see [`crate::deadline`]).
-    let mut builder = crate::deadline::policy(
-        http::Request::builder()
-            .method(http::Method::POST)
-            .uri(target.as_str())
-            .header(http::header::CONTENT_TYPE, "application/json"),
-        MAX_RESPONSE_BYTES,
-        request.timeout,
-    );
+    // The port clamps the head (and a buffered call's whole exchange) to
+    // its 30 s ceiling; a streamed call's body runs under its own
+    // [`StreamPolicy`](cratefield_core::StreamPolicy): the idle gap between
+    // chunks and the call's deadline for the whole (see [`crate::stream`]).
+    let mut builder = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(target.as_str())
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .extension(HttpPolicy {
+            max_response_bytes: MAX_RESPONSE_BYTES,
+            timeout: request.timeout,
+        });
     if stream {
-        builder = builder.extension(crate::stream::ModelStream(wire));
+        builder = builder.extension(crate::stream::policy(request.timeout));
     }
     builder = match auth {
         Auth::Bearer => builder.header(http::header::AUTHORIZATION, format!("Bearer {key}")),
@@ -442,7 +451,11 @@ pub async fn chat(
     // The key is kept only until the answer is read, so that a provider (or
     // a transport layer) quoting it back can have it taken out of what the
     // failure carries; see [`safe_detail`].
-    let sent = http.send(outgoing).await;
+    let sent = if stream {
+        crate::stream::receive(http, outgoing, wire, MAX_RESPONSE_BYTES).await
+    } else {
+        http.send(outgoing).await
+    };
     let response = match sent {
         Ok(response) => response,
         Err(error) => return Err(transport(&error, &key)),
@@ -456,7 +469,8 @@ pub async fn chat(
         return Err(InvokeError::Status(upstream));
     }
     let parsed = if event_stream(response.headers()) {
-        // A client without the streaming seam buffered the whole stream.
+        // An unstreamed call whose provider streamed anyway: read the
+        // buffered events.
         match sse::read_body(response.body(), wire, MAX_RESPONSE_BYTES) {
             Ok(completion) => completion.native_json(wire),
             Err(failure) => {

@@ -94,13 +94,12 @@ const MAX_PROCESS_NOW: usize = 3;
 /// streams (`livingbrain_models::stream`), so a stalled one ends after 90 s
 /// without bytes, not here. Eight minutes, plus the cron tick's 5-minute
 /// budget checked before each job, stays inside a cron invocation's 15. The
-/// `HttpClient` port clamps a deadline to 30 s; this holds because the
-/// venture wires `livingbrain_models::deadline::ModelDeadlineHttpClient`
-/// (with its streaming seam) on the coding-agents routes and the cron tick.
+/// bound is the `HttpClient` port's own `StreamPolicy` (whole-body ceiling),
+/// on every route and the cron tick alike.
 const CALL_TIMEOUT: StdDuration = StdDuration::from_secs(480);
-// The venture's streaming client honours a model call's deadline only up to
-// this ceiling; one past it would be cut silently. (An unstreamed call is
-// held to `deadline::MAX_MODEL_DEADLINE`, five minutes.)
+// A streamed call's deadline is honoured only up to this ceiling; one past
+// it would be cut silently. (An unstreamed call is held to the port's
+// buffered ceiling, 30 s.)
 const _: () =
     assert!(CALL_TIMEOUT.as_secs() <= livingbrain_models::stream::MAX_STREAM_DEADLINE.as_secs());
 // The compiler starts a call in a cron tick only when one of this length
