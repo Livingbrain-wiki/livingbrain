@@ -29,29 +29,58 @@ cratefield-mail-templates = { workspace = true }
 # adapter on its join form. The venture, not a module, names them.
 cratefield-module-waitlist = { workspace = true }
 cratefield-adapter-turnstile = { workspace = true }
+# The device authorization grant (issue #72): the codes, the approval page
+# and the polling state machine, for a client with no browser. The venture
+# supplies its two hooks — who may approve, and what a credential is.
+cratefield-module-device-auth = { workspace = true }
 # The MCP server (issue #24) seals and opens page bodies through the same key
 # custodian `cratefield-kms` serves the page store; the harness has no `Kms`
 # port, so the composition builds it and hands it to the module.
 cratefield-kms = { workspace = true }
-# `SessionBearer` below implements the module's `BearerAuth` seam.
+# `TokenBearer` below implements the module's `BearerAuth` seam.
 async-trait = { workspace = true }
+# The CLI surface (issue #121): the four harness modules behind the client
+# contract — `/v1/notes`, `/v1/pages`, `/v1/search`, `/v1/ask`,
+# `/v1/export`. `fetch` diverts the four non-pages paths through the harness
+# router itself (see `serve_cli` below).
+livingbrain-api = { path = "../livingbrain-api" }
 livingbrain-canary = { path = "../livingbrain-canary" }
 livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }
+livingbrain-tokens = { path = "../livingbrain-tokens" }
+# The MCP client (issue #11): remote servers per member, behind the write gate.
+livingbrain-tools = { path = "../livingbrain-tools" }
+# The cost ledger (issue #12): the per-workspace per-day usage table and its
+# admin read endpoint, mounted below beside the modules it bills.
+livingbrain-usage = { path = "../livingbrain-usage" }
 livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+# `serve_cli` drives the diverted CLI paths through the harness router.
+tower = { workspace = true }
 worker = { workspace = true }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The entropy source the device grant draws its codes from (issue #72).
+# `wasm_js` is what makes it work in a Workers isolate; on a native build it
+# is the operating system's.
 getrandom = { workspace = true }
+# `DurableTurns` encodes a turn call as the request body the conversation
+# object reads back with `json()` (issue #7).
+serde_json = { workspace = true }
+# The timestamp the usage ledger's email seam passes to `record_email`
+# (issue #12) — the same `OffsetDateTime` the workspaces handler already holds.
+time = { workspace = true }
+
+# `#[durable_object]`'s expansion names the `wasm_bindgen` crate directly, so
+# the class in `src/conversation.rs` needs it linked on the wasm build. Native
+# builds — the tests, clippy — never see the class (it is `#[cfg]`-gated), so
+# this never reaches their graph.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.129"
 
 [dev-dependencies]
 # The fake HTTP client the Owlpost test records a send with, the snapshot tool
-# for the rendered mail layouts, `serde_json` for the sample data and the
-# recorded body, and the block-on the async tests need. The waitlist test
-# mounts the venture's composition over the kit's fakes and an in-memory
-# SQLite database. Dev-only: none of them reach the wasm graph.
+# for the rendered mail layouts, and the block-on the async tests need. The
+# waitlist test mounts the venture's composition over the kit's fakes and an
+# in-memory SQLite database. Dev-only: none of them reach the wasm graph.
 cratefield-testing = { workspace = true }
 insta = { workspace = true }
 pollster = { workspace = true }
-serde_json = { workspace = true }

@@ -18,6 +18,11 @@ workspace = true
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
 serde_json = "1"
+# The normalised session record (`src/logs.rs`) is a typed struct serialised
+# with `serde_derive`, so one build writes byte-identical bodies: struct order
+# is wire order, and nothing in the record is read from the clock. Pinned to
+# the version the harness already resolves, so it adds no new lockfile entry.
+serde = { workspace = true }
 # Blocking HTTP, rustls only: no OpenSSL, and static-musl friendly.
 ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
 # The OS keychain, never a file. `linux-native` is the kernel keyutils backend:
@@ -27,3 +32,35 @@ keyring = { version = "3.6", default-features = false, features = [
     "windows-native",
     "linux-native",
 ] }
+# What leaves a machine, and the switch that decides whether it does. A plain
+# library with no HTTP client, no clock and no RNG of its own, so the CLI keeps
+# the only network client it has (`ureq`) and the only source of randomness it
+# has (std's `RandomState`) — both named in `src/telemetry.rs`. A path dep
+# because this crate is native-only and is never in the Worker's graph.
+livingbrain-telemetry = { path = "../livingbrain-telemetry" }
+# The vendored "Built with" list (issue #61): pure data and two renderers, so
+# `livingbrain about` works before anyone has logged in.
+livingbrain-stack = { path = "../livingbrain-stack" }
+# The directory walk behind `import markdown` (issue #81): `.gitignore` and
+# hidden files respected, `--exclude` globs applied as ignore overrides.
+ignore = { workspace = true }
+# What leaves a machine. Run here, on the file, before the body is built, so a
+# secret in a vault never crosses the socket — the server runs the same library
+# on every ingest path, so the thing that decides what is stored stays one
+# piece of code.
+livingbrain-redact = { path = "../livingbrain-redact" }
+# The chat export reader (issue #49): reads `conversations.json` out of the
+# export zip, in memory. See the note on `zip` in the root Cargo.toml.
+zip = { workspace = true }
+# ChatGPT stamps times in Unix seconds; every body this build renders records
+# them as RFC 3339. `formatting` is what that needs; `parsing` stays off — the
+# `--since`/`--until` dates are checked by hand (see `import::checked_date`).
+time = { workspace = true }
+
+[dev-dependencies]
+# The import test's mock keys "already imported?" on the body's SHA-256, the
+# same idempotency key the server uses. The lockfile already resolves `sha2`.
+sha2 = { workspace = true }
+# The import chat test builds its export zips at test time, so no binary
+# fixture is committed; only the `conversations.json` inside them is.
+zip = { workspace = true }

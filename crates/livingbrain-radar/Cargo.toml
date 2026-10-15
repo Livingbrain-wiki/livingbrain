@@ -1,0 +1,39 @@
+[package]
+name = "livingbrain-radar"
+description = "Research radar: watch the wiki's topics, screen what the world publishes, judge relevance, and write a cited radar page per survivor — proposals always pending"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# A plain library, not a Cratefield module, exactly like `livingbrain-judge`:
+# no tables, no routes, no `Module`. The nightly pass (#19) is what calls
+# `Radar::run` and what writes the pages. It names `cratefield-core` for the
+# `HttpClient` and `TextModel` ports, and nothing that names a runtime.
+[dependencies]
+cratefield-core = { workspace = true }
+# The screen's second half (secrets and PII) and its first half (is this
+# trying to instruct the model). Both plain libraries, both wasm-safe.
+livingbrain-judge = { path = "../livingbrain-judge" }
+livingbrain-redact = { path = "../livingbrain-redact" }
+# The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
+bytes = { workspace = true }
+# The arXiv query string. The version `axum` and `url` already resolve.
+percent-encoding = { workspace = true }
+
+[dev-dependencies]
+# The fakes: a scripted classifier, a scripted text model, a canned HTTP
+# response. `pollster` is how a `#[test]` drives an `async fn`.
+cratefield-testing = { workspace = true }
+# Only the test fakes implement ports declared with `#[async_trait]`.
+async-trait = { workspace = true }
+pollster = { workspace = true }
+serde_json = { workspace = true }
+# The page parser, so the rendered Markdown is asserted against the real
+# frontmatter and `[[link]]` rules rather than a copy of them.
+livingbrain-pages = { path = "../livingbrain-pages" }

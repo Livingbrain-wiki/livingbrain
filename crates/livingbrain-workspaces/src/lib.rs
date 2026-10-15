@@ -27,28 +27,48 @@
 //! [`link_connection`] and [`link_identity`] are the same kind of seam for
 //! issue #56: a caller that has verified a Discord guild or user id binds it
 //! to a workspace and a member. Discord's OAuth route is not here yet.
+//!
+//! [`Answers`] is the same kind of seam for issue #123, in the other
+//! direction: this module owns the Slack conversation and cannot read a page,
+//! so a composition injects something that can, and the agent loop answers
+//! through it. [`Turns`] is its sibling for issue #7: several people can
+//! talk in one thread at once, and what serialises the agent's turns is a
+//! per-conversation coordinator only the composition can provide.
 
 #![forbid(unsafe_code)]
 
+mod agent;
 mod config;
+mod conversation;
 mod events;
 mod flow;
 mod handlers;
 mod install;
+mod reply;
 mod slack;
 mod store;
+mod turn;
 
 pub use config::Settings;
+pub use conversation::{
+    Admit, Answer, Call, Conversation, Exchange, LocalTurns, Pending, Room, Turn, TurnError, Turns,
+    apply,
+};
 pub use events::bot_scopes;
 pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
-pub use handlers::{Caller, caller};
+pub use handlers::{Caller, caller, caller_for};
 pub use install::{BotTokenError, bot_token};
+pub use livingbrain_pages::Answers;
 pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};
+pub use turn::set_proactivity;
+
+use std::sync::Arc;
 
 use cratefield_core::{
-    Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,
-    Port, SqlMigration,
+    Config, ConfigError, DataKind, Database, Disposition, Migrations, Module, ModuleContext,
+    PersonalDataSet, Port, SqlMigration,
 };
+use time::OffsetDateTime;
 
 /// The first migration: `workspaces` and `workspace_members`.
 const MIGRATION_INIT: SqlMigration = SqlMigration::new(
@@ -102,16 +122,106 @@ const MIGRATION_0003_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0003_slack_app.sql"),
 );
 
+/// The fourth migration: the speak-up policy (`turn_policies`) and the
+/// triage cost ledger (`turn_triage`) behind it (issue #9). Both are
+/// additive; a deployment where nobody has ever set a policy writes nothing.
+const MIGRATION_0004: SqlMigration = SqlMigration::new(
+    "0004",
+    "turn",
+    include_str!("../migrations/sqlite/0004_turn.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_0004`], the same file byte for byte.
+const MIGRATION_0004_POSTGRES: SqlMigration = SqlMigration::new(
+    "0004",
+    "turn",
+    include_str!("../migrations/postgres/0004_turn.sql"),
+);
+
+/// Records an email send into the cost ledger, for the composition to
+/// inject (issue #12). A seam rather than a dependency because the graph
+/// runs the other way: the usage module reaches this one through `tokens`
+/// (`usage` → `tokens` → `workspaces`), so depending back on `usage` would
+/// be a cycle Cargo refuses. The same shape as [`Answers`], whose page
+/// store this module may not hold either.
+#[async_trait::async_trait]
+pub trait EmailLedger: Send + Sync {
+    /// Record one send for `workspace_id`. The implementation swallows its
+    /// own failures: a lost count must never fail the mail it counts.
+    async fn record_email(&self, db: &dyn Database, now: OffsetDateTime, workspace_id: &str);
+}
+
 /// Workspaces, Slack sign-in and the member mirror.
-#[derive(Debug, Default)]
-pub struct Workspaces;
+#[derive(Default)]
+pub struct Workspaces {
+    /// The seam the Slack agent answers through (issue #123). A composition
+    /// that leaves it `None` has a workspaces module and no agent.
+    answers: Option<Arc<dyn Answers>>,
+    /// The seam the agent takes its turn from (issue #7). `None` is the
+    /// per-isolate [`LocalTurns`]: right for a single isolate, and what the
+    /// venture replaces with its per-conversation Durable Object.
+    turns: Option<Arc<dyn Turns>>,
+    /// The seam the cost ledger counts an email send through (issue #12).
+    /// `None` is a composition that mounted no usage module: mail still
+    /// sends, nothing counts it.
+    ledger: Option<Arc<dyn EmailLedger>>,
+}
+
+// The two seams are `dyn`s and not a `Debug`; the module itself is still
+// one, so a composition that prints its modules keeps working.
+impl std::fmt::Debug for Workspaces {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspaces")
+            .field("answers", &self.answers.is_some())
+            .field("turns", &self.turns.is_some())
+            .field("ledger", &self.ledger.is_some())
+            .finish()
+    }
+}
 
 impl Workspaces {
     /// A new workspaces module. There is nothing to configure in the
     /// builder; the Slack app settings come from config at router build.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Answer @mentions and DMs from `answers` (issue #123).
+    ///
+    /// The seam is injected rather than built here because a `PageStore` is a
+    /// tenant-wide capability and this module may not hold one: what it may
+    /// hold is "a way to answer somebody, given their workspace and their
+    /// member id", which is exactly what [`Answers`] is.
+    #[must_use]
+    pub fn answering(mut self, answers: Arc<dyn Answers>) -> Self {
+        self.answers = Some(answers);
+        self
+    }
+
+    /// Take the agent's turns from `turns` (issue #7).
+    ///
+    /// The seam is injected rather than built here because the coordinator
+    /// is a Durable Object keyed by the conversation, and a Durable Object
+    /// class can only be declared by the crate compiled into the Worker —
+    /// the same constraint [`Answers`] is injected for, with a different
+    /// answer behind it: what this module may hold is "a way to learn
+    /// whether a message in this conversation answers now or queues", which
+    /// is exactly what [`Turns`] is.
+    #[must_use]
+    pub fn taking_turns(mut self, turns: Arc<dyn Turns>) -> Self {
+        self.turns = Some(turns);
+        self
+    }
+
+    /// Count each email send into `ledger` (issue #12).
+    ///
+    /// Injected rather than built here for the reason recorded on
+    /// [`EmailLedger`]: this module cannot depend on the usage crate.
+    #[must_use]
+    pub fn email_ledger(mut self, ledger: Arc<dyn EmailLedger>) -> Self {
+        self.ledger = Some(ledger);
+        self
     }
 }
 
@@ -146,8 +256,14 @@ impl Module for Workspaces {
     /// whatever sign-in methods it has, and the email routes answer `503`
     /// per request when no mailer is wired, exactly as the Slack routes
     /// answer `503` when the app keys are absent.
+    ///
+    /// `Classifier` is optional for the same reason, and for one more
+    /// (issue #123): the Slack agent triages a DM with the fast judge
+    /// (issue #112) and a deployment with no classifier has no judge — so it
+    /// answers an @mention, which is a request, and stays out of a DM, which
+    /// is a conversation. A deployment that wires one gets both gated by it.
     fn optional(&self) -> &'static [Port] {
-        &[Port::Mailer]
+        &[Port::Mailer, Port::Classifier]
     }
 
     fn tables(&self) -> &'static [&'static str] {
@@ -159,6 +275,8 @@ impl Module for Workspaces {
             "sign_in_links",
             "workspaces_slack_inbox",
             "slack_installs",
+            "turn_policies",
+            "turn_triage",
         ]
     }
 
@@ -243,19 +361,42 @@ impl Module for Workspaces {
                  app and bot user ids, and a bot token sealed under a \
                  KMS-wrapped key with the team as its AAD",
             ),
+            // The two tables issue #9 added. Neither names a person: the
+            // policy row is a workspace's (or channel's) choice of
+            // proactivity, and the triage row is what one *message* decided
+            // and cost — platform ids and numbers, never text or author.
+            PersonalDataSet::none(
+                "turn_policies",
+                "the row is one channel's (or the workspace's org-wide) \
+                 speak-up setting: how eagerly the brain may answer a \
+                 message that did not name it",
+            ),
+            PersonalDataSet::none(
+                "turn_triage",
+                "the row is one message's triage outcome: the channel and \
+                 message ids, whether it addressed the bot, the proactivity \
+                 in force, the decision and estimated token counts — never \
+                 the message text or its author",
+            ),
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 3] = [MIGRATION_INIT, MIGRATION_0002, MIGRATION_0003];
+        const MIGRATIONS: [SqlMigration; 4] = [
+            MIGRATION_INIT,
+            MIGRATION_0002,
+            MIGRATION_0003,
+            MIGRATION_0004,
+        ];
         // The array is the apply order; this refuses a gap, a duplicate or
         // an entry out of order at build time.
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 4] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_0002_POSTGRES,
             MIGRATION_0003_POSTGRES,
+            MIGRATION_0004_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
@@ -292,6 +433,11 @@ impl Module for Workspaces {
     }
 
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        handlers::router(ctx)
+        handlers::router(
+            ctx,
+            self.answers.clone(),
+            self.turns.clone(),
+            self.ledger.clone(),
+        )
     }
 }

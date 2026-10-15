@@ -23,7 +23,9 @@ use serde_json::{Value, json};
 /// which is the whole reason the surface lives there.
 const ENDPOINT: &str = "/v1/pages/mcp";
 
-/// What a refused call says about where to authenticate.
+/// What a refused call says about where to authenticate when the request
+/// named no host at all: the production origin, the same fallback the
+/// discovery documents' compiled-in constant covers.
 const CHALLENGE: &str = "Bearer resource_metadata=\"https://mcp.livingbrain.wiki/.well-known/oauth-protected-resource\"";
 
 /// A bearer resolver over a fixed table: a known token names an asker, an
@@ -54,6 +56,7 @@ fn world() -> Fixture {
             Asker {
                 workspace_id: workspace.to_owned(),
                 user_id: user.to_owned(),
+                token_scopes: None,
             },
         )
     })
@@ -86,6 +89,7 @@ fn fixture_with(askers: &[(&str, &str, &str)]) -> Fixture {
                 Asker {
                     workspace_id: (*workspace).to_owned(),
                     user_id: (*user).to_owned(),
+                    token_scopes: None,
                 },
             )
         })
@@ -195,6 +199,39 @@ fn header_of(response: &TestResponse, name: header::HeaderName) -> Option<&str> 
         .headers
         .get(name)
         .and_then(|value| value.to_str().ok())
+}
+
+/// A `tools/list` POST addressed to another hostname, the way a proxy
+/// forwards one: `Host` names the deployment, `x-forwarded-proto` (when
+/// given) the scheme it terminated. The kit's `request` helpers send no
+/// `Host`, and the challenge is the one response that has to vary with it.
+fn challenged_at(fixture: &Fixture, host: &str, proto: Option<&str>) -> String {
+    use cratefield_core::axum::body::Body;
+    use cratefield_core::axum::http::Request;
+    use tower::ServiceExt;
+    let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(ENDPOINT)
+        .header(header::HOST, host)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(proto) = proto {
+        builder = builder.header("x-forwarded-proto", proto);
+    }
+    let response = pollster::block_on(
+        fixture
+            .router
+            .clone()
+            .oneshot(builder.body(Body::from(message)).expect("request builds")),
+    )
+    .expect("router answers");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    response
+        .headers()
+        .get(header::WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .expect("a 401 carries the challenge")
+        .to_owned()
 }
 
 fn code_of(response: &TestResponse) -> i64 {
@@ -516,4 +553,24 @@ fn no_credential_or_a_wrong_one_is_a_challenged_401() {
         json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
     );
     assert_eq!(handshake.status, StatusCode::OK);
+}
+
+/// The challenge names the metadata on the host the request itself reached,
+/// not a compiled-in one: one Worker fronts staging, production and `mcp.`,
+/// and a client that followed a challenge across to another host would end
+/// up authenticating against a different deployment (issue #72).
+#[test]
+fn the_challenge_names_the_host_the_request_reached() {
+    let fixture = world();
+
+    assert_eq!(
+        challenged_at(&fixture, "staging-api.livingbrain.wiki", None),
+        "Bearer resource_metadata=\"https://staging-api.livingbrain.wiki/.well-known/oauth-protected-resource\"",
+    );
+
+    // `wrangler dev`: the http scheme only `x-forwarded-proto` reveals.
+    assert_eq!(
+        challenged_at(&fixture, "localhost:8787", Some("http")),
+        "Bearer resource_metadata=\"http://localhost:8787/.well-known/oauth-protected-resource\"",
+    );
 }

@@ -1,0 +1,67 @@
+# Living Brain module: Livingbrain as an MCP *client* of remote MCP servers.
+# Per member a connection to a server (GitHub, Linear, Notion, Google, or any
+# Streamable HTTP endpoint), with the connection token sealed under a
+# KMS-wrapped data key. Every call goes through the write gate: a write runs
+# only on the asker's own connection or on an approval the owner granted, and
+# a tool disabled at the connection or the workspace is never offered to the
+# model at all.
+
+[package]
+name = "livingbrain-tools"
+description = "Living Brain module: an MCP client of remote servers, with encrypted per-member connections and a write gate"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed. `axum` and `http`
+# arrive through `cratefield_core::axum`, so neither is named directly.
+cratefield-core = { workspace = true }
+# The KMS port beside the others (`cratefield-kms` names no
+# `cratefield-core`, so it cannot split the ports in two): the connection
+# token's envelope is a fresh data key per row, wrapped by the custodian.
+cratefield-kms = { workspace = true }
+
+# The outbound request body over the `HttpClient` port. Pure Rust, wasm-safe.
+bytes = { workspace = true }
+# The four base64 TEXT columns of the envelope. `alloc` only: a Worker has
+# no `std`. The version `cratefield-core` already resolves.
+base64 = { workspace = true }
+# The token envelope (issue #11): XChaCha20-Poly1305 under a KMS-wrapped
+# data key, the same cipher `livingbrain-workspaces` seals the Slack bot
+# token with. Pure Rust, wasm-safe, already in the lockfile.
+chacha20poly1305 = { workspace = true }
+# The 24-byte nonce for that envelope, from the OS random source.
+getrandom = { workspace = true }
+# Portable SQL bound as parameterized statements over the `Database` port
+# (ADR 0004), and the ISO-8601 timestamps the rows carry.
+sea-query = { workspace = true }
+time = { workspace = true }
+# Tool arguments, disabled-tool lists and the JSON-RPC wire.
+serde_json = { workspace = true }
+
+# The write gate's decision: `connection_for_write` and the
+# `Approval`/`ConnectionGrant` pair it resolves through.
+livingbrain-access = { path = "../livingbrain-access" }
+# The approval card rendered by the asker's platform adapter.
+livingbrain-channel = { path = "../livingbrain-channel" }
+# The SSRF guard runs on a connection's server URL before any request is
+# made to it — the same guard, not a second copy of it.
+livingbrain-models = { path = "../livingbrain-models" }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
+# sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+# Only so a test fake can implement the `HttpClient` port, whose trait is
+# declared with `#[async_trait]`.
+async-trait = { workspace = true }
+pollster = { workspace = true }

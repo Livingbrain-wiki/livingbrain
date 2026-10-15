@@ -1,0 +1,59 @@
+# Living Brain module: personal access tokens (issue #72) — one bearer
+# credential a person mints for a machine they own, stored as a SHA-256 hash
+# with only its public prefix in the clear. It also answers the two
+# `/.well-known` discovery documents and carries the device-authorization glue.
+
+[package]
+name = "livingbrain-tokens"
+description = "Living Brain module: personal access tokens, and the OAuth discovery documents that point at them"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*", "migrations/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only Cratefield dependency a module is allowed. `axum` and `http`
+# arrive through `cratefield_core::axum`, so neither is named directly.
+cratefield-core = { workspace = true }
+# The device authorization grant (RFC 8628) owns the codes, the approval page
+# and the polling; this module supplies the two hooks that need to know about
+# a session and about tokens (`Approver` and `Issuer`).
+cratefield-module-device-auth = { workspace = true }
+# The session is shared with the workspaces module rather than reimplemented,
+# so a PAT and a cookie resolve to the same member.
+livingbrain-workspaces = { path = "../livingbrain-workspaces" }
+# The scope vocabulary a token's subset is written in (`shared`,
+# `channel:<id>`, `user:<id>`), and the scopes a member holds.
+livingbrain-access = { path = "../livingbrain-access" }
+
+# Portable SQL bound as parameterized statements over the `Database` port
+# (ADR 0004), and the ISO-8601 timestamps the rows carry.
+sea-query = { workspace = true }
+time = { workspace = true }
+# SHA-256 is a token's storage form: 256 random bits leave a slow search
+# nothing to find, and argon2 per request would burn the Workers CPU budget.
+# `getrandom` is the entropy source, exactly as in the page store's envelope
+# nonce (core carries no CSPRNG, ADR 0002).
+sha2 = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `Approver` and `Issuer` are declared with `#[async_trait]`.
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# The `postgres` feature unlocks the Postgres leg of the conformance suite
+# (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
+# sqlx and tokio never reach the module's wasm graph.
+cratefield-testing = { workspace = true, features = ["postgres"] }
+pollster = { workspace = true }
+tower = { workspace = true }
+serde_json = { workspace = true }
+sea-query = { workspace = true }
+time = { workspace = true }

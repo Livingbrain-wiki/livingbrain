@@ -116,7 +116,7 @@ jobs:
           node --check app/sw.js
           # The three modules, each imported the way a page or a test loads
           # it, so an import-time error fails here and not only in a browser.
-          for file in app/assets/markdown.js app/assets/settings.js app/assets/app.js; do
+          for file in app/assets/markdown.js app/assets/settings.js app/assets/session.js app/assets/models.js app/assets/marks.js app/assets/tokens.js app/assets/app.js; do
             node --input-type=module -e "import('./$file').then(() => process.exit(0))"
           done
       - name: No HTML is ever assigned from content
@@ -129,6 +129,31 @@ jobs:
             echo "::error::user content must never be assigned as HTML"
             exit 1
           fi
+
+  vendored-stack:
+    # The "Built with" list is a vendored copy of the registry entry for this
+    # venture: nothing fetches it at runtime, so it can only go stale silently.
+    # This job fails the build when the vendored copy drifts from the published
+    # registry. It is the one job that does reach the network, which is why it
+    # lives beside `app` (the other non-Rust job) and not among the crate jobs.
+    # Python is pinned like every other toolchain here; the script uses only the
+    # standard library, so there is nothing to install.
+    name: vendored stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: scripts/check-vendored-stack.sh
+      # The provider catalog is vendored the same way, from Colonizer. This
+      # re-derives app/assets/providers.json from the upstream commit it
+      # records, so a hand edit or a half-applied sync fails here. Moving to a
+      # newer upstream is a deliberate `scripts/sync-providers` run in a PR.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: scripts/sync-providers --check --pinned
 
   redact-wasm:
     # The redaction library runs in the Worker, so its tests run in one. The

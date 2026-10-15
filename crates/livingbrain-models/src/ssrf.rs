@@ -47,7 +47,7 @@ const DOH_ENDPOINT: &str = "https://cloudflare-dns.com/dns-query";
 /// never the provider key — and never echoes the URL back, so nothing a
 /// member typed leaves the server through it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SsrfError {
+pub enum SsrfError {
     /// The URL did not parse at all.
     NotAUrl,
     /// The scheme was not `https`.
@@ -94,7 +94,7 @@ impl std::error::Error for SsrfError {}
 ///
 /// Pure: no I/O. The DNS resolution for hostname hosts is
 /// [`check_destination`].
-pub(crate) fn validate_url(raw: &str) -> Result<Url, SsrfError> {
+pub fn validate_url(raw: &str) -> Result<Url, SsrfError> {
     let url = Url::parse(raw).map_err(|_| SsrfError::NotAUrl)?;
     if url.scheme() != "https" {
         return Err(SsrfError::Scheme(url.scheme().to_owned()));
@@ -120,7 +120,7 @@ pub(crate) fn validate_url(raw: &str) -> Result<Url, SsrfError> {
 
 /// Checks the destination's addresses, resolving hostnames via DoH.
 /// Call after [`validate_url`].
-pub(crate) async fn check_destination(http: &dyn HttpClient, url: &Url) -> Result<(), SsrfError> {
+pub async fn check_destination(http: &dyn HttpClient, url: &Url) -> Result<(), SsrfError> {
     match url.host() {
         Some(Host::Ipv4(addr)) => check_ipv4(&addr),
         Some(Host::Ipv6(addr)) => check_ipv6(&addr),

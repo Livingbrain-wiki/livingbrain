@@ -1,0 +1,1 @@
+{"schema_version":1,"trace_id":"01JABC.123-4","kind":"brain_turn","at_unix":1767225600,"outcome":"success","duration_ms":1240,"subject":{"kind":"message","id":"01JMSG.500-7"},"error_kind":null,"tool":null,"colonizer_colony":null}

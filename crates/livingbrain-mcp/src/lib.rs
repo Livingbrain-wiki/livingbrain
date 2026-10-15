@@ -1,9 +1,11 @@
-//! `livingbrain-mcp`: the remote MCP server (issue #24).
+//! `livingbrain-mcp`: the remote MCP server (issue #24) and the source import
+//! endpoint (issue #81).
 //!
 //! Four tools over `livingbrain-pages` — `brain_search`, `brain_page`,
-//! `brain_context_for`, `brain_note` — on stateless Streamable HTTP, mounted
-//! *inside* the pages module: the harness scopes `Blob` per module name, so a
-//! sibling module could never open a body this one writes.
+//! `brain_context_for`, `brain_note` — on stateless Streamable HTTP, plus one
+//! `POST /v1/pages/sources` for a file that arrived from outside. Both are
+//! mounted *inside* the pages module: the harness scopes `Blob` per module
+//! name, so a sibling module could never open a body this one writes.
 //!
 //! Every tool reads through [`page_scopes`] and none takes a scope argument,
 //! so an agent sees what its user sees; every page a tool quotes comes back as
@@ -13,31 +15,47 @@
 
 mod auth;
 mod protocol;
+mod sources;
 mod tools;
 
 pub use auth::{Asker, AuthError, BearerAuth, page_scope, page_scopes};
+pub use sources::sources_router;
 
 use std::sync::Arc;
 
 use cratefield_core::axum::body::Bytes;
 use cratefield_core::axum::extract::State;
-use cratefield_core::axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use cratefield_core::axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::post;
 use cratefield_core::axum::{self, Json, Router};
-use cratefield_core::{ModuleContext, Ports, Problem, ProblemDef};
+use cratefield_core::{ModuleContext, Problem, ProblemDef};
 use cratefield_kms::Kms;
 use livingbrain_pages::PageStore;
+use livingbrain_tokens::origin_of_request;
 use serde_json::Value;
 
-/// The RFC 9728 §5.1 challenge, naming the protected-resource metadata of the
-/// authorization server — issue #72, which has not landed, so a client that
-/// follows it today gets a 404.
-const CHALLENGE: &str = "Bearer resource_metadata=\"https://mcp.livingbrain.wiki/.well-known/oauth-protected-resource\"";
+/// The origin the discovery documents sit behind in production, and the
+/// challenge's fallback for a request that names no host at all — neither a
+/// `Host` header nor a URI authority, which an internal probe can produce.
+const MCP_ORIGIN: &str = "https://mcp.livingbrain.wiki";
+
+/// The RFC 9728 §5.1 challenge, naming the protected-resource metadata on the
+/// origin the request itself reached — the same per-request resolution the
+/// discovery documents use (issue #72), so one Worker fronts `api.`,
+/// `staging-api.`, `mcp.` and a `wrangler dev` on `localhost:8787`, and every
+/// challenge points the client at the host it was talking to.
+fn challenge(headers: &HeaderMap, uri: &Uri) -> HeaderValue {
+    let base = origin_of_request(headers, uri).unwrap_or_else(|| MCP_ORIGIN.to_owned());
+    HeaderValue::from_str(&format!(
+        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
+    ))
+    .expect("an origin serializes to ASCII, so it is a valid header value")
+}
 
 /// No credential, or one that speaks for nobody — one definition for both, so
 /// the body says the same thing either way.
-const UNAUTHORIZED: ProblemDef = ProblemDef {
+pub(crate) const UNAUTHORIZED: ProblemDef = ProblemDef {
     slug: "mcp/unauthorized",
     status: StatusCode::UNAUTHORIZED,
     title: "Bearer token required",
@@ -46,27 +64,33 @@ const UNAUTHORIZED: ProblemDef = ProblemDef {
 };
 
 /// A port the module declared and the runtime did not supply.
-fn port<T: ?Sized>(slot: Option<Arc<T>>) -> Result<Arc<T>, Problem> {
+pub(crate) fn port<T: ?Sized>(slot: Option<Arc<T>>) -> Result<Arc<T>, Problem> {
     slot.ok_or_else(Problem::internal)
 }
 
-/// The router state: the pages module's ports, plus the two things the ports
-/// do not carry — a key custodian and a way to resolve a bearer credential.
+/// The router state: the pages module's own context, plus the two things the
+/// ports do not carry — a key custodian and a way to resolve a bearer
+/// credential.
+///
+/// The context is held as the `Arc` the pages module handed over rather than as
+/// the ports alone: `Ports` is neither `Clone` nor copyable, and this crate
+/// must not hand-copy one.
 pub(crate) struct McpState {
-    ports: Ports,
-    kms: Arc<dyn Kms>,
-    auth: Arc<dyn BearerAuth>,
+    pub(crate) ctx: Arc<ModuleContext>,
+    pub(crate) kms: Arc<dyn Kms>,
+    pub(crate) auth: Arc<dyn BearerAuth>,
 }
 
 impl McpState {
     /// The page store for one request, over the pages module's own ports.
     fn store(&self) -> Result<PageStore, Problem> {
+        let ports = &self.ctx.ports;
         Ok(PageStore::new(
-            port(self.ports.db.clone())?,
-            port(self.ports.blob.clone())?,
+            port(ports.db.clone())?,
+            port(ports.blob.clone())?,
             Arc::clone(&self.kms),
-            port(self.ports.clock.clone())?,
-            port(self.ports.id_gen.clone())?,
+            port(ports.clock.clone())?,
+            port(ports.id_gen.clone())?,
         ))
     }
 }
@@ -77,12 +101,8 @@ impl McpState {
 /// is scoped to `pages`, so a page the module writes is a page this surface
 /// can open. `auth` is the credential resolver — until the OAuth server lands
 /// (issue #72) the session cookie the web app already issues.
-pub fn router(ctx: ModuleContext, kms: Arc<dyn Kms>, auth: Arc<dyn BearerAuth>) -> Router {
-    let state = Arc::new(McpState {
-        ports: ctx.ports,
-        kms,
-        auth,
-    });
+pub fn router(ctx: Arc<ModuleContext>, kms: Arc<dyn Kms>, auth: Arc<dyn BearerAuth>) -> Router {
+    let state = Arc::new(McpState { ctx, kms, auth });
     axum::Router::new()
         .route(
             "/",
@@ -93,7 +113,12 @@ pub fn router(ctx: ModuleContext, kms: Arc<dyn Kms>, auth: Arc<dyn BearerAuth>) 
 
 /// `POST /` — one JSON-RPC message in, one response out. Nothing streams and
 /// nothing is remembered, so a request needs no session id.
-async fn call(State(state): State<Arc<McpState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn call(
+    State(state): State<Arc<McpState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return jsonrpc(protocol::error(
             &Value::Null,
@@ -125,31 +150,32 @@ async fn call(State(state): State<Arc<McpState>>, headers: HeaderMap, body: Byte
     // the handshake and read the 401 that says how to authenticate.
     let asker = if protocol::needs_asker(method) {
         let Some(token) = protocol::bearer(&headers) else {
-            return unauthorized();
+            return unauthorized(&headers, &uri);
         };
-        match state.auth.authenticate(&state.ports, token).await {
+        match state.auth.authenticate(&state.ctx.ports, token).await {
             // An asker with no workspace or no user id names nobody: it is
             // the credential that is wrong, and a 401 says so without saying
             // which part was.
             Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => asker,
-            _ => return unauthorized(),
+            _ => return unauthorized(&headers, &uri),
         }
     } else {
         Asker {
             workspace_id: String::new(),
             user_id: String::new(),
+            token_scopes: None,
         }
     };
     jsonrpc(protocol::dispatch(&state, &asker, &id, &request).await)
 }
 
-/// The 401, with the challenge that says where to authenticate.
-fn unauthorized() -> Response {
+/// The 401, with the challenge that says where to authenticate. Shared with
+/// the source importer, which answers a missing credential the same way.
+pub(crate) fn unauthorized(headers: &HeaderMap, uri: &Uri) -> Response {
     let mut response = Problem::new(&UNAUTHORIZED).into_response();
-    response.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        HeaderValue::from_static(CHALLENGE),
-    );
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, challenge(headers, uri));
     response
 }
 

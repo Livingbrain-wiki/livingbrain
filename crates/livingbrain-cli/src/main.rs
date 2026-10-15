@@ -17,7 +17,11 @@ use api::Client;
 
 mod api;
 mod auth;
+mod chat_export;
+mod import;
+mod logs;
 mod mcp;
+mod telemetry;
 
 const DEFAULT_API_URL: &str = "https://api.livingbrain.wiki";
 
@@ -151,6 +155,23 @@ enum Command {
     },
     /// Run a stdio MCP server (its output is always JSON; `--json` is a no-op)
     Mcp,
+    /// Import notes from elsewhere into the brain
+    Import {
+        #[command(subcommand)]
+        format: import::Format,
+    },
+    /// Sync local coding agents' session logs into the brain (opt-in per repo)
+    Logs {
+        #[command(subcommand)]
+        command: logs::Command,
+    },
+    /// Turn anonymous usage data on or off, and show what would be sent
+    Telemetry {
+        #[command(subcommand)]
+        action: telemetry::Action,
+    },
+    /// What Living Brain is built with, from the vendored Factory Zero stack registry
+    About,
 }
 
 fn main() {
@@ -168,6 +189,15 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         Command::Login => auth::login(&cli.api_url, out),
         Command::Logout => auth::logout(&cli.api_url, out),
         Command::Mcp => mcp::serve(&client(cli)?),
+        // The stack is vendored into the binary (issue #61), so this is the
+        // one command that needs neither a token nor the API — a reader who
+        // asks what the brain is made of should get an answer before signing in.
+        Command::About => {
+            let value = serde_json::to_value(livingbrain_stack::stack())
+                .map_err(|e| err(format!("could not render the stack: {e}")))?;
+            out.json_or(&value, || print!("{}", livingbrain_stack::stack().text()));
+            Ok(())
+        }
         Command::Ask { project, question } => {
             let value = client(cli)?.ask(&question.join(" "), project.as_deref())?;
             out.json_or(&value, || render_ask(&value));
@@ -207,6 +237,22 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             out.json_or(&value, || println!("Wrote {path} ({} bytes)", bytes.len()));
             Ok(())
         }
+        // The walk, the preview and the confirmation all happen before the
+        // client is built, so a declined import touches neither the keychain
+        // nor the network (see `import`).
+        Command::Import { format } => import::run(format, &cli.api_url, out),
+        // Like `import`, everything before the upload is local: the parse,
+        // the per-repo opt-in decision and the redaction. Nothing opted in,
+        // nothing sent — the auth request included (see `logs`).
+        Command::Logs { command } => logs::run(command, &cli.api_url, out),
+        // The only command that neither needs a token nor opens a socket: it
+        // reads and writes the stored preference and prints the local view.
+        Command::Telemetry { action } => telemetry::run(
+            *action,
+            out,
+            &telemetry::KeychainPreference,
+            &telemetry::Env::from_process(),
+        ),
     }
 }
 

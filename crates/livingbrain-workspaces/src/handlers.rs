@@ -3,8 +3,9 @@
 //! Two are the Slack sign-in flow (`/slack/start` and `/slack/callback`),
 //! two read the session back (`/me` and `/members`), one links a Slack team
 //! to a workspace the caller is already in (`/connections/slack/start`),
-//! and three are the email magic link (`/email/start`, and `/email/verify`
-//! as a form to render and a form to submit).
+//! three are the email magic link (`/email/start`, and `/email/verify`
+//! as a form to render and a form to submit), and one ends the session
+//! (`/signout`).
 //!
 //! No route takes a workspace id from the request and acts on it. The
 //! workspace is whatever the verified session cookie names, what the sealed
@@ -22,20 +23,32 @@ use cratefield_core::axum::routing::{get, post};
 use cratefield_core::axum::{self, Json};
 use cratefield_core::{
     Clock, Database, DbError, IdGen, MailError, Message, ModuleContext, Problem, ProblemDef,
-    SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email,
+    SendOutcome, Signer, constant_time_eq, invalid_email_problem, normalize_email, origin_of,
 };
 use cratefield_kms::Kms;
+use livingbrain_pages::Answers;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
+use crate::EmailLedger;
 use crate::config::{self, Settings};
+use crate::conversation::{LocalTurns, Turns};
 use crate::events;
 use crate::events::events as slack_events;
 use crate::flow::{self, Flow, Session};
 use crate::install;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
+
+/// A cookie-carrying write a browser reports as coming from another site.
+/// The same refusal `livingbrain-tokens` answers its cookie writes with.
+const CROSS_SITE_REQUEST: ProblemDef = ProblemDef {
+    slug: "workspaces/cross-site-request",
+    status: StatusCode::FORBIDDEN,
+    title: "This request came from another site",
+    description: "Signing out is only accepted from this site's own pages.",
+};
 
 /// The Slack app has not been configured. A 503, not a 500: nothing is
 /// broken, the deployment has not been given the credentials, and the
@@ -181,7 +194,19 @@ pub(crate) struct ModuleState {
     signing_secret: Option<String>,
     /// The key custodian the bot token is sealed under; `None` is a
     /// deployment with no key ring, which still serves sign-in and email.
-    kms: Option<Arc<dyn Kms>>,
+    pub(crate) kms: Option<Arc<dyn Kms>>,
+    /// The seam the Slack agent answers through (issue #123). `None` is a
+    /// composition that wired no agent: the events still arrive, are
+    /// deduplicated and are answered by nobody.
+    pub(crate) answers: Option<Arc<dyn Answers>>,
+    /// The seam the agent takes its turn from (issue #7). Absent at build,
+    /// the per-isolate coordinator is the answer — one isolate serialises
+    /// itself, which is all a composition without the venture's Durable
+    /// Object can promise.
+    pub(crate) turns: Arc<dyn Turns>,
+    /// The seam the cost ledger counts an email send through (issue #12).
+    /// `None` is a composition that mounted no usage module.
+    ledger: Option<Arc<dyn EmailLedger>>,
 }
 
 impl ModuleState {
@@ -218,7 +243,12 @@ impl ModuleState {
 }
 
 /// The module's routes.
-pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
+pub(crate) fn router(
+    ctx: ModuleContext,
+    answers: Option<Arc<dyn Answers>>,
+    turns: Option<Arc<dyn Turns>>,
+    ledger: Option<Arc<dyn EmailLedger>>,
+) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
     let mail_from = config::mail_from(&*ctx.config);
@@ -231,6 +261,9 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
         mail_from,
         signing_secret,
         kms,
+        answers,
+        turns: turns.unwrap_or_else(|| Arc::new(LocalTurns::default())),
+        ledger,
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))
@@ -242,6 +275,7 @@ pub(crate) fn router(ctx: ModuleContext) -> axum::Router {
         .route("/slack/events", post(slack_events))
         .route("/me", get(me))
         .route("/members", get(members))
+        .route("/signout", post(signout))
         .route("/email/start", post(email_start))
         .route("/email/verify", get(email_verify_form).post(email_verify))
         .with_state(state)
@@ -986,6 +1020,35 @@ pub async fn caller(
     })
 }
 
+/// Resolves a caller from a **verified pair of ids** rather than from a
+/// cookie — a personal access token (issue #72) stores `workspace_id` and
+/// `user_id` as columns. `Ok(None)` is the same refusal a missing session
+/// gets, which is the property a token needs: one minted for somebody who
+/// has since left the workspace stops working rather than outliving the
+/// membership it was minted for. These are row reads against this module's
+/// own tables, so a sibling module never has to know their shape.
+///
+/// # Errors
+///
+/// [`DbError`] when either lookup fails.
+pub async fn caller_for(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Option<Caller>, DbError> {
+    let Some(workspace) = store::workspace(db, workspace_id).await? else {
+        return Ok(None);
+    };
+    let Some(member) = store::member(db, workspace_id, user_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(Caller {
+        workspace_id: workspace.id,
+        user_id: member.user_id,
+        is_admin: workspace.owner_id == user_id || member.is_admin,
+    }))
+}
+
 /// The one place the session's workspace field is read: a verified
 /// [`Session`] resolved to its workspace and member, or refused exactly
 /// like no session at all. Both the module's routes and [`caller`] go
@@ -1008,6 +1071,89 @@ async fn session_scope_of(
     };
     let is_owner = workspace.owner_id == session.user_id;
     Ok((workspace, member, is_owner))
+}
+
+/// `POST /signout` — end the session in this browser.
+///
+/// Answers `204` and a `Set-Cookie` that drops `__Host-lb_session` with the
+/// same attributes it was set with (`Path=/`, `Secure`, `HttpOnly`,
+/// `SameSite=Lax`) and `Max-Age=0`. It answers `204` whether or not a session
+/// was presented, so signing out twice — or in a second tab — is not an
+/// error.
+///
+/// It is a cookie write, so it takes the same same-origin check the other
+/// cookie writes in this venture take ([`require_same_origin`]): another site
+/// cannot sign a person out by posting here. `SameSite=Lax` already keeps the
+/// cookie off a cross-site `POST`, but a sibling subdomain is *same-site*, so
+/// the check is what refuses one of those.
+///
+/// There is no session row to revoke: a session is a signed, self-expiring
+/// cookie ([`flow::Session`]) and nothing is stored server-side, so a copy of
+/// the cookie taken before this call still verifies until its `exp`. Closing
+/// that needs a server-side session table or a per-member revocation stamp,
+/// which is a migration and not this route.
+async fn signout(headers: HeaderMap) -> Result<Response, Problem> {
+    require_same_origin(&headers)?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        flow::clear_cookie(flow::SESSION_COOKIE).ok_or_else(Problem::internal)?,
+    );
+    Ok(response)
+}
+
+/// Refuses a write a browser reports as coming from another site.
+///
+/// The rule `livingbrain-tokens` applies to its cookie writes, restated here
+/// because that crate depends on this one and not the other way round.
+/// `sec-fetch-site` is checked first — `same-origin` and `none` pass and
+/// everything else, including `same-site`, is refused — then `Origin`, when
+/// present, must be this request's own origin, compared as an RFC 6454
+/// origin rather than as a string. A request carrying neither header is not
+/// a browser and is accepted.
+fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
+    let refused = |detail: String| Problem::new(&CROSS_SITE_REQUEST).with_detail(detail);
+    if let Some(site) = headers.get("sec-fetch-site") {
+        let site = site.to_str().unwrap_or_default().to_ascii_lowercase();
+        if !matches!(site.as_str(), "same-origin" | "none") {
+            return Err(refused(format!(
+                "sec-fetch-site is {site}; only same-origin or none is accepted"
+            )));
+        }
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let presented = origin
+        .to_str()
+        .map_err(|_| refused("origin was not valid UTF-8".to_owned()))?;
+    let presented = origin_of(presented)
+        .map_err(|err| refused(format!("origin {presented:?} is not an origin: {err}")))?;
+    let own = own_origin(headers)
+        .ok_or_else(|| refused("origin was present but the request named no host".to_owned()))?;
+    if presented != own {
+        return Err(refused(format!(
+            "origin {presented} does not match the host this request reached ({own})"
+        )));
+    }
+    Ok(())
+}
+
+/// The origin this request reached: its `Host`, under `x-forwarded-proto`
+/// when a proxy names one and `https` otherwise — the resolution
+/// `livingbrain-tokens` uses for the same check.
+fn own_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| !host.is_empty())?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|scheme| scheme.split(',').next().unwrap_or(scheme).trim())
+        .filter(|scheme| matches!(*scheme, "http" | "https"))
+        .unwrap_or("https");
+    origin_of(&format!("{scheme}://{host}")).ok()
 }
 
 fn member_view(member: Member) -> MemberView {
@@ -1113,6 +1259,15 @@ async fn email_start(
         }
         Err(error) => return Err(mail_failed(error)),
     }
+    // The cost ledger (issue #12): one increment per send. The seam's
+    // contract is best-effort, and a link that named no workspace (the
+    // body's optional field) has nothing to record against. `email_start`
+    // is unauthenticated and workspace-named — safe only while the email
+    // rate is 0 (pilot free tier); a membership check must precede any
+    // non-zero rate.
+    if let (Some(ledger), Some(workspace_id)) = (&state.ledger, workspace_id) {
+        ledger.record_email(&*db, now, workspace_id).await;
+    }
     email_ok()
 }
 
@@ -1206,29 +1361,60 @@ async fn email_verify_form(
         .map(str::trim)
         .filter(|t| !t.is_empty())
     else {
-        return Ok(verify_page(
-            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-             <title>Sign in</title>\n</head>\n<body>\n<h1>This sign-in link is not usable</h1>\n\
-             <p>Ask for a new one and open the newest message.</p>\n</body>\n</html>\n",
-        ));
+        return Ok(verify_page(&verify_shell(
+            "Sign in",
+            "<p class=\"eyebrow\">Sign-in link</p>\n\
+             <h1>This sign-in link is not usable</h1>\n\
+             <div class=\"notice\" data-tone=\"warn\">Ask for a new one and open the newest \
+             message.</div>\n\
+             <p><a class=\"btn\" href=\"/index.html\">Back to sign-in</a></p>\n",
+        )));
     };
     // The token is the caller's own, from their own URL, and it is rendered
     // into a hidden field of a form that posts it straight back. It is
     // still escaped, because a token is still a value from a request.
     let escaped = html_escape(token);
     let action = format!("{}/v1/workspaces/email/verify", state.public_base()?);
-    Ok(verify_page(&format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <title>Sign in to Living Brain</title>\n</head>\n<body>\n\
-         <h1>Sign in to Living Brain</h1>\n\
-         <p>This link works once, and for the next {} minutes.</p>\n\
-         <form method=\"post\" action=\"{action}\">\n\
-         <input type=\"hidden\" name=\"token\" value=\"{escaped}\">\n\
-         <button type=\"submit\">Sign in</button>\n</form>\n\
-         <p>If you did not ask for it, close this page and ignore the message.</p>\n\
-         </body>\n</html>\n",
-        flow::SIGN_IN_TTL_SECS / 60
+    Ok(verify_page(&verify_shell(
+        "Sign in to Living Brain",
+        &format!(
+            "<p class=\"eyebrow\">Sign-in link</p>\n\
+             <h1>Sign in to Living Brain</h1>\n\
+             <p class=\"lede\">This link works once, and for the next {} minutes.</p>\n\
+             <form method=\"post\" action=\"{action}\">\n\
+             <input type=\"hidden\" name=\"token\" value=\"{escaped}\">\n\
+             <button type=\"submit\" data-variant=\"primary\">Sign in</button>\n</form>\n\
+             <p class=\"tiny\">If you did not ask for it, close this page and ignore the \
+             message.</p>\n",
+            flow::SIGN_IN_TTL_SECS / 60
+        ),
     )))
+}
+
+/// The page around a verify body: the web app's stylesheet, mark and header,
+/// so the one page the API renders itself looks like the rest of the app.
+///
+/// The app is served from the same host as static assets, so the stylesheet
+/// and icon are root-relative. Both are same-origin and the page sends no
+/// referrer, so loading them cannot carry the token in the URL anywhere; on a
+/// host without the app's assets they 404 and the page still works unstyled.
+/// No script is added: this page needs none, and the theme simply follows the
+/// system here.
+fn verify_shell(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <meta name=\"color-scheme\" content=\"dark light\">\n\
+         <title>{title}</title>\n\
+         <link rel=\"icon\" href=\"/assets/favicon.svg\" type=\"image/svg+xml\">\n\
+         <link rel=\"stylesheet\" href=\"/assets/app.css\">\n</head>\n<body>\n\
+         <header class=\"hd\"><div class=\"wrap hd__in\">\
+         <a class=\"brand\" href=\"/index.html\"><span class=\"mark\" aria-hidden=\"true\">\
+         <span></span></span><span class=\"brand__word\">livingbrain<span>.wiki</span>\
+         </span></a></div></header>\n\
+         <main id=\"main\" class=\"wrap solo\">\n<div class=\"card\">\n{body}</div>\n</main>\n\
+         </body>\n</html>\n"
+    )
 }
 
 /// A page the verify route serves, with the headers a page carrying a live

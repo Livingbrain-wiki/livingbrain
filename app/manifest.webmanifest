@@ -5,15 +5,33 @@
   "start_url": "./wiki.html",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#16191c",
-  "theme_color": "#16191c",
+  "background_color": "#070f11",
+  "theme_color": "#070f11",
   "orientation": "any",
   "icons": [
     {
-      "src": "assets/icon.svg",
+      "src": "assets/favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
+    },
+    {
+      "src": "assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { api, ApiError, esc, LB } from "../assets/app.js";
+import { api, ApiError, esc, LB, resumeReturnTo } from "../assets/app.js";
 
 /**
  * The placeholder BYOK key these tests paste into a models payload. Built at
@@ -189,4 +189,55 @@ test("esc escapes every character that could close an attribute", () => {
   assert.equal(esc(`<script>"x"&'`), "&lt;script&gt;&quot;x&quot;&amp;&#39;");
   assert.equal(esc(null), "");
   assert.equal(esc(0), "0");
+});
+
+/**
+ * A `sessionStorage` stand-in: the same three methods, backed by a `Map`, so
+ * the sign-in return round trip can be exercised in Node without a browser.
+ */
+function sessionStore() {
+  const map = new Map();
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, String(value)),
+    removeItem: (key) => map.delete(key),
+    get size() {
+      return map.size;
+    },
+  };
+}
+
+const APPROVAL_PAGE = "/v1/device-auth/approve?user_code=ABCD-EFGH";
+
+test("return_to waits out the sign-in round trip, then comes back once", () => {
+  const store = sessionStore();
+
+  // Bounced here by the device-approval hook: remembered, nothing to go to yet.
+  assert.equal(
+    resumeReturnTo("?return_to=%2Fv1%2Fdevice-auth%2Fapprove%3Fuser_code%3DABCD-EFGH", store),
+    null,
+  );
+  assert.equal(store.getItem("lb-return-to"), APPROVAL_PAGE);
+
+  // Back from the magic link or the Slack callback, both of which land on `/`
+  // with an empty query: the target is handed back — and taken out, so a later
+  // plain visit to the sign-in page stays there.
+  assert.equal(resumeReturnTo("", store), APPROVAL_PAGE);
+  assert.equal(store.size, 0);
+  assert.equal(resumeReturnTo("", store), null, "a stash is consumed once");
+});
+
+test("an unsafe return_to is never stored, and a fresh bounce replaces an old one", () => {
+  const store = sessionStore();
+
+  // Whatever the query carries, only a same-origin path may reach storage.
+  for (const bad of ["//evil.com", "/\\evil.com", "https://evil.com", "javascript:alert(1)"]) {
+    assert.equal(resumeReturnTo(`?return_to=${encodeURIComponent(bad)}`, store), null);
+    assert.equal(store.size, 0, bad);
+  }
+
+  // A second, different bounce is the most recent intent and wins the stash.
+  assert.equal(resumeReturnTo("?return_to=%2Fsettings.html", store), null);
+  assert.equal(resumeReturnTo("?return_to=%2Findex.html", store), null);
+  assert.equal(store.getItem("lb-return-to"), "/index.html");
 });

@@ -34,6 +34,11 @@ chacha20poly1305 = { workspace = true }
 getrandom = { workspace = true }
 # `HMAC-SHA256`, so the tests can sign a delivery the way Slack does.
 hmac = { workspace = true }
+# The module's injected seams, [`Answers`] in tests, the turn coordinator
+# (issue #7) and the cost ledger's `EmailLedger` (issue #12) in `src`: all
+# are `dyn` traits with async methods. Pure Rust, wasm-safe, already in the
+# lockfile.
+async-trait = { workspace = true }
 # Portable SQL built as parameterized statements over the `Database` port
 # (ADR 0004). Pure Rust, wasm-safe, and the version the harness resolves.
 sea-query = { workspace = true }
@@ -47,14 +52,29 @@ serde_json = { workspace = true }
 # wasm32, so it never enters a host `cargo tree`.
 time = { workspace = true }
 
+# The agent loop (issue #123). Four siblings, and why each is here rather
+# than folded into this crate: the access model decides which pages a member
+# may read, the channel adapters normalise Slack's events and render the
+# reply body, the judge decides whether to answer at all, and the pages
+# module owns both the scope naming and the answer seam. All four are
+# `livingbrain-*` modules, not vendors, so none splits the ports or reaches
+# a runtime.
+livingbrain-access = { path = "../livingbrain-access" }
+livingbrain-channel = { path = "../livingbrain-channel" }
+livingbrain-judge = { path = "../livingbrain-judge" }
+livingbrain-pages = { path = "../livingbrain-pages" }
+# Redaction (issue #108), and the reason it is here rather than only in
+# `livingbrain-pages`: a question reaches the **classifier** before it ever
+# reaches the page index, so redacting only downstream leaves the one copy
+# that leaves the machine first unredacted. Pure Rust, wasm-safe, already in
+# the tree.
+livingbrain-redact = { path = "../livingbrain-redact" }
+
 [dev-dependencies]
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
 # (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
 # sqlx and tokio never reach the module's wasm graph.
 cratefield-testing = { workspace = true, features = ["postgres"] }
-# Only so the test kit's Slack token fake can implement the `HttpClient`
-# port, whose trait is declared with `#[async_trait]`.
-async-trait = { workspace = true }
 pollster = { workspace = true }
 tower = { workspace = true }
 serde_json = { workspace = true }

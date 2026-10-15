@@ -1,0 +1,526 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Living Brain operations: brain turns, search p95, nightly-evolve duration, queue depth, token spend, plus the structured event log and a trace-to-logs link. Import this, then pick your metric datasource (Prometheus, Mimir, Grafana Cloud metrics) and your log datasource (Loki, Grafana Cloud Logs) at the top of the dashboard. Panels whose label would otherwise be install-specific use the placeholder <workspace-id>; replace it with your own id after import. Honest status: Living Brain exports metrics, traces and logs over OTLP to OTEL_EXPORTER_OTLP_ENDPOINT, but the Worker-side exporter wiring is not landed in the repository yet, so these panels read empty until it is. See docs/telemetry.md.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": true,
+      "title": "What leaves the machine",
+      "tooltip": "The usage-data contract: every field, every vocabulary, and how to turn it off",
+      "type": "link",
+      "url": "https://github.com/Livingbrain-wiki/livingbrain/blob/main/docs/usage-data.md"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "tags": [],
+      "targetBlank": true,
+      "title": "Telemetry, live map and event log",
+      "tooltip": "The live map, the structured event log and operational logs",
+      "type": "link",
+      "url": "https://github.com/Livingbrain-wiki/livingbrain/blob/main/docs/telemetry.md"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+      "description": "The number in the top right is brain turns per second across the selected window, and how that compares with the previous window of the same length. One brain turn is one ask of the brain, so this is the closest thing on the dashboard to a request rate. If it is zero and you expected traffic, check that the exporter is wired to the endpoint you picked.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "green", "mode": "fixed" },
+          "decimals": 1,
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": true,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "sum(rate(livingbrain_brain_turns_total{workspace=\"<workspace-id>\"}[$__rate_interval]))",
+          "legendFormat": "brain turns/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Brain turns per second",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+      "description": "How many brain turns happened over time. Read the shape before the number: a flat line means an idle brain, a sawtooth on a schedule usually means the nightly evolve pass firing, and a drop to zero with a flat queue-depth panel below means work is arriving but not being served.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "green", "mode": "fixed" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 12, "x": 6, "y": 0 },
+      "id": 2,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "sum by (kind) (rate(livingbrain_brain_turns_total{workspace=\"<workspace-id>\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Brain turns over time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+      "description": "The 95th percentile search latency in milliseconds, which is the number to alert on: the mean hides the slow tail, and this is the tail. Latency here is the measured duration on your instance and is not the bucketed search latency from the anonymous usage payload, which is deliberately coarse.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "yellow", "mode": "fixed" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1000 },
+              { "color": "red", "value": 5000 }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "id": 3,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(livingbrain_search_duration_milliseconds_bucket{workspace=\"<workspace-id>\"}[$__rate_interval])))",
+          "legendFormat": "search p95",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Search p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+      "description": "The queue depth over time: work that has arrived and is waiting to be served. Rising while brain turns are flat is the signal that something behind the brain is stuck. A single spike right after a nightly pass is normal; a queue that climbs all night is not.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "purple", "mode": "fixed" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 5 },
+      "id": 4,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "max(livingbrain_queue_depth{workspace=\"<workspace-id>\"})",
+          "legendFormat": "queued",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Queue depth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+      "description": "How long the nightly evolve pass takes, per run. It merges duplicates, reconciles contradictions and refreshes stale facts, and this is its wall clock. A night that takes longer than the interval between nights means passes are overlapping and you want to know that before the queue-depth panel starts climbing.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "orange", "mode": "fixed" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 70,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 5 },
+      "id": 5,
+      "options": {
+        "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "max(livingbrain_evolve_duration_milliseconds{workspace=\"<workspace-id>\"})",
+          "legendFormat": "evolve duration",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Nightly evolve duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", " uid": "${ds_metrics}" },
+      "description": "Token spend per hour, split by direction: in is tokens sent to a model, out is tokens received back. This is the panel that turns into a bill, so it is the one to put a budget alert on. It counts tokens, not content: what was in them never appears here or anywhere else in operational telemetry.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "blue", "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "normal" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 5 },
+      "id": 6,
+      "options": {
+        "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "sum by (direction) (sum_over_time(livingbrain_tokens_total{workspace=\"<workspace-id>\"}[$__interval]))",
+          "legendFormat": "{{direction}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Token spend",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+      "description": "Failures per hour, split by the six closed error kinds: config (the caller's own setup, no key or no workspace), upstream (a dependency answered badly), timeout (it did not answer in time), decode (the answer could not be turned into what was asked for), permission (the asker was not allowed to) and internal (a bug, and the bucket everything unmapped falls into). Splitting them is the point: a permission error is a configuration question and an upstream error is the provider's.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "normal" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 13 },
+      "id": 7,
+      "options": {
+        "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${ds_metrics}" },
+          "editorMode": "code",
+          "expr": "sum by (error_kind) (rate(livingbrain_errors_total{workspace=\"<workspace-id>\"}[$__rate_interval]))",
+          "legendFormat": "{{error_kind}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Failures by error kind",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "${ds_logs}" },
+      "description": "The structured event log: one JSON line per brain turn, nightly-evolve change, MCP call and colony hand-off. Filter on the event fields, which are the schema in docs/brain-events.schema.json: kind is brain_turn, nightly_evolve, mcp_call, colony_handoff or operational; outcome is success, failure or skipped; error_kind is config, upstream, timeout, decode, permission or internal. A line references content by page or message id and never carries it, so nothing here is message text or a page body. Click any line's trace id to jump to the rest of that turn in the traces panel below.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 13 },
+      "id": 8,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${ds_logs}" },
+          "editorMode": "code",
+          "expr": "{job=\"livingbrain\"} | json | kind=~\"brain_turn|nightly_evolve|mcp_call|colony_handoff\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Brain events (structured log)",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+      "description": "One span tree per brain turn, so a slow turn is a trace you can read rather than a number you can only compare. Each trace carries the same opaque trace id the event log lines carry, which is what links the two: click the trace id in the log panel above to land here, and click the Logs link on any trace row to go back to the lines that turn produced. No message text and no page body reaches a span attribute, for the same reason it cannot reach a log line: there is no field to put it in.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+      "id": 9,
+      "links": [
+        {
+          "targetBlank": false,
+          "title": "Logs for this trace",
+          "url": "/explore?schemaVersion=1&panes=${__url_panes}&left={\"datasource\":\"${ds_logs}\",\"queries\":[{\"queryType\":\"range\",\"refId\":\"A\",\"expr\":\"{job=\\\"livingbrain\\\"} | json | trace_id=\\\"${__value.raw}\\\"\"}],\"range\":{\"from\":\"${__from}\",\"to\":\"${__to}\"}}"
+        }
+      ],
+      "options": {},
+      "pluginVersion": "11.3.0",
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "${ds_traces}" },
+          "filters": [
+            {
+              "key": "name",
+              "operator": "=",
+              "value": "brain_turn"
+            }
+          ],
+          "limit": 20,
+          "query": "{ true }",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Brain turn traces — click a trace id to see the logs for that turn",
+      "type": "traces"
+    }
+  ],
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["livingbrain", "brain"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Metrics",
+        "multi": false,
+        "name": "ds_metrics",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Logs",
+        "multi": false,
+        "name": "ds_logs",
+        "options": [],
+        "query": "loki",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Traces",
+        "multi": false,
+        "name": "ds_traces",
+        "options": [],
+        "query": "tempo",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Living Brain",
+  "uid": "livingbrain",
+  "version": 1,
+  "weekStart": ""
+}

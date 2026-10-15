@@ -1,0 +1,31 @@
+# Living Brain's "Built with" list: the venture's `uses` array out of the
+# published Factory Zero stack registry, vendored. A plain library — the same
+# shape as `livingbrain-redact` — because it is data plus the two renderers
+# that print it, not a module with ports, tables or routes.
+
+[package]
+name = "livingbrain-stack"
+description = "Living Brain's vendored Factory Zero stack entry: the 'Built with' list, as text and as Markdown"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["src/**/*"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# The vendored `stack.json` is deserialized with `serde`, exactly the way the
+# venture's `mail-theme.json` is; both are data files beside a `from_json`
+# constructor. Both crates are already in the tree, so this adds no lockfile
+# entry.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The offline drift guard: SHA-256 of the vendored `stack.json`, the same hash
+# the workspace already resolves for sign-in tokens.
+sha2 = { workspace = true }

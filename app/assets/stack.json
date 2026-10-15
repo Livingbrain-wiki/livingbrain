@@ -1,0 +1,106 @@
+{
+  "venture": {
+    "id": "FZ-018",
+    "name": "Living Brain",
+    "site": "https://livingbrain.wiki/",
+    "page": "https://factory0.ventures/ventures/living-brain/"
+  },
+  "statuses": {
+    "live": "In use today.",
+    "planned": "Decided and tracked, not in use yet."
+  },
+  "uses": [
+    {
+      "role": "framework",
+      "phrase": "Built with",
+      "name": "Cratefield",
+      "id": "FZ-004",
+      "kind": "factory-zero",
+      "url": "https://cratefield.com/",
+      "status": "planned",
+      "note": "Built in Rust as a Cratefield venture; nothing is deployed yet, including the waitlist."
+    },
+    {
+      "role": "agents",
+      "phrase": "Agents run on",
+      "name": "Colonizer",
+      "id": "FZ-006",
+      "kind": "factory-zero",
+      "url": "https://colonizer.dev/",
+      "status": "planned",
+      "note": "Colonizer colonies take the bigger jobs and open a pull request; nothing is dispatched yet."
+    },
+    {
+      "role": "email",
+      "phrase": "Email by",
+      "name": "Owlpost",
+      "id": "FZ-013",
+      "kind": "factory-zero",
+      "url": "https://owlpost.to/",
+      "status": "planned",
+      "note": "Waitlist confirmation, digests and the brain’s own inbox."
+    },
+    {
+      "role": "support",
+      "phrase": "Support by",
+      "name": "SupportGenius",
+      "id": "FZ-008",
+      "kind": "factory-zero",
+      "url": "https://supportgeni.us/",
+      "status": "planned",
+      "note": "Customer-safe answers and tickets routed back in from SupportGenius."
+    },
+    {
+      "role": "bug-reports",
+      "phrase": "Bug reports to",
+      "name": "SupportGenius",
+      "id": "FZ-008",
+      "kind": "factory-zero",
+      "url": "https://supportgeni.us/",
+      "status": "planned",
+      "note": "Errors and bug reports become deduplicated GitHub issues, through the Cratefield error reporter."
+    },
+    {
+      "role": "payments",
+      "phrase": "Payments by",
+      "name": "Polar",
+      "id": "polar",
+      "kind": "third-party",
+      "url": "https://polar.sh",
+      "status": "planned",
+      "note": "Hosted plans through Polar as Merchant of Record. Nothing is on sale yet."
+    },
+    {
+      "role": "security-screening",
+      "phrase": "Screened by",
+      "name": "promptdecode",
+      "id": "FZ-009",
+      "kind": "factory-zero",
+      "url": "https://promptdeco.de/",
+      "status": "planned",
+      "note": "Every way in and out screened for hidden text with the promptdecode engine."
+    },
+    {
+      "role": "deploys",
+      "phrase": "Deploys by",
+      "name": "Keep Shipping",
+      "id": "FZ-012",
+      "kind": "factory-zero",
+      "url": "https://keepshipping.run/",
+      "status": "planned",
+      "note": "Every venture site and Worker deployed from the Keep Shipping console."
+    },
+    {
+      "role": "hosting",
+      "phrase": "Hosted on",
+      "name": "Cloudflare",
+      "id": "cloudflare",
+      "kind": "third-party",
+      "url": "https://www.cloudflare.com",
+      "status": "live",
+      "note": "The site."
+    }
+  ],
+  "source": "https://factory0.ventures/stack.json",
+  "subprocessors": "https://factory0.ventures/ventures/living-brain/"
+}

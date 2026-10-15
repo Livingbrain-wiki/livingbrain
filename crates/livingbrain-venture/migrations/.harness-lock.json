@@ -46,5 +46,33 @@
   "workspaces/0003": {
     "file": "0012_workspaces_0003_slack_app.sql",
     "sha256": "b6ad4a673b3ca4c04ee8853add253ee19036aa6ad33b61c5139cc9cc262825fb"
+  },
+  "pages/0003": {
+    "file": "0013_pages_0003_sources.sql",
+    "sha256": "88c9b9a47025b9403f13cae3cc7209913392a9653630d8d0e0ccbb2477119d8f"
+  },
+  "device-auth/0001": {
+    "file": "0014_device-auth_0001_init.sql",
+    "sha256": "e91aedf2fb661c50e9db080ad48e6daf5736fd02f3bfe32ae7a34d5ab1395c94"
+  },
+  "tokens/0001": {
+    "file": "0015_tokens_0001_init.sql",
+    "sha256": "0ea8243b2b7ab242454c815e5a6a4d9c114db8c997fbca96613b7115feef26e0"
+  },
+  "models/0002": {
+    "file": "0016_models_0002_provider_wire.sql",
+    "sha256": "0027f24324aa342d22e31df8ab965de17f566fb0665f91592a4fdd3e9ef43563"
+  },
+  "pages/0004": {
+    "file": "0017_pages_0004_source_ledger.sql",
+    "sha256": "75795d68d54db610bfbbad26ee4da5ed28b78553f7b9cca12be2e78f8eafba23"
+  },
+  "tools/0001": {
+    "file": "0018_tools_0001_init.sql",
+    "sha256": "0a4d2c03a8af4e1e8ae3d168fae7947858e893a9c59bb5d9334a58abb86b0307"
+  },
+  "usage/0001": {
+    "file": "0019_usage_0001_init.sql",
+    "sha256": "cdb8adf5ba7ab4697f77d5b20b7e2e315589d165c0bcadee0771a233f814d8cd"
   }
 }

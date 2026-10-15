@@ -5,7 +5,9 @@
 //! facts disagree?") are one shape: a typed question set, one `ask` against
 //! one state, a threshold that turns a probability into a decision. The
 //! policy — which question, which labels, which number — is in this crate;
-//! the classifier only answers.
+//! the classifier only answers. Relevance ("is this item about that
+//! topic?", #58) is a fourth question of the same shape, kept out of
+//! [`Thresholds`] so a stored settings row keeps loading.
 //!
 //! **Confidence is per family.** A `0.8` from a purpose-trained classifier
 //! is not a `0.8` elicited from a language model, so every threshold is
@@ -147,6 +149,10 @@ pub struct JudgeSettings {
     pub classifier: Thresholds,
     #[serde(default = "Thresholds::language_model")]
     pub language_model: Thresholds,
+    /// The relevance bar, per family, for [`Judge::relevance`]. Its own
+    /// struct so a settings row stored before relevance existed loads.
+    #[serde(default)]
+    pub relevance: RelevanceThresholds,
 }
 
 impl Default for JudgeSettings {
@@ -155,6 +161,7 @@ impl Default for JudgeSettings {
             proactivity: Proactivity::default(),
             classifier: Thresholds::CLASSIFIER,
             language_model: Thresholds::LANGUAGE_MODEL,
+            relevance: RelevanceThresholds::CLASSIFIER,
         }
     }
 }
@@ -205,6 +212,73 @@ pub fn memory_questions() -> BTreeMap<String, Question> {
                     kind(CHATTER, "Small talk and noise: read once, never keep."),
                 ])
             },
+        },
+    )])
+}
+
+/// The relevance question id: "is this item about that topic".
+pub const RELEVANCE_QUESTION: &str = "relevant";
+
+/// How sure a call has to be that an item is about the topic it was scored
+/// against. Its own struct rather than a fourth field of [`Thresholds`],
+/// because a [`Thresholds`] family is deliberately all-or-nothing (see
+/// there) and relevance arrived after rows were already stored: its own
+/// `#[serde(default)]`ed field on [`JudgeSettings`] loads a row written
+/// before this existed without breaking the contract the other three keep,
+/// and the struct defaults each threshold, so a row naming one family and
+/// not the other is not an error either.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RelevanceThresholds {
+    /// P(relevant) a purpose-trained classifier has to reach.
+    pub classifier: f32,
+    /// P(relevant) elicited from a language model has to reach. Higher,
+    /// like every other threshold in this crate: the same number means
+    /// something less.
+    pub language_model: f32,
+}
+
+impl RelevanceThresholds {
+    /// The defaults: `0.70` for a classifier, `0.85` for a language model.
+    pub const CLASSIFIER: Self = Self {
+        classifier: 0.70,
+        language_model: 0.85,
+    };
+
+    /// The bar that family of numbers has to clear.
+    #[must_use]
+    pub fn threshold_for(self, calibration: Calibration) -> f32 {
+        match calibration {
+            Calibration::Classifier => self.classifier,
+            Calibration::LanguageModel => self.language_model,
+        }
+    }
+}
+
+impl Default for RelevanceThresholds {
+    fn default() -> Self {
+        Self::CLASSIFIER
+    }
+}
+
+/// The one noul [`Judge::relevance`] asks, about `topic`.
+///
+/// The topic is in the *instructions*, not the state: the item is the state
+/// (the thing a fetcher collected, carried once per call), and the topic is
+/// the question being asked of it. A caller scoring one item against every
+/// watched topic therefore pays for the item once and varies only the
+/// question — the reason this is a question set and not a bespoke call.
+#[must_use]
+pub fn relevance_questions(topic: &str) -> BTreeMap<String, Question> {
+    BTreeMap::from([(
+        RELEVANCE_QUESTION.to_owned(),
+        Question::Noul {
+            instructions: format!(
+                "Is this item about {topic}? It is when it is about that \
+                 subject and would be worth a person's attention there: work, \
+                 writing, tooling or research on it. It is not when it merely \
+                 shares a word with it, or when it is about something adjacent."
+            ),
         },
     )])
 }
@@ -402,6 +476,29 @@ impl Judge {
             label: most_likely(answer),
             ..decided
         })
+    }
+
+    /// Is `item` about `topic`? One ask, scored on P(true) against
+    /// [`JudgeSettings::relevance`]. The research radar (#58) asks this of
+    /// every screened item against every watched topic; an advisory is not
+    /// asked it at all, which is the caller's decision, not this crate's.
+    pub async fn relevance(&self, item: &str, topic: &str) -> Result<Decided, JudgeError> {
+        self.check_state(item)?;
+        let threshold = self
+            .settings
+            .relevance
+            .threshold_for(self.classifier.profile().calibration);
+        let questions = relevance_questions(topic);
+        let answers = self.classifier.ask(item, &questions).await?;
+        let answer = take(&answers, RELEVANCE_QUESTION)?;
+        Ok(self.decide(
+            "relevance",
+            questions,
+            RELEVANCE_QUESTION,
+            answer,
+            mass(answer, "true")?,
+            threshold,
+        ))
     }
 
     /// Do `first` and `second` conflict? One ask over both facts joined by

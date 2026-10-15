@@ -1,0 +1,479 @@
+/* The wiki page's own styles, on top of the shared tokens and components in
+ * `app.css`. Same rules as there: every length is fluid or auto, nothing has
+ * a fixed pixel width, and anything that could be wider than its column sets
+ * `min-width: 0` or `overflow-wrap: anywhere`, so a 360 px viewport never
+ * scrolls sideways. Only this page loads this sheet.
+ */
+
+/* Headings land below the sticky header when a TOC link is followed, and
+ * scroll themselves smoothly (the global reduced-motion rule in app.css
+ * turns this off for anyone who asks for it). */
+html {
+  scroll-behavior: smooth;
+}
+.prose :where(h1, h2, h3, h4, h5, h6) {
+  scroll-margin-top: 5.5rem;
+}
+
+/* Search-result and snippet highlights. */
+.wiki mark {
+  background: var(--accent-soft);
+  color: inherit;
+  border-radius: 4px;
+  padding: 0 0.1em;
+}
+
+/*   header: the search box
+   ---------------------------------------------------------------- */
+
+.wiki-search {
+  position: relative;
+  flex: 1 1 10rem;
+  min-width: 0;
+  max-width: 22rem;
+}
+
+.wiki-search > input {
+  min-height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+  background: var(--bg);
+}
+
+/* The results listbox hangs under the field, above the page. */
+.wiki-search__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: min(24rem, 60vh);
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  box-shadow: 0 12px 30px oklch(0 0 0 / 0.35);
+}
+
+.wiki-search__opt {
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line2);
+  cursor: pointer;
+}
+
+.wiki-search__opt:first-child {
+  border-top: 0;
+}
+
+.wiki-search__opt:hover,
+.wiki-search__opt--active {
+  background: var(--accent-soft);
+}
+
+.wiki-search__title {
+  font-weight: 600;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-search__snippet {
+  font-size: 13px;
+  color: var(--ink2);
+  overflow-wrap: anywhere;
+}
+
+.wiki-search__none {
+  padding: 12px 14px;
+  font-size: 14px;
+  color: var(--ink3);
+}
+
+@media (max-width: 40rem) {
+  /* The field takes the whole second row on phones, next to the menu button. */
+  .wiki-search {
+    order: 3;
+    flex: 1 1 100%;
+    max-width: none;
+  }
+}
+
+/* Touch: the field, like every control on this page, clears 44 px. */
+@media (pointer: coarse) {
+  .wiki-search > input {
+    min-height: 44px;
+  }
+}
+
+/* Under 40rem the header's inline nav duplicates the drawer: the same links
+ * plus sign in/out live in there behind the Menu button, and on a phone the
+ * drawer is the one nav. The inline list stands down wherever the Menu button
+ * shows; from 40rem up it is back and the button is gone. */
+@media (max-width: 40rem) {
+  .hd__in .nav {
+    display: none;
+  }
+}
+
+/*   header: the small-screen drawer
+   ---------------------------------------------------------------- */
+
+.wiki-drawer__btn {
+  flex-shrink: 0;
+}
+
+/* The drawer is only a phone-and-tablet affordance: from 40rem up the header
+ * nav and the page's side TOC already carry everything it has. */
+@media (min-width: 40rem) {
+  .wiki-drawer__btn,
+  #wiki-drawer {
+    display: none;
+  }
+}
+
+.wiki-drawer {
+  border-bottom: 1px solid var(--line2);
+  background: var(--bg2);
+}
+
+.wiki-drawer__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px var(--gutter) 0;
+}
+
+.wiki-drawer__nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--ink2);
+  text-decoration: none;
+}
+
+.wiki-drawer__nav a:hover {
+  color: var(--ink);
+  background: var(--bg3);
+}
+
+/* The drawer's sign-out mirror: styled as a nav link, wired like the header's. */
+.wiki-drawer__signout {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  justify-content: flex-start;
+  font-size: inherit;
+  font-weight: 400;
+  color: var(--ink2);
+  background: transparent;
+}
+
+.wiki-drawer__signout:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--bg3);
+}
+
+.wiki-drawer__h {
+  margin: 0;
+  padding: 10px var(--gutter) 0;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+.wiki-drawer .wiki-toc {
+  padding: 0 var(--gutter) 14px;
+}
+
+/*   the table of contents (both mounts)
+   ---------------------------------------------------------------- */
+
+.wiki-toc ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.wiki-toc a {
+  display: block;
+  padding: 4px 0;
+  font-size: 14px;
+  color: var(--ink2);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.wiki-toc a:hover {
+  color: var(--accent);
+}
+
+.wiki-toc .wiki-toc__sub a {
+  padding-inline-start: 1rem;
+  font-size: 13px;
+}
+
+/* The desktop TOC is only the wide layout's side rail: below 60rem the
+ * drawer already carries the same list, so the aside must not flow beneath
+ * the article (its `hidden` attribute still wins through app.css). */
+#toc-desktop {
+  display: none;
+}
+
+/* Beside the page on wide screens; below it until there is room. */
+.wiki-page {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+@media (min-width: 60rem) {
+  .wiki-page {
+    grid-template-columns: minmax(0, 1fr) 14rem;
+  }
+  #toc-desktop {
+    display: block;
+  }
+  .wiki-toc--side {
+    position: sticky;
+    top: 88px;
+    border-inline-start: 1px solid var(--line2);
+    padding-inline-start: var(--space-2);
+  }
+}
+
+.wiki-toc--side h2 {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+/*   home: the page lists
+   ---------------------------------------------------------------- */
+
+.wiki-filter {
+  flex: 1 1 12rem;
+  min-width: 0;
+  max-width: 20rem;
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 15px;
+}
+
+.wiki-list {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.wiki-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  min-width: 0;
+}
+
+.wiki-row__link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.wiki-row__slug {
+  font-family: var(--f-mono);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-row__link:hover .wiki-row__slug {
+  color: var(--accent);
+}
+
+.wiki-row__meta {
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink3);
+  white-space: nowrap;
+}
+
+.wiki-row__pin {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+@media (pointer: coarse) {
+  .wiki-row__pin {
+    min-height: 44px;
+  }
+}
+
+.wiki-empty h2 {
+  font-size: var(--step-1);
+}
+
+/*   the page meta line
+   ---------------------------------------------------------------- */
+
+.wiki-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  max-width: none;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink3);
+}
+
+/*   the citations card
+   ---------------------------------------------------------------- */
+
+/* A citation's URL drops to its own line under the title (and quote), not
+ * the title's tail; `anywhere` keeps a long URL from widening the card. */
+#page-citations .tiny {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+/*   the editor
+   ---------------------------------------------------------------- */
+
+.wiki-editor__h {
+  font-size: var(--step-2);
+}
+
+.wiki-editmode {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-block: var(--space-2);
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  background: var(--bg2);
+}
+
+.wiki-editmode button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  font-size: 14px;
+  background: transparent;
+}
+
+.wiki-editmode button[aria-pressed="true"] {
+  background: var(--bg3);
+  color: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.wiki-editmode button:hover:not(:disabled) {
+  background: var(--bg3);
+}
+
+@media (pointer: coarse) {
+  .wiki-editmode button {
+    min-height: 44px;
+  }
+}
+
+/*   new page
+   ---------------------------------------------------------------- */
+
+.wiki-np {
+  max-width: 34rem;
+}
+
+/* The slug gate holds Create disabled, but the shared primary keeps its
+ * accent on `:disabled` — mute it here so an unready button reads as off in
+ * both themes. */
+#np-create:disabled {
+  border-color: var(--line);
+  background: var(--bg3);
+  color: var(--ink3);
+  filter: none;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* The slug rule doubles as the field's helper, so it reads as one: muted
+ * ink, like `.hint`. Only once validation has actually failed — a slug was
+ * typed and refused, or the server sent back a 422 — does `wiki.js` mark the
+ * input `aria-invalid`, and the adjacent slot then takes the danger color. A
+ * pristine form never wears red. */
+#np-slug-error {
+  color: var(--ink3);
+  font-weight: 400;
+}
+
+#np-slug[aria-invalid="true"] + #np-slug-error {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+/*   ask
+   ---------------------------------------------------------------- */
+
+.wiki-ask {
+  width: min(34rem, calc(100vw - 32px));
+}
+
+.wiki-ask__status {
+  display: block;
+  margin: 0 0 var(--space-2);
+  font-size: 14px;
+  color: var(--ink3);
+}
+
+.wiki-ask__status:empty {
+  display: none;
+}
+
+/* ask citations: the title, then the quoted line it came from */
+.wiki-ask .citations {
+  margin-top: var(--space-2);
+}
+
+/* conflict actions live inside the notice they belong to */
+#wiki-notice {
+  flex-wrap: wrap;
+  max-width: none;
+}
+
+#wiki-notice button {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+@media (pointer: coarse) {
+  #wiki-notice button {
+    min-height: 44px;
+  }
+}

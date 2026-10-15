@@ -1,7 +1,7 @@
 //! `livingbrain-pages`: the page store — entities, Markdown, links, history.
 //!
-//! A page is an **entity** (a person, project, decision, customer, system or
-//! glossary term) whose Markdown body lives in the blob store and whose
+//! A page is an **entity** (a person, project, decision, customer, system,
+//! glossary term or radar item) whose Markdown body lives in the blob store and whose
 //! metadata lives in D1: a slug, an entity type, a scope, `[[backlinks]]` and
 //! a version history. Two properties are the point of the module:
 //!
@@ -21,29 +21,47 @@
 //!
 //! There is no HTTP surface of its own: authentication and workspaces are a
 //! sibling issue, and an unauthenticated write route would be a hole. A
-//! composition that has one mounts it with [`Pages::nest`], which builds it
-//! from this module's own context — the harness scopes `Blob` per module
-//! name, so only a nested surface can open a body this module writes.
+//! composition that has one mounts it with [`Pages::nest`] (routes under a
+//! path inside the module) or [`Pages::surface`] (routes at the module's own
+//! mount root), either of which builds it from this module's own context —
+//! the harness scopes `Blob` per module name, so only a surface built here
+//! can open a body this module writes.
 
 #![forbid(unsafe_code)]
 
+mod answers;
 mod entity;
+mod ingest;
 mod keys;
+mod scope;
+mod sources;
 mod store;
 
+pub use answers::{AnswerError, Answered, Answers, Asker, Citation, PageAnswers};
 pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
-pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
-pub use store::{
-    Author, AuthorKind, Page, PageError, PageStore, PageWrite, ReencryptReport, SearchHit,
-    VersionMeta,
+pub use ingest::{
+    Extract, IngestError, IngestOutcome, Ingested, Ingestor, NoExtract, NoScreen, Screen,
+    SourceIngest, Verdict,
 };
+pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
+pub use scope::{page_scope, page_scopes_for};
+pub use sources::{
+    MAX_SOURCE_BODY_BYTES, Released, Source, SourceError, SourceKind, SourceStore, SourceWrite,
+    extract_wikilinks,
+};
+pub use store::{
+    Author, AuthorKind, Page, PageError, PageStore, PageSummary, PageWrite, ReencryptReport,
+    SearchHit, VersionMeta,
+};
+
+use std::sync::Arc;
 
 use cratefield_core::axum::Router;
 use cratefield_core::{
-    Config, ConfigError, DataKind, Migrations, Module, ModuleContext, PersonalDataSet, Port,
-    SqlMigration,
+    Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,
+    Port, SqlMigration,
 };
 
 /// The pages, links and history tables, in the portable SQL subset so
@@ -61,24 +79,50 @@ const MIGRATION_SCOPE_KEYS: SqlMigration = SqlMigration::new(
     include_str!("../migrations/sqlite/0002_scope_keys.sql"),
 );
 
+/// The source ledger (issue #81), same portable subset.
+const MIGRATION_SOURCES: SqlMigration = SqlMigration::new(
+    "0003",
+    "sources",
+    include_str!("../migrations/sqlite/0003_sources.sql"),
+);
+
+/// The ledger widened into the ingest ledger (issue #77), same portable
+/// subset — `ALTER TABLE ADD COLUMN` runs unchanged on both engines.
+const MIGRATION_SOURCE_LEDGER: SqlMigration = SqlMigration::new(
+    "0004",
+    "source_ledger",
+    include_str!("../migrations/sqlite/0004_source_ledger.sql"),
+);
+
 /// Routes a composition mounts inside this module.
 ///
-/// The closure is handed the one `ModuleContext` the mount got, so the
-/// surface it builds reads what this module reads.
-type Nest = Box<dyn Fn(ModuleContext) -> Router + Send + Sync>;
+/// The closure is handed the one [`ModuleContext`] the mount got, shared, so
+/// the surface it builds reads what this module reads. It is shared through an
+/// `Arc` because `ModuleContext` is neither `Clone` nor copyable — [`Ports`]
+/// behind it holds a resolved runtime bundle and a second one rebuilt by hand
+/// would drift from the first the moment a port is added — while a module may
+/// nest more than one surface and each needs the same one.
+///
+/// [`Ports`]: cratefield_core::Ports
+type Nest = Box<dyn Fn(Arc<ModuleContext>) -> Router + Send + Sync>;
 
 /// The pages module.
 #[derive(Default)]
 pub struct Pages {
-    nest: Option<(&'static str, Nest)>,
+    nest: Vec<(&'static str, Nest)>,
+    surface: Option<Nest>,
 }
 
-// A nested surface is a closure, which is not `Debug`; the module itself is
-// still one, so a composition that prints its modules keeps working.
+// A surface is a closure, which is not `Debug`; the module itself is still
+// one, so a composition that prints its modules keeps working.
 impl std::fmt::Debug for Pages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pages")
-            .field("nested", &self.nest.as_ref().map(|(path, _)| path))
+            .field(
+                "nested",
+                &self.nest.iter().map(|(path, _)| *path).collect::<Vec<_>>(),
+            )
+            .field("surface", &self.surface.is_some())
             .finish()
     }
 }
@@ -97,17 +141,64 @@ impl Pages {
     /// module name, and a sibling module could not open a body this one
     /// writes (issue #24).
     ///
-    /// One surface per module, and the type says so: `ModuleContext` is not
-    /// `Clone` and a mount gets exactly one.
+    /// A module may nest more than one surface (issue #81 added `/sources`
+    /// beside `/mcp`), so this pushes rather than replacing. Every mount is
+    /// handed the same `Arc`, ports and all.
     #[must_use]
     pub fn nest(
-        self,
+        mut self,
         path: &'static str,
-        routes: impl Fn(ModuleContext) -> Router + Send + Sync + 'static,
+        routes: impl Fn(Arc<ModuleContext>) -> Router + Send + Sync + 'static,
+    ) -> Self {
+        self.nest.push((path, Box::new(routes)));
+        self
+    }
+
+    /// Merge `routes` at the module's own mount root, beside [`Pages::nest`],
+    /// which puts its routes under a path inside the module.
+    ///
+    /// The routes the closure builds are module-absolute: one registered at
+    /// `/` is served wherever a composition mounted this module, so a
+    /// `GET /:slug` there is `/v1/pages/:slug` at the harness. Like a nest,
+    /// the surface is built from *this* module's context and reads the same
+    /// blob prefix the pages do (issue #24).
+    ///
+    /// One surface of each kind per module, and the type says so:
+    /// `ModuleContext` is not `Clone` and a mount gets exactly one.
+    #[must_use]
+    pub fn surface(
+        self,
+        routes: impl Fn(Arc<ModuleContext>) -> Router + Send + Sync + 'static,
     ) -> Self {
         Self {
-            nest: Some((path, Box::new(routes))),
+            nest: self.nest,
+            surface: Some(Box::new(routes)),
         }
+    }
+}
+
+/// A second context with this module's exact wiring, for a composition that
+/// both nests a surface and merges one at the mount root. A mount gets
+/// exactly one `ModuleContext` and it is not `Clone`, so the twin is
+/// rebuilt: [`Ports::view_for`](cratefield_core::Ports::view_for)
+/// re-derives the ports view the way the harness built the first one —
+/// except the blob, which is put back as scoped, because a second
+/// `view_for` would wrap it in `pages/` a second time. Everything else is
+/// an `Arc`, the cloned bus, or a bool, so the twin shares what the first
+/// context shares.
+fn twin_context(ctx: &ModuleContext, module: &dyn Module) -> ModuleContext {
+    let mut ports = ctx.ports.view_for(module);
+    ports.blob.clone_from(&ctx.ports.blob);
+    ModuleContext {
+        ports,
+        config: Arc::clone(&ctx.config),
+        events: ctx.events.clone(),
+        templates: Arc::clone(&ctx.templates),
+        venture: Arc::clone(&ctx.venture),
+        unprotected_writes_accepted: ctx.unprotected_writes_accepted,
+        personal_data: Arc::clone(&ctx.personal_data),
+        ui_mounted: ctx.ui_mounted,
+        scheduled: Arc::clone(&ctx.scheduled),
     }
 }
 
@@ -124,7 +215,12 @@ impl Module for Pages {
     /// and `PageStore::new` is handed one by whoever composes the store. When
     /// the runtime grows a `Port::Kms` this moves beside it.
     fn requires(&self) -> &'static [Port] {
-        &[Port::Db, Port::Blob, Port::Clock, Port::IdGen]
+        // `Defer` since issue #77: the source ledger's ingest pipeline
+        // enqueues extraction on it. A held source enqueues nothing until it
+        // is released, but the port itself is not optional — a composition
+        // that cannot defer extraction is a ledger that silently never
+        // extracts, and `Harness::build` is where that must be said.
+        &[Port::Db, Port::Blob, Port::Clock, Port::IdGen, Port::Defer]
     }
 
     /// `Signer` is **optional**, and only because a nested surface may need
@@ -143,6 +239,7 @@ impl Module for Pages {
             "page_links",
             "scope_keys",
             "page_terms",
+            "sources",
         ]
     }
 
@@ -194,12 +291,41 @@ impl Module for Pages {
                 "the row holds HMACs of tokens, not tokens, so no erasure query can match a \
                  word; forgetting a scope deletes its rows with its key",
             ),
+            // The source ledger (issues #81 and #77). A source is somebody's
+            // document or message and its path or origin is often their own
+            // filing, so the row is declared content with the one column an
+            // erasure query can bind to named as the subject — `imported_by`
+            // holds the asker's user id, the same value the workspaces module
+            // matches on (`author`, when set, holds another member's id, and
+            // erasure of either subject deletes the whole row). The path, the
+            // origin ref and the link targets are plaintext columns, so
+            // erasure reaches them by deleting the row; only the sealed body
+            // outlives it, and that one is destroyed with the scope key by
+            // `PageStore::forget_scope`.
+            PersonalDataSet {
+                table: "sources",
+                subject: "imported_by",
+                kind: DataKind::Content,
+                disposition: Disposition::Erase,
+                description: "For each source that arrived from outside: where it came \
+                              from (a path or an origin ref), the `[[wiki-links]]` it \
+                              names, and the sealed body. Erasing you deletes the row; the \
+                              sealed body stays in the blob store, unreadable to everybody \
+                              once the scope's key is destroyed.",
+                redacted: &[],
+                subject_via: None,
+            },
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_SCOPE_KEYS];
+        const MIGRATIONS: [SqlMigration; 4] = [
+            MIGRATION_INIT,
+            MIGRATION_SCOPE_KEYS,
+            MIGRATION_SOURCES,
+            MIGRATION_SOURCE_LEDGER,
+        ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
@@ -213,12 +339,52 @@ impl Module for Pages {
         Ok(())
     }
 
-    /// Whatever a composition nested, and nothing otherwise — see the module
-    /// docs. A `PageStore` is built from [`ModuleContext::ports`].
+    /// The coarse pre-buffer ceiling, raised for the import route (issue #81).
+    ///
+    /// The harness-wide 64 KiB is right for a note written by an agent and
+    /// wrong for a file that arrived from a vault: an ordinary Markdown file
+    /// is over it, and a runtime with a fixed memory ceiling — a Workers
+    /// isolate — would refuse the import at the door, before the route that
+    /// actually knows the ledger's own limit had a chance to read the body.
+    ///
+    /// This is the *coarse* number only. The import route carries its own
+    /// `DefaultBodyLimit` at exactly this value and answers anything past it
+    /// with the `sources/too-large` problem, so a body between 64 KiB and here
+    /// is admitted only to be refused or accepted by the route that means it —
+    /// `/mcp`, which inherits the harness limit, is unchanged.
+    fn max_body_bytes(&self, _cfg: &dyn Config) -> usize {
+        MAX_SOURCE_BODY_BYTES
+    }
+
+    /// Whatever a composition surfaced or nested, and nothing otherwise — see
+    /// the module docs. A `PageStore` is built from [`ModuleContext::ports`].
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
+        // One context per surface: with no merged surface, every nest shares
+        // the mount's own `Arc` — `ModuleContext` is not `Clone`, and the
+        // ports are **not** re-viewed through [`Ports::view_for`], which would
+        // scope the blob a second time (`pages/pages/…`) and put every nested
+        // surface somewhere the module's own blobs are not.
+        //
+        // With a merged surface, the surface keeps the mount's own context and
+        // each nest gets a twin ([`twin_context`]), which re-derives the view
+        // the way the harness built the first one and puts the scoped blob
+        // back, so the same no-second-scoping rule holds there too.
+        //
+        // [`Ports::view_for`]: cratefield_core::Ports::view_for
+        let ctx = Arc::new(ctx);
         let mut api = cratefield_core::axum::Router::new();
-        if let Some((path, build)) = &self.nest {
-            api = api.nest(path, build(ctx));
+        if let Some(surface) = &self.surface {
+            // The merged surface is applied first, on the mount's context;
+            // each nest then gets its own twin.
+            api = api.merge(surface(Arc::clone(&ctx)));
+            for (path, build) in &self.nest {
+                let twin = twin_context(&ctx, self);
+                api = api.nest(path, build(Arc::new(twin)));
+            }
+        } else {
+            for (path, build) in &self.nest {
+                api = api.nest(path, build(Arc::clone(&ctx)));
+            }
         }
         api
     }

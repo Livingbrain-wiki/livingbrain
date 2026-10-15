@@ -15,7 +15,67 @@ import {
   isSection,
   auditRecord,
   describeOutcome,
+  STACK,
+  STACK_STATUSES,
+  stackEntries,
+  stackStatus,
+  stackSubprocessors,
+  renderStackRows,
+  renderStackLinks,
 } from "../assets/settings.js";
+
+/**
+ * A document that records how it was used, so the rendering is asserted the
+ * way `dom.test.mjs` asserts the wiki: through `createElement` and
+ * `setAttribute`, never through an HTML string. Any method the renderer does
+ * not call here simply does not exist.
+ */
+function recordingDocument() {
+  const original = globalThis.document;
+  const container = {
+    children: [],
+    replaceChildren() {
+      this.children = [];
+    },
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+  };
+  globalThis.document = {
+    readyState: "complete",
+    createElement: (tag) => ({
+      tag,
+      className: "",
+      textContent: "",
+      attrs: {},
+      children: [],
+      setAttribute(name, value) {
+        this.attrs[name] = value;
+      },
+      appendChild(child) {
+        this.children.push(child);
+        return child;
+      },
+    }),
+    createTextNode: (value) => ({ tag: "#text", attrs: {}, textContent: value }),
+  };
+  try {
+    renderStackRows(container);
+    return container;
+  } finally {
+    globalThis.document = original;
+  }
+}
+
+/** Every element in the rendered container, flattened. */
+function flatten(node, out = []) {
+  for (const child of node.children || []) {
+    out.push(child);
+    flatten(child, out);
+  }
+  return out;
+}
 
 /**
  * The placeholder BYOK key these tests paste into a models payload. Built at
@@ -25,7 +85,7 @@ import {
  */
 const FIXTURE_KEY = ["lb", "test", "byok", "fixture"].join("-");
 
-test("the six sections the issue asks for are present", () => {
+test("the sections the issue asks for are present", () => {
   assert.deepEqual(SECTIONS, [
     "models",
     "proactivity",
@@ -33,6 +93,7 @@ test("the six sections the issue asks for are present", () => {
     "automations",
     "skills",
     "colonizer",
+    "stack",
   ]);
   for (const section of SECTIONS) assert.ok(isSection(section));
   assert.ok(!isSection("billing"));
@@ -101,7 +162,14 @@ test("a non-models change carries the same triple", () => {
 });
 
 test("a section with no server route is not wired, and has no path", () => {
-  for (const section of ["proactivity", "tools", "automations", "skills", "colonizer"]) {
+  for (const section of [
+    "proactivity",
+    "tools",
+    "automations",
+    "skills",
+    "colonizer",
+    "stack",
+  ]) {
     const request = settingRequest(section, "anything", true);
     assert.equal(request.wired, false, section);
     assert.equal(request.method, null);
@@ -143,4 +211,144 @@ test("the outcome text says plainly when nothing was sent", () => {
   assert.match(describeOutcome(unwired, false), /tools\.mcp-tools/);
   assert.match(describeOutcome(wired, true), /models\.main saved/);
   assert.match(describeOutcome(wired, false), /could not be saved/);
+});
+
+/* ------------------------------------------------------------ built with */
+
+test("the Built with section is one of the settings sections", () => {
+  assert.ok(SECTIONS.includes("stack"));
+  assert.ok(isSection("stack"));
+});
+
+test("the vendored entry is FZ-018 and the subprocessors link is honest", () => {
+  assert.equal(STACK.venture.id, "FZ-018");
+  const list = stackSubprocessors();
+  assert.equal(list.href, STACK.subprocessors);
+  // The registry has no subprocessors page: the URL is the venture's page, so
+  // the label must not claim a dedicated privacy page exists.
+  assert.equal(list.href, "https://factory0.ventures/ventures/living-brain/");
+  assert.match(list.label, /venture page; no privacy page yet/);
+});
+
+test("every one of the nine registry entries is rendered", () => {
+  const rows = stackEntries();
+  assert.equal(STACK.uses.length, 9);
+  assert.equal(rows.length, 9);
+  // The rendered rows are the registry's entries, one for one.
+  assert.deepEqual(
+    rows.map((row) => row.id).sort(),
+    STACK.uses.map((entry) => entry.id).sort(),
+  );
+});
+
+test("each entry carries its role phrase, its product link and its status", () => {
+  for (const row of stackEntries()) {
+    const source = STACK.uses.find((entry) => entry.id === row.id && entry.role === row.role);
+    assert.ok(source, row.role);
+    assert.equal(row.phrase, source.phrase);
+    assert.equal(row.name, source.name);
+    // The url is rendered as the anchor's href, not as text.
+    assert.equal(row.url, source.url);
+    assert.match(row.url, /^https:\/\//);
+    assert.ok(row.detail.length > 0, `${row.name} has a status in words`);
+  }
+});
+
+test("the two statuses read in words, from the registry's own sentences", () => {
+  assert.deepEqual(STACK_STATUSES, ["live", "planned"]);
+  const planned = stackEntries().find((row) => row.status === "planned");
+  const live = stackEntries().find((row) => row.status === "live");
+  assert.equal(planned.detail, "Decided and tracked, not in use yet.");
+  assert.equal(live.detail, "In use today.");
+});
+
+test("only Cloudflare is live, and no planned entry is shown as live", () => {
+  const live = stackEntries().filter((row) => row.status === "live");
+  assert.equal(live.length, 1);
+  assert.equal(live[0].name, "Cloudflare");
+  // The acceptance criterion, asserted against the source data as well as
+  // the rendered rows: nothing planned can be painted live.
+  const rendered = new Set(stackEntries().map((row) => row.name));
+  for (const entry of STACK.uses) {
+    if (entry.status !== "live") {
+      assert.ok(rendered.has(entry.name), entry.name);
+      assert.equal(stackStatus(entry), "planned", entry.name);
+    }
+  }
+});
+
+test("a status the registry never uses falls back to planned", () => {
+  // Anything that is not exactly "live" is planned, so a typo or a new status
+  // cannot leak through as a claim that something is running today.
+  assert.equal(stackStatus({ status: "live" }), "live");
+  for (const value of ["planned", "Live", "LIVE", "shipped", "", null, undefined]) {
+    assert.equal(stackStatus({ status: value }), "planned", String(value));
+  }
+  assert.equal(stackStatus(null), "planned");
+});
+
+test("live entries come first, registry order kept inside each group", () => {
+  const rows = stackEntries();
+  // Grouped live-then-planned, so the reader meets what runs today first.
+  assert.equal(rows[0].name, "Cloudflare");
+  assert.deepEqual(
+    [...new Set(rows.map((row) => row.status))],
+    ["live", "planned"],
+  );
+  // Registry order preserved inside the planned group.
+  assert.deepEqual(
+    rows.filter((row) => row.status === "planned").map((row) => row.role),
+    STACK.uses.filter((entry) => entry.status === "planned").map((entry) => entry.role),
+  );
+});
+
+test("the rendered rows put every product's url in an anchor's href", () => {
+  const elements = flatten(recordingDocument());
+  const anchors = elements.filter((el) => el.tag === "a");
+  assert.equal(anchors.length, 9);
+  for (const anchor of anchors) {
+    assert.match(anchor.attrs.href, /^https:\/\//);
+    assert.equal(anchor.attrs.rel, "noopener noreferrer");
+  }
+  // Cloudflare is the one that is actually in use, and it leads.
+  assert.equal(anchors[0].textContent, "Cloudflare");
+  assert.equal(anchors[0].attrs.href, "https://www.cloudflare.com");
+});
+
+test("the rendered pills carry the same status word as the registry", () => {
+  const elements = flatten(recordingDocument());
+  const pills = elements.filter((el) => el.attrs["data-state"]);
+  assert.equal(pills.length, 9);
+  assert.equal(pills.filter((pill) => pill.attrs["data-state"] === "live").length, 1);
+  assert.equal(pills.filter((pill) => pill.attrs["data-state"] === "planned").length, 8);
+  // The pill's words and its state agree for every row: no row can read as
+  // live while carrying the planned state, or the other way round.
+  for (const pill of pills) {
+    assert.equal(pill.textContent, STACK.statuses[pill.attrs["data-state"]]);
+  }
+});
+
+test("the page's subprocessors href comes from the vendored document", () => {
+  // `bootStack` writes both hrefs, so the URLs live in `stack.json` and the
+  // HTML is not a second source of truth for them.
+  const node = () => ({
+    textContent: "",
+    attrs: {},
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
+  });
+  const nodes = {
+    "#stack-venture": node(),
+    "#stack-subprocessors": node(),
+    "#stack-source": node(),
+  };
+  const doc = {
+    querySelector: (sel) => nodes[sel] || null,
+  };
+  renderStackLinks(doc);
+  assert.equal(nodes["#stack-subprocessors"].attrs.href, STACK.subprocessors);
+  assert.equal(nodes["#stack-subprocessors"].attrs.rel, "noopener noreferrer");
+  assert.equal(nodes["#stack-source"].attrs.href, STACK.source);
+  assert.equal(nodes["#stack-venture"].textContent, "FZ-018 (Living Brain)");
 });

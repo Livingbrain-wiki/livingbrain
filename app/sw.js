@@ -10,7 +10,8 @@
  * the app's data must never be served from a stale cache.
  */
 
-const CACHE = "lb-app-v1";
+
+const CACHE = "lb-app-v8";
 
 const SHELL = [
   "./",
@@ -21,7 +22,26 @@ const SHELL = [
   "./assets/app.js",
   "./assets/markdown.js",
   "./assets/settings.js",
+  "./assets/session.js",
+  "./assets/models.js",
+  // models.js imports the provider catalog statically, like stack.json.
+  "./assets/providers.json",
+  // app.js and models.js import the provider marks beside the names.
+  "./assets/marks.js",
+  "./assets/tokens.js",
+  // wiki.js is app.js's import for the wiki page, and wiki.css its sheet;
+  // an ES module import fails atomically, so an offline wiki needs both.
+  "./assets/wiki.js",
+  "./assets/wiki.css",
+  // settings.js imports this statically, and an ES module import fails
+  // atomically, so an offline settings page would not render at all without it.
+  "./assets/stack.json",
   "./manifest.webmanifest",
+  // The website's look: its self-hosted fonts and its mark.
+  "./assets/fonts/bricolage-grotesque.woff2",
+  "./assets/fonts/hanken-grotesk.woff2",
+  "./assets/fonts/jetbrains-mono.woff2",
+  "./assets/favicon.svg",
 ];
 
 self.addEventListener("install", (event) => {

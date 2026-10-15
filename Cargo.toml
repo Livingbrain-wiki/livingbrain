@@ -39,6 +39,10 @@ cratefield-testing = "=0.5.0"
 cratefield-adapter-owlpost = "=0.2.0"
 cratefield-mail-templates = "=0.1.0"
 cratefield-module-waitlist = "=0.4.0"
+# The device authorization grant (issue #72): the codes, the approval page
+# and the polling state machine for a client with no browser. This venture
+# supplies the two hooks — who may approve, and what a credential is.
+cratefield-module-device-auth = "=0.3.0"
 # The two classifiers the judge thresholds for (issue #53): the
 # purpose-trained one (`Calibration::Classifier`) and the language-model
 # fallback over a `TextModel` (`Calibration::LanguageModel`). Dev-only here,
@@ -85,6 +89,17 @@ sha2 = "0.10.9"
 # Wipes the derived blind-index key when the call that needed it is over, the
 # way `cratefield-kms` wipes a DEK.
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+# The `import markdown` walk (issue #81): `.gitignore`-aware, hidden-skipping
+# directory traversal with `--exclude` globs. Native-only, and named here for
+# the resolution it already needs: only the CLI depends on it, never a module,
+# so it stays out of the Worker's wasm graph.
+ignore = "0.4.23"
+# The chat export reader (issue #49): `import chatgpt` / `import claude` read
+# `conversations.json` straight out of the export zip, in memory, never
+# extracted to disk. Native-only like `ignore` above — only the CLI names it,
+# never a module. `deflate` only: an export zip stores or deflates, and the
+# test suite builds its fixtures with the same feature set.
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 # The URL-encoding `axum` and `url` already resolve.
 percent-encoding = "2.3"
 pollster = { version = "0.4", features = ["macro"] }

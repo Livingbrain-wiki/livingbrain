@@ -124,6 +124,20 @@ pub struct SearchHit {
     pub slug: String,
 }
 
+/// One page's head metadata, without its body: what [`PageStore::list`]
+/// hands back for the pages the asker's scopes hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageSummary {
+    pub scope: String,
+    pub slug: String,
+    pub entity_type: EntityType,
+    /// The page's head version.
+    pub version: u32,
+    /// When the head was written, RFC 3339 — the storage format for every
+    /// timestamp.
+    pub updated_at: String,
+}
+
 /// What a [`PageStore::reencrypt_scope`] pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReencryptReport {
@@ -561,6 +575,63 @@ impl PageStore {
             .collect())
     }
 
+    /// The heads of the pages in `scopes`, newest first, each without its
+    /// body — the inventory behind a "list pages" call.
+    ///
+    /// The asker supplies the scopes; this never widens them and never runs
+    /// a query without a scope predicate. An empty scope list or a zero
+    /// limit asks for nothing and gets nothing, without a query.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::Store`] if the database fails.
+    pub async fn list(&self, scopes: &[&str], limit: usize) -> Result<Vec<PageSummary>, PageError> {
+        if scopes.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut values = Vec::new();
+        let placeholders = scopes
+            .iter()
+            .map(|scope| {
+                values.push(text(scope));
+                "?"
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        values.push(SeaValue::BigInt(Some(
+            i64::try_from(limit).unwrap_or(i64::MAX),
+        )));
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                format!(
+                    "SELECT scope, slug, entity_type, head_version, updated_at FROM pages \
+                     WHERE scope IN ({placeholders}) \
+                     ORDER BY updated_at DESC, slug ASC LIMIT ?"
+                ),
+                values,
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let raw = row.get::<String>("entity_type").ok_or_else(|| {
+                    PageError::Corrupt("pages.entity_type is not text".to_owned())
+                })?;
+                Ok(PageSummary {
+                    scope: row.get::<String>("scope").unwrap_or_default(),
+                    slug: row.get::<String>("slug").unwrap_or_default(),
+                    entity_type: EntityType::parse(&raw).ok_or_else(|| {
+                        PageError::Corrupt(format!("unknown entity type `{raw}`"))
+                    })?,
+                    version: row.get::<u32>("head_version").unwrap_or_default(),
+                    updated_at: row.get::<String>("updated_at").unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
     /// The `pages` row for a page, or `None`.
     async fn head_row(&self, scope: &str, slug: &str) -> Result<Option<PageRow>, PageError> {
         let rows = self
@@ -754,14 +825,21 @@ impl PageStore {
     }
 
     /// Forgets a scope: every version of its key is destroyed, and its blind
-    /// index rows and its link rows go, in one batch. The `pages` and
-    /// `page_versions` metadata stays, and the bodies stay in the blob store —
-    /// readable by nobody, because the key that opened them is gone, and
-    /// destroying it is immediate everywhere because no key is ever cached.
+    /// index rows, its link rows and its source rows go, in one batch. The
+    /// `pages` and `page_versions` metadata stays, and the bodies stay in the
+    /// blob store — readable by nobody, because the key that opened them is
+    /// gone, and destroying it is immediate everywhere because no key is ever
+    /// cached.
     ///
     /// The link rows go because a `[[wiki-link]]` target is a word chosen out of
     /// a body. The slugs stay: a page's own name is how the rest of the wiki
     /// refers to it.
+    ///
+    /// The source rows go for the same reason and more (issue #81): an imported
+    /// file's path is somebody's own filing and, unlike a page slug, it names
+    /// nothing that outlives the scope. Their sealed bodies need no delete —
+    /// the `UPDATE` above nulls the key that opens them in the same batch, so
+    /// they are unreadable the moment this commits.
     ///
     /// # Errors
     ///
@@ -779,6 +857,7 @@ impl PageStore {
                 ),
                 Statement::with_values("DELETE FROM page_terms WHERE scope = ?", vec![text(scope)]),
                 Statement::with_values("DELETE FROM page_links WHERE scope = ?", vec![text(scope)]),
+                Statement::with_values("DELETE FROM sources WHERE scope = ?", vec![text(scope)]),
             ])
             .await
             .map_err(PageError::Store)

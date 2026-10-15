@@ -78,6 +78,24 @@ bucket_name = "livingbrain-blobs"
 binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
 
+# The per-conversation turn coordinator (issue #7): one Durable Object per
+# conversation, keyed by `Message::conversation_key`. workerd runs one
+# conversation object's requests one at a time with input gates held, which
+# is what serialises the turns of a thread. The class is
+# `#[durable_object(fetch)]` in `src/conversation.rs`; `fetch` in `src/lib.rs`
+# resolves this binding per request and hands it to the workspaces module's
+# turn seam.
+[[durable_objects.bindings]]
+name = "CONVERSATIONS"
+class_name = "ConversationObject"
+
+# The class's one-time migration: object storage is SQLite, the only backend
+# a new object gets. `[[migrations]]` is one of the few INHERITED keys, so
+# this is declared once at the top level — the binding above is not.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ConversationObject"]
+
 # Non-secret configuration. Secrets — `HARNESS_SECRET` (which signs every
 # cookie this Worker issues), `WORKSPACES_SLACK_CLIENT_SECRET`,
 # `MODEL_KEYS_SECRET` (issue #10: the AES-256-GCM key the `models` module
@@ -110,6 +128,13 @@ WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 # The origin this Worker answers on — under `wrangler dev` that is the
 # cloudflared tunnel, because Slack must call the callback back over HTTPS.
 WORKSPACES_REDIRECT_BASE = "https://replace-with-your-tunnel.trycloudflare.com"
+# The origin the device grant (issue #72) builds `verification_uri` under.
+# `ModuleConfig` prefixes module config, so the key the grant actually reads
+# is `DEVICE_AUTH_API_BASE`, not a bare `API_BASE`; left unset it falls back
+# to `https://api.<domain>`, which points a CLI at production from a staging
+# or local run. This is the port `wrangler dev` serves, which is plain http
+# on loopback.
+DEVICE_AUTH_API_BASE = "http://localhost:8787"
 # The mail sender. The Worker falls back to this same address when the binding
 # is absent, so this line documents the default as much as it sets it.
 MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
@@ -164,6 +189,11 @@ bucket_name = "livingbrain-blobs-staging"
 binding = "KV"
 id = "333ff8d934b04e87a0c6cb85f9daa572"
 
+# Not inherited from the top level (the `[[migrations]]` above is).
+[[env.staging.durable_objects.bindings]]
+name = "CONVERSATIONS"
+class_name = "ConversationObject"
+
 # `ENV` is what the harness reads: it names the deployment environment to the
 # production readiness gate and binds every cookie this Worker signs, so a
 # token minted in staging never verifies in production. `HARNESS_VENTURE` is
@@ -173,6 +203,10 @@ id = "333ff8d934b04e87a0c6cb85f9daa572"
 ENV = "staging"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 WORKSPACES_REDIRECT_BASE = "https://staging-api.livingbrain.wiki"
+# The device grant's `verification_uri` (issue #72). Same origin as the host
+# above — the API and the app are one Worker, so the approval page the CLI
+# sends a person to is served here and carries the session cookie.
+DEVICE_AUTH_API_BASE = "https://staging-api.livingbrain.wiki"
 # The sending domain verified in Owlpost is `send.livingbrain.wiki` (the same
 # one the waitlist mails from), so both senders live there: `MAIL_FROM` for
 # the venture's own mail, `WORKSPACES_MAIL_FROM` for the sign-in magic link.
@@ -201,9 +235,11 @@ routes = [
 [env.production.assets]
 directory = "../../app"
 
+# Not inherited from the top level, so repeated here. Its own namespace, as
+# staging has its own, so neither environment spends the other's budget.
 [[env.production.ratelimits]]
 name = "RATE_LIMITER"
-namespace_id = "4001"
+namespace_id = "4003"
 
 [env.production.ratelimits.simple]
 limit = 30
@@ -223,9 +259,16 @@ bucket_name = "livingbrain-blobs"
 binding = "KV"
 id = "placeholder-run-wrangler-kv-namespace-create"
 
+# Not inherited from the top level (the `[[migrations]]` above is).
+[[env.production.durable_objects.bindings]]
+name = "CONVERSATIONS"
+class_name = "ConversationObject"
+
 [env.production.vars]
 ENV = "production"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
 WORKSPACES_REDIRECT_BASE = "https://app.livingbrain.wiki"
+# The device grant's `verification_uri` (issue #72): production's own origin.
+DEVICE_AUTH_API_BASE = "https://app.livingbrain.wiki"
 MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"
 WORKSPACES_MAIL_FROM = "Living Brain <no-reply@send.livingbrain.wiki>"

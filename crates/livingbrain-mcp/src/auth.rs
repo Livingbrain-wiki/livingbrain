@@ -4,11 +4,16 @@
 //! [`Asker`], and [`page_scopes`] is the only way this crate names a page
 //! scope. Every tool reads through it and **no tool accepts a scope
 //! argument**, so an agent cannot ask for a scope it was not granted.
+//!
+//! The naming rule itself lives in `livingbrain-pages` (issue #123), because
+//! the Slack agent answers from the same pages and two copies of the rule
+//! would be two answer keys. These two functions are the MCP server's own
+//! access model — a direct message, no channel memberships — and they say so
+//! by delegating.
 
 use async_trait::async_trait;
 use cratefield_core::Ports;
-use livingbrain_access::{ChannelMemberships, Location, Scope, UserId, scopes_for};
-use sha2::{Digest, Sha256};
+use livingbrain_access::{Location, Scope};
 
 /// The person a credential speaks for, and the workspace they are in. The
 /// ids are opaque and are only ever combined, never concatenated into
@@ -17,6 +22,11 @@ use sha2::{Digest, Sha256};
 pub struct Asker {
     pub workspace_id: String,
     pub user_id: String,
+    /// The scope subset this credential was cut down to, in the access
+    /// model's own vocabulary. `None` carries everything the member holds
+    /// (issue #72). Filtered here, before [`page_scope`] hashes anything: a
+    /// narrowed credential must not even be able to name the pages it lost.
+    pub token_scopes: Option<Vec<String>>,
 }
 
 /// Why a bearer value named no asker. Both variants get the same 401 and the
@@ -55,48 +65,64 @@ pub trait BearerAuth: Send + Sync {
 /// The grant is `scopes_for(asker, Location::Dm, …)`: the same rule Slack
 /// asks with, so a person's private memory is the same set here as there.
 pub fn page_scopes(asker: &Asker) -> Vec<String> {
-    let granted = scopes_for(
-        &UserId::new(asker.user_id.clone()),
+    let memberships = livingbrain_access::ChannelMemberships::new();
+    let all = livingbrain_pages::page_scopes_for(
+        &asker.workspace_id,
+        &asker.user_id,
         Location::Dm,
-        &ChannelMemberships::new(),
+        &memberships,
     );
-    let mut ranked: Vec<(u8, String)> = granted
-        .scopes()
-        .map(|scope| (specificity(scope), page_scope(&asker.workspace_id, scope)))
-        .collect();
-    ranked.sort();
-    ranked.dedup();
-    ranked.into_iter().map(|(_, scope)| scope).collect()
+    // Issue #72: a narrowed credential keeps only the scopes in its subset,
+    // decided on the access model's own names before anything is hashed, and
+    // the ordering stays the one `page_scopes_for` owns.
+    let Some(subset) = asker.token_scopes.as_deref() else {
+        return all;
+    };
+    let allowed: std::collections::HashSet<String> = livingbrain_access::scopes_for(
+        &livingbrain_access::UserId::new(asker.user_id.clone()),
+        Location::Dm,
+        &memberships,
+    )
+    .scopes()
+    .filter(|scope| subset.contains(&scope.to_string()))
+    .map(|scope| page_scope(&asker.workspace_id, scope))
+    .collect();
+    all.into_iter()
+        .filter(|scope| allowed.contains(scope))
+        .collect()
 }
 
 /// The page-store scope one access scope maps to, inside `workspace_id`.
-///
-/// **The workspace is folded in on purpose.** A page is `(scope, slug)` with
-/// no tenant column, so two workspaces sharing a scope name would share every
-/// page in it, and two stores cannot be relied on to disagree about that.
-/// A SHA-256 over the workspace and the scope, hex-truncated to 64 bits: the
-/// ids behind them are Slack user ids and ULIDs, which are neither slug-safe
-/// nor worth putting in a citation.
 pub fn page_scope(workspace_id: &str, scope: &Scope) -> String {
-    let (prefix, id) = match scope {
-        Scope::Shared => ("shared", String::new()),
-        Scope::Channel(id) => ("channel", id.to_string()),
-        Scope::User(id) => ("user", id.to_string()),
-    };
-    let key = format!("{workspace_id}\u{1f}{prefix}\u{1f}{id}");
-    let digest = Sha256::digest(key.as_bytes());
-    let mut hex = String::with_capacity(16);
-    for byte in digest.iter().take(8) {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    format!("{prefix}-{hex}")
+    livingbrain_pages::page_scope(workspace_id, scope)
 }
 
-/// Most specific first: the asker's own memory, then shared, then a channel.
-fn specificity(scope: &Scope) -> u8 {
-    match scope {
-        Scope::User(_) => 0,
-        Scope::Shared => 1,
-        Scope::Channel(_) => 2,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asker(token_scopes: Option<Vec<String>>) -> Asker {
+        Asker {
+            workspace_id: "T0SPACE".to_owned(),
+            user_id: "U0OWNER".to_owned(),
+            token_scopes,
+        }
+    }
+
+    /// The filter this crate owns — that a subset reaches no page outside
+    /// itself. The intersection with the access model itself is held by
+    /// `livingbrain-tokens`.
+    #[test]
+    fn a_narrowed_credential_reads_only_what_is_in_both_grants() {
+        let all = page_scopes(&asker(None));
+        assert!(all.len() > 1, "the member holds more than one: {all:?}");
+
+        let narrowed = page_scopes(&asker(Some(vec!["shared".to_owned()])));
+        assert_eq!(
+            narrowed,
+            vec![page_scope("T0SPACE", &Scope::Shared)],
+            "one scope, its own hash"
+        );
+        assert!(all.len() > narrowed.len(), "and something was cut: {all:?}");
     }
 }

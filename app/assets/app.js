@@ -3,14 +3,59 @@
 // tests need lives in `markdown.js` and `settings.js`, which the tests import
 // directly, so the tests exercise the code the pages actually run.
 //
-// There are no tokens in this file, and none may be added. The session is an
-// HttpOnly cookie the browser attaches on its own; every request below asks
-// the fetch wrapper to send credentials same-origin (or to include them when
-// the API is cross-origin, which CORS allows only for the origins
-// `livingbrain-venture` lists).
+// No request below ever carries an Authorization header, and none may: the
+// session is an HttpOnly cookie the browser attaches on its own; every request
+// asks the fetch wrapper to send credentials same-origin (or to include them
+// when the API is cross-origin, which CORS allows only for the origins
+// `livingbrain-venture` lists). The one token value the app ever holds — the
+// one `POST /v1/tokens` returns — is written into a single element by
+// `revealToken` for the member to copy, and never stored. See `tokens.js`.
 
 import { settingRequest, describeOutcome } from "./settings.js";
-import { renderMarkdown, renderCitations, renderBacklinks } from "./markdown.js";
+import {
+  PROVIDERS,
+  POPULAR,
+  POPULAR_LABELS,
+  CATALOG_SOURCE,
+  WIRES,
+  AUTHS,
+  CHIP_LIMIT,
+  roleInfo,
+  providerInfo,
+  providerForConnection,
+  searchProviders,
+  fillTemplate,
+  keyHint,
+  validateConnect,
+  discoverRequest,
+  slotViews,
+  renderModelSlots,
+} from "./models.js";
+import { providerMark } from "./marks.js";
+import {
+  TOKEN_SCOPES,
+  tokenListRequest,
+  tokenCreateRequest,
+  tokenRevokeRequest,
+  tokenViews,
+  createdTokenView,
+  tokenErrorMessage,
+  renderTokenRows,
+  revealToken,
+  clearToken,
+  safeReturnTo,
+  RETURN_TO_PARAM,
+} from "./tokens.js";
+import { isSafeHref } from "./markdown.js";
+import {
+  checkSession,
+  applySignInPage,
+  applyHeader,
+  signOutRequest,
+  SLOTS,
+  MCP_PATH,
+} from "./session.js";
+import { wikiPage } from "./wiki.js";
 
 /**
  * The API base. Same-origin by default, because the app is served from the
@@ -264,9 +309,58 @@ export function notice(element, message, tone = "warn") {
 
 const pages = {};
 
+/* --- session -------------------------------------------------------- */
+
+/**
+ * The origin the API answers on: the `lb-api` meta when a deployment sets
+ * one, this page's own origin otherwise. It is what the MCP endpoint and the
+ * CLI's `LIVINGBRAIN_API_URL` are shown under, so staging shows staging.
+ */
+export function apiOrigin() {
+  return apiBase() || (typeof location !== "undefined" ? location.origin : "");
+}
+
+/**
+ * Asks the API to drop the session cookie. Resolves `true` once it has; on a
+ * refusal the caller says so and leaves the page as it was.
+ */
+export async function signOut() {
+  const request = signOutRequest();
+  await api(request.path, { method: request.method });
+  return true;
+}
+
+/**
+ * The header on every page but sign-in: "Signed in as …" and Sign out when
+ * there is a session, the "Sign in" link otherwise. It never blocks the
+ * page: the check runs beside the page's own setup.
+ */
+async function wireHeaderSession() {
+  const bar = $("#session-bar");
+  if (!bar) return;
+  const els = { bar, who: $("#session-who"), signin: $("#header-signin") };
+  applyHeader(els, await checkSession(api));
+  const button = $("#header-signout");
+  if (button) {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await signOut();
+        location.assign("index.html");
+      } catch (error) {
+        button.disabled = false;
+        notice($("#settings-notice") || $("#wiki-notice"), `Not signed out: ${error.message}`, "bad");
+      }
+    });
+  }
+}
+
 /** Runs a page's setup once the DOM is parsed. */
 function boot() {
   wireThemeToggle($("#theme-toggle"));
+  wireHeaderSession().catch(() => {
+    /* the header keeps its plain "Sign in" link */
+  });
   const init = document.body && document.body.dataset.page;
   const page = pages[init];
   if (page) page().catch((error) => {
@@ -281,7 +375,92 @@ function boot() {
 
 /* --- sign-in -------------------------------------------------------- */
 
+/**
+ * Where a pending sign-in return target waits out the round trip.
+ *
+ * The device-approval hook bounces an anonymous visitor here as
+ * `/index.html?return_to=<the approval page>`, but both ways in leave this
+ * page — the magic link is opened from a mail client, Slack finishes on its
+ * own callback — and both land back on this page at `/` with an empty query,
+ * so the target cannot ride in the URL. The session itself is cookie-only and
+ * `tokens.js` is checked by a static test that forbids storage there, so the
+ * target — not a secret, and gone when the tab closes — waits in
+ * `sessionStorage` in this file.
+ */
+const RETURN_TO_KEY = "lb-return-to";
+
+/**
+ * Remembers a fresh `return_to` and answers where to go now.
+ *
+ * Called once per sign-in page load with the page's query string and the
+ * session store. A `return_to` in the query means the person has just been
+ * bounced here by the approval hook: only a path `safeReturnTo` accepts is
+ * stored, and it replaces any older one — it is the most recent bounce; an
+ * unsafe value is dropped rather than stored. No `return_to` means the person
+ * is back from a completed sign-in: the stored target is taken out,
+ * re-validated, and returned for the caller to navigate to. Any storage
+ * failure degrades to "no round trip to resume", never to a throw.
+ */
+export function resumeReturnTo(search, store) {
+  const params = new URLSearchParams(search);
+  if (params.has(RETURN_TO_PARAM)) {
+    const requested = safeReturnTo(params.get(RETURN_TO_PARAM));
+    try {
+      if (requested) store.setItem(RETURN_TO_KEY, requested);
+      else store.removeItem(RETURN_TO_KEY);
+    } catch {
+      /* storage can be refused; the person signs in without the bounce back */
+    }
+    return null;
+  }
+  let stored = null;
+  try {
+    stored = store.getItem(RETURN_TO_KEY);
+    store.removeItem(RETURN_TO_KEY);
+  } catch {
+    return null;
+  }
+  return safeReturnTo(stored);
+}
+
 pages.signin = async function signin() {
+  // A returned target means this load is the landing after a completed
+  // sign-in: go straight back to where the person was headed — the
+  // device-approval page, usually — instead of showing the form again.
+  const resume = resumeReturnTo(location.search, sessionStorage);
+  if (resume) {
+    location.assign(resume);
+    return;
+  }
+  // Signed in already? The magic link and Slack both land here at `/`, so
+  // this is the page a fresh session arrives on. Neither the form nor the
+  // home shows until the check settles.
+  const els = {
+    checking: $("#session-checking"),
+    signin: $("#signin-view"),
+    home: $("#home-view"),
+    error: $("#session-error"),
+  };
+  for (const key of SLOTS) els[key] = $$(`[data-session="${key}"]`);
+  applySignInPage(els, { kind: "checking" }, apiOrigin());
+  const state = await checkSession(api);
+  applySignInPage(els, state, apiOrigin());
+
+  const signout = $("#signout");
+  signout.addEventListener("click", async () => {
+    signout.disabled = true;
+    try {
+      await signOut();
+      applySignInPage(els, { kind: "signed-out" }, apiOrigin());
+      $("#email").focus();
+    } catch (error) {
+      notice(els.error, `Not signed out: ${error.message}`, "bad");
+      els.error.hidden = false;
+    } finally {
+      signout.disabled = false;
+    }
+  });
+
   const form = $("#email-form");
   const status = $("#email-status");
   const email = $("#email");
@@ -319,178 +498,703 @@ pages.signin = async function signin() {
 /* --- settings ------------------------------------------------------- */
 
 pages.settings = async function settings() {
-  const status = $("#settings-notice");
-  const modelBody = $("#model-rows");
-  const modelsCard = $("#models-status");
+  wireSectionNav();
+  wireCopyButtons();
+  fillConnectPanel();
+  await Promise.all([wireModels(), wireTokens()]);
+};
 
-  const load = async () => {
-    modelBody.replaceChildren();
+/* --- small shared pieces ------------------------------------------- */
+
+/** A short-lived message at the bottom of the screen. */
+let toastTimer = null;
+export function toast(message, tone = "ok") {
+  const box = $("#toast");
+  if (!box) return;
+  box.textContent = message;
+  box.dataset.tone = tone;
+  box.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    box.hidden = true;
+  }, tone === "bad" ? 8000 : 4000);
+}
+
+/**
+ * Asks before something that cannot be undone. Resolves `true` only when the
+ * person picks the confirm button; Escape and Cancel are `false`. Falls back
+ * to `window.confirm` where `<dialog>` is missing.
+ */
+export function confirmAction({ title, body, confirm }) {
+  const dialog = $("#confirm");
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return Promise.resolve(window.confirm(`${title}\n\n${body}`));
+  }
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").textContent = body;
+  $("#confirm-ok").textContent = confirm;
+  dialog.returnValue = "";
+  dialog.showModal();
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), {
+      once: true,
+    });
+  });
+}
+
+/** Every `[data-copy="<id>"]` button copies that element's text. */
+function wireCopyButtons() {
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy]");
+    if (!button) return;
+    const source = document.getElementById(button.dataset.copy);
+    if (!source) return;
     try {
-      const rows = await api("/v1/models");
-      const list = Array.isArray(rows) ? rows : [];
-      for (const row of list) {
-        const tr = document.createElement("tr");
-        const cells = [
-          row.role,
-          row.provider,
-          row.model,
-          row.key, // `…abcd`: the server never returns the full key.
-          row.status,
-        ];
-        for (const value of cells) {
-          const td = document.createElement("td");
-          td.textContent = value == null ? "—" : String(value);
-          tr.appendChild(td);
-        }
-        modelBody.appendChild(tr);
-      }
-      if (!list.length) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 5;
-        td.className = "muted";
-        td.textContent =
-          "No model connections yet. The managed model is used until one is connected.";
-        tr.appendChild(td);
-        modelBody.appendChild(tr);
-      }
-      notice(modelsCard, "", "ok");
-    } catch (error) {
-      notice(
-        modelsCard,
-        `Could not read the model connections: ${error.message}`,
-        "warn",
-      );
+      await navigator.clipboard.writeText(source.textContent);
+      const label = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = label;
+      }, 1500);
+    } catch {
+      toast("Copying was blocked. Select the text and copy it by hand.", "warn");
+    }
+  });
+}
+
+/** Marks the section in view in the section nav. */
+function wireSectionNav() {
+  const links = $$(".snav a");
+  if (!links.length || typeof IntersectionObserver === "undefined") return;
+  const mark = (id) => {
+    for (const link of links) {
+      if (link.getAttribute("href") === `#${id}`) link.setAttribute("aria-current", "true");
+      else link.removeAttribute("aria-current");
+    }
+  };
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const visible = entries.filter((e) => e.isIntersecting);
+      if (visible.length) mark(visible[0].target.id);
+    },
+    { rootMargin: "-30% 0px -60% 0px" },
+  );
+  for (const link of links) {
+    const target = document.querySelector(link.getAttribute("href"));
+    if (target) observer.observe(target);
+  }
+}
+
+/** Builds a group of radio "cards" from a list of options. */
+function choiceCards(container, name, options, selected, withMarks) {
+  container.replaceChildren();
+  for (const option of options) {
+    const label = document.createElement("label");
+    label.className = "choice__card";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = name;
+    input.value = option.value;
+    if (option.value === selected) input.checked = true;
+    label.appendChild(input);
+    if (withMarks) label.appendChild(providerMark(option.value, option.label));
+    const text = document.createElement("span");
+    text.className = "choice__text";
+    const title = document.createElement("strong");
+    title.textContent = option.label;
+    text.appendChild(title);
+    if (option.detail) {
+      const detail = document.createElement("span");
+      detail.textContent = option.detail;
+      text.appendChild(detail);
+    }
+    label.appendChild(text);
+    container.appendChild(label);
+  }
+}
+
+/** The checked value of a radio group, or "" when none is. */
+const checked = (form, name) => {
+  const input = form.querySelector(`input[name="${name}"]:checked`);
+  return input ? input.value : "";
+};
+
+/** Shows (or clears) one field's error under it. */
+function fieldError(id, message, input) {
+  const slot = $(`#err-${id}`);
+  if (slot) slot.textContent = message || "";
+  if (input) {
+    if (message) input.setAttribute("aria-invalid", "true");
+    else input.removeAttribute("aria-invalid");
+  }
+}
+
+/* --- connect your coding agent -------------------------------------- */
+
+/** Writes this origin's endpoint and commands into the Connect panel. */
+function fillConnectPanel() {
+  const origin = apiOrigin();
+  const mcp = `${origin}${MCP_PATH}`;
+  const set = (id, text) => {
+    const el = $(`#${id}`);
+    if (el) el.textContent = text;
+  };
+  set("mcp-url", mcp);
+  set(
+    "cmd-claude",
+    `claude mcp add --transport http livingbrain ${mcp} --header "Authorization: Bearer <token>"`,
+  );
+  set("cmd-cli", `LIVINGBRAIN_API_URL=${origin} livingbrain login`);
+}
+
+/* --- models ---------------------------------------------------------- */
+
+async function wireModels() {
+  const form = $("#model-form");
+  const slots = $("#model-rows");
+  const modelsStatus = $("#models-status");
+  const baseUrl = $("#base-url");
+  const editEndpoint = $("#edit-endpoint");
+  const apiKey = $("#api-key");
+  const model = $("#model-name");
+  const submit = $("#connect-model");
+  const cancel = $("#cancel-replace");
+  const discover = $("#discover-models");
+  const search = $("#provider-search");
+  const list = $("#provider-list");
+  let rows = [];
+  // The endpoint is the catalog's, read-only, until the member unlocks it.
+  let editing = false;
+  // The model list the server last fetched, by the provider it was for.
+  let listed = { provider: null, models: [] };
+  // The chosen provider. The popular cards and the full list are two radio
+  // groups (a provider can appear in both), so the choice lives here and
+  // both groups are painted from it.
+  let selectedId = "anthropic";
+  // The slot the form is for. Main until a slot's Connect or Change opens it
+  // for another job; the slot cards are the only role chooser.
+  let activeRole = "main";
+
+  /** The card's one small line: which API the provider speaks, never its host. */
+  const wireLabel = (provider) =>
+    provider.wire === "anthropic" ? "Anthropic API" : "OpenAI API";
+
+  choiceCards(
+    $("#provider-popular"),
+    "provider",
+    [
+      ...POPULAR.map((id) => {
+        const p = providerInfo(id);
+        return { value: id, label: POPULAR_LABELS[id] || p.name, detail: wireLabel(p) };
+      }),
+      { value: "custom", label: "Custom endpoint", detail: "Any other API" },
+    ],
+    "anthropic",
+    true,
+  );
+  choiceCards($("#wire-choices"), "wire", WIRES, "openai");
+  choiceCards($("#auth-choices"), "auth", AUTHS, "bearer");
+  $("#provider-count").textContent = `${PROVIDERS.length}`;
+  const source = $("#provider-source");
+  if (CATALOG_SOURCE && CATALOG_SOURCE.commit) {
+    const href = `https://github.com/${CATALOG_SOURCE.repo}/blob/${CATALOG_SOURCE.commit}/${CATALOG_SOURCE.path}`;
+    if (isSafeHref(href)) source.setAttribute("href", href);
+  }
+
+  // The full list: the same cards as the popular grid, in the same radio
+  // style, filtered by the search box. (A provider's site link waits in the
+  // "Selected:" line below — a link inside a card label would fight the
+  // radio for the click.)
+  const renderList = () => {
+    const matches = searchProviders(search.value);
+    choiceCards(
+      list,
+      "provider-pick",
+      matches.map((provider) => ({
+        value: provider.id,
+        label: provider.name,
+        detail: wireLabel(provider),
+      })),
+      selectedId,
+      true,
+    );
+    $("#provider-empty").hidden = matches.length > 0;
+  };
+  search.addEventListener("input", renderList);
+  renderList();
+
+  /** Records the choice and checks its card in both groups. */
+  const select = (id) => {
+    selectedId = id;
+    for (const input of form.querySelectorAll('input[name="provider"], input[name="provider-pick"]')) {
+      input.checked = input.value === id;
     }
   };
 
-  // Connect a model. The role is the key in the URL, so it is also the key in
-  // the audit record; the value is the whole connection the server reads.
-  $("#connect-model").addEventListener("click", async () => {
-    const role = $("#role").value;
-    const value = {
-      provider: $("#provider").value,
-      base_url: $("#base-url").value.trim() || null,
-      api_key: $("#api-key").value,
-      model: $("#model-name").value.trim(),
-      fallback_to_managed: false,
-    };
-    const outcome = await setSetting("models", role, value);
-    notice(status, outcome.message, outcome.ok ? "ok" : "warn");
-    if (outcome.ok) {
-      // The key is never echoed back by the API, so it is dropped here too.
-      $("#api-key").value = "";
-      await load();
+  const currentProvider = () => providerInfo(selectedId) || providerInfo("anthropic");
+
+  const variableValues = () => {
+    const values = {};
+    for (const input of $$("#provider-vars input")) values[input.dataset.var] = input.value;
+    return values;
+  };
+
+  /** The endpoint field follows the provider and its variables. */
+  const paintEndpoint = () => {
+    const provider = currentProvider();
+    const custom = provider.id === "custom";
+    const unlocked = custom || editing;
+    if (!unlocked) baseUrl.value = fillTemplate(provider.base_url, variableValues());
+    baseUrl.readOnly = !unlocked;
+    editEndpoint.hidden = custom;
+    editEndpoint.textContent = editing ? "Reset" : "Edit";
+    editEndpoint.setAttribute("aria-pressed", String(editing));
+    $("#base-url-hint").textContent = custom
+      ? "The API root, for example https://api.example.com. Paths are added for you."
+      : editing
+        ? "Your own host for this provider, such as a regional endpoint."
+        : "From the provider catalog.";
+  };
+
+  /** Model chips: the catalog's list, else what the server listed. */
+  const paintModels = () => {
+    const provider = currentProvider();
+    const names =
+      provider.models && provider.models.length
+        ? provider.models
+        : listed.provider === provider.id
+          ? listed.models
+          : [];
+    const datalist = $("#model-suggestions");
+    const chips = $("#model-chips");
+    datalist.replaceChildren();
+    chips.replaceChildren();
+    for (const name of names) {
+      const option = document.createElement("option");
+      option.value = name;
+      datalist.appendChild(option);
+    }
+    for (const name of names.slice(0, CHIP_LIMIT)) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = name;
+      chip.setAttribute("aria-label", `Use ${name}`);
+      chip.addEventListener("click", () => {
+        model.value = name;
+        fieldError("model", "", model);
+      });
+      chips.appendChild(chip);
+    }
+    chips.hidden = !names.length;
+    discover.hidden = Boolean(provider.models && provider.models.length);
+    $("#model-hint").textContent =
+      names.length > CHIP_LIMIT
+        ? `${names.length} models; type to search them all.`
+        : names.length
+          ? "Pick one, or type the exact name."
+          : "Type the exact model name, or list what your key can use.";
+  };
+
+  const applyProvider = (id, { keepModel = false } = {}) => {
+    const provider = providerInfo(id) || providerInfo("anthropic");
+    select(provider.id);
+    editing = false;
+    const custom = provider.id === "custom";
+    $("#custom-fields").hidden = !custom;
+    if (custom) baseUrl.value = "";
+    // One field per URL variable, built from the catalog entry.
+    const vars = $("#provider-vars");
+    vars.replaceChildren();
+    for (const variable of provider.variables || []) {
+      const field = document.createElement("div");
+      field.className = "field";
+      const label = document.createElement("label");
+      label.htmlFor = `var-${variable.name}`;
+      label.textContent = variable.label;
+      const input = document.createElement("input");
+      input.id = `var-${variable.name}`;
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = variable.placeholder || "";
+      input.dataset.var = variable.name;
+      if (variable.default) input.value = variable.default;
+      input.setAttribute("aria-describedby", `err-var-${variable.name}`);
+      input.addEventListener("input", () => {
+        fieldError(`var-${variable.name}`, "", input);
+        paintEndpoint();
+      });
+      const error = document.createElement("p");
+      error.className = "field-error";
+      error.id = `err-var-${variable.name}`;
+      field.append(label, input, error);
+      vars.appendChild(field);
+    }
+    const picked = $("#provider-picked");
+    picked.replaceChildren();
+    if (!custom) {
+      picked.append("Selected: ");
+      const strong = document.createElement("strong");
+      strong.textContent = provider.name;
+      picked.appendChild(strong);
+      if (provider.site && isSafeHref(provider.site)) {
+        picked.append(" · ");
+        const site = document.createElement("a");
+        site.href = provider.site;
+        site.target = "_blank";
+        site.rel = "noopener noreferrer";
+        site.textContent = "get a key";
+        picked.appendChild(site);
+      }
+    }
+    $("#api-key-kind").textContent = custom ? "" : keyHint(provider);
+    if (!keepModel) model.value = "";
+    fieldError("baseUrl", "", baseUrl);
+    fieldError("provider", "");
+    paintEndpoint();
+    paintModels();
+  };
+
+  form.addEventListener("change", (event) => {
+    if (event.target.name === "provider" || event.target.name === "provider-pick") {
+      applyProvider(event.target.value);
+    }
+    if (event.target.name === "wire") fieldError("wire", "");
+    if (event.target.name === "auth") {
+      fieldError("auth", "");
+    }
+  });
+  editEndpoint.addEventListener("click", () => {
+    editing = !editing;
+    paintEndpoint();
+    if (editing) baseUrl.focus();
+  });
+  applyProvider("anthropic");
+
+  $("#toggle-key").addEventListener("click", (event) => {
+    const show = apiKey.type === "password";
+    apiKey.type = show ? "text" : "password";
+    event.currentTarget.textContent = show ? "Hide" : "Show";
+    event.currentTarget.setAttribute("aria-pressed", String(show));
+  });
+  for (const [input, id] of [
+    [baseUrl, "baseUrl"],
+    [apiKey, "apiKey"],
+    [model, "model"],
+  ]) {
+    input.addEventListener("input", () => fieldError(id, "", input));
+  }
+
+  /** Reads the form into what `validateConnect` checks. The role is the
+   *  slot the form was opened for; there is no radio for it any more. */
+  const readForm = () => ({
+    role: activeRole,
+    provider: selectedId,
+    variables: variableValues(),
+    baseUrl: baseUrl.value,
+    editUrl: editing,
+    wire: checked(form, "wire"),
+    auth: checked(form, "auth"),
+    apiKey: apiKey.value,
+    model: model.value,
+  });
+
+  /** Puts each error under its field; answers the first field with one. */
+  const showErrors = (errors) => {
+    fieldError("provider", errors.provider);
+    fieldError("baseUrl", errors.baseUrl, baseUrl);
+    fieldError("wire", errors.wire);
+    fieldError("auth", errors.auth);
+    fieldError("apiKey", errors.apiKey, apiKey);
+    fieldError("model", errors.model, model);
+    for (const input of $$("#provider-vars input")) {
+      fieldError(`var-${input.dataset.var}`, errors[`var:${input.dataset.var}`], input);
+    }
+    return form.querySelector('[aria-invalid="true"]');
+  };
+
+  // Listing models: the key goes to Living Brain's own API, which asks the
+  // provider; the page never calls a provider. Only the endpoint and key
+  // fields have to be valid for this, not the model name.
+  const listModels = async ({ quiet = false } = {}) => {
+    const provider = currentProvider();
+    if (provider.models && provider.models.length) return;
+    const check = validateConnect({ ...readForm(), model: "listing" });
+    const blocking = Object.keys(check.errors).filter((k) => k !== "role");
+    if (blocking.length) {
+      if (!quiet) showErrors(check.errors);
+      return;
+    }
+    const request = discoverRequest(check.value);
+    discover.disabled = true;
+    const label = discover.textContent;
+    discover.textContent = "Listing…";
+    try {
+      const answer = await api(request.path, { method: request.method, body: request.body });
+      listed = { provider: provider.id, models: (answer && answer.models) || [] };
+      paintModels();
+      if (!listed.models.length && !quiet) {
+        toast("This provider does not list its models. Type the model name.", "warn");
+      }
+    } catch (error) {
+      if (!quiet) toast(`Could not list models: ${error.message}`, "bad");
+    } finally {
+      discover.disabled = false;
+      discover.textContent = label;
+    }
+  };
+  discover.addEventListener("click", () => listModels());
+  apiKey.addEventListener("change", () => listModels({ quiet: true }));
+
+  const resetForm = () => {
+    form.reset();
+    apiKey.type = "password";
+    $("#toggle-key").textContent = "Show";
+    const info = roleInfo(activeRole);
+    $("#connect-title").textContent = `Connect ${info ? info.label : activeRole}`;
+    submit.textContent = "Connect model";
+    cancel.hidden = true;
+    search.value = "";
+    renderList();
+    listed = { provider: null, models: [] };
+    applyProvider("anthropic");
+  };
+  cancel.addEventListener("click", resetForm);
+
+  const load = async () => {
+    try {
+      rows = await api("/v1/models");
+      renderModelSlots(slots, slotViews(rows));
+      notice(modelsStatus, "");
+    } catch (error) {
+      rows = [];
+      slots.replaceChildren();
+      notice(modelsStatus, `Could not load your models: ${error.message}`, "warn");
+    }
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const check = validateConnect(readForm());
+    const first = showErrors(check.errors);
+    if (!check.ok) {
+      if (first) first.focus();
+      return;
+    }
+    const label = submit.textContent;
+    submit.disabled = true;
+    submit.textContent = "Testing the connection…";
+    try {
+      const outcome = await setSetting("models", check.role, check.value);
+      if (outcome.ok) {
+        toast(`${roleInfo(check.role).label} model connected.`, "ok");
+        resetForm();
+        await load();
+      } else {
+        toast(`Not connected: ${outcome.message}`, "bad");
+      }
+    } finally {
+      submit.disabled = false;
+      if (submit.textContent === "Testing the connection…") submit.textContent = label;
     }
   });
 
+  /** Opens the form for one slot. Change prefills what the stored connection
+   *  can offer; the key never travels back out of the server, so it is always
+   *  typed again. */
+  const openSlot = (role, row) => {
+    const info = roleInfo(role);
+    const name = info ? info.label : role;
+    activeRole = role;
+    if (row) {
+      const provider = providerForConnection(row);
+      applyProvider(provider.id, { keepModel: true });
+      const stored = String(row.base_url || "").replace(/\/+$/, "");
+      if (provider.id === "custom") {
+        baseUrl.value = stored;
+        const wire = form.querySelector(`input[name="wire"][value="${row.wire}"]`);
+        const auth = form.querySelector(`input[name="auth"][value="${row.auth}"]`);
+        if (wire) wire.checked = true;
+        if (auth) auth.checked = true;
+      } else if (stored && stored !== provider.base_url.replace(/\/+$/, "")) {
+        // A regional host or a filled-in variable: keep exactly what was used.
+        editing = true;
+        paintEndpoint();
+        baseUrl.value = stored;
+      }
+      model.value = row.model || "";
+      $("#connect-title").textContent = `Change ${name}`;
+      submit.textContent = "Save and test";
+    } else {
+      applyProvider("anthropic");
+      $("#connect-title").textContent = `Connect ${name}`;
+      submit.textContent = "Connect model";
+    }
+    apiKey.value = "";
+    cancel.hidden = false;
+    form.scrollIntoView({ behavior: "smooth", block: "start" });
+    apiKey.focus({ preventScroll: true });
+  };
+
+  // Connect, Change and Remove, one listener for every slot.
+  slots.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const role = button.dataset.role;
+    const info = roleInfo(role);
+    const name = info ? info.label : role;
+    if (button.dataset.action === "remove") {
+      const mainGone = role === "main";
+      const ok = await confirmAction({
+        title: `Remove the ${name} model?`,
+        body: mainGone
+          ? "Its key is deleted. Until you connect another, the managed model answers for every job."
+          : "Its key is deleted. This job uses Main while Main is set, and the managed model when it is not.",
+        confirm: "Remove",
+      });
+      if (!ok) return;
+      button.disabled = true;
+      const outcome = await setSetting("models", role, null);
+      if (outcome.ok) {
+        toast(`${name} model removed.`, "ok");
+        await load();
+      } else {
+        button.disabled = false;
+        toast(`Not removed: ${outcome.message}`, "bad");
+      }
+      return;
+    }
+    const row = rows.find((r) => r.role === role) || null;
+    openSlot(role, button.dataset.action === "change" ? row : null);
+  });
+
   await load();
-};
+}
+
+/* --- api tokens ------------------------------------------------------ */
+
+/**
+ * The token section. Three rules, all about where a secret may live: the list
+ * is rendered from `tokenViews`, which cannot carry a value; the value a create
+ * returns is written once into `#token-value`, beside "you won't see it
+ * again"; and dismissing it — or leaving the page — takes it back out.
+ */
+function wireTokens() {
+  const status = $("#tokens-status");
+  const rows = $("#token-rows");
+  const reveal = $("#token-reveal");
+  const value = $("#token-value");
+  const form = $("#token-form");
+  const name = $("#token-name");
+  const submit = $("#create-token");
+
+  choiceCards(
+    $("#scope-choices"),
+    "token-scope",
+    TOKEN_SCOPES.map((s) => ({ value: s.value, label: s.label, detail: s.detail })),
+    "",
+  );
+
+  const forget = () => {
+    clearToken(value);
+    reveal.hidden = true;
+  };
+
+  const load = async () => {
+    try {
+      renderTokenRows(rows, tokenViews(await api(tokenListRequest().path)));
+      notice(status, "");
+    } catch (error) {
+      renderTokenRows(rows, []);
+      notice(status, tokenErrorMessage(error, "load your tokens"), "warn");
+    }
+  };
+
+  name.addEventListener("input", () => fieldError("tokenName", "", name));
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    let request;
+    try {
+      request = tokenCreateRequest(name.value, checked(form, "token-scope"));
+    } catch {
+      fieldError("tokenName", "Give the token a name.", name);
+      name.focus();
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const created = await api(request.path, {
+        method: request.method,
+        body: request.body,
+      });
+      revealToken(value, createdTokenView(created));
+      reveal.hidden = false;
+      reveal.scrollIntoView({ behavior: "smooth", block: "center" });
+      toast("Token created. Copy it now.", "ok");
+      form.reset();
+      await load();
+    } catch (error) {
+      toast(tokenErrorMessage(error, "create the token"), "bad");
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  // One handler for the table: each row's button carries its own prefix, so the
+  // list can be re-rendered without re-attaching anything.
+  rows.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-prefix]");
+    if (!button) return;
+    const label = button.dataset.name;
+    const ok = await confirmAction({
+      title: `Revoke "${label}"?`,
+      body: "Anything using this token stops working at once. This cannot be undone.",
+      confirm: "Revoke token",
+    });
+    if (!ok) return;
+    try {
+      const request = tokenRevokeRequest(button.dataset.prefix);
+      await api(request.path, { method: request.method });
+      toast(`Revoked ${label}.`, "ok");
+      await load();
+    } catch (error) {
+      toast(tokenErrorMessage(error, "revoke the token"), "bad");
+    }
+  });
+
+  $("#copy-token").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    try {
+      await navigator.clipboard.writeText(value.textContent);
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = "Copy";
+      }, 1500);
+    } catch {
+      // Clipboard access can be refused; say where the value is rather than
+      // pretending the copy worked.
+      toast("Copying was blocked. Select the token and copy it by hand.", "warn");
+    }
+  });
+
+  $("#dismiss-token").addEventListener("click", () => {
+    forget();
+    toast("The token is gone from this page.", "ok");
+  });
+
+  // Leaving the page is a dismissal too.
+  window.addEventListener("pagehide", forget);
+
+  return load();
+}
 
 /* --- wiki ----------------------------------------------------------- */
 
-pages.wiki = async function wiki() {
-  const params = new URLSearchParams(location.search);
-  const slug = params.get("slug") || "";
-  const title = $("#page-title");
-  const body = $("#page-body");
-  const backlinks = $("#page-backlinks");
-  const citations = $("#page-citations");
-  // Two places to say something: a short line in the toolbar, and a notice
-  // below it for anything long enough to need explaining.
-  const status = $("#wiki-status");
-  const banner = $("#wiki-notice");
-  const say = (message, tone) => {
-    status.textContent = message;
-    notice(banner, message, tone);
-  };
-  const editorWrap = $("#editor-wrap");
-  const viewWrap = $("#view-wrap");
-  const source = $("#source");
-  const preview = $("#preview");
-  const toggle = $("#mode-toggle");
-
-  let current = null;
-  let version = null;
-
-  const show = (page) => {
-    current = page;
-    version = page.version == null ? null : page.version;
-    title.textContent = page.title || page.slug || "Untitled";
-    renderInto(body, renderMarkdown(page.markdown || ""));
-    renderInto(backlinks, renderBacklinks(page.backlinks || []));
-    renderInto(citations, renderCitations(page.citations || []));
-    if (source.value !== (page.markdown || "")) source.value = page.markdown || "";
-    renderInto(preview, renderMarkdown(source.value));
-  };
-
-  const load = async () => {
-    if (!slug) {
-      say("Open a page with ?slug=<page-slug>.", "warn");
-      return;
-    }
-    try {
-      show(await api(`/v1/pages/${encodeURIComponent(slug)}`));
-      say("", "ok");
-    } catch (error) {
-      say(`Could not open ${slug}: ${error.message}`, "bad");
-    }
-  };
-
-  // Live preview: the same renderer the view mode uses, so what is previewed
-  // is what will be saved.
-  source.addEventListener("input", () => {
-    renderInto(preview, renderMarkdown(source.value));
-  });
-
-  const setMode = (mode) => {
-    const editing = mode === "edit";
-    editorWrap.hidden = !editing;
-    viewWrap.hidden = editing;
-    // Saving only makes sense while editing, so the button lives in edit mode.
-    save.hidden = !editing;
-    toggle.textContent = editing ? "Done editing" : "Edit";
-    toggle.setAttribute("aria-pressed", editing ? "true" : "false");
-  };
-  toggle.addEventListener("click", () => {
-    setMode(editorWrap.hidden ? "edit" : "view");
-  });
-  setMode("view");
-
-  const save = $("#save");
-  save.addEventListener("click", async () => {
-    if (!current) return;
-    // Optimistic concurrency: the store refuses a write whose base_version is
-    // stale, so a lost update is a visible conflict, never a silent overwrite.
-    const body = {
-      markdown: source.value,
-      base_version: version,
-      title: current.title,
-    };
-    try {
-      const saved = await api(`/v1/pages/${encodeURIComponent(current.slug || slug)}`, {
-        method: "PUT",
-        body,
-      });
-      show(saved && saved.markdown != null ? saved : { ...current, ...body, version: (version || 0) + 1 });
-      setMode("view");
-      say("Saved.", "ok");
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        say(
-          "Someone else saved this page while you were editing. Your text is " +
-            "still here — reload to get their version, then re-apply your " +
-            "changes.",
-          "bad",
-        );
-        return;
-      }
-      say(`Not saved: ${error.message}`, "bad");
-    }
-  });
-
-  await load();
-};
+// The controller itself lives in `wiki.js`, imported above; boot passes no
+// arguments, so the registry entry closes over this module's `api` wrapper.
+pages.wiki = () => wikiPage(api);
 
 /**
  * `LB` is the app's whole public surface: the DOM helpers, the fetch wrapper,
@@ -506,6 +1210,7 @@ pages.wiki = async function wiki() {
 export const LB = Object.freeze({
   $, $$, esc,
   api, ApiError,
+  signOut,
   setting: setSetting,
   theme: { apply: applyTheme, current: currentTheme },
 });

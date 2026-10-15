@@ -7,17 +7,19 @@
 //!
 //! | Request | Body | Success response |
 //! | :--- | :--- | :--- |
-//! | `POST /v1/auth/device` | `{"client_id":"livingbrain-cli"}` | `{device_code, user_code, verification_uri, verification_uri_complete?, interval, expires_in}` |
-//! | `POST /v1/auth/token` | form `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…` | `{access_token}` |
+//! | `POST /v1/device-auth/code` | `{"client_id":"livingbrain-cli"}` | `{device_code, user_code, verification_uri, verification_uri_complete?, interval, expires_in}` |
+//! | `POST /v1/device-auth/token` | form `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…&client_id=livingbrain-cli` | `{access_token}` |
 //! | `POST /v1/ask` | `{question, project?}` | `{answer, citations:[{title, url, quote?}]}` |
 //! | `GET /v1/search` | `?q=&project=&limit=` | `{results:[{title, url, snippet}]}` |
 //! | `POST /v1/notes` | `{body, project?}` | `{id, url}` |
 //! | `GET /v1/pages/{slug}` | — (slug percent-encoded) | `{slug, title, markdown, url}` |
 //! | `GET /v1/export` | `?format=obsidian` | a zip response body |
+//! | `POST /v1/pages/sources` | `{kind:"import"\|"agent_log", path, body, scope}` | `{id, kind, scope, path, sha256, wikilinks:[], redacted, created, created_at}` (issues #81, #45) |
 //!
-//! `POST /v1/auth/token` answers `400 {error}` with one of
+//! `POST /v1/device-auth/token` answers `400 {error}` with one of
 //! `authorization_pending`, `slow_down`, `expired_token`, `access_denied`
-//! (RFC 8628 §3.5). Any other non-2xx is read as `{error}` or `{message}`.
+//! (RFC 8628 §3.5). Any other non-2xx is read as `{error}` or `{message}`, or as
+//! the RFC 9457 problem document the modules answer with (`title`, `detail`).
 
 use std::time::Duration;
 
@@ -105,23 +107,25 @@ impl Client {
         }
     }
 
-    /// `POST /v1/auth/device` — the device authorization request (RFC 8628 §3.1).
+    /// `POST /v1/device-auth/code` — the device authorization request (RFC 8628 §3.1).
     pub fn device_authorize(&self) -> CliResult<Value> {
         let response = self
-            .post("/v1/auth/device")
+            .post("/v1/device-auth/code")
             .send_json(json!({ "client_id": "livingbrain-cli" }))
             .map_err(transport)?;
         read_json(response)
     }
 
-    /// `POST /v1/auth/token` — one poll of the device token endpoint.
+    /// `POST /v1/device-auth/token` — one poll of the device token endpoint.
     pub fn device_token(&self, device_code: &str) -> CliResult<Poll> {
         let form = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ("device_code", device_code),
+            // A device code is issued for one client, so the poll names it.
+            ("client_id", "livingbrain-cli"),
         ];
         let response = self
-            .post("/v1/auth/token")
+            .post("/v1/device-auth/token")
             .send_form(form)
             .map_err(transport)?;
         let status = response.status().as_u16();
@@ -178,6 +182,23 @@ impl Client {
         read_bytes(response)
     }
 
+    /// `POST /v1/pages/sources` — add one source: an imported file (`kind`
+    /// `import`) or an agent session's normalised log (`kind` `agent_log`).
+    ///
+    /// For `import`, `path` is the vault-relative path with `/` separators;
+    /// for `agent_log`, it is the session's filing name, `<agent> session
+    /// <id>`. `body` is the already-redacted text; the server re-redacts and
+    /// derives the wikilinks itself, and answers `201` for a new source or
+    /// `200` for one it already holds (the idempotency key is the scope plus
+    /// the body's SHA-256).
+    pub fn post_source(&self, kind: &str, path: &str, body: &str, scope: &str) -> CliResult<Value> {
+        self.post_json(
+            "/v1/pages/sources",
+            json!({ "kind": kind, "path": path, "body": body, "scope": scope }),
+            None,
+        )
+    }
+
     /// POST one JSON body (plus `project`) and read the JSON answer.
     fn post_json(&self, path: &str, mut body: Value, project: Option<&str>) -> CliResult<Value> {
         if let Some(project) = project {
@@ -223,14 +244,31 @@ fn read_json(response: Response) -> CliResult<Value> {
         .map_err(|e| err(format!("the server's response was not JSON: {e}")))
 }
 
-/// The error for a non-2xx response, from its `{error}` / `{message}`.
+/// The error for a non-2xx response, from its `{error}` / `{message}`, or from
+/// the problem document the modules answer with (RFC 9457: `title`, `detail`).
+/// The raw body is the last resort, and only because an unrecognised shape
+/// should still say something.
 fn api_error(status: u16, body: &[u8]) -> CliError {
     let parsed: Value = serde_json::from_slice(body).unwrap_or_default();
-    let message = parsed
-        .get("error")
-        .or_else(|| parsed.get("message"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+    let field = |name: &str| {
+        parsed
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    // A problem document's `detail` is the sentence written for the reader;
+    // `title` only classifies it, so it is a prefix rather than a substitute.
+    let problem = match (field("title"), field("detail")) {
+        (Some(title), Some(detail)) => Some(format!("{title}: {detail}")),
+        (_, Some(detail)) => Some(detail),
+        (Some(title), None) => Some(title),
+        _ => None,
+    };
+    let message = field("error")
+        .or_else(|| field("message"))
+        .or(problem)
         .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_owned());
     let message = if message.is_empty() {
         format!("the API answered HTTP {status}")

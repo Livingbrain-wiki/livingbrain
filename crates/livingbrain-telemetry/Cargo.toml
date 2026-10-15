@@ -1,0 +1,25 @@
+[package]
+name = "livingbrain-telemetry"
+description = "What leaves a Living Brain machine: counted anonymous usage on by default, an opt-in live map, and a structured event log that references content by id and never carries it"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `derive` is all this crate needs: every wire type is a struct or a closed
+# enum of integers and strings, so there is nothing here that a runtime, a
+# vendor SDK or an HTTP client could be smuggled in behind. The crate is
+# deliberately a plain library — no ports, no tables, no routes — and it is
+# pure Rust, so it builds unchanged for the Worker and for a CLI.
+serde = { workspace = true }
+# The one line of JSON a batch and an event are printed as, the machine-readable
+# field list `Event::schema` returns, and the tests' recursive walk over the
+# serialised payload. No JSON-schema crate: the schema is generated from the
+# same types that serialise the data, so the two cannot drift apart.
+serde_json = { workspace = true }

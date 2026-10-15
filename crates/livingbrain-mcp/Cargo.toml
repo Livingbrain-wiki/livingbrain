@@ -28,6 +28,10 @@ livingbrain-access = { path = "../livingbrain-access" }
 livingbrain-pages = { path = "../livingbrain-pages" }
 # Secrets and PII leave `brain_note` before it reaches a body (issue #108).
 livingbrain-redact = { path = "../livingbrain-redact" }
+# The 401 challenge names the protected-resource metadata on the origin the
+# request itself reached (issue #72) — the same per-request resolution the
+# discovery documents over there serve from, so one helper, one rule.
+livingbrain-tokens = { path = "../livingbrain-tokens" }
 # `BearerAuth` is an async trait, declared the way every harness port is.
 async-trait = { workspace = true }
 # SHA-256 of a workspace and a scope, so an access scope becomes a page slug.
@@ -38,3 +42,6 @@ serde_json = { workspace = true }
 cratefield-testing = { workspace = true, features = ["postgres"] }
 async-trait = { workspace = true }
 pollster = { workspace = true }
+# `ServiceExt::oneshot`, so a test can send the `Host` a proxy would and read
+# the challenge written for it — the kit's `request` helpers send none.
+tower = { workspace = true }

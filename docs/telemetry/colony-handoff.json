@@ -1,0 +1,1 @@
+{"schema_version":1,"trace_id":"01JABC.123-7","kind":"colony_handoff","at_unix":1767225600,"outcome":"success","duration_ms":35,"subject":{"kind":"workspace","id":"01JWS.200-3"},"error_kind":null,"tool":null,"colonizer_colony":"01JCOLONY.42-1"}

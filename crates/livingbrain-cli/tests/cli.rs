@@ -200,10 +200,10 @@ fn login_never_persists_the_token_in_plaintext() {
     let handler = {
         let calls = Arc::clone(&calls);
         move |request: &common::Request| match request.path.as_str() {
-            "/v1/auth/device" => Reply::ok_json(
+            "/v1/device-auth/code" => Reply::ok_json(
                 r#"{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://example.test/device","interval":0,"expires_in":60}"#,
             ),
-            "/v1/auth/token" => {
+            "/v1/device-auth/token" => {
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     Reply::json(400, r#"{"error":"authorization_pending"}"#)
                 } else {
@@ -260,4 +260,51 @@ fn unauthorized_is_a_clear_json_error() {
             .expect("error string")
             .contains("login")
     );
+}
+
+/// (6) `about` prints the vendored stack with no token and no API (issue #61):
+/// the list is compiled into the binary, so a reader gets it before signing in.
+#[test]
+fn about_needs_no_credentials() {
+    let (cwd, home) = (temp_dir("about-cwd"), temp_dir("about-home"));
+
+    let human = run(&cwd, &home, &["about"], &[], None);
+    assert!(human.status.success(), "stderr: {}", human.stderr);
+    for expected in [
+        "Built with",
+        "Cratefield",
+        "Cloudflare",
+        "https://cratefield.com/",
+        "https://factory0.ventures/ventures/living-brain/",
+        "https://factory0.ventures/stack.json",
+    ] {
+        assert!(
+            human.stdout.contains(expected),
+            "missing {expected}:\n{}",
+            human.stdout
+        );
+    }
+    // Nothing is deployed but the site, and the row says so: hosting is live
+    // and the framework it is built with is not.
+    let hosting = human
+        .stdout
+        .lines()
+        .find(|line| line.contains("Cloudflare"))
+        .expect("the hosting row");
+    assert!(hosting.contains(" live "), "{hosting}");
+    let framework = human
+        .stdout
+        .lines()
+        .find(|line| line.contains("Cratefield"))
+        .expect("the framework row");
+    assert!(framework.contains(" planned "), "{framework}");
+
+    let json = run(&cwd, &home, &["about", "--json"], &[], None);
+    assert!(json.status.success(), "stderr: {}", json.stderr);
+    let value = json_of(&json);
+    assert_eq!(value["venture"]["id"], "FZ-018");
+    assert_eq!(value["source"], "https://factory0.ventures/stack.json");
+    assert_eq!(value["uses"].as_array().expect("uses").len(), 9);
+    assert_eq!(value["uses"][8]["status"], "live");
+    assert_eq!(value["uses"][0]["status"], "planned");
 }

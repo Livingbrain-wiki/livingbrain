@@ -188,6 +188,44 @@ pub struct Output {
     pub stderr: String,
 }
 
+/// Every `LIVINGBRAIN_*` variable the binary reads, and which way this helper
+/// deals with it.
+///
+/// The rule: **a test run must not depend on the developer's shell.** Every
+/// variable here has a value in a real shell that changes what the binary
+/// does — `LIVINGBRAIN_API_URL` points a test at a stranger's server,
+/// `LIVINGBRAIN_TOKEN` makes a command that should say "not logged in" report
+/// success, and `LIVINGBRAIN_TELEMETRY` flips the resolution rule that
+/// `tests/telemetry.rs` is entirely about. A test that only passes because
+/// nobody happened to export the variable is not a test, and worse, the one
+/// this list was written for is near-guaranteed to be set: `livingbrain
+/// telemetry off` tells the reader to `export LIVINGBRAIN_TELEMETRY=0`, so
+/// setting it is the documented next step after using the feature.
+///
+/// The list is spelled out as a whole rather than a bare `env_remove` at each
+/// site so that adding a command which reads a new `LIVINGBRAIN_*` variable
+/// means editing this one place, and so that the *reason* a variable is here is
+/// attached to the variable. New `LIVINGBRAIN_*` readers get added here, or
+/// their tests will inherit the shell.
+///
+/// The two `LIVINGBRAIN_TEST_*` hooks are deliberately absent: this helper
+/// sets both itself (below), because a test needs them and cannot have a
+/// developer's shell decide whether they are on.
+const SCRUBBED: &[&str] = &[
+    // The API base URL. A developer's `LIVINGBRAIN_API_URL` points every
+    // request at their own server instead of the mock.
+    "LIVINGBRAIN_API_URL",
+    // The bearer token. Without this a logged-in developer gets a command that
+    // should refuse to run — or a `logout` test — quietly succeeding.
+    "LIVINGBRAIN_TOKEN",
+    // The one-run telemetry override, read by `telemetry::Env::from_process`.
+    // This is the variable the docs tell people to export, so it is the one
+    // most likely to be set when the suite runs. It was missing here, and
+    // `LIVINGBRAIN_TELEMETRY=0` in the developer's shell failed two tests in
+    // `tests/telemetry.rs` and `=1` failed a third.
+    "LIVINGBRAIN_TELEMETRY",
+];
+
 /// Run the binary in `cwd` with an isolated `home`, the given environment and
 /// optional stdin. The test-only keychain hook is always set.
 pub fn run(
@@ -215,8 +253,11 @@ pub fn run(
     // Debug-only hook (see `auth::poll_interval`): poll the device token with no
     // sleep. Ignored by a release build, so the login test is `ignore`d there.
     command.env("LIVINGBRAIN_TEST_POLL_INTERVAL", "0");
-    command.env_remove("LIVINGBRAIN_TOKEN");
-    command.env_remove("LIVINGBRAIN_API_URL");
+    // Scrubbed before `envs` is applied, so a test that wants one of these
+    // values still sets it explicitly — an inherited value can never win.
+    for key in SCRUBBED {
+        command.env_remove(key);
+    }
     for (key, value) in envs {
         command.env(key, value);
     }
