@@ -824,6 +824,8 @@ pub async fn seed_workspace(kit: &TestHarness, id: &str, name: &str, owner: &str
         )
         .await;
     }
+    // The founder is an owner, as migration 0005 backfills.
+    exec(kit, "UPDATE workspace_members SET role = 'owner' WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.id = workspace_members.workspace_id AND w.owner_id = workspace_members.user_id)", vec![]).await;
 }
 
 /// A workspace created before ADR 0002, plus the Slack links migration

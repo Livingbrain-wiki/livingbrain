@@ -46,6 +46,11 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `PUT /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, connection)` |
 | `DELETE /v1/models/{role}` | `settings.html` | **yes** — via `LB.setting("models", role, null)` |
 | `POST /v1/models/discover` | `settings.html` | **yes** — the provider's model list, fetched server-side with the key the form holds; nothing stored |
+| `GET /v1/workspaces/members` | `settings.html` | **yes** — `[{user_id, name, timezone, is_admin, role}]` |
+| `PATCH /v1/workspaces/members/{id}` | `settings.html` | **yes** — body `{role}`; owner/admin only, only an owner touches owners, `409` for the last owner |
+| `DELETE /v1/workspaces/members/{id}` | `settings.html` | **yes** — remove (owner/admin) or leave (yourself); `409` for the last owner |
+| `GET /v1/workspaces/invites` / `POST` / `DELETE /v1/workspaces/invites/{id}` | `settings.html` | **yes** — open invitations; `POST {email, role}` mails a 7-day link |
+| `GET /v1/workspaces` / `POST /v1/workspaces/switch` | `settings.html` | **yes** — the workspaces your address belongs to, and switching the session to one |
 | `GET /v1/tokens` | `settings.html` | **yes** |
 | `POST /v1/tokens` | `settings.html` | **yes** — the only call that returns a token value |
 | `DELETE /v1/tokens/{prefix}` | `settings.html` | **yes** |

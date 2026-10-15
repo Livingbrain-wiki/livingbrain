@@ -14,7 +14,7 @@ use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, Statu
 use cratefield_core::{Kid, Payload, Ports, RandomBytes, RandomError, Signer, Statement};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
 use cratefield_testing::TestHarness;
-use livingbrain_tokens::{DevicePorts, Tokens};
+use livingbrain_tokens::{DevicePorts, Me, Tokens};
 use livingbrain_workspaces::Workspaces;
 use serde_json::{Value, json};
 
@@ -82,6 +82,12 @@ pub async fn signed_in() -> Kit {
             ],
         );
         kit.execute(&member, "the member row seeds").await;
+        // The founder is an owner, as migration workspaces/0005 backfills.
+        kit.execute(
+            &cratefield_core::Statement::new("UPDATE workspace_members SET role = 'owner' WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.id = workspace_members.workspace_id AND w.owner_id = workspace_members.user_id)"),
+            "the owner role seeds",
+        )
+        .await;
     }
     kit
 }
@@ -103,6 +109,7 @@ fn kit() -> Kit {
                 .build(),
         ),
         Box::new(Tokens::new().device_ports(device)),
+        Box::new(Me::new()),
     ];
 
     // The ports the router was built with, captured so `authenticate` in a

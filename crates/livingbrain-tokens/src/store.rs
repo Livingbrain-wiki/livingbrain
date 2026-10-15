@@ -81,6 +81,8 @@ pub(crate) struct Summary {
 /// A verified token's answer to "who is calling?", and the subset it was cut
 /// down to.
 pub(crate) struct Principal {
+    /// The token's public prefix, for "connected as" and the audit trail.
+    pub(crate) prefix: String,
     pub(crate) workspace_id: String,
     pub(crate) user_id: String,
     pub(crate) scopes: Option<Vec<String>>,
@@ -182,6 +184,7 @@ impl Store {
             return Ok(None);
         };
         Ok(Some(Principal {
+            prefix: prefix.to_owned(),
             workspace_id,
             user_id,
             scopes: split_list(&field("scopes").unwrap_or_default()),

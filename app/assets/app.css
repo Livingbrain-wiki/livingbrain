@@ -2274,3 +2274,7 @@ main > p.tiny:last-child {
     display: none;
   }
 }
+
+/* The workspace switcher in Settings → Members (ADR 0004). */
+.plain-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
+.plain-list li { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
