@@ -119,6 +119,16 @@
           <span class="status" id="home-status" role="status"></span>
         </div>
 
+        <!-- the compiled coding-agents wiki: agent, then project -->
+        <section id="coding-agents-section" class="ca-section" hidden>
+          <h2>Coding agents</h2>
+          <p class="tiny">
+            Compiled from your synced agent sessions, one session at a time,
+            every entry dated and cited.
+          </p>
+          <div id="coding-agents-tree" class="ca-tree"></div>
+        </section>
+
         <section id="pinned-section" hidden>
           <h2>Pinned</h2>
           <ul id="pinned-list" class="wiki-list"></ul>
@@ -153,6 +163,16 @@
           ></select>
           <span class="status" id="sessions-status" role="status"></span>
         </div>
+        <!-- the compile queue: sessions become coding-agents/ pages -->
+        <div id="ca-card" class="card ca-card" hidden>
+          <h2>Coding-agent wiki</h2>
+          <p id="ca-summary" class="ca-card__summary"></p>
+          <p id="ca-model" class="tiny"></p>
+          <div class="wiki-toolbar">
+            <button id="ca-process" type="button">Process now</button>
+            <span class="status" id="ca-result" role="status"></span>
+          </div>
+        </div>
         <ul id="sessions-list" class="wiki-list" hidden></ul>
         <button id="sessions-more" type="button" hidden>Load more</button>
         <div id="sessions-empty" class="card wiki-empty" hidden>
@@ -173,6 +193,7 @@
           <span class="status" id="transcript-status" role="status"></span>
         </div>
         <h1 id="transcript-title">Agent session</h1>
+        <p id="transcript-compile" class="tiny ca-compile" hidden></p>
         <div id="transcript-body" class="transcript"></div>
       </section>
 

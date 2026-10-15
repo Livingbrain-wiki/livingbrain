@@ -373,6 +373,13 @@ const {
   parseSessionRecord,
   sessionStats,
   transcriptNodes,
+  codingAgentsPlace,
+  codingAgentsTree,
+  codingAgentsLabel,
+  queuePath,
+  queueSummary,
+  jobsBySource,
+  jobLabel,
 } = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
@@ -1623,4 +1630,138 @@ test("agent sessions: each row links to its transcript, one row per session", as
   const links = walk(el("sessions-list"), "a");
   assert.equal(links.length, 1, "the older source of the same session is folded away");
   assert.equal(links[0].href, "wiki.html?view=sessions&source=01J0000000000000000000000C");
+});
+
+/* ------------------------------------------------- the coding-agents wiki */
+
+const CA_PAGES = {
+  pages: [
+    { scope: "personal", slug: "coding-agents--index", entity_type: "topic", version: 2, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "personal", slug: "coding-agents--log", entity_type: "topic", version: 3, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "personal", slug: "coding-agents--claude--patterns", entity_type: "topic", version: 1, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "personal", slug: "coding-agents--claude--demo--decisions", entity_type: "topic", version: 1, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "personal", slug: "coding-agents--claude--demo--index", entity_type: "topic", version: 1, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "personal", slug: "coding-agents--codex--demo--learnings", entity_type: "topic", version: 1, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "personal", slug: "coding-agents--projects--demo", entity_type: "topic", version: 1, updated_at: "2026-10-15T10:00:00Z" },
+    { scope: "shared", slug: "kestrel-routes", entity_type: "system", version: 4, updated_at: "2026-10-01T10:00:00Z" },
+  ],
+};
+
+test("coding-agents helpers: a slug splits into its folder, and a listing into a tree", () => {
+  assert.deepEqual(codingAgentsPlace("coding-agents--claude--chi-infra--decisions"), {
+    kind: "project",
+    path: ["coding-agents", "claude", "chi-infra", "decisions"],
+    agent: "claude",
+    project: "chi-infra",
+    page: "decisions",
+  });
+  assert.equal(codingAgentsPlace("coding-agents--projects--demo").kind, "rollup");
+  assert.equal(codingAgentsPlace("coding-agents--claude--patterns").kind, "agent");
+  assert.equal(codingAgentsPlace("coding-agents--index").kind, "top");
+  assert.equal(codingAgentsPlace("coding-agentsx--index"), null);
+  assert.equal(codingAgentsPlace("kestrel-routes"), null);
+  assert.equal(codingAgentsPlace("coding-agents---index"), null);
+  assert.equal(codingAgentsLabel("coding-agents--codex--demo--learnings"), "coding-agents/codex/demo/learnings");
+
+  const tree = codingAgentsTree(CA_PAGES.pages);
+  assert.deepEqual(tree.top.map((e) => e.place.page), ["index", "log"]);
+  assert.deepEqual(tree.agents.map((a) => a.agent), ["claude", "codex"]);
+  assert.deepEqual(tree.agents[0].pages.map((e) => e.place.page), ["patterns"]);
+  assert.deepEqual(tree.agents[0].projects[0].pages.map((e) => e.place.page), ["index", "decisions"]);
+  assert.deepEqual(tree.rollups.map((e) => e.place.project), ["demo"]);
+
+  assert.equal(queuePath(), "/v1/coding-agents/queue?limit=100");
+  assert.equal(queuePath("01J/x"), "/v1/coding-agents/queue?source=01J%2Fx");
+  assert.equal(queueSummary({ queued: 2, done: 5, failed: 0 }), "2 queued · 5 compiled");
+  assert.equal(queueSummary({}), "Nothing queued");
+  assert.equal(jobLabel("skipped-no-model"), "No model");
+  const jobs = jobsBySource([
+    { source_id: "a", status: "done" },
+    { source_id: "a", status: "queued" },
+  ]);
+  assert.equal(jobs.get("a").status, "done", "the newest job per source");
+});
+
+test("coding-agents: home shows the compiled pages as a folder, not as recent pages", async () => {
+  reset({ search: "" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages?limit=200") return json(CA_PAGES);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("coding-agents-section").hidden, false);
+  const recent = walk(el("recent-list"), ".wiki-row__slug").map((n) => n.textContent);
+  assert.deepEqual(recent, ["kestrel-routes"]);
+  const folders = walk(el("coding-agents-tree"), "summary").map((n) => n.textContent);
+  assert.deepEqual(folders, ["coding-agents/", "claude/", "demo/", "codex/", "demo/", "projects/"]);
+  const links = walk(el("coding-agents-tree"), "a").map((a) => a.href);
+  assert.ok(links.includes("wiki.html?slug=coding-agents--claude--demo--decisions"), String(links));
+  assert.ok(links.includes("wiki.html?slug=coding-agents--projects--demo"));
+});
+
+test("coding-agents: the sessions view shows each session's status, its pages, and Process now", async () => {
+  reset({ search: "?view=sessions" });
+  seedTriggers();
+  let queue = {
+    counts: { queued: 0, done: 1, "skipped-no-model": 0 },
+    model: { connected: false, role: "main" },
+    budget: { daily_tokens: 400000, spent_today: 0 },
+    jobs: [
+      {
+        source_id: "01J0000000000000000000000B",
+        status: "done",
+        pages: ["coding-agents--claude--demo--decisions", "coding-agents--log"],
+      },
+    ],
+  };
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources?kind=agent_log&limit=50") return json({ ...SESSIONS, next_cursor: null });
+    if (url === "/v1/coding-agents/queue?limit=100") return json(queue);
+    if (url === "/v1/coding-agents/process" && method === "POST") {
+      queue = { ...queue, counts: { done: 1, failed: 1 } };
+      return json({ processed: [{ source_id: "x", status: "failed", pages: [] }], counts: {} });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("ca-card").hidden, false);
+  assert.equal(el("ca-summary").textContent, "1 compiled");
+  assert.match(el("ca-model").textContent, /No model connected/);
+  assert.match(el("ca-model").textContent, /Settings → Models/);
+  const status = walk(el("sessions-list"), ".ca-status")[0];
+  assert.equal(status.textContent, "Compiled");
+  const wrote = walk(el("sessions-list"), ".ca-pages")[0];
+  assert.match(wrote.textContent, /claude\/demo\/decisions/);
+  assert.doesNotMatch(wrote.textContent, /log/, "the log is not a page a session wrote");
+
+  await el("ca-process").click();
+  await drain();
+  const post = calls.find((call) => call.url === "/v1/coding-agents/process");
+  assert.equal(post.method, "POST");
+  assert.deepEqual(JSON.parse(post.init.body), { max: 1 });
+  assert.equal(el("ca-result").textContent, "Failed");
+  assert.equal(el("ca-summary").textContent, "1 compiled · 1 failed");
+  assert.equal(el("ca-process").disabled, false);
+});
+
+test("coding-agents: a queue the API cannot answer hides the card, never the sessions", async () => {
+  reset({ search: "?view=sessions" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources?kind=agent_log&limit=50") return json({ ...SESSIONS, next_cursor: null });
+    return json({ title: "boom" }, 500);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("ca-card").hidden, true);
+  assert.equal(walk(el("sessions-list"), ".wiki-row__slug").length, 1);
+  assert.equal(walk(el("sessions-list"), ".ca-status").length, 0);
 });
