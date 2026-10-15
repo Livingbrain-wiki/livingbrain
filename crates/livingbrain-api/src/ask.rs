@@ -15,7 +15,12 @@
 //!   answer on the way back ([`livingbrain_redact`]);
 //! - the call is **budgeted**: a workspace past `USAGE_BUDGET_CENTS_MONTHLY`
 //!   gets no call, and one call is capped at [`MAX_ANSWER_TOKENS`] out and
-//!   [`MAX_CONTEXT_CHARS`] in; `invoke::chat` records the tokens in the
+//!   at a share of the connected model's own context window in
+//!   ([`context_budget`]: a quarter of the window, never past
+//!   `ASK_CONTEXT_CHARS_MAX`, and [`MAX_CONTEXT_CHARS`] when the model never
+//!   said how large its window is); a long page contributes the passages
+//!   that mention the question rather than its first few thousand
+//!   characters ([`passages`]); `invoke::chat` records the tokens in the
 //!   usage ledger;
 //! - the system prompt makes the model cite `[n]`/`[Fn]` from the provided
 //!   sources only, say when they do not answer the question, and follow the
@@ -81,10 +86,34 @@ pub const ASK_ROLE: &str = "main";
 /// The completion ceiling for one answer, in tokens.
 pub const MAX_ANSWER_TOKENS: u32 = 1024;
 
-/// The most characters of brief one call sends — roughly 8k tokens — and the
-/// most of any one page's body inside it.
+/// The most characters of brief one call sends when the connected model
+/// reported no context window — roughly 8k tokens. With a window, the budget
+/// is [`context_budget`].
 pub const MAX_CONTEXT_CHARS: usize = 32_000;
-const MAX_PAGE_CONTEXT_CHARS: usize = 6_000;
+
+/// The config key that caps the brief one call sends, in characters, however
+/// large the model's window: a 1M-token model is not a reason to send a
+/// megabyte per question. [`DEFAULT_CONTEXT_CHARS_MAX`] when unset.
+pub const ASK_CONTEXT_CHARS_MAX: &str = "ASK_CONTEXT_CHARS_MAX";
+/// The default of [`ASK_CONTEXT_CHARS_MAX`]: about 50–65k tokens.
+pub const DEFAULT_CONTEXT_CHARS_MAX: usize = 200_000;
+/// The share of the model's context window the sources may fill: a quarter,
+/// leaving the rest to the prompt, the question and the answer.
+const SOURCE_SHARE_DIVISOR: u64 = 4;
+/// Characters per token, counted low so a budget in characters never
+/// overruns the window it was derived from (English prose runs ~4, code and
+/// logs nearer 3).
+const CHARS_PER_TOKEN: u64 = 3;
+/// Tokens kept back for the system prompt, the framing and the question.
+const PROMPT_RESERVE_TOKENS: u64 = 2_000;
+/// The smallest brief worth sending, whatever a tiny window works out to.
+const MIN_CONTEXT_CHARS: usize = 2_000;
+/// Lines of context kept on each side of a line that mentions the question
+/// when a long page is cut to its relevant passages.
+const PASSAGE_RADIUS: usize = 3;
+/// The most of a long page's opening kept ahead of its passages — a note's
+/// header (agent, repo, branch, dates) is what places the passages.
+const PASSAGE_HEAD_CHARS: usize = 1_500;
 
 /// The longest question accepted, in characters.
 pub const MAX_QUESTION_CHARS: usize = 4_000;
@@ -445,7 +474,6 @@ async fn ask(
         return Ok(Json(body).into_response());
     }
 
-    let context = model_context(&lines, at, &found);
     // The handle the asker's runner job is found again by: the question in
     // its project, so asking it again with fresher pages replaces the job.
     let ref_key = format!(
@@ -461,7 +489,11 @@ async fn ask(
         &ref_key,
         question,
         &at_text,
-        &context,
+        Brief {
+            lines: &lines,
+            at,
+            found: &found,
+        },
         Labels {
             pages: found.len(),
             facts: fact_count,
@@ -513,20 +545,205 @@ fn section(index: usize, page: &Found, body: &str) -> String {
     )
 }
 
+/// What the model's brief is built from, once the connection — and so the
+/// budget — is known.
+#[derive(Clone, Copy)]
+struct Brief<'a> {
+    lines: &'a [(usize, String)],
+    at: i64,
+    found: &'a [Found],
+}
+
+/// How many characters of brief one call may send to a model whose window
+/// is `context_tokens`: a quarter of the window (less the answer and the
+/// prompt's own share when the window is small), counted at
+/// [`CHARS_PER_TOKEN`], never past `ceiling` and never below
+/// [`MIN_CONTEXT_CHARS`]. A model that reported no window gets
+/// [`MAX_CONTEXT_CHARS`], under the same ceiling.
+#[must_use]
+pub fn context_budget(context_tokens: Option<u64>, ceiling: usize) -> usize {
+    let ceiling = ceiling.max(MIN_CONTEXT_CHARS);
+    let Some(window) = context_tokens else {
+        return MAX_CONTEXT_CHARS.min(ceiling);
+    };
+    let room = window.saturating_sub(u64::from(MAX_ANSWER_TOKENS) + PROMPT_RESERVE_TOKENS);
+    let tokens = (window / SOURCE_SHARE_DIVISOR).min(room);
+    let chars = usize::try_from(tokens.saturating_mul(CHARS_PER_TOKEN)).unwrap_or(usize::MAX);
+    chars.clamp(MIN_CONTEXT_CHARS, ceiling)
+}
+
+/// The configured ceiling ([`ASK_CONTEXT_CHARS_MAX`]), or its default.
+fn context_ceiling(config: &dyn cratefield_core::Config) -> usize {
+    config
+        .get(ASK_CONTEXT_CHARS_MAX)
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|chars| *chars > 0)
+        .unwrap_or(DEFAULT_CONTEXT_CHARS_MAX)
+}
+
 /// The brief the model reads: the same sections and labels as the one a
-/// person reads, each page's body cut to [`MAX_PAGE_CONTEXT_CHARS`] and the
-/// whole to [`MAX_CONTEXT_CHARS`], so one call's input is bounded however
-/// long the pages are.
-fn model_context(lines: &[(usize, String)], at: i64, found: &[Found]) -> String {
-    let mut context = brief_section(lines, at);
-    for (index, page) in found.iter().enumerate() {
+/// person reads, the facts first, then each page within its share of
+/// `budget` — the shares fair, and what a short page leaves unused handed on
+/// to the longer ones. A page longer than its share contributes its
+/// [`passages`] that mention the question. The whole is cut to `budget`
+/// last, so one call's input is bounded however long the pages are.
+fn model_context(brief: Brief<'_>, question: &str, budget: usize) -> String {
+    let mut context = brief_section(brief.lines, brief.at);
+    let headers: Vec<String> = brief
+        .found
+        .iter()
+        .enumerate()
+        .map(|(index, page)| section(index, page, ""))
+        .collect();
+    let framing: usize = context.chars().count()
+        + headers
+            .iter()
+            .map(|header| header.chars().count())
+            .sum::<usize>();
+    let shares = page_shares(
+        &brief
+            .found
+            .iter()
+            .map(|page| page.body.trim().chars().count())
+            .collect::<Vec<_>>(),
+        budget.saturating_sub(framing),
+    );
+    let terms = livingbrain_pages::query_terms(question);
+    for (index, page) in brief.found.iter().enumerate() {
         context.push_str(&section(
             index,
             page,
-            &cut(page.body.trim(), MAX_PAGE_CONTEXT_CHARS),
+            &passages(page.body.trim(), &terms, shares[index]),
         ));
     }
-    cut(&context, MAX_CONTEXT_CHARS)
+    cut(&context, budget)
+}
+
+/// Each page's share of `total` characters, in page order: fair shares,
+/// smallest page first, so a page shorter than its share takes only what it
+/// needs and the rest goes to the pages after it.
+fn page_shares(lengths: &[usize], total: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|index| lengths[*index]);
+    let mut shares = vec![0; lengths.len()];
+    let mut left = total;
+    for (done, index) in order.iter().enumerate() {
+        let fair = left / (lengths.len() - done);
+        let share = lengths[*index].min(fair);
+        shares[*index] = share;
+        left -= share;
+    }
+    shares
+}
+
+/// `body` in at most about `max` characters: the whole of it when it fits;
+/// otherwise its opening (up to [`PASSAGE_HEAD_CHARS`], a fifth of the
+/// share at most) and then the passages around the lines that mention the
+/// question's words, each [`PASSAGE_RADIUS`] lines either side, the passages
+/// that mention the most distinct words first, set out in page order with a
+/// `[…]` where lines were left out. A page none of whose lines mention the
+/// question — it matched on its title — is cut to its opening instead.
+fn passages(body: &str, terms: &[livingbrain_pages::QueryTerm], max: usize) -> String {
+    if body.chars().count() <= max {
+        return body.to_owned();
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let hits: Vec<Vec<usize>> = lines
+        .iter()
+        .map(|line| {
+            let words: Vec<String> = line
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+                .collect();
+            (0..terms.len())
+                .filter(|term| words.iter().any(|word| terms[*term].matches(word)))
+                .collect()
+        })
+        .collect();
+    if hits.iter().all(Vec::is_empty) {
+        return cut(body, max);
+    }
+
+    // The passages: each matching line's window, overlapping ones merged.
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    for (index, matched) in hits.iter().enumerate() {
+        if matched.is_empty() {
+            continue;
+        }
+        let start = index.saturating_sub(PASSAGE_RADIUS);
+        let end = (index + PASSAGE_RADIUS).min(lines.len() - 1);
+        match windows.last_mut() {
+            Some(last) if start <= last.1 + 1 => last.1 = last.1.max(end),
+            _ => windows.push((start, end)),
+        }
+    }
+    let size = |(start, end): (usize, usize)| -> usize {
+        lines[start..=end]
+            .iter()
+            .map(|line| line.chars().count() + 1)
+            .sum()
+    };
+    let mut ranked: Vec<(usize, usize, (usize, usize))> = windows
+        .iter()
+        .map(|&(start, end)| {
+            let mut distinct: Vec<usize> = hits[start..=end].iter().flatten().copied().collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            let mentions = hits[start..=end].iter().filter(|m| !m.is_empty()).count();
+            (distinct.len(), mentions, (start, end))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+
+    // The opening, then the best passages that fit.
+    let head_budget = PASSAGE_HEAD_CHARS.min(max / 5);
+    let mut head_end = 0;
+    let mut used = 0;
+    while head_end < lines.len() {
+        let next = lines[head_end].chars().count() + 1;
+        if used + next > head_budget {
+            break;
+        }
+        used += next;
+        head_end += 1;
+    }
+    let mut chosen: Vec<(usize, usize)> = Vec::new();
+    for (_, _, (start, end)) in ranked {
+        let start = start.max(head_end);
+        if start > end {
+            continue;
+        }
+        let cost = size((start, end)) + 4;
+        if used + cost > max {
+            continue;
+        }
+        used += cost;
+        chosen.push((start, end));
+    }
+    if chosen.is_empty() {
+        // Not even the best passage fits whole: cut it rather than send none.
+        let (start, end) = windows[0];
+        return cut(&lines[start..=end].join("\n"), max);
+    }
+    chosen.sort_unstable();
+
+    let mut out: Vec<String> = Vec::new();
+    if head_end > 0 {
+        out.push(lines[..head_end].join("\n"));
+    }
+    let mut next = head_end;
+    for (start, end) in chosen {
+        if start > next {
+            out.push("[…]".to_owned());
+        }
+        out.push(lines[start..=end].join("\n"));
+        next = end + 1;
+    }
+    if next < lines.len() {
+        out.push("[…]".to_owned());
+    }
+    out.join("\n")
 }
 
 /// `text` cut to `max` characters on a character boundary, marked when cut.
@@ -567,7 +784,7 @@ async fn answer_with_model(
     ref_key: &str,
     question: &str,
     at: &str,
-    context: &str,
+    brief: Brief<'_>,
     labels: Labels,
 ) -> Outcome {
     let ctx = state.service.ctx();
@@ -578,6 +795,8 @@ async fn answer_with_model(
             role: ASK_ROLE.to_owned(),
             provider: format!("local-runner:{agent}"),
             model,
+            // A runner reports no window: the fixed budget.
+            context_size: None,
         },
         Ok(None) => {
             let serving = match state.model.serving(ctx, workspace).await {
@@ -604,11 +823,16 @@ async fn answer_with_model(
         Err(_) => return Outcome::Sources(MODEL_FAILED),
     };
 
+    // The brief, within this connection's budget: a share of the model's
+    // own window, under the configured ceiling.
+    let budget = context_budget(serving.context_size, context_ceiling(&*ctx.config));
+    let context = model_context(brief, question, budget);
+
     // Redacted on the way out: pages and facts were redacted when they were
     // written, but a page a person typed need not have been, and the
     // question never was.
     let (Ok((context, _)), Ok((question, _))) = (
-        redact(context, Policy::Redact),
+        redact(&context, Policy::Redact),
         redact(question, Policy::Redact),
     ) else {
         return Outcome::Sources(MODEL_FAILED);
@@ -757,6 +981,73 @@ mod tests {
         let (text, dropped) = check_citations(answer, TWO_AND_ONE);
         assert_eq!(text, answer);
         assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn the_budget_scales_with_the_window_under_the_ceiling() {
+        let ceiling = DEFAULT_CONTEXT_CHARS_MAX;
+        // No window reported: today's fixed budget.
+        assert_eq!(context_budget(None, ceiling), MAX_CONTEXT_CHARS);
+        // A quarter of the window, at three characters a token.
+        assert_eq!(context_budget(Some(32_000), ceiling), 24_000);
+        assert_eq!(context_budget(Some(128_000), ceiling), 96_000);
+        assert!(context_budget(Some(128_000), ceiling) > context_budget(Some(32_000), ceiling));
+        // GLM's 1M window hits the ceiling, and a lower ceiling holds too.
+        assert_eq!(context_budget(Some(1_000_000), ceiling), ceiling);
+        assert_eq!(context_budget(Some(1_000_000), 50_000), 50_000);
+        assert_eq!(context_budget(None, 10_000), 10_000);
+        // A tiny window leaves room for the answer and the prompt.
+        assert_eq!(context_budget(Some(4_096), ceiling), 3_072);
+        assert_eq!(context_budget(Some(100), ceiling), MIN_CONTEXT_CHARS);
+    }
+
+    #[test]
+    fn a_short_page_hands_its_unused_share_on() {
+        assert_eq!(
+            page_shares(&[100, 10_000, 10_000], 9_000),
+            [100, 4_450, 4_450]
+        );
+        assert_eq!(page_shares(&[100, 200], 9_000), [100, 200]);
+        assert!(page_shares(&[], 9_000).is_empty());
+    }
+
+    #[test]
+    fn a_long_page_contributes_the_passage_that_mentions_the_question() {
+        let mut lines: Vec<String> = vec![
+            "Agent: claude_code".to_owned(),
+            "Repo: ~/earthos".to_owned(),
+        ];
+        for n in 0..2_000 {
+            lines.push(format!("turn {n}: routine output, nothing to see"));
+        }
+        lines[1_500] =
+            "**Assistant:** Found two issues: a stale lockfile and a flaky test.".to_owned();
+        let body = lines.join("\n");
+        let terms =
+            livingbrain_pages::query_terms("What issues were found in the EarthOS codebase?");
+        let out = passages(&body, &terms, 2_000);
+        assert!(
+            out.chars().count() <= 2_000,
+            "{} chars",
+            out.chars().count()
+        );
+        assert!(out.contains("a stale lockfile and a flaky test"), "{out}");
+        assert!(
+            out.starts_with("Agent: claude_code\nRepo: ~/earthos"),
+            "{out}"
+        );
+        // The lines around it come along, and the gaps are marked.
+        assert!(
+            out.contains("turn 1497:") && out.contains("turn 1501:"),
+            "{out}"
+        );
+        assert!(!out.contains("turn 100:"), "{out}");
+        assert!(out.contains("[…]"), "{out}");
+        // A page that fits is sent whole; one that never mentions the words
+        // is cut to its opening.
+        assert_eq!(passages("short", &terms, 100), "short");
+        let unrelated = "nothing\n".repeat(1_000);
+        assert!(passages(&unrelated, &terms, 100).starts_with("nothing"));
     }
 
     #[test]

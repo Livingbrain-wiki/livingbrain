@@ -79,8 +79,8 @@ mod sources;
 mod zip;
 
 pub use ask::{
-    ASK_ROLE, Ask, AskModel, MAX_ANSWER_TOKENS, MAX_CONTEXT_CHARS, MAX_QUESTION_CHARS,
-    MODEL_FAILED, NO_MODEL, OVER_BUDGET,
+    ASK_CONTEXT_CHARS_MAX, ASK_ROLE, Ask, AskModel, DEFAULT_CONTEXT_CHARS_MAX, MAX_ANSWER_TOKENS,
+    MAX_CONTEXT_CHARS, MAX_QUESTION_CHARS, MODEL_FAILED, NO_MODEL, OVER_BUDGET, context_budget,
 };
 pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, StoreFacts};
 pub use export::Export;

@@ -5,7 +5,7 @@
 //! a per-scope data key held only wrapped in D1, so reading or searching for
 //! one is also a KMS round trip — which is what buys [`PageStore::forget_scope`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cratefield_core::{Blob, BlobError, Clock, Database, DbError, IdGen, Row, Statement};
@@ -122,6 +122,28 @@ pub struct Page {
 pub struct SearchHit {
     pub scope: String,
     pub slug: String,
+}
+
+/// One scored candidate, before the cross-scope merge.
+struct Ranked {
+    scope: String,
+    slug: String,
+    score: i64,
+    updated_at: String,
+}
+
+/// How many times a word in a page's title or slug outweighs the same word
+/// in its body.
+const TITLE_BOOST: i64 = 3;
+
+/// A word's weight, in thousandths: BM25's inverse document frequency,
+/// `ln(1 + (N - df + 0.5) / (df + 0.5))`, for a word on `df` of `total`
+/// pages. Never below one, so a word on every page still counts.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn idf_weight(total: i64, df: i64) -> i64 {
+    let (n, df) = (total as f64, df.clamp(0, total) as f64);
+    let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+    ((idf * 1000.0).round() as i64).max(1)
 }
 
 /// One page's head metadata, without its body: what [`PageStore::list`]
@@ -401,10 +423,7 @@ impl PageStore {
             write.markdown.as_bytes(),
         )?;
         let index_key = keys::IndexKey::derive(&active.dek);
-        let terms: Vec<String> = keys::tokenize(&write.markdown)
-            .iter()
-            .map(|token| index_key.mac(token))
-            .collect();
+        let terms: Vec<String> = index_key.page_terms(slug, &write.markdown);
         let key_version = active.version;
         drop(active);
         self.blob
@@ -732,17 +751,30 @@ impl PageStore {
         }))
     }
 
-    /// Pages in `scopes` whose current body contains **every** token of
-    /// `query`, as `(scope, slug)` and never anything else.
+    /// Pages in `scopes` whose current body mentions `query`, best first, as
+    /// `(scope, slug)` and never anything else.
+    ///
+    /// The query is cut into words the way a body is indexed, its stopwords
+    /// dropped and each word widened to its singular/plural forms
+    /// ([`crate::query_terms`]). A page matches when it holds **any** of the
+    /// words, and the pages are ranked in SQL by a BM25-style score: the sum,
+    /// over the query words a page holds, of the word's inverse document
+    /// frequency in the scope (`ln(1 + (N - df + 0.5) / (df + 0.5))`), a word
+    /// in the page's title or slug counting [`TITLE_BOOST`] times. The blind
+    /// index holds distinct words, not counts, so term frequency is one and
+    /// there is no length normalisation — rarer words and title words are
+    /// what rank. Ties go to the most recently updated page, then the slug.
     ///
     /// The asker supplies the scopes; this never widens them, never runs a
-    /// query without a scope predicate, and never decrypts a body. Each query
-    /// token's blind-index MAC is computed under every live key version of the
-    /// scope — so a page written before a rotation is still found after one —
-    /// and the slugs the tokens match are intersected. A scope with no live key
-    /// (shredded, or never written) has no MACs to compute and contributes
-    /// nothing, and a query with no token in it matches nothing: there is no
-    /// way to say "any page" through a blind index.
+    /// query without a scope predicate (every statement binds the scope
+    /// first), and never decrypts a body. Each query word's MAC is computed
+    /// under every live key version of the scope — so a page written before a
+    /// rotation is still found after one. The limit is applied after the
+    /// scope predicate and the ranking, in the database, and again across
+    /// scopes. A scope with no live key (shredded, or never written)
+    /// contributes nothing, and a query with no word left in it — empty,
+    /// punctuation, or only stopwords — matches nothing: there is no way to
+    /// say "any page" through a blind index.
     ///
     /// # Errors
     ///
@@ -759,69 +791,171 @@ impl PageStore {
                 return Err(PageError::InvalidScope((*scope).to_owned()));
             }
         }
-        let tokens = keys::tokenize(query);
-        if tokens.is_empty() || limit == 0 {
+        let terms = crate::query::query_terms(query);
+        if terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
 
-        let mut hits: BTreeSet<SearchHit> = BTreeSet::new();
+        let mut ranked: Vec<Ranked> = Vec::new();
         for scope in scopes {
             let index_keys = self.keys.index_keys(scope).await?;
             if index_keys.is_empty() {
                 continue;
             }
-            let mut slugs: Option<BTreeSet<String>> = None;
-            for token in &tokens {
-                // Every live version of this scope MACs the same token; a
-                // page indexed under any of them is a hit.
-                let mut values = vec![text(scope)];
-                let placeholders = index_keys
-                    .iter()
-                    .map(|key| {
-                        values.push(text(&key.mac(token)));
-                        "?"
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let rows = self
-                    .db
-                    .query(&Statement::with_values(
-                        format!(
-                            "SELECT DISTINCT slug FROM page_terms \
-                             WHERE scope = ? AND term IN ({placeholders}) LIMIT ?"
-                        ),
-                        {
-                            values.push(SeaValue::BigInt(Some(
-                                i64::try_from(limit).unwrap_or(i64::MAX),
-                            )));
-                            values
-                        },
-                    ))
-                    .await
-                    .map_err(PageError::Store)?;
-                let found: BTreeSet<String> = rows
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.get::<String>("slug"))
-                    .collect();
-                slugs = Some(match slugs {
-                    None => found,
-                    Some(seen) => seen.intersection(&found).cloned().collect(),
-                });
-            }
-            if let Some(slugs) = slugs {
-                hits.extend(
-                    slugs
-                        .into_iter()
-                        .map(|slug| SearchHit {
-                            scope: (*scope).to_owned(),
-                            slug,
-                        })
-                        .collect::<Vec<_>>(),
-                );
+            ranked.extend(self.rank_scope(scope, &index_keys, &terms, limit).await?);
+        }
+        ranked.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+                .then_with(|| a.scope.cmp(&b.scope))
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
+        Ok(ranked
+            .into_iter()
+            .take(limit)
+            .map(|hit| SearchHit {
+                scope: hit.scope,
+                slug: hit.slug,
+            })
+            .collect())
+    }
+
+    /// One scope's best `limit` pages for `terms`, scored in the database.
+    ///
+    /// Two statements: the scope's page count and each body form's document
+    /// frequency, from which this computes every word's weight; then one
+    /// ranking query that groups the matching index rows by page and word
+    /// (a page holding two forms of a word, or a word in both its title and
+    /// body, counts the word once, at its best weight), sums the weights per
+    /// page and orders and limits there. The candidate set is the index rows
+    /// of the query's MACs in this scope — bounded by the page count times
+    /// the handful of MACs — and only `limit` rows come back.
+    ///
+    /// The MACs and weights are written into the SQL as literals: a MAC is
+    /// 64 hex characters this module computed ([`keys::hex`]) and a weight an
+    /// integer, so neither can carry SQL, and inlining them keeps the scope
+    /// the first and the limit the only other bound value — inside D1's
+    /// bound-parameter ceiling however many forms and keys a query has.
+    async fn rank_scope(
+        &self,
+        scope: &str,
+        index_keys: &[keys::IndexKey],
+        terms: &[crate::QueryTerm],
+        limit: usize,
+    ) -> Result<Vec<Ranked>, PageError> {
+        // (group, MAC) for every body form and every title form.
+        let mut body: Vec<(usize, String)> = Vec::new();
+        let mut title: Vec<(usize, String)> = Vec::new();
+        for (group, term) in terms.iter().enumerate() {
+            for form in &term.forms {
+                for key in index_keys {
+                    body.push((group, key.mac(form)));
+                    title.push((group, key.title_mac(form)));
+                }
             }
         }
-        Ok(hits.into_iter().take(limit).collect())
+        debug_assert!(
+            body.iter()
+                .chain(&title)
+                .all(|(_, mac)| mac.bytes().all(|b| b.is_ascii_hexdigit()))
+        );
+        let in_list = |macs: &mut dyn Iterator<Item = &String>| {
+            macs.map(|mac| format!("'{mac}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let pages = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT COUNT(*) AS n FROM pages WHERE scope = ?",
+                vec![text(scope)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let total = pages
+            .first()
+            .and_then(|row| row.get::<i64>("n"))
+            .unwrap_or(0)
+            .max(0);
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let frequencies = self
+            .db
+            .query(&Statement::with_values(
+                format!(
+                    "SELECT term, COUNT(*) AS df FROM page_terms \
+                     WHERE scope = ? AND term IN ({}) GROUP BY term",
+                    in_list(&mut body.iter().map(|(_, mac)| mac))
+                ),
+                vec![text(scope)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let df_of: BTreeMap<String, i64> = frequencies
+            .rows
+            .iter()
+            .filter_map(|row| Some((row.get::<String>("term")?, row.get::<i64>("df")?)))
+            .collect();
+        // A word's document frequency is its most frequent form's: the forms
+        // of one word overlap on the pages that use both.
+        let mut df = vec![0_i64; terms.len()];
+        for (group, mac) in &body {
+            df[*group] = df[*group].max(df_of.get(mac).copied().unwrap_or(0));
+        }
+        // A word no body holds keeps its (high) weight: a page can still be
+        // named for it, through its title rows.
+        let weight: Vec<i64> = df.iter().map(|count| idf_weight(total, *count)).collect();
+
+        let mut group_case = String::from("CASE term");
+        let mut weight_case = String::from("CASE term");
+        for (group, mac) in &body {
+            group_case.push_str(&format!(" WHEN '{mac}' THEN {group}"));
+            weight_case.push_str(&format!(" WHEN '{mac}' THEN {}", weight[*group]));
+        }
+        for (group, mac) in &title {
+            group_case.push_str(&format!(" WHEN '{mac}' THEN {group}"));
+            weight_case.push_str(&format!(
+                " WHEN '{mac}' THEN {}",
+                weight[*group] * TITLE_BOOST
+            ));
+        }
+        group_case.push_str(" END");
+        weight_case.push_str(" END");
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                format!(
+                    "SELECT g.slug AS slug, SUM(g.w) AS score, MAX(p.updated_at) AS recency \
+                     FROM (SELECT scope, slug, {group_case} AS grp, MAX({weight_case}) AS w \
+                           FROM page_terms WHERE scope = ? AND term IN ({}) \
+                           GROUP BY scope, slug, grp) g \
+                     JOIN pages p ON p.scope = g.scope AND p.slug = g.slug \
+                     GROUP BY g.slug \
+                     ORDER BY score DESC, recency DESC, slug ASC LIMIT ?",
+                    in_list(&mut body.iter().chain(&title).map(|(_, mac)| mac))
+                ),
+                vec![
+                    text(scope),
+                    SeaValue::BigInt(Some(i64::try_from(limit).unwrap_or(i64::MAX))),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                Some(Ranked {
+                    scope: scope.to_owned(),
+                    slug: row.get::<String>("slug")?,
+                    score: row.get::<i64>("score").unwrap_or(0),
+                    updated_at: row.get::<String>("recency").unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     /// Forgets a scope: every version of its key is destroyed, and its blind
@@ -1064,10 +1198,10 @@ impl PageStore {
                 "DELETE FROM page_terms WHERE scope = ? AND slug = ?",
                 vec![text(scope), text(slug)],
             )];
-            for token in keys::tokenize(markdown) {
+            for term in index_key.page_terms(slug, markdown) {
                 statements.push(Statement::with_values(
                     "INSERT INTO page_terms (scope, term, slug) VALUES (?, ?, ?)",
-                    vec![text(scope), text(&index_key.mac(&token)), text(slug)],
+                    vec![text(scope), text(&term), text(slug)],
                 ));
             }
             self.db

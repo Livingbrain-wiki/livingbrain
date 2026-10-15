@@ -13,8 +13,8 @@ use cratefield_core::axum::http::{HeaderMap, Request, StatusCode};
 use cratefield_core::{ModuleContext, Ports};
 use livingbrain_access::Scope;
 use livingbrain_api::{
-    AskModel, MAX_ANSWER_TOKENS, MAX_CONTEXT_CHARS, MODEL_FAILED, NO_MODEL, OVER_BUDGET,
-    SessionAuth,
+    AskModel, DEFAULT_CONTEXT_CHARS_MAX, MAX_ANSWER_TOKENS, MAX_CONTEXT_CHARS, MODEL_FAILED,
+    NO_MODEL, OVER_BUDGET, SessionAuth,
 };
 use livingbrain_mcp::{Asker, AuthError};
 use livingbrain_models::invoke::{ChatReply, ChatRequest, InvokeError, Serving};
@@ -55,6 +55,17 @@ impl Scripted {
         })
     }
 
+    /// The same, served by a model that reported a `window`-token context.
+    fn with_window(reply: &str, window: u64) -> Arc<Self> {
+        let mut serving = serving("zai", "glm-test");
+        serving.context_size = Some(window);
+        Arc::new(Self {
+            serving: Some(serving),
+            reply: Ok(reply.to_owned()),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
     fn calls(&self) -> Vec<Seen> {
         self.seen.lock().expect("seen").clone()
     }
@@ -65,6 +76,7 @@ fn serving(provider: &str, model: &str) -> Serving {
         role: "main".to_owned(),
         provider: provider.to_owned(),
         model: model.to_owned(),
+        context_size: None,
     }
 }
 
@@ -168,8 +180,8 @@ fn a_model_that_finds_no_answer_in_the_sources_says_so() {
     let fx = fixture_with_ask_model(model.clone());
     seed(&fx, WORKSPACE, &user("user-a"), "kestrel", KESTREL);
 
-    let body = ask(&fx, json!({ "question": "kestrel budget" }));
-    // `kestrel budget` is every-word recall: nothing holds both, so there
+    let body = ask(&fx, json!({ "question": "What is the osprey budget?" }));
+    // No page holds `osprey` or `budget` (the rest are stopwords), so there
     // are no sources and no model is asked.
     assert_eq!(
         answer_of(&body),
@@ -345,6 +357,123 @@ fn one_call_s_context_is_capped() {
     );
     // The person still gets the full brief's citations.
     assert_eq!(body["citations"].as_array().map(Vec::len), Some(5));
+}
+
+/// The production failure: a natural-language question, mostly stopwords,
+/// found nothing although a synced session named every word that matters.
+/// It must find the session — and only the asker's: another member's page
+/// naming every word never becomes a candidate.
+#[test]
+fn a_natural_language_question_finds_the_session_it_is_about() {
+    let model = Scripted::with_window("Two issues: a stale lockfile [1].", 1_000_000);
+    let fx = fixture_with_ask_model(model.clone());
+    seed(
+        &fx,
+        WORKSPACE,
+        &user("user-a"),
+        "agent-log-claude-code-3f2a9c1e",
+        "---\ntitle: claude_code session 3f2a9c1e\nproject: earthos\n---\n\
+         Coding agent session: claude_code in earthos.\n\n- Repo: ~/code/earthos\n\n\
+         ## Conversation\n\n**Assistant:** Reviewed the codebase. Two issues: a stale \
+         lockfile and a flaky test.",
+    );
+    seed(
+        &fx,
+        WORKSPACE,
+        &user("user-b"),
+        "earthos-issues",
+        "---\ntitle: EarthOS issues in the codebase\n---\nb-only-kingfisher earthos issues codebase",
+    );
+
+    let body = ask(
+        &fx,
+        json!({ "question": "What issues were found in the EarthOS codebase?" }),
+    );
+    assert_eq!(body["mode"], "model", "{body}");
+    let citations = body["citations"].as_array().expect("citations");
+    assert_eq!(citations.len(), 1, "{body}");
+    assert_eq!(citations[0]["title"], "claude_code session 3f2a9c1e");
+    let call = &model.calls()[0];
+    assert!(
+        call.user.contains("a stale lockfile and a flaky test"),
+        "{}",
+        call.user
+    );
+    assert!(!call.user.contains("b-only-kingfisher"), "{}", call.user);
+
+    // The same question through search, and a question of only stopwords.
+    let search = common::get(
+        &fx,
+        TOKEN_A,
+        "/v1/search?q=What%20issues%20were%20found%20in%20the%20EarthOS%20codebase%3F",
+    );
+    assert_eq!(search.status, StatusCode::OK);
+    let results = search.json();
+    assert_eq!(
+        results["results"][0]["title"], "claude_code session 3f2a9c1e",
+        "{results}"
+    );
+    let body = ask(&fx, json!({ "question": "What were they?" }));
+    assert_eq!(
+        answer_of(&body),
+        "Nothing in the pages you can read mentions this."
+    );
+}
+
+/// A model that reported a large window gets a brief sized to it — more than
+/// the fixed budget of a model that reported none, never past the ceiling.
+#[test]
+fn the_brief_scales_with_the_model_s_window() {
+    let model = Scripted::with_window("Long [1].", 1_000_000);
+    let fx = fixture_with_ask_model(model.clone());
+    for n in 0..5 {
+        seed(
+            &fx,
+            WORKSPACE,
+            &user("user-a"),
+            &format!("kestrel-{n}"),
+            &format!(
+                "---\ntitle: Kestrel {n}\n---\nkestrel {}",
+                "word ".repeat(60_000)
+            ),
+        );
+    }
+    ask(&fx, json!({ "question": "kestrel" }));
+    let sent = model.calls()[0].user.chars().count();
+    assert!(sent > MAX_CONTEXT_CHARS * 2, "{sent} chars");
+    assert!(sent <= DEFAULT_CONTEXT_CHARS_MAX + 500, "{sent} chars");
+}
+
+/// A long page cut to its share contributes the passage that mentions the
+/// question, not only its opening.
+#[test]
+fn a_long_page_sends_the_passage_that_mentions_the_question() {
+    let model = Scripted::answering("Found it [1].");
+    let fx = fixture_with_ask_model(model.clone());
+    // Filler without numbered lines: the blind index keeps a page's first
+    // 2,000 distinct words, and the point here is the context cut.
+    let mut lines: Vec<String> = (0..4_000)
+        .map(|_| "routine output, nothing to see here".to_owned())
+        .collect();
+    lines[3_500] = "The osprey migration stalled on the lockfile.".to_owned();
+    seed(
+        &fx,
+        WORKSPACE,
+        &user("user-a"),
+        "long-session",
+        &format!("---\ntitle: A long session\n---\n{}", lines.join("\n")),
+    );
+    ask(
+        &fx,
+        json!({ "question": "Why did the osprey migration stall?" }),
+    );
+    let call = &model.calls()[0];
+    assert!(
+        call.user
+            .contains("The osprey migration stalled on the lockfile."),
+        "the relevant passage was not sent"
+    );
+    assert!(call.user.chars().count() <= MAX_CONTEXT_CHARS + 500);
 }
 
 /// A session resolver for the web app's cookie: any `cookie` header names

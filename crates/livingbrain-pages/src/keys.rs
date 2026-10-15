@@ -44,6 +44,16 @@ const MIN_TOKEN_LEN: usize = 2;
 /// The most distinct tokens indexed per page, so the index cannot be a
 /// denial of service against D1.
 const MAX_TOKENS: usize = 2000;
+/// The most distinct title tokens indexed per page: a title is a name, not a
+/// body.
+const MAX_TITLE_TOKENS: usize = 64;
+/// The frontmatter keys a page's title is read from — the same rule the
+/// routes title a page by (`name`, then `title`, then `term`).
+const TITLE_KEYS: [&str; 3] = ["name", "title", "term"];
+/// What a title token is prefixed with before it is MACed, so a title row and
+/// a body row for the same word are different terms. A body token never holds
+/// a NUL: the tokenizer splits on every non-alphanumeric.
+const TITLE_PREFIX: &str = "title\0";
 /// How many times a key lookup will re-read before giving up: a scope that
 /// cannot settle in a few rounds is a fault worth reporting.
 const SETTLE_ROUNDS: usize = 4;
@@ -80,6 +90,37 @@ pub(crate) fn tokenize(markdown: &str) -> Vec<String> {
             }
         }
     }
+    tokens
+}
+
+/// The tokens a page is *named* by: its slug's words and its frontmatter
+/// `name`/`title`/`term`, tokenized like a body and capped at
+/// [`MAX_TITLE_TOKENS`]. These are indexed a second time, as title rows
+/// ([`IndexKey::title_mac`]), so a search can rank a page named for the
+/// query above one that only mentions it.
+///
+/// The frontmatter is read without the entity schema — a leading `---`
+/// fence and `key: value` lines — because a re-index pass has only the
+/// markdown, and a page whose fence does not parse simply has no title rows.
+#[must_use]
+pub(crate) fn title_tokens(slug: &str, markdown: &str) -> Vec<String> {
+    let mut named = slug.to_owned();
+    let mut lines = markdown.lines();
+    if lines.next().map(str::trim_end) == Some("---") {
+        for line in lines {
+            if line.trim_end() == "---" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':')
+                && TITLE_KEYS.contains(&key.trim())
+            {
+                named.push(' ');
+                named.push_str(value);
+            }
+        }
+    }
+    let mut tokens = tokenize(&named);
+    tokens.truncate(MAX_TITLE_TOKENS);
     tokens
 }
 
@@ -207,6 +248,29 @@ impl IndexKey {
             .expect("HMAC accepts a key of any length");
         mac.update(token.as_bytes());
         hex(&mac.finalize().into_bytes())
+    }
+
+    /// The blind-index MAC of one title token ([`title_tokens`]): the same
+    /// key over a prefixed token, so it never equals a body token's MAC.
+    #[must_use]
+    pub(crate) fn title_mac(&self, token: &str) -> String {
+        self.mac(&format!("{TITLE_PREFIX}{token}"))
+    }
+
+    /// Every blind-index row a page's current body is indexed under: one per
+    /// distinct body token, then one per distinct title token.
+    #[must_use]
+    pub(crate) fn page_terms(&self, slug: &str, markdown: &str) -> Vec<String> {
+        let mut terms: Vec<String> = tokenize(markdown)
+            .iter()
+            .map(|token| self.mac(token))
+            .collect();
+        terms.extend(
+            title_tokens(slug, markdown)
+                .iter()
+                .map(|token| self.title_mac(token)),
+        );
+        terms
     }
 }
 
