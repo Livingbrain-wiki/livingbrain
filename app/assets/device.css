@@ -1,0 +1,98 @@
+/* The device sign-in pages — `livingbrain login`'s browser half.
+ *
+ * They are not files in this directory: the Worker answers them under
+ * `/v1/device-auth` (the harness's device grant), and the venture re-renders
+ * the module's bare markup into the app's shell (`device_pages.rs` in
+ * `crates/livingbrain-venture`), loading `app.css` and then this sheet. So
+ * everything here is layout for that one card; colours, type and buttons are
+ * the tokens and components `app.css` already defines, which keeps dark,
+ * light and the person's own theme choice working the same as on every other
+ * page. */
+
+/* The card sits in the middle of the viewport, under the header. The one
+   column is `minmax(0, …)` so a long word or code can never size it past a
+   narrow screen. */
+main.device {
+  display: grid;
+  grid-template-columns: minmax(0, 34rem);
+  justify-content: center;
+  align-content: center;
+}
+
+.device__card h1 {
+  font-size: var(--step-2);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+}
+
+.device__card .pill {
+  margin-bottom: var(--space-3);
+}
+
+/* The user code, large enough to compare with the terminal at a glance. */
+.device__code {
+  margin: 0 0 var(--space-3);
+  max-width: none;
+  padding: var(--space-3);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--bg3);
+  text-align: center;
+}
+
+.device__code code {
+  background: none;
+  padding: 0;
+  font-size: clamp(1.6rem, 1.2rem + 2vw, 2.2rem);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+
+.device__facts {
+  flex-direction: column;
+  margin-bottom: var(--space-3);
+}
+
+.device__facts dd {
+  font-weight: 400;
+  color: var(--ink2);
+}
+
+/* Approve and Deny side by side, full width each on a narrow screen. */
+.device__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: var(--space-3);
+}
+
+.device__actions form {
+  display: flex;
+  flex: 1 1 10rem;
+  margin: 0;
+}
+
+.device__actions :where(form > button, .btn) {
+  flex: 1 1 auto;
+}
+
+.device__form {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.device__form button {
+  margin-top: var(--space-1);
+}
+
+.device__input {
+  font-family: var(--f-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* A page the venture did not recognise keeps the module's own markup. */
+.device__raw form {
+  margin-block: var(--space-2);
+}

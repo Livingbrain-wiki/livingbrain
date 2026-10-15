@@ -66,6 +66,7 @@ use tower::ServiceExt;
 use worker::{Context, Env, ObjectNamespace, Request, Response, event};
 
 mod conversation;
+mod device_pages;
 
 use conversation::{CONVERSATIONS, DurableTurns};
 
@@ -760,7 +761,11 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
     }
     // Read before `serve` takes the request; see `page_referrer_policy`.
     let referrer_policy = page_referrer_policy(req.method().as_ref(), &req.path());
+    let device_document = device_pages::is_document(req.method().as_ref(), &req.path());
     let mut response = serve(harness, runtime, req, env, ctx).await?;
+    if device_document {
+        response = brand_device_page(response).await?;
+    }
     if let Some(policy) = referrer_policy {
         // `set` replaces the harness's `no-referrer` rather than adding a
         // second value. A failure leaves the stricter header standing, which
@@ -769,6 +774,30 @@ pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Respo
         let _ = response.headers_mut().set("referrer-policy", policy);
     }
     Ok(response)
+}
+
+/// Re-renders a device-grant HTML answer in the web app's shell; see
+/// [`device_pages`] for why the venture does this rather than the module.
+///
+/// Only an HTML body is touched: the module's problem+json refusals and the
+/// `303` to sign-in pass through as they are. The status and every header
+/// the harness stamped are carried over unchanged — `no-store`, `nosniff`,
+/// `X-Frame-Options`, `frame-ancestors 'none'` — except `content-length`,
+/// which described the old body, and the branded page's own CSP is
+/// *appended*, so it can only narrow what the harness allowed.
+async fn brand_device_page(mut response: Response) -> worker::Result<Response> {
+    let content_type = response.headers().get("content-type").ok().flatten();
+    if !device_pages::is_html(content_type.as_deref()) {
+        return Ok(response);
+    }
+    let status = response.status_code();
+    let headers = response.headers().clone();
+    let body = response.text().await?;
+    let _ = headers.delete("content-length");
+    let _ = headers.append("content-security-policy", device_pages::PAGE_CSP);
+    Ok(Response::from_html(device_pages::brand(&body))?
+        .with_status(status)
+        .with_headers(headers))
 }
 
 /// Serves one of the five CLI paths ([`CLI_ROUTES`]) through the harness
@@ -1163,6 +1192,234 @@ mod tests {
             ("GET", "/v1/tokens"),
         ] {
             assert_eq!(page_referrer_policy(method, path), None, "{method} {path}");
+        }
+    }
+
+    /// An approver that has already signed the visitor in, so the page
+    /// renders the module's own documents instead of the `303` to sign-in.
+    /// The session check itself is the tokens module's and is tested there.
+    struct SignedIn;
+
+    #[async_trait::async_trait]
+    impl cratefield_module_device_auth::Approver for SignedIn {
+        async fn approve(
+            &self,
+            _headers: &HeaderMap,
+            _return_to: &str,
+        ) -> Result<
+            cratefield_module_device_auth::Approval,
+            cratefield_module_device_auth::ApproverError,
+        > {
+            Ok(cratefield_module_device_auth::Approval::Subject(
+                "T0SPACE\u{1f}U0OWNER".to_owned(),
+            ))
+        }
+    }
+
+    /// [`device_kit`] with a signed-in approver: the grant this venture
+    /// mounts, its one client and the tokens module's issuer.
+    fn signed_in_device_kit() -> cratefield_testing::TestHarness {
+        let ports = DevicePorts::new();
+        let grant = DeviceAuth::builder()
+            .client(DeviceClient::new(DEVICE_CLIENT))
+            .random(WorkersRandom)
+            .approver(SignedIn)
+            .issuer(ports.issuer())
+            .build();
+        cratefield_testing::TestHarness::with_builder(
+            vec![Box::new(grant), Box::new(tokens_module(ports))],
+            |builder| builder.venture(venture()),
+            |_| {},
+        )
+    }
+
+    /// The response's `content-type` and body, as `fetch` would read them.
+    async fn read(response: AxumResponse) -> (Option<String>, String) {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .expect("a body");
+        (content_type, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// A fresh user code from the machine route, the way the CLI asks.
+    async fn new_user_code(kit: &cratefield_testing::TestHarness) -> String {
+        let response = send(
+            kit,
+            HttpMethod::POST,
+            "/v1/device-auth/code",
+            &[("content-type", "application/x-www-form-urlencoded")],
+            "client_id=livingbrain-cli&name=nick%27s%20%3Cmac%3E",
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        let (_, body) = read(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+        json["user_code"].as_str().expect("a user code").to_owned()
+    }
+
+    /// Branded the way `fetch` brands it: the same route gate, the same
+    /// type gate, over what the pinned module really rendered.
+    async fn brand_as_fetch(method: &str, path: &str, response: AxumResponse) -> String {
+        assert!(device_pages::is_document(method, path), "{method} {path}");
+        let (content_type, body) = read(response).await;
+        assert!(
+            device_pages::is_html(content_type.as_deref()),
+            "{content_type:?}"
+        );
+        device_pages::brand(&body)
+    }
+
+    /// The whole browser half of `livingbrain login`, through the harness
+    /// and the pinned module: what it renders is recognised and re-rendered,
+    /// the forms post exactly where the module's did with the same hidden
+    /// code, a decision posted from the branded form is accepted, and the
+    /// device label the client chose is escaped on the way through.
+    #[pollster::test]
+    async fn the_device_pages_are_branded_end_to_end() {
+        let kit = signed_in_device_kit();
+        let code = new_user_code(&kit).await;
+        let page_path = format!("/v1/device-auth?user_code={code}");
+        let page = send(
+            &kit,
+            HttpMethod::GET,
+            &page_path,
+            &[("sec-fetch-site", "none")],
+            "",
+        )
+        .await;
+        assert_eq!(page.status(), 200);
+        for (name, value) in [
+            ("cache-control", "no-store"),
+            ("x-frame-options", "DENY"),
+            ("content-security-policy", "frame-ancestors 'none'"),
+        ] {
+            // What `brand_device_page` carries over to the branded page.
+            assert_eq!(
+                page.headers().get(name).map(HeaderValue::as_bytes),
+                Some(value.as_bytes()),
+                "{name}"
+            );
+        }
+        let approval = brand_as_fetch("GET", "/v1/device-auth", page).await;
+        assert!(approval.contains("Approve Living Brain CLI?"), "{approval}");
+        assert!(approval.contains(&format!("<code>{code}</code>")));
+        assert!(approval.contains(&format!(
+            "<form method=\"post\" action=\"/v1/device-auth/approve\">\
+             <input type=\"hidden\" name=\"user_code\" value=\"{code}\">"
+        )));
+        assert!(approval.contains(&format!(
+            "<form method=\"post\" action=\"/v1/device-auth/deny\">\
+             <input type=\"hidden\" name=\"user_code\" value=\"{code}\">"
+        )));
+        assert!(
+            approval.contains("nick&#39;s &lt;mac&gt;"),
+            "the label, escaped"
+        );
+        assert!(!approval.contains("<mac>") && !approval.contains("no scopes"));
+
+        // The branded Approve button posts what the module's did.
+        let decision = [
+            ("sec-fetch-site", "same-origin"),
+            ("origin", "https://app.livingbrain.wiki"),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ];
+        let body = format!("user_code={code}");
+        let approved = send(
+            &kit,
+            HttpMethod::POST,
+            "/v1/device-auth/approve",
+            &decision,
+            &body,
+        )
+        .await;
+        assert_eq!(approved.status(), 200);
+        let approved = brand_as_fetch("POST", "/v1/device-auth/approve", approved).await;
+        assert!(approved.contains("You can close this tab and return to your terminal."));
+
+        let denied_code = new_user_code(&kit).await;
+        let body = format!("user_code={denied_code}");
+        let denied = send(
+            &kit,
+            HttpMethod::POST,
+            "/v1/device-auth/deny",
+            &decision,
+            &body,
+        )
+        .await;
+        assert_eq!(denied.status(), 200);
+        let denied = brand_as_fetch("POST", "/v1/device-auth/deny", denied).await;
+        assert!(denied.contains("Request denied"));
+
+        // An answered code: the module's problem+json, which is not HTML
+        // and so is never branded.
+        let again = send(
+            &kit,
+            HttpMethod::POST,
+            "/v1/device-auth/approve",
+            &decision,
+            &body,
+        )
+        .await;
+        let (content_type, _) = read(again).await;
+        assert!(
+            !device_pages::is_html(content_type.as_deref()),
+            "{content_type:?}"
+        );
+
+        let form = send(&kit, HttpMethod::GET, "/v1/device-auth", &[], "").await;
+        let form = brand_as_fetch("GET", "/v1/device-auth", form).await;
+        assert!(
+            form.contains("method=\"get\" action=\"/v1/device-auth\""),
+            "{form}"
+        );
+        let unknown = send(
+            &kit,
+            HttpMethod::GET,
+            "/v1/device-auth?user_code=ZZZZ-ZZZZ",
+            &[],
+            "",
+        )
+        .await;
+        let unknown = brand_as_fetch("GET", "/v1/device-auth", unknown).await;
+        assert!(unknown.contains("That code is not valid"), "{unknown}");
+
+        // Previews for review, only when asked for: the pages as rendered,
+        // with the deployed stylesheet's absolute URL so they open from disk.
+        if let Some(dir) = std::env::var_os("LB_DEVICE_PAGES_PREVIEW") {
+            preview(
+                std::path::Path::new(&dir),
+                &[
+                    ("approve.html", &approval),
+                    ("approved.html", &approved),
+                    ("denied.html", &denied),
+                    ("enter-code.html", &form),
+                    ("unknown-code.html", &unknown),
+                ],
+            );
+        }
+    }
+
+    /// Writes the pages to `dir` for a look in a browser. `app.css` and the
+    /// favicon point at the deployed app; `device.css` is copied beside the
+    /// pages, because until this change deploys the live app has none.
+    fn preview(dir: &std::path::Path, pages: &[(&str, &String)]) {
+        std::fs::create_dir_all(dir).expect("a preview directory");
+        let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/assets");
+        std::fs::copy(app.join("device.css"), dir.join("device.css")).expect("device.css");
+        for (file, html) in pages {
+            let html = html
+                .replace("href=\"/assets/device.css\"", "href=\"device.css\"")
+                .replace(
+                    "href=\"/assets/",
+                    "href=\"https://app.livingbrain.wiki/assets/",
+                )
+                .replace("href=\"/", "href=\"https://app.livingbrain.wiki/");
+            std::fs::write(dir.join(file), html).expect("a preview page");
         }
     }
 
