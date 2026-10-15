@@ -87,7 +87,10 @@ to a member (a GitHub login is not a member id).
 
 ## Backfill planner
 
-`planner::plan(&state, DEFAULT_BUDGET)` returns at most 45 requests per tick
+`planner::plan(&state, budget)` returns at most `budget` requests per tick —
+the tick's `planner::tick_budget` (400 unless `GITHUB_TICK_BUDGET` says
+otherwise; `DEFAULT_BUDGET`, 45, is the Workers Free figure) within what the
+invocation has left
 (commit list page, issue list page, comments and reviews of queued items in
 order, then commit details). The driver makes each call and calls
 `planner::apply(state, &request, &response)`, which returns the new state and
@@ -296,7 +299,7 @@ in code, not just stated:
 | A webhook filing data into another workspace | `upsert_repos` and `enqueue` take the workspace from the installation binding (`INSERT … SELECT … WHERE workspace_id = ? AND status = 'active'`), so a mismatched pair writes nothing. |
 | Suspended or deleted installation keeps syncing | Suspension stops the repositories, and the claim skips the queue. Deletion is terminal and drops the queue. `repos_due` and `claim` also join on installation status. |
 | Secrets in logs or errors | `Secret` has no `Display`, and its `Debug` is redacted. `StoreError` carries scrubbed `DbError`s and fixed `KmsError` texts. Stored error text is limited to 300 characters with control characters stripped, and the drain must never pass a header, token or body. |
-| Two cron runs at once | Queue claims are a compare-and-set on the lease, and completion needs the lease token, so an expired holder cannot complete an item that another run now holds. |
+| Two cron runs at once | Queue claims are a compare-and-set on the lease, and completion needs the lease token, so an expired holder cannot complete an item that another run now holds. A repository's pass holds a lease in its cursor, and every cursor write is a compare-and-set on the cursor its writer read, so two runs never pass one repository. |
 
 Part C closes the four items Part B left open: the install callback verifies
 the installation with GitHub before `bind_installation`; installation tokens
@@ -431,11 +434,21 @@ reopen below catches up whatever was missed.
 `sync::run`. Without the key ring, or without a blob, id or defer port, only
 the housekeeping runs.
 
-- **Budget.** A tick may make at most `min(planner::DEFAULT_BUDGET,
-  ctx.scheduled remaining)` GitHub calls, and it stops at the scheduled
-  deadline. A token mint counts as a call; a cached token does not. The venture
-  mounts the module **last**, so it inherits whatever subrequests the earlier
-  modules left in the invocation (45 in total, split in order).
+- **Budget.** A tick may make at most `min(planner::tick_budget(
+  GITHUB_TICK_BUDGET), ctx.scheduled remaining)` GitHub calls — 400 by
+  default, so twelve ticks an hour stay under an installation's 5,000/h —
+  and it stops at the scheduled deadline. A token mint counts as a call; a
+  cached token does not. The venture mounts the module **last**, so it
+  inherits whatever steps and time the earlier modules left in the
+  invocation (2,000 steps and 12 minutes in total on Workers Paid, split in
+  order; docs/deploy.md, "Scheduled limits").
+- **Repository lease.** The cron fires every five minutes and a run may
+  last fifteen, so two runs can be in the drain at once. A pass holds its
+  repository under a 15-minute lease kept in the cursor (`lease_until`),
+  taken with a compare-and-set on the cursor `repos_due` read and given
+  back by the save, which is a compare-and-set on the leased cursor. A
+  leased repository is not due, and a push to it is retried once the lease
+  ends, so no two runs pass one repository or overwrite each other's cursor.
 - **Daily reopen.** A repository that finished more than 24 hours ago goes back
   to `running`. Its stored cursor is the planner's `next_run`, so this is an
   incremental pass.
@@ -645,7 +658,7 @@ as the example. The settings UI is in Settings → Integrations → GitHub (the
    repository shows as pending, shared, project `EarthOS.world` (the
    repository's own name, in its own case, so agent sessions from the same
    repository file under the same project). Change the scope or project here
-   if needed. The backfill starts on the next cron tick (every 15 minutes)
+   if needed. The backfill starts on the next cron tick (every 5 minutes)
    and shows its progress on this page. Nothing needs to be clicked to start
    it, and nothing can.
 

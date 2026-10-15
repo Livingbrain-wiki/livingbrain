@@ -53,12 +53,28 @@ period = 60
 # Worker's modules — the `waitlist` module prunes expired confirmation claims
 # on it. A trigger configured on some other Worker never reaches this
 # handler, so the cron has to live here or the pass silently never runs.
-# Daily, in a quiet hour; the pass is safe at any cadence. The quarter-hourly
-# firing drains the `coding-agents` compile queue a job or two at a time
-# (`CODING_AGENTS_BATCH`); every module sees every firing, and the waitlist's
-# prune is as safe every fifteen minutes as it is daily.
+# Daily, in a quiet hour; the pass is safe at any cadence. The five-minute
+# firing drains the `coding-agents` compile queue (up to each workspace's
+# `CODING_AGENTS_BATCH` a run) and the GitHub backfill; every module sees
+# every firing, and the waitlist's prune is as safe every five minutes as it
+# is daily. Sized for Workers Paid (docs/deploy.md, "Scheduled limits"): a
+# run may last 15 minutes, so two runs can overlap, and leases keep them off
+# the same compile job and the same repository.
+#
+# Inherited by `[env.staging]` and `[env.production]`, as `[limits]` is.
 [triggers]
-crons = ["19 4 * * *", "*/15 * * * *"]
+crons = ["19 4 * * *", "*/5 * * * *"]
+
+# Workers Paid: CPU time per invocation may be raised from the default 30 s
+# to 5 minutes. A drain is mostly waiting (model calls, GitHub, D1, R2),
+# which is not CPU time, but a busy run parses, redacts, compacts and seals
+# dozens of transcripts of up to a megabyte or two in wasm, and that can
+# pass 30 s. Cloudflare's limits page lists a Cron Trigger under an hourly
+# interval at 30 s of CPU on Paid, whatever this says; the setting is here
+# for the HTTP routes (`/v1/coding-agents/process`, `compile-fully`) and for
+# whenever the cron is allowed it. Only CPU actually used is billed.
+[limits]
+cpu_ms = 300_000
 
 # D1 database `livingbrain`. The id is a PLACEHOLDER: `wrangler dev --local`
 # simulates the database and ignores it, so this is enough locally. A real

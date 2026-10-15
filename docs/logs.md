@@ -122,7 +122,7 @@ session a15f…`) gets one the server reads from the note itself; for a
 Colonizer colony that is the issue it worked on, else its pull request, else
 its outcome (`EarthOS.world · Colony a15fba01 · #123 Fix auth redirect`).
 Notes synced before this were decisions titled by id: the notes module's
-cron moves them to `session` and renames them, a batch every 15 minutes, and
+cron moves them to `session` and renames them, a batch every 5 minutes, and
 a session's next sync does the same for its own page.
 
 ## Opt-in is per repository

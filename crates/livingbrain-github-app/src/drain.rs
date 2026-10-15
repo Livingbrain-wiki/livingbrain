@@ -159,12 +159,62 @@ pub struct BackfillProgress {
 #[allow(clippy::too_many_arguments)]
 pub async fn save_backfill_progress(
     db: &dyn Database,
-    _drain: &Drain,
+    drain: &Drain,
     now: time::OffsetDateTime,
     workspace_id: &str,
     installation_id: i64,
     repo_id: i64,
     progress: &BackfillProgress,
+) -> Result<bool, StoreError> {
+    save_progress(
+        db,
+        drain,
+        now,
+        (workspace_id, installation_id, repo_id),
+        progress,
+        None,
+    )
+    .await
+}
+
+/// [`save_backfill_progress`], landing only while the stored cursor is
+/// still `expected` (`None`: still no cursor) — a compare-and-set, so a
+/// pass that lost its repository to another run, or a push that read a
+/// cursor another run has since moved, writes nothing. Answers whether it
+/// landed.
+///
+/// # Errors
+///
+/// As [`save_backfill_progress`].
+#[allow(clippy::too_many_arguments)]
+pub async fn save_backfill_progress_if(
+    db: &dyn Database,
+    drain: &Drain,
+    now: time::OffsetDateTime,
+    workspace_id: &str,
+    installation_id: i64,
+    repo_id: i64,
+    progress: &BackfillProgress,
+    expected: Option<&str>,
+) -> Result<bool, StoreError> {
+    save_progress(
+        db,
+        drain,
+        now,
+        (workspace_id, installation_id, repo_id),
+        progress,
+        Some(expected),
+    )
+    .await
+}
+
+async fn save_progress(
+    db: &dyn Database,
+    _drain: &Drain,
+    now: time::OffsetDateTime,
+    (workspace_id, installation_id, repo_id): (&str, i64, i64),
+    progress: &BackfillProgress,
+    expected: Option<Option<&str>>,
 ) -> Result<bool, StoreError> {
     if let Some(cursor) = progress.cursor.as_deref()
         && (cursor.len() > MAX_CURSOR_BYTES
@@ -179,25 +229,70 @@ pub async fn save_backfill_progress(
     };
     let now = unix(now);
     let finished = progress.done.then_some(now);
-    Ok(db
-        .execute(&Statement::with_values(
-            "UPDATE github_repos SET \
+    let sql = format!(
+        "UPDATE github_repos SET \
                backfill_state = ?, backfill_cursor = ?, \
                backfill_items = backfill_items + ?, backfill_batches = backfill_batches + 1, \
                backfill_started_at = COALESCE(backfill_started_at, ?), \
                backfill_finished_at = ?, last_error = NULL, last_error_at = NULL, \
                updated_at = ? \
-             WHERE workspace_id = ? AND installation_id = ? AND repo_id = ? AND active = 1",
+             WHERE workspace_id = ? AND installation_id = ? AND repo_id = ? AND active = 1{}",
+        if expected.is_some() {
+            " AND backfill_cursor IS ?"
+        } else {
+            ""
+        }
+    );
+    let mut values = vec![
+        text(state.as_str()),
+        crate::common::opt_text(progress.cursor.as_deref()),
+        int(i64::from(progress.items)),
+        int(now),
+        crate::common::opt_int(finished),
+        int(now),
+        text(workspace_id),
+        int(installation_id),
+        int(repo_id),
+    ];
+    if let Some(expected) = expected {
+        values.push(crate::common::opt_text(expected));
+    }
+    Ok(db.execute(&Statement::with_values(sql, values)).await? == 1)
+}
+
+/// Swaps a repository's cursor from `expected` to `new` and nothing else —
+/// not its state, counters or `updated_at` — only while it is still
+/// `expected` (`None`: no cursor yet). How a pass takes a repository's
+/// lease and gives it back unused. Answers whether it swapped.
+///
+/// # Errors
+///
+/// [`StoreError::Invalid`] for a `new` cursor that is not JSON or is too
+/// large; a storage failure.
+pub async fn swap_cursor(
+    db: &dyn Database,
+    _drain: &Drain,
+    (workspace_id, installation_id, repo_id): (&str, i64, i64),
+    expected: Option<&str>,
+    new: Option<&str>,
+) -> Result<bool, StoreError> {
+    if let Some(cursor) = new
+        && (cursor.len() > MAX_CURSOR_BYTES
+            || serde_json::from_str::<serde_json::Value>(cursor).is_err())
+    {
+        return Err(StoreError::Invalid("backfill cursor"));
+    }
+    Ok(db
+        .execute(&Statement::with_values(
+            "UPDATE github_repos SET backfill_cursor = ? \
+             WHERE workspace_id = ? AND installation_id = ? AND repo_id = ? AND active = 1 \
+               AND backfill_cursor IS ?",
             vec![
-                text(state.as_str()),
-                crate::common::opt_text(progress.cursor.as_deref()),
-                int(i64::from(progress.items)),
-                int(now),
-                crate::common::opt_int(finished),
-                int(now),
+                crate::common::opt_text(new),
                 text(workspace_id),
                 int(installation_id),
                 int(repo_id),
+                crate::common::opt_text(expected),
             ],
         ))
         .await?

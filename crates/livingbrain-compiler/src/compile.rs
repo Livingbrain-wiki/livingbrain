@@ -43,10 +43,15 @@ use crate::record::{self, Session};
 use crate::triage::{self, Decision, Plan, Strictness, Triage};
 
 /// The most sessions one cron run may compile for one workspace, whatever
-/// the workspace or the deployment asks for: the scheduled invocation's
-/// subrequest budget (Workers allow 50; the venture keeps 45) is spent eight
-/// steps a compile, so more could never run anyway, and the clamp keeps a
-/// stored or configured number from pretending otherwise.
+/// the workspace or the deployment asks for. A cron run's compiles are
+/// bounded by time and connections, not steps: on Workers Paid the
+/// venture's scheduled budget gives the compiler a share of 2,000 steps
+/// (about 660, eight a compile — 80 compiles' worth), while at most
+/// [`MAX_IN_FLIGHT`] compiles run at once (a Worker invocation keeps six
+/// connections open) and they start only until the share's deadline (about
+/// four minutes in, at most five and a half). Twenty is past what a run
+/// gets through, so the clamp only keeps a stored or configured number from
+/// asking for more than one invocation can finish.
 pub const BATCH_CEILING: usize = 20;
 /// The most model calls one session may take, a hard ceiling for the same
 /// reason as [`BATCH_CEILING`]: every call is a subrequest and a wait.

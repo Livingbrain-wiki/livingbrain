@@ -40,7 +40,7 @@ use cratefield_core::axum::http::{
 use cratefield_core::axum::response::Response as AxumResponse;
 use cratefield_core::{
     Blob, Classifier, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes,
-    RandomError, Rendered, ScheduledLimits, ScheduledSplit, Template, Venture,
+    RandomError, Rendered, ScheduledBudget, ScheduledLimits, ScheduledSplit, Template, Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
@@ -1218,8 +1218,11 @@ fn model_deadlines(ports: &mut Ports) {
 /// one change, the one [`serve_cli`] makes per request: the raw store is
 /// wrapped in [`PagesRebind`] before the views are cut, so the sibling
 /// modules' keys land on `pages/…` and every other key passes through
-/// unchanged. The split, the budget and the error handling are the
-/// runtime's own (`cratefield-runtime-cloudflare` 0.4.0, `src/lib.rs`).
+/// unchanged. The split and the error handling are the runtime's own
+/// (`cratefield-runtime-cloudflare` 0.4.0, `src/lib.rs`); the limits are
+/// this venture's, sized for Workers Paid ([`scheduled_limits`]), and the
+/// compile drain's deadline is held under Cloudflare's wall
+/// ([`module_budget`]).
 pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::ScheduleContext) {
     let (harness, runtime, _) = instance(&env);
     install_tracing();
@@ -1234,12 +1237,22 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
     let start = clock
         .as_ref()
         .map_or(OffsetDateTime::UNIX_EPOCH, |clock| clock.now());
-    let mut split = ScheduledSplit::new(SCHEDULED_LIMITS, start, harness.modules().len());
+    let limits = scheduled_limits(
+        env.var("SCHEDULED_WALL_SECS")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
+        env.var("SCHEDULED_SUBREQUESTS")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
+    );
+    let mut split = ScheduledSplit::new(limits, start, harness.modules().len());
     for module in harness.modules() {
         let now = clock
             .as_ref()
             .map_or(OffsetDateTime::UNIX_EPOCH, |clock| clock.now());
-        let budget = Arc::new(split.next(now));
+        let budget = Arc::new(module_budget(module.name(), split.next(now), start));
         let mut module_ctx = harness.module_context(module.as_ref(), &ports);
         module_ctx.scheduled = Arc::clone(&budget);
         if let Err(err) = module.scheduled(&module_ctx, &cron).await {
@@ -1256,22 +1269,191 @@ pub async fn scheduled(event: worker::ScheduledEvent, env: Env, ctx: worker::Sch
 }
 
 /// What one cron invocation may spend, split across the modules in order
-/// with each module's unspent share rolling forward. The runtime's default
-/// (25 s, 40 steps) is sized for a pass that never waits on a model; a
-/// compile does, so the wall is longer — a scheduled Worker may run for
-/// minutes — while the step count stays under the Workers Free plan's 50
-/// subrequests. The compiler checks the budget before each job and takes
-/// each workspace's own batch (Settings → Usage & limits, else
-/// `CODING_AGENTS_BATCH`, default 1) of jobs a tick at most.
-const SCHEDULED_LIMITS: ScheduledLimits = ScheduledLimits {
-    wall: Some(time::Duration::minutes(5)),
-    subrequests: Some(45),
-};
+/// with each module's unspent share rolling forward ([`ScheduledSplit`]).
+///
+/// Sized for **Workers Paid** (developers.cloudflare.com/workers/platform/
+/// limits/): a scheduled invocation has a 15-minute wall, and a paid
+/// Worker may make 10,000 subrequests per invocation (Fetch *and* calls to
+/// D1, R2 and KV). The wall here is 12 minutes ([`DEFAULT_SCHEDULED_WALL`]),
+/// three kept for the compile drain's tail ([`module_budget`]) and the
+/// finish. The steps are 2,000 ([`DEFAULT_SCHEDULED_SUBREQUESTS`]), a fifth
+/// of the real limit, because a step is an *estimate*: a compile is counted
+/// as 8 (9 with the triage classifier) though its D1 and R2 reads and
+/// writes come to more, and a GitHub call is counted as one though filing
+/// what it read writes the ledger too.
+///
+/// Both are deployment settings, `SCHEDULED_WALL_SECS` and
+/// `SCHEDULED_SUBREQUESTS` (docs/deploy.md), clamped to
+/// [`SCHEDULED_WALL_RANGE`] and [`SCHEDULED_SUBREQUESTS_RANGE`]; a value
+/// that is blank or not a number is the default. A deployment on Workers
+/// Free sets them to `300` and `45` (its limit is 50 subrequests).
+///
+/// The cron fires every five minutes, so invocations can overlap: a
+/// compile drain runs up to [`livingbrain_compiler::WALL_AFTER_BUDGET`]
+/// past its share's deadline. That is safe by leases, not by timing — a
+/// compile job is claimed with a compare-and-set under a 15-minute lease
+/// (the invocation can never outlive it), a GitHub queue item likewise
+/// with a lease token its completion must present, and a repository's
+/// backfill pass under a lease in its cursor (`livingbrain-github-app`).
+fn scheduled_limits(wall_secs: Option<&str>, subrequests: Option<&str>) -> ScheduledLimits {
+    let wall = parse_clamped(wall_secs, SCHEDULED_WALL_RANGE)
+        .unwrap_or(DEFAULT_SCHEDULED_WALL.whole_seconds());
+    let subrequests = parse_clamped(subrequests, SCHEDULED_SUBREQUESTS_RANGE)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(DEFAULT_SCHEDULED_SUBREQUESTS);
+    ScheduledLimits {
+        wall: Some(time::Duration::seconds(wall)),
+        subrequests: Some(subrequests),
+    }
+}
+
+/// A whole number from a deployment setting, clamped into `range`; `None`
+/// when it is absent, blank or not a number.
+fn parse_clamped(raw: Option<&str>, range: (i64, i64)) -> Option<i64> {
+    raw.map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map(|n| n.clamp(range.0, range.1))
+}
+
+/// Cloudflare's wall for one scheduled invocation, on every plan.
+const CRON_HARD_WALL: time::Duration = time::Duration::minutes(15);
+/// The invocation's wall unless `SCHEDULED_WALL_SECS` says otherwise.
+const DEFAULT_SCHEDULED_WALL: time::Duration = time::Duration::minutes(12);
+/// What `SCHEDULED_WALL_SECS` is clamped to: at least 30 s, at most 14
+/// minutes, so one is always left under [`CRON_HARD_WALL`].
+const SCHEDULED_WALL_RANGE: (i64, i64) = (30, 14 * 60);
+/// The invocation's steps unless `SCHEDULED_SUBREQUESTS` says otherwise.
+const DEFAULT_SCHEDULED_SUBREQUESTS: u32 = 2_000;
+/// What `SCHEDULED_SUBREQUESTS` is clamped to: at least 10, at most 5,000 —
+/// half the paid plan's 10,000, since a step undercounts (see
+/// [`scheduled_limits`]).
+const SCHEDULED_SUBREQUESTS_RANGE: (i64, i64) = (10, 5_000);
+
+/// One module's budget: its share of the split, except that the compile
+/// drain's deadline is held early enough for its tail to fit.
+///
+/// The compiler starts compiles until its share's deadline and lets them
+/// run [`livingbrain_compiler::WALL_AFTER_BUDGET`] (9 minutes) past it, so
+/// the deadline it is handed must leave that much (and 30 s for the finish)
+/// under [`CRON_HARD_WALL`] — at most 5.5 minutes into the invocation,
+/// however long the wall or the modules before it took. Every other module
+/// stops at its deadline and keeps its share as it is.
+fn module_budget(module: &str, share: ScheduledBudget, start: OffsetDateTime) -> ScheduledBudget {
+    if module != CODING_AGENTS_MODULE {
+        return share;
+    }
+    let latest = start + CRON_HARD_WALL
+        - livingbrain_compiler::WALL_AFTER_BUDGET
+        - time::Duration::seconds(30);
+    let deadline = share.deadline().map(|deadline| deadline.min(latest));
+    ScheduledBudget::new(deadline, share.remaining_subrequests())
+}
+
+/// The compile drain's module name (`livingbrain_api::CodingAgents`).
+const CODING_AGENTS_MODULE: &str = "coding-agents";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cratefield_kms::{Dek, LocalFileKms};
+
+    #[test]
+    fn the_scheduled_limits_default_to_the_paid_plan() {
+        let limits = scheduled_limits(None, None);
+        assert_eq!(limits.wall, Some(time::Duration::minutes(12)));
+        assert_eq!(limits.subrequests, Some(2_000));
+        // Blank or not a number is the default, not zero.
+        let limits = scheduled_limits(Some("  "), Some("lots"));
+        assert_eq!(limits.wall, Some(time::Duration::minutes(12)));
+        assert_eq!(limits.subrequests, Some(2_000));
+        assert!(
+            DEFAULT_SCHEDULED_WALL < CRON_HARD_WALL,
+            "headroom under Cloudflare's wall"
+        );
+    }
+
+    #[test]
+    fn the_scheduled_limits_take_the_env_and_clamp_it() {
+        // A free-plan deployment.
+        let free = scheduled_limits(Some("300"), Some(" 45 "));
+        assert_eq!(free.wall, Some(time::Duration::minutes(5)));
+        assert_eq!(free.subrequests, Some(45));
+        // Past either end: clamped, never past Cloudflare's wall or half
+        // the paid plan's subrequests.
+        let high = scheduled_limits(Some("3600"), Some("1000000"));
+        assert_eq!(high.wall, Some(time::Duration::minutes(14)));
+        assert_eq!(high.subrequests, Some(5_000));
+        let low = scheduled_limits(Some("0"), Some("-5"));
+        assert_eq!(low.wall, Some(time::Duration::seconds(30)));
+        assert_eq!(low.subrequests, Some(10));
+    }
+
+    #[test]
+    fn the_split_hands_the_compiler_a_paid_share() {
+        // Mounted order: the compiler is third from last (then `model-jobs`
+        // and `github`), so with the modules before it spending nothing it
+        // gets a third of what is left.
+        let start = OffsetDateTime::UNIX_EPOCH;
+        let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
+            .expect("a well-formed key");
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
+        let at = names
+            .iter()
+            .position(|name| *name == CODING_AGENTS_MODULE)
+            .expect("the compiler is mounted");
+        assert_eq!(names.last(), Some(&"github"), "github inherits the rest");
+        let mut split = ScheduledSplit::new(scheduled_limits(None, None), start, names.len());
+        for _ in 0..at {
+            let share = split.next(start);
+            split.settle(&share);
+        }
+        let compiler = module_budget(CODING_AGENTS_MODULE, split.next(start), start);
+        let left = names.len() - at;
+        assert_eq!(
+            compiler.remaining_subrequests(),
+            Some(2_000_u32.div_ceil(u32::try_from(left).unwrap()))
+        );
+        // 8 steps a compile: far more than six connections and the clock
+        // let one invocation start, so time is the bound, not steps.
+        assert!(compiler.remaining_subrequests().unwrap() / 9 >= 20 * 3);
+        let deadline = compiler.deadline().expect("bounded");
+        assert!(deadline <= start + time::Duration::seconds(330));
+        assert!(
+            deadline + livingbrain_compiler::WALL_AFTER_BUDGET < start + CRON_HARD_WALL,
+            "the drain's tail fits in the invocation"
+        );
+        // The last module gets everything left.
+        split.settle(&compiler);
+        for _ in at + 1..names.len() - 1 {
+            let share = split.next(start);
+            split.settle(&share);
+        }
+        let github = module_budget("github", split.next(start), start);
+        assert_eq!(github.remaining_subrequests(), Some(2_000));
+        assert_eq!(github.deadline(), Some(start + time::Duration::minutes(12)));
+    }
+
+    #[test]
+    fn the_compile_deadline_is_held_under_the_wall_whatever_ran_before() {
+        let start = OffsetDateTime::UNIX_EPOCH;
+        // The modules before it took eight minutes: its even share would
+        // end at 9:20, and nine more minutes would pass Cloudflare's wall.
+        let late = ScheduledBudget::new(Some(start + time::Duration::seconds(560)), Some(600));
+        let held = module_budget(CODING_AGENTS_MODULE, late, start);
+        assert_eq!(held.deadline(), Some(start + time::Duration::seconds(330)));
+        assert_eq!(held.remaining_subrequests(), Some(600));
+        // An earlier deadline is kept as it is; other modules are untouched.
+        let early = ScheduledBudget::new(Some(start + time::Duration::seconds(200)), Some(7));
+        let kept = module_budget(CODING_AGENTS_MODULE, early, start);
+        assert_eq!(kept.deadline(), Some(start + time::Duration::seconds(200)));
+        let other = ScheduledBudget::new(Some(start + time::Duration::seconds(560)), Some(7));
+        assert_eq!(
+            module_budget("github", other, start).deadline(),
+            Some(start + time::Duration::seconds(560))
+        );
+    }
 
     /// The mail settings of a deployment with no Owlpost key: the adapter is
     /// wired but degrades to `NotConfigured`.

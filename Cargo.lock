@@ -2146,6 +2146,7 @@ dependencies = [
  "insta",
  "livingbrain-api",
  "livingbrain-canary",
+ "livingbrain-compiler",
  "livingbrain-github-app",
  "livingbrain-mcp",
  "livingbrain-models",
