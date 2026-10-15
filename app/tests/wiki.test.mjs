@@ -381,6 +381,12 @@ const {
   jobsBySource,
   jobLabel,
   askWithRunner,
+  subagentHeader,
+  subagentStepNodes,
+  formatDuration,
+  projectSegment,
+  folderSummary,
+  sessionsHref,
 } = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
@@ -2013,4 +2019,268 @@ test("ask: a pending answer waits for the asker's own runner, then asks again", 
     askWithRunner(async () => ({ status: "pending", poll: "https://evil.example/x" }), {}),
     /no job/,
   );
+});
+
+/* ------------------------------------------------------- subagents (v3) */
+
+/** A version-3 record: the main agent on two models, one background
+ * subagent that launched a nested one. */
+const SUB_RECORD = {
+  schema_version: 3,
+  agent: "claude_code",
+  collector_version: 3,
+  detail: "full",
+  session_id: "9a8b7c6d",
+  repo: "~/code/demo",
+  branch: "main",
+  models: ["claude-opus-4-5", "claude-sonnet-4-5"],
+  started_at: "2026-10-02T10:00:00.000Z",
+  ended_at: "2026-10-02T10:03:00.000Z",
+  turns: [
+    { role: "user", at: "2026-10-02T10:00:00.000Z", text: "Audit the logging module", tool_calls: [] },
+    {
+      role: "assistant",
+      at: "2026-10-02T10:00:05.000Z",
+      model: "claude-opus-4-5",
+      text: "Sending an explorer first.",
+      tool_calls: [
+        {
+          name: "Agent",
+          format: "text",
+          input: "Find every logger in src/",
+          output: "Two loggers.",
+          status: "ok",
+          subagent: {
+            id: "a1111",
+            name: "Explore",
+            description: "Survey logging <b>bold?</b>",
+            models: ["claude-haiku-4-5"],
+            started_at: "2026-10-02T10:00:06.500Z",
+            ended_at: "2026-10-02T10:01:30.000Z",
+            status: "completed",
+            totals: { input_tokens: 180, output_tokens: 45, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0, cost_usd: null },
+            turns: [
+              { role: "user", at: null, text: "Find every logger in src/", tool_calls: [] },
+              {
+                role: "assistant",
+                at: null,
+                model: "claude-haiku-4-5",
+                text: "Looking.",
+                tool_calls: [{ name: "Bash", format: "shell", input: "rg -n logger src", output: "src/a.rs:1", status: "ok" }],
+              },
+              {
+                role: "assistant",
+                at: null,
+                text: "",
+                tool_calls: [
+                  {
+                    name: "Agent",
+                    input: "Check a.rs",
+                    output: "a.rs is fine.",
+                    status: "ok",
+                    subagent: {
+                      id: "a2222",
+                      name: "general-purpose",
+                      description: "Deep check",
+                      models: ["claude-haiku-4-5"],
+                      started_at: null,
+                      ended_at: null,
+                      status: "failed",
+                      totals: {},
+                      turns: [
+                        { role: "user", at: null, text: "Check a.rs", tool_calls: [] },
+                        { role: "assistant", at: null, model: "claude-haiku-4-5", text: "a.rs is fine.", tool_calls: [] },
+                      ],
+                      truncated: false,
+                      omitted_turns: 0,
+                    },
+                  },
+                ],
+              },
+              { role: "assistant", at: null, text: "Two loggers: **a.rs** and b.rs.", tool_calls: [] },
+            ],
+            truncated: true,
+            omitted_turns: 7,
+          },
+        },
+      ],
+    },
+    { role: "assistant", at: "2026-10-02T10:03:00.000Z", model: "claude-sonnet-4-5", text: "Both fixed.", tool_calls: [] },
+  ],
+  totals: { input_tokens: 300, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0, cost_usd: null },
+  outcome: null,
+  truncated: true,
+  omitted_turns: 0,
+  omitted_subagent_turns: 7,
+};
+
+test("subagents: a card in the call that launched it — header, task, answer, steps on request", () => {
+  assert.equal(formatDuration("2026-10-02T10:00:06.500Z", "2026-10-02T10:01:30.000Z"), "1m 23s");
+  assert.equal(formatDuration("x", "y"), "");
+  assert.deepEqual(subagentHeader(SUB_RECORD.turns[1].tool_calls[0].subagent), [
+    "Explore",
+    "claude-haiku-4-5",
+    "1m 23s",
+    "225 tokens",
+    "completed",
+  ]);
+  const subs = [];
+  const nodes = transcriptNodes(SUB_RECORD, subs);
+  const all = textOf(nodes);
+  assert.match(all, /Model: claude-opus-4-5/);
+  assert.match(all, /Subagents: 2 \(Explore ×1, general-purpose ×1\)/);
+  assert.match(all, /7 subagent turn\(s\) were left out/);
+  assert.match(all, /🤖 Explore · claude-haiku-4-5 · 1m 23s · 225 tokens · completed/);
+  // The task is text, never markup.
+  assert.match(all, /Survey logging <b>bold\?<\/b>/);
+  assert.equal(tagged(nodes, "b").length, 0);
+  // The answer is markdown; the steps wait behind a button.
+  assert.match(all, /Two loggers: a\.rs and b\.rs\./);
+  assert.doesNotMatch(all, /rg -n logger/, "steps are not drawn until asked");
+  const buttons = tagged(nodes, "button");
+  assert.equal(buttons.length, 1);
+  assert.equal(textOf(buttons[0]), "Show 3 steps");
+  assert.equal(buttons[0].attrs["data-sub"], "0");
+  assert.equal(subs.length, 1);
+  // The model badge: only where the main agent's model changes.
+  const badges = tagged(nodes, "span").filter((n) => n.attrs && n.attrs.class === "pill transcript-model");
+  assert.deepEqual(badges.map(textOf), ["claude-sonnet-4-5"]);
+
+  const steps = subagentStepNodes(subs[0], subs);
+  const stepText = textOf(steps);
+  assert.match(stepText, /rg -n logger src/);
+  assert.match(stepText, /🤖 general-purpose · claude-haiku-4-5 · failed/);
+  assert.doesNotMatch(stepText, /Two loggers: /, "the answer is on the card, not repeated");
+  assert.equal(subs.length, 2, "the nested card registers its subagent");
+});
+
+test("subagents: Show steps draws a subagent's turns once, and its nested card works too", async () => {
+  reset({ search: "?view=sessions&source=01J0000000000000000000000D" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources/01J0000000000000000000000D") {
+      return json({ id: "01J0000000000000000000000D", kind: "agent_log", project: "demo", body: JSON.stringify(SUB_RECORD) });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  const body = el("transcript-body");
+  assert.doesNotMatch(body.textContent, /rg -n logger/);
+  const button = walk(body, "[data-sub]")[0];
+  assert.equal(button.textContent, "Show 3 steps");
+  await button.click();
+  const steps = walk(body, "[data-sub-steps]")[0];
+  assert.equal(steps.hidden, false);
+  assert.match(steps.textContent, /rg -n logger src/);
+  assert.equal(button.textContent, "Hide steps");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  const nested = walk(steps, "[data-sub]")[0];
+  await nested.click();
+  assert.match(steps.textContent, /Check a\.rs/);
+  await button.click();
+  assert.equal(steps.hidden, true);
+  assert.equal(button.textContent, "Show 3 steps");
+});
+
+test("transcript nodes: a version-2 record (no subagents, no models per turn) still reads", () => {
+  const all = textOf(transcriptNodes({ ...RECORD, schema_version: 2 }));
+  assert.match(all, /Fix all the TODOs/);
+  assert.doesNotMatch(all, /Subagents:/);
+  assert.doesNotMatch(all, /🤖/);
+});
+
+const CA_SESSIONS = {
+  agents: [
+    {
+      agent: "claude_code",
+      folder: "claude",
+      sessions: 3,
+      compiled: 1,
+      projects: [{ project: "demo", sessions: 3, compiled: 1, statuses: { done: 1, queued: 2 }, latest_at: "x" }],
+    },
+    {
+      agent: "colonizer",
+      folder: "colonizer",
+      sessions: 489,
+      compiled: 0,
+      projects: [{ project: "harness", sessions: 489, compiled: 0, statuses: { queued: 480, failed: 9 }, latest_at: "x" }],
+    },
+  ],
+  truncated: false,
+};
+
+test("coding-agents tree: synced agents and projects are folders before any page is compiled", () => {
+  assert.equal(projectSegment("My Repo.v2"), "my-repo-v2");
+  assert.equal(projectSegment(""), "no-project");
+  const tree = codingAgentsTree(CA_PAGES.pages, CA_SESSIONS);
+  assert.deepEqual(tree.agents.map((a) => a.agent), ["claude", "codex", "colonizer"]);
+  const colonizer = tree.agents[2];
+  assert.equal(colonizer.info.agent, "colonizer");
+  assert.equal(colonizer.info.sessions, 489);
+  assert.deepEqual(colonizer.projects.map((p) => p.project), ["harness"]);
+  assert.equal(colonizer.projects[0].pages.length, 0);
+  assert.equal(folderSummary(colonizer.projects[0].info), "489 sessions · 0 compiled · 480 queued · 9 failed");
+  // A compiled folder and its synced sessions are one folder.
+  const claudeDemo = tree.agents[0].projects[0];
+  assert.equal(claudeDemo.pages.length, 2);
+  assert.equal(claudeDemo.info.sessions, 3);
+  assert.equal(sessionsHref("colonizer", "harness"), "wiki.html?view=sessions&agent=colonizer&project=harness");
+  assert.equal(sessionsPath({ agent: "colonizer" }), "/v1/sources?kind=agent_log&limit=50&agent=colonizer");
+  assert.equal(sessionsPath({ agent: "Bad One" }), "/v1/sources?kind=agent_log&limit=50");
+});
+
+test("coding-agents: home shows colonizer/ from synced sessions, linking to its sessions", async () => {
+  reset({ search: "" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages?limit=200") return json({ pages: [] });
+    if (url === "/v1/coding-agents/tree") return json(CA_SESSIONS);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("coding-agents-section").hidden, false);
+  const folders = walk(el("coding-agents-tree"), "summary").map((n) => n.textContent);
+  assert.deepEqual(folders, [
+    "coding-agents/",
+    "claude/ 3 sessions · 1 compiled",
+    "demo/ 3 sessions · 1 compiled",
+    "colonizer/ 489 sessions · 0 compiled",
+    "harness/ 489 sessions · 0 compiled",
+  ]);
+  const links = walk(el("coding-agents-tree"), "a").map((a) => a.href);
+  assert.ok(links.includes("wiki.html?view=sessions&agent=colonizer"), String(links));
+  assert.ok(links.includes("wiki.html?view=sessions&agent=colonizer&project=harness"), String(links));
+  const info = walk(el("coding-agents-tree"), "li").find((li) => /Open all 489 sessions/.test(li.textContent));
+  assert.match(info.textContent, /480 queued · 9 failed/);
+});
+
+test("agent sessions: ?agent= filters the list, and the agent select changes it", async () => {
+  reset({ search: "?view=sessions&agent=colonizer" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url.startsWith("/v1/sources?kind=agent_log")) return json({ sources: [], next_cursor: null });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.ok(calls.some((call) => call.url === "/v1/sources?kind=agent_log&limit=50&agent=colonizer"));
+  const select = el("sessions-agent");
+  assert.equal(select.hidden, false);
+  assert.equal(select.value, "colonizer");
+  assert.deepEqual(
+    select.children.map((o) => o.value),
+    ["", "claude_code", "codex", "colonizer"],
+  );
+  select.value = "codex";
+  await select.fire("change");
+  await drain();
+  assert.ok(calls.some((call) => call.url === "/v1/sources?kind=agent_log&limit=50&agent=codex"));
+  assert.equal(replacedUrls.at(-1), "wiki.html?view=sessions&agent=codex");
 });

@@ -497,8 +497,8 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     );
 
     // Claude Code: one assistant message streamed as two lines, counted once.
-    assert_eq!(claude["schema_version"], 2);
-    assert_eq!(claude["collector_version"], 2);
+    assert_eq!(claude["schema_version"], 3);
+    assert_eq!(claude["collector_version"], 3);
     assert_eq!(claude["detail"], "full");
     assert_eq!(claude["session_id"], CLAUDE_SESSION);
     // Elision ran with the real-shaped HOME, so the repo folds to `~` before
@@ -547,7 +547,7 @@ fn claude_and_codex_sessions_land_in_the_normalised_schema() {
     assert!(!claude.to_string().contains(planted_key().as_str()));
 
     // Codex: the last cumulative token count, no cost invented.
-    assert_eq!(codex["schema_version"], 2);
+    assert_eq!(codex["schema_version"], 3);
     assert_eq!(codex["session_id"], CODEX_SESSION);
     assert_eq!(codex["repo"], "~/code/demo", "{codex}");
     assert_eq!(codex["branch"], "main");
@@ -1154,5 +1154,87 @@ fn a_changed_record_re_uploads_and_replaces_its_note() {
     assert_eq!(
         first_slugs, second_slugs,
         "the same pages, updated in place"
+    );
+}
+
+/// (s) Subagents travel inside their sessions: Claude Code's sidechain
+/// transcripts (`<session>/subagents/agent-*.jsonl`) nest in the `Agent`
+/// call that launched them, a nested one inside its parent; Codex's spawned
+/// rollout nests in its `spawn_agent` call and is not a session of its own.
+/// A secret in a subagent's tool output is redacted; the note names each
+/// subagent with its model and status and quotes its answer.
+#[test]
+fn subagents_travel_nested_in_their_sessions() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for (from, to) in [
+        ("tests/fixtures/logs-sub/claude", ".claude"),
+        ("tests/fixtures/logs-sub/codex", ".codex"),
+    ] {
+        copy_tree(&manifest.join(from), &home.join(to));
+    }
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    let extra = fixture_dirs(&home);
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let output = sync(&home, &real_home_envs(&mock.base), &extra);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(
+        report["scanned"], 2,
+        "the spawned rollout is no session: {report}"
+    );
+
+    let bodies = source_bodies(&mock);
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    for envelope in &bodies {
+        let body = envelope["body"].as_str().unwrap();
+        assert!(!body.contains(planted_aws_key().as_str()), "{body}");
+        assert!(!body.contains("/home/alice"), "{body}");
+    }
+    let records: Vec<Value> = bodies.iter().map(record_of).collect();
+    let claude = records
+        .iter()
+        .find(|record| record["agent"] == "claude_code")
+        .expect("the claude record");
+    assert_eq!(claude["schema_version"], 3);
+    let call = &claude["turns"][1]["tool_calls"][0];
+    let sub = &call["subagent"];
+    assert_eq!(sub["name"], "Explore", "{call}");
+    assert_eq!(sub["models"], json!(["claude-haiku-4-5"]));
+    assert_eq!(sub["status"], "completed");
+    assert_eq!(
+        sub["turns"][2]["tool_calls"][0]["subagent"]["name"],
+        "general-purpose"
+    );
+    assert!(
+        sub["turns"][1]["tool_calls"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED:")
+    );
+    let codex = records
+        .iter()
+        .find(|record| record["agent"] == "codex")
+        .expect("the codex record");
+    let spawned = &codex["turns"][1]["tool_calls"][0]["subagent"];
+    assert_eq!(spawned["name"], "explorer", "{codex}");
+    assert_eq!(spawned["models"], json!(["gpt-5.1-codex-mini"]));
+
+    let notes = note_bodies(&mock);
+    let note = notes
+        .iter()
+        .find(|note| note["slug"].as_str().unwrap().contains("claude-code"))
+        .expect("the claude note");
+    let text = note["body"].as_str().unwrap();
+    assert!(text.contains("- Subagents: 1 (Explore ×1)"), "{text}");
+    assert!(
+        text.contains("> 🤖 **Explore** · claude-haiku-4-5 · 1m 24s · 225 tokens · completed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("> Two loggers: src/a.rs and src/b.rs."),
+        "{text}"
     );
 }

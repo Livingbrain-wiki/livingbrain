@@ -55,9 +55,11 @@ public struct SessionShow: Decodable, Equatable, Sendable {
     }
 }
 
-/// The normalised session schema (logs.rs `SessionRecord`), versions 1 and
-/// 2. Version 2 adds tool inputs and results, `reasoning` and `event` turns,
-/// `detail` and `omitted_turns`; a version-1 record decodes with those empty.
+/// The normalised session schema (logs.rs `SessionRecord`), versions 1 to 3.
+/// Version 2 adds tool inputs and results, `reasoning` and `event` turns,
+/// `detail` and `omitted_turns`; version 3 a subagent's whole session on the
+/// call that launched it, the model on a turn where it changes, and
+/// `omitted_subagent_turns`. An older record decodes with those empty.
 public struct SessionRecord: Decodable, Equatable, Sendable {
     public var schemaVersion: Int
     public var agent: String
@@ -73,6 +75,129 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
     public var detail: String?
     /// Turns the size cap removed (an `event` turn marks where).
     public var omittedTurns: Int
+    /// Turns the size cap removed from inside subagents (version 3).
+    public var omittedSubagentTurns: Int
+
+    /// The main agent's model: the first the record names that a model wrote.
+    public var mainModel: String? { models.first { $0 != "<synthetic>" } }
+
+    /// Every subagent the session launched, nested ones included.
+    public var subagents: [Subagent] { Subagent.all(in: turns) }
+
+    /// What a session or a subagent spent, as its log reported it.
+    public struct Totals: Decodable, Equatable, Sendable {
+        public var inputTokens: Int
+        public var outputTokens: Int
+        public var cacheReadTokens: Int
+        public var cacheCreationTokens: Int
+        public var costUsd: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case inputTokens = "input_tokens"
+            case outputTokens = "output_tokens"
+            case cacheReadTokens = "cache_read_tokens"
+            case cacheCreationTokens = "cache_creation_tokens"
+            case costUsd = "cost_usd"
+        }
+
+        public init(input: Int = 0, output: Int = 0, cacheRead: Int = 0, cacheCreation: Int = 0, cost: Double? = nil) {
+            inputTokens = input
+            outputTokens = output
+            cacheReadTokens = cacheRead
+            cacheCreationTokens = cacheCreation
+            costUsd = cost
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            inputTokens = try c.decodeIfPresent(Int.self, forKey: .inputTokens) ?? 0
+            outputTokens = try c.decodeIfPresent(Int.self, forKey: .outputTokens) ?? 0
+            cacheReadTokens = try c.decodeIfPresent(Int.self, forKey: .cacheReadTokens) ?? 0
+            cacheCreationTokens = try c.decodeIfPresent(Int.self, forKey: .cacheCreationTokens) ?? 0
+            costUsd = try c.decodeIfPresent(Double.self, forKey: .costUsd)
+        }
+
+        /// Every token counted, summed.
+        public var all: Int { inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens }
+    }
+
+    /// A subagent's own session, nested in the call that launched it: the
+    /// same turn shape as the session's, recursively.
+    public struct Subagent: Decodable, Equatable, Sendable {
+        public var id: String
+        /// The kind of agent (`Explore`, `general-purpose`, a Codex role).
+        public var name: String
+        public var description: String?
+        public var models: [String]
+        public var startedAt: String?
+        public var endedAt: String?
+        /// `completed`, `failed`, `stopped` or `running`, when the log said.
+        public var status: String?
+        public var totals: Totals
+        public var turns: [Turn]
+        public var truncated: Bool
+        public var omittedTurns: Int
+
+        enum CodingKeys: String, CodingKey {
+            case id, name, description, models, status, totals, turns, truncated
+            case startedAt = "started_at"
+            case endedAt = "ended_at"
+            case omittedTurns = "omitted_turns"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+            name = try c.decodeIfPresent(String.self, forKey: .name) ?? "subagent"
+            description = try c.decodeIfPresent(String.self, forKey: .description)
+            models = try c.decodeIfPresent([String].self, forKey: .models) ?? []
+            startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
+            endedAt = try c.decodeIfPresent(String.self, forKey: .endedAt)
+            status = try c.decodeIfPresent(String.self, forKey: .status)
+            totals = try c.decodeIfPresent(Totals.self, forKey: .totals) ?? Totals()
+            truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+            omittedTurns = try c.decodeIfPresent(Int.self, forKey: .omittedTurns) ?? 0
+            var decoded = try c.decodeIfPresent([Turn].self, forKey: .turns) ?? []
+            for index in decoded.indices { decoded[index].id = index }
+            turns = decoded
+        }
+
+        /// Where its final answer sits: the last assistant turn that said
+        /// something.
+        public var finalAnswerIndex: Int? {
+            turns.lastIndex { $0.role == "assistant" && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+
+        public var finalAnswer: String? { finalAnswerIndex.map { turns[$0].text } }
+
+        /// Its turns other than the final answer: what "Show steps" draws.
+        public var steps: [Turn] {
+            guard let at = finalAnswerIndex else { return turns }
+            return turns.filter { $0.id != at }
+        }
+
+        /// `Explore · claude-haiku-4-5 · 1m 24s · 225 tokens · completed`.
+        public var header: String {
+            var parts = [name]
+            if !models.isEmpty { parts.append(models.joined(separator: ", ")) }
+            if let start = startedAt.flatMap(ISODate.parse), let end = endedAt.flatMap(ISODate.parse),
+               let duration = SubagentFormat.duration(end.timeIntervalSince(start))
+            {
+                parts.append(duration)
+            }
+            if totals.all > 0 { parts.append("\(SubagentFormat.grouped(totals.all)) tokens") }
+            if let cost = totals.costUsd { parts.append(String(format: "$%.4f", cost)) }
+            if let status { parts.append(status) }
+            return parts.joined(separator: " · ")
+        }
+
+        /// Every subagent launched in `turns`, depth first.
+        public static func all(in turns: [Turn]) -> [Subagent] {
+            turns.flatMap { turn in
+                turn.calls.compactMap(\.subagent).flatMap { [$0] + all(in: $0.turns) }
+            }
+        }
+    }
 
     /// A tool the agent called: under `full`, what it was called with and
     /// what came back (both clipped by the CLI); otherwise the name alone.
@@ -86,9 +211,11 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
         /// `ok`, `error` or `interrupted`, when the log said.
         public var status: String?
         public var exitCode: Int?
+        /// The subagent this call launched, with its whole session (version 3).
+        public var subagent: Subagent?
 
         enum CodingKeys: String, CodingKey {
-            case name, format, path, input, output, status
+            case name, format, path, input, output, status, subagent
             case exitCode = "exit_code"
         }
 
@@ -113,26 +240,29 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
             output = try c.decodeIfPresent(String.self, forKey: .output)
             status = try c.decodeIfPresent(String.self, forKey: .status)
             exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
+            subagent = try c.decodeIfPresent(Subagent.self, forKey: .subagent)
         }
 
         /// Whether there is anything to show beyond the name.
-        public var hasDetail: Bool { input != nil || output != nil || path != nil }
+        public var hasDetail: Bool { input != nil || output != nil || path != nil || subagent != nil }
     }
 
     public struct Turn: Decodable, Equatable, Sendable, Identifiable {
         /// `user`, `assistant`, `reasoning` or `event`.
         public var role: String
         public var at: String?
+        /// The model that wrote it, named where it changed (version 3).
+        public var model: String?
         public var text: String
         public var calls: [ToolCall]
-        /// Position in the record; set after decoding.
+        /// Position in its list; set after decoding.
         public var id: Int = 0
 
         /// The tool names, in order.
         public var toolCalls: [String] { calls.map(\.name) }
 
         enum CodingKeys: String, CodingKey {
-            case role, at, text
+            case role, at, model, text
             case calls = "tool_calls"
         }
 
@@ -140,6 +270,7 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
             at = try c.decodeIfPresent(String.self, forKey: .at)
+            model = try c.decodeIfPresent(String.self, forKey: .model)
             text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
             calls = try c.decodeIfPresent([ToolCall].self, forKey: .calls) ?? []
         }
@@ -152,6 +283,7 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
         case startedAt = "started_at"
         case endedAt = "ended_at"
         case omittedTurns = "omitted_turns"
+        case omittedSubagentTurns = "omitted_subagent_turns"
     }
 
     public init(from decoder: Decoder) throws {
@@ -167,9 +299,47 @@ public struct SessionRecord: Decodable, Equatable, Sendable {
         truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
         omittedTurns = try c.decodeIfPresent(Int.self, forKey: .omittedTurns) ?? 0
+        omittedSubagentTurns = try c.decodeIfPresent(Int.self, forKey: .omittedSubagentTurns) ?? 0
         var decoded = try c.decodeIfPresent([Turn].self, forKey: .turns) ?? []
         for index in decoded.indices { decoded[index].id = index }
         turns = decoded
+    }
+
+    /// The model badge each turn of a list shows: a turn's model where it
+    /// differs from the one before it, starting from the list's own `model`.
+    public static func modelBadges(_ turns: [Turn], startingWith model: String?) -> [Int: String] {
+        var current = model
+        var badges: [Int: String] = [:]
+        for turn in turns where turn.role == "assistant" {
+            if let next = turn.model, next != current {
+                badges[turn.id] = next
+                current = next
+            }
+        }
+        return badges
+    }
+}
+
+/// How a subagent's header spells its numbers.
+public enum SubagentFormat {
+    /// `45s`, `3m 05s` or `1h 02m`; nil for a negative span.
+    public static func duration(_ seconds: TimeInterval) -> String? {
+        guard seconds >= 0, seconds.isFinite else { return nil }
+        let s = Int(seconds)
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return String(format: "%dm %02ds", s / 60, s % 60) }
+        return String(format: "%dh %02dm", s / 3600, (s % 3600) / 60)
+    }
+
+    /// `1234567` as `1,234,567`, whatever the locale.
+    public static func grouped(_ n: Int) -> String {
+        let digits = Array(String(n))
+        var out = ""
+        for (index, ch) in digits.enumerated() {
+            if index > 0, (digits.count - index) % 3 == 0 { out.append(",") }
+            out.append(ch)
+        }
+        return out
     }
 }
 

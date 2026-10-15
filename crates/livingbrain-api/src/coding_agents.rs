@@ -17,8 +17,11 @@
 //!   failed"), and answers how many. A failed job's `error` names what the
 //!   provider said (`model-http 429: {…}`), so the person can see the cause
 //!   is fixed before pressing it.
+//! - `GET /v1/coding-agents/tree` — the asker's synced sessions grouped
+//!   by agent and project, with how many compiled ([`tree`]): the home
+//!   view's `coding-agents/` folders before any page is written.
 //!
-//! Both answer only for the asker's own scopes — the same two clauses the
+//! All four answer only for the asker's own scopes — the same two clauses the
 //! source listing applies — so a member sees and spends nothing of anybody
 //! else's. The cron tick (`scheduled`) drains every workspace in bounded
 //! batches — each workspace's own sessions-per-run setting, else
@@ -60,6 +63,8 @@ use livingbrain_models::invoke::{self, ChatRequest, InvokeError};
 use livingbrain_models::jobs::{self, Dispatch, JobCall};
 use livingbrain_pages::{FactError, FactInput, FactStore};
 use serde_json::{Value, json};
+
+mod tree;
 
 use crate::Wiki;
 use crate::budgets::StoredTuning;
@@ -199,6 +204,7 @@ impl Module for CodingAgents {
             .route("/queue", get(queue))
             .route("/process", post(process))
             .route("/retry", post(retry))
+            .route("/tree", get(tree::tree))
             .with_state(state)
     }
 

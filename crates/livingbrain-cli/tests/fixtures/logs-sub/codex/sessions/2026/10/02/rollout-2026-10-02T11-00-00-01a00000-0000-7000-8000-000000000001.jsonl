@@ -1,0 +1,7 @@
+{"timestamp":"2026-10-02T11:00:00.000Z","type":"session_meta","payload":{"id":"01a00000-0000-7000-8000-000000000001","cwd":"/home/alice/code/demo","git":{"branch":"main"},"source":"cli"}}
+{"timestamp":"2026-10-02T11:00:00.100Z","type":"turn_context","payload":{"cwd":"/home/alice/code/demo","model":"gpt-5.1-codex"}}
+{"timestamp":"2026-10-02T11:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Find the TODOs with a helper"}]}}
+{"timestamp":"2026-10-02T11:00:02.000Z","type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call_sp","arguments":"{\"task_name\": \"scan\", \"agent_type\": \"explorer\", \"message\": \"Scan for TODOs\"}"}}
+{"timestamp":"2026-10-02T11:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_sp","output":"{\"task_name\": \"/root/scan\"}"}}
+{"timestamp":"2026-10-02T11:01:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The helper found one TODO."}]}}
+{"timestamp":"2026-10-02T11:01:00.500Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900,"output_tokens":90,"cached_input_tokens":0,"reasoning_output_tokens":0}}}}

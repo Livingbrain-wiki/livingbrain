@@ -92,11 +92,25 @@ export function searchPath(query, project, limit = SEARCH_LIMIT) {
   return path;
 }
 
-/** One page of the agent-sessions list: `kind=agent_log`, the project when
- * one is chosen, and the previous page's cursor when there is one. */
-export function sessionsPath({ project = "", cursor = "", limit = SESSIONS_LIMIT } = {}) {
+/** The agents a session can come from, as `GET /v1/sources?agent=` names
+ * them (the first word of a session's title), with what a person reads. */
+export const AGENT_LABELS = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  colonizer: "Colonizer",
+};
+
+/** An agent name the sources listing accepts. */
+export function validAgent(value) {
+  return typeof value === "string" && /^[a-z0-9_-]{1,32}$/.test(value);
+}
+
+/** One page of the agent-sessions list: `kind=agent_log`, the project and
+ * the agent when chosen, and the previous page's cursor when there is one. */
+export function sessionsPath({ project = "", agent = "", cursor = "", limit = SESSIONS_LIMIT } = {}) {
   const params = new URLSearchParams({ kind: "agent_log", limit: String(limit) });
   if (validProject(project)) params.set("project", project);
+  if (validAgent(agent)) params.set("agent", agent);
   if (cursor) params.set("cursor", cursor);
   return `/v1/sources?${params.toString()}`;
 }
@@ -140,6 +154,79 @@ export function parseSessionRecord(body) {
   return record;
 }
 
+/** `1234567` as `1,234,567`. */
+function grouped(n) {
+  return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** How long between two timestamps, as `45s`, `3m 05s` or `1h 02m`; "" when
+ * either does not read or the end comes first. */
+export function formatDuration(start, end) {
+  const ms = Date.parse(end) - Date.parse(start);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const s = Math.floor(ms / 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
+  return `${Math.floor(s / 3600)}h ${pad(Math.floor((s % 3600) / 60))}m`;
+}
+
+/** Every token a totals object counts, summed. */
+function tokenSum(totals) {
+  const t = totals || {};
+  return (
+    (Number(t.input_tokens) || 0) +
+    (Number(t.output_tokens) || 0) +
+    (Number(t.cache_read_tokens) || 0) +
+    (Number(t.cache_creation_tokens) || 0)
+  );
+}
+
+/** A record's main model: the first it names that a model wrote. */
+export function mainModel(models) {
+  return (Array.isArray(models) ? models : []).find((model) => model && model !== "<synthetic>") || "";
+}
+
+/** A subagent's header as text parts: name, model, duration, tokens, cost,
+ * status — what is known of each. */
+export function subagentHeader(sub) {
+  const parts = [String((sub && sub.name) || "subagent")];
+  const models = Array.isArray(sub && sub.models) ? sub.models.filter(Boolean) : [];
+  if (models.length) parts.push(models.join(", "));
+  const duration = sub && sub.started_at && sub.ended_at ? formatDuration(sub.started_at, sub.ended_at) : "";
+  if (duration) parts.push(duration);
+  const tokens = tokenSum(sub && sub.totals);
+  if (tokens > 0) parts.push(`${grouped(tokens)} tokens`);
+  if (sub && sub.totals && sub.totals.cost_usd != null) parts.push(`$${Number(sub.totals.cost_usd).toFixed(4)}`);
+  if (sub && sub.status) parts.push(String(sub.status));
+  return parts;
+}
+
+/** Where a subagent's final answer sits in its turns: the last assistant
+ * turn that said something, or -1. */
+export function finalAnswerIndex(turns) {
+  const list = Array.isArray(turns) ? turns : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const turn = list[i] || {};
+    if (turn.role === "assistant" && String(turn.text || "").trim()) return i;
+  }
+  return -1;
+}
+
+/** Every subagent a list of turns launched, depth first. */
+export function subagentsOf(turns) {
+  const out = [];
+  for (const turn of Array.isArray(turns) ? turns : []) {
+    for (const call of Array.isArray(turn && turn.tool_calls) ? turn.tool_calls : []) {
+      if (call && call.subagent && typeof call.subagent === "object") {
+        out.push(call.subagent);
+        out.push(...subagentsOf(call.subagent.turns));
+      }
+    }
+  }
+  return out;
+}
+
 /** A transcript's numbers, for its header line. */
 export function sessionStats(record) {
   const turns = (record && record.turns) || [];
@@ -165,9 +252,72 @@ function lineCount(text) {
   return value ? value.split("\n").length : 0;
 }
 
+/** A subagent, as a card nested under the call that launched it: its
+ * header (who, on what, how long, at what cost, how it ended), its task,
+ * its final answer, and a button that draws its other turns when asked —
+ * they can be hundreds. `subs` collects every card's subagent, so the page
+ * can find one by the index its button carries. */
+function subagentCard(sub, subs) {
+  const index = subs.length;
+  subs.push(sub);
+  const turns = Array.isArray(sub.turns) ? sub.turns : [];
+  const answerAt = finalAnswerIndex(turns);
+  const steps = turns.length - (answerAt === -1 ? 0 : 1);
+  const [name, ...rest] = subagentHeader(sub);
+  const status = String(sub.status || "");
+  const head = [tx("🤖 "), el("strong", [tx(name)])];
+  const facts = status ? rest.slice(0, -1) : rest;
+  if (facts.length) head.push(tx(` · ${facts.join(" · ")}`));
+  if (status) {
+    head.push(
+      el("span", [tx(` · ${status}`)], {
+        class: `transcript-sub__status${status === "failed" ? " is-bad" : ""}`,
+      }),
+    );
+  }
+  const children = [el("div", head, { class: "transcript-sub__head" })];
+  if (sub.description) children.push(el("p", [tx(sub.description)], { class: "transcript-sub__desc" }));
+  if (sub.truncated) {
+    children.push(
+      el("p", [tx(`${sub.omitted_turns || 0} of its turn(s) were left out to fit the upload size cap.`)], {
+        class: "transcript-note",
+      }),
+    );
+  }
+  if (answerAt !== -1) {
+    children.push(el("div", renderMarkdown(String(turns[answerAt].text)), { class: "transcript-md transcript-sub__answer" }));
+  }
+  if (steps > 0) {
+    children.push(
+      el("button", [tx(`Show ${steps} step${steps === 1 ? "" : "s"}`)], {
+        type: "button",
+        class: "transcript-sub__more",
+        "data-sub": String(index),
+        "aria-expanded": "false",
+      }),
+    );
+    children.push(el("div", [], { class: "transcript-sub__steps", "data-sub-steps": String(index), hidden: "" }));
+  }
+  return el("div", children, { class: "transcript-sub" });
+}
+
+/** A subagent's turns other than its final answer, drawn the way the
+ * session's are — its own subagents nested again. */
+export function subagentStepNodes(sub, subs = []) {
+  const turns = Array.isArray(sub && sub.turns) ? sub.turns : [];
+  const answerAt = finalAnswerIndex(turns);
+  return turnListNodes(
+    turns.filter((_, i) => i !== answerAt),
+    mainModel(sub && sub.models),
+    subs,
+  );
+}
+
 /** One tool call as node descriptions: name, file and outcome on a line,
- * the input fenced, the result folded away when it is long. */
-function callNodes(call) {
+ * the input fenced, the result folded away when it is long. A call that
+ * launched a subagent shows its prompt folded and the subagent's card in
+ * place of a result. */
+function callNodes(call, subs = []) {
   const head = [el("code", [tx(call.name || "tool")])];
   if (call.path) head.push(tx(" "), el("code", [tx(call.path)], { class: "transcript-call__path" }));
   const outcome = [];
@@ -181,6 +331,17 @@ function callNodes(call) {
     );
   }
   const children = [el("div", head, { class: "transcript-call__head" })];
+  if (call.subagent && typeof call.subagent === "object") {
+    if (call.input) {
+      children.push(
+        el("details", [el("summary", [tx("Prompt")]), el("pre", [el("code", [tx(call.input)])], { "data-lang": "text" })], {
+          class: "transcript-call__output",
+        }),
+      );
+    }
+    children.push(subagentCard(call.subagent, subs));
+    return el("div", children, { class: "transcript-call" });
+  }
   if (call.input) {
     const lang = call.format === "shell" ? "sh" : call.format || "text";
     children.push(el("pre", [el("code", [tx(call.input)])], { "data-lang": lang }));
@@ -199,8 +360,9 @@ function callNodes(call) {
   return el("div", children, { class: "transcript-call" });
 }
 
-/** One turn as a node description, or null when it shows nothing. */
-function turnNodes(turn) {
+/** One turn as a node description, or null when it shows nothing. `badge`
+ * is the model to name on it — set where the model changed. */
+function turnNodes(turn, subs = [], badge = "") {
   const role = turn.role || "assistant";
   const text = String(turn.text || "");
   const at = turn.at ? shortTime(turn.at) : "";
@@ -208,7 +370,9 @@ function turnNodes(turn) {
     return el("p", [tx(`— ${text}${at ? ` · ${at}` : ""} —`)], { class: "transcript-event" });
   }
   const label = { user: "User", assistant: "Assistant", reasoning: "Reasoning" }[role] || role;
-  const head = el("div", [el("strong", [tx(label)]), tx(at ? ` · ${at}` : "")], {
+  const headParts = [el("strong", [tx(label)]), tx(at ? ` · ${at}` : "")];
+  if (badge) headParts.push(tx(" "), el("span", [tx(badge)], { class: "pill transcript-model" }));
+  const head = el("div", headParts, {
     class: "transcript-turn__head",
   });
   const body = [];
@@ -228,19 +392,41 @@ function turnNodes(turn) {
     else body.push(el("p", [tx(text)], { class: "transcript-text" }));
   }
   for (const call of Array.isArray(turn.tool_calls) ? turn.tool_calls : []) {
-    body.push(callNodes(call || {}));
+    body.push(callNodes(call || {}, subs));
   }
   if (!body.length) return null;
-  return el("div", [text.trim() ? head : null, ...body].filter(Boolean), {
+  return el("div", [text.trim() || badge ? head : null, ...body].filter(Boolean), {
     class: `transcript-turn transcript-turn--${role}`,
   });
 }
 
+/** A list of turns, a model badge wherever a turn's model differs from the
+ * one before it (starting from `model`, the list's own). */
+function turnListNodes(turns, model, subs) {
+  const nodes = [];
+  let current = model || "";
+  for (const turn of turns || []) {
+    let badge = "";
+    if (turn && turn.role === "assistant" && turn.model && turn.model !== current) {
+      badge = String(turn.model);
+      current = turn.model;
+    }
+    const node = turnNodes(turn || {}, subs, badge);
+    if (node) nodes.push(node);
+  }
+  return nodes;
+}
+
 /** The whole transcript as node descriptions: the header facts, then every
- * turn in order. Pure, so the tests read it without a page. */
-export function transcriptNodes(record) {
+ * turn in order, each subagent as a card in the call that launched it
+ * (its steps drawn on request: `subs` collects the cards' subagents for
+ * that). Pure, so the tests read it without a page. */
+export function transcriptNodes(record, subs = []) {
   const stats = sessionStats(record);
   const totals = record.totals || {};
+  const subagents = subagentsOf(record.turns);
+  const kinds = new Map();
+  for (const sub of subagents) kinds.set(sub.name || "subagent", (kinds.get(sub.name || "subagent") || 0) + 1);
   const facts = [
     ["Agent", record.agent],
     ["Repo", record.repo],
@@ -251,7 +437,19 @@ export function transcriptNodes(record) {
         ? `${shortTime(record.started_at)} to ${shortTime(record.ended_at)}`
         : shortTime(record.started_at || record.ended_at || ""),
     ],
-    ["Models", Array.isArray(record.models) ? record.models.join(", ") : ""],
+    ["Model", mainModel(record.models)],
+    [
+      "Models",
+      Array.isArray(record.models) && record.models.filter((m) => m !== "<synthetic>").length > 1
+        ? record.models.filter((m) => m !== "<synthetic>").join(", ")
+        : "",
+    ],
+    [
+      "Subagents",
+      subagents.length
+        ? `${subagents.length} (${[...kinds].map(([name, n]) => `${name} ×${n}`).join(", ")})`
+        : "",
+    ],
     ["Messages", `${stats.user} user, ${stats.assistant} assistant`],
     ["Tool calls", String(stats.tools)],
     [
@@ -271,13 +469,16 @@ export function transcriptNodes(record) {
     ),
   ];
   if (record.truncated) {
+    const parts = [];
+    if (record.omitted_turns) parts.push(`${record.omitted_turns} turn(s)`);
+    if (record.omitted_subagent_turns) parts.push(`${record.omitted_subagent_turns} subagent turn(s)`);
     nodes.push(
       el(
         "p",
         [
           tx(
-            record.omitted_turns
-              ? `${record.omitted_turns} turn(s) were left out to fit the upload size cap.`
+            parts.length
+              ? `${parts.join(" and ")} were left out to fit the upload size cap.`
               : "Part of this session was left out to fit the upload size cap.",
           ),
         ],
@@ -285,10 +486,7 @@ export function transcriptNodes(record) {
       ),
     );
   }
-  for (const turn of record.turns || []) {
-    const node = turnNodes(turn || {});
-    if (node) nodes.push(node);
-  }
+  nodes.push(...turnListNodes(record.turns, mainModel(record.models), subs));
   return nodes;
 }
 
@@ -332,10 +530,37 @@ function byPage(a, b) {
   return pageRank(a.place.page) - pageRank(b.place.page) || a.place.page.localeCompare(b.place.page);
 }
 
+/** A project's folder name, as the compiler folds it (layout.rs
+ * `segment`): lowercase ASCII letters and digits, every other run one `-`,
+ * at most 28 bytes, `no-project` when nothing survives. */
+export function projectSegment(project) {
+  let out = "";
+  let dash = false;
+  for (const ch of String(project || "")) {
+    const lower = ch.toLowerCase();
+    if (/^[a-z0-9]$/.test(lower)) {
+      if (dash && out) out += "-";
+      dash = false;
+      out += lower;
+    } else {
+      dash = true;
+    }
+    if (out.length >= 28) break;
+  }
+  out = out.replace(/^-+|-+$/g, "");
+  return out || "no-project";
+}
+
 /** The collection's pages out of a page listing, as a folder tree:
  * `{ top, agents: [{ agent, pages, projects: [{ project, pages }] }], rollups }`,
- * each page `{ row, place }`. Rows outside the collection are left out. */
-export function codingAgentsTree(rows) {
+ * each page `{ row, place }`. Rows outside the collection are left out.
+ *
+ * `sessions` is `GET /v1/coding-agents/tree`'s answer, when there is one:
+ * every agent and project the asker synced sessions under becomes a folder
+ * even before a page is compiled into it, and carries `info` — its record
+ * agent name, sessions, compiled and queue statuses — for the folder's line
+ * and its link to the Agent sessions list. */
+export function codingAgentsTree(rows, sessions = null) {
   const top = [];
   const rollups = [];
   const agents = new Map();
@@ -358,6 +583,33 @@ export function codingAgentsTree(rows) {
       folder.projects.get(place.project).pages.push(entry);
     }
   }
+  for (const entry of (sessions && Array.isArray(sessions.agents) ? sessions.agents : [])) {
+    if (!entry || !entry.agent) continue;
+    const folder = agent(String(entry.folder || entry.agent));
+    folder.info = {
+      agent: String(entry.agent),
+      sessions: Number(entry.sessions) || 0,
+      compiled: Number(entry.compiled) || 0,
+    };
+    for (const project of Array.isArray(entry.projects) ? entry.projects : []) {
+      const name = project && project.project ? String(project.project) : "";
+      const key = projectSegment(name);
+      if (!folder.projects.has(key)) folder.projects.set(key, { project: key, pages: [] });
+      const node = folder.projects.get(key);
+      const before = node.info || { agent: String(entry.agent), project: name, sessions: 0, compiled: 0, statuses: {} };
+      const statuses = { ...before.statuses };
+      for (const [status, n] of Object.entries((project && project.statuses) || {})) {
+        statuses[status] = (statuses[status] || 0) + (Number(n) || 0);
+      }
+      node.info = {
+        agent: before.agent,
+        project: before.project || name,
+        sessions: before.sessions + (Number(project.sessions) || 0),
+        compiled: before.compiled + (Number(project.compiled) || 0),
+        statuses,
+      };
+    }
+  }
   top.sort(byPage);
   rollups.sort((a, b) => a.place.project.localeCompare(b.place.project));
   return {
@@ -367,13 +619,42 @@ export function codingAgentsTree(rows) {
       .sort((a, b) => a.agent.localeCompare(b.agent))
       .map((folder) => ({
         agent: folder.agent,
+        info: folder.info || null,
         pages: folder.pages.sort(byPage),
         projects: [...folder.projects.values()]
           .sort((a, b) => a.project.localeCompare(b.project))
-          .map((project) => ({ project: project.project, pages: project.pages.sort(byPage) })),
+          .map((project) => ({
+            project: project.project,
+            info: project.info || null,
+            pages: project.pages.sort(byPage),
+          })),
       })),
   };
 }
+
+/** A synced folder's line: `12 sessions · 3 compiled · 9 queued`. */
+export function folderSummary(info) {
+  if (!info) return "";
+  const parts = [`${info.sessions} session${info.sessions === 1 ? "" : "s"}`, `${info.compiled} compiled`];
+  for (const status of Object.keys(JOB_LABELS)) {
+    if (status === "done" || status === "superseded") continue;
+    const n = Number((info.statuses && info.statuses[status]) || 0);
+    if (n > 0) parts.push(`${n} ${jobLabel(status).toLowerCase()}`);
+  }
+  return parts.join(" · ");
+}
+
+/** The Agent sessions list, filtered to one agent and (optionally) one
+ * project: where a synced folder links. */
+export function sessionsHref(agent = "", project = "") {
+  const params = new URLSearchParams({ view: "sessions" });
+  if (validAgent(agent)) params.set("agent", agent);
+  if (validProject(project)) params.set("project", project);
+  return `wiki.html?${params.toString()}`;
+}
+
+/** The compile queue's tree route: synced sessions by agent and project. */
+export const TREE_PATH = "/v1/coding-agents/tree";
 
 /** The compile queue's status route, optionally for one source. */
 export function queuePath(source = "") {
@@ -665,6 +946,7 @@ export async function wikiPage(api) {
   const startInEdit = params.get("mode") === "edit";
   const startView = params.get("view") || "";
   const startProject = validProject(params.get("project")) ? params.get("project") : "";
+  const startAgent = validAgent(params.get("agent")) ? params.get("agent") : "";
 
   const els = {
     views: {
@@ -725,6 +1007,7 @@ export async function wikiPage(api) {
     searchResults: $("#wiki-search-results"),
     searchProject: $("#wiki-project"),
     sessionsProject: $("#sessions-project"),
+    sessionsAgent: $("#sessions-agent"),
     sessionsStatus: $("#sessions-status"),
     sessionsList: $("#sessions-list"),
     sessionsEmpty: $("#sessions-empty"),
@@ -773,7 +1056,10 @@ export async function wikiPage(api) {
     projects: [],
     sessions: [],
     sessionsProject: startProject,
+    sessionsAgent: startAgent,
     sessionsCursor: null,
+    // The synced sessions by agent and project (`/v1/coding-agents/tree`).
+    caSessions: null,
     // The compile queue, keyed by source id (`/v1/coding-agents/queue`).
     jobs: new Map(),
   };
@@ -913,6 +1199,20 @@ export async function wikiPage(api) {
     els.homeNomatch.hidden = !(state.rows.length > 0 && matches.length === 0);
   }
 
+  /** A synced folder's line: its numbers, linking to its sessions. */
+  function treeInfo(info, project) {
+    const li = document.createElement("li");
+    li.className = "ca-folder__info";
+    const link = document.createElement("a");
+    link.href = sessionsHref(info.agent, project ? info.project : "");
+    link.textContent = info.sessions === 1 ? "Open the session" : `Open all ${info.sessions} sessions`;
+    li.appendChild(link);
+    // What the queue says beyond the counts the folder's name already shows.
+    const rest = folderSummary(info).split(" · ").slice(2).join(" · ");
+    if (rest) li.appendChild(document.createTextNode(` · ${rest}`));
+    return li;
+  }
+
   /** One page link in the coding-agents tree, labelled by its last segment. */
   function treeLink(entry) {
     const li = document.createElement("li");
@@ -923,16 +1223,25 @@ export async function wikiPage(api) {
     return li;
   }
 
-  /** A folder: `<details>` with its name and its pages and subfolders. */
-  function treeFolder(name, entries, children, open) {
+  /** A folder: `<details>` with its name and its pages and subfolders —
+   * and, for one synced sessions are filed in, a line with their numbers
+   * linking to them (`info`; `project` says it is a project's). */
+  function treeFolder(name, entries, children, open, info = null, project = false) {
     const details = document.createElement("details");
     details.className = "ca-folder";
     if (open) details.setAttribute("open", "");
     const summary = document.createElement("summary");
     summary.textContent = `${name}/`;
+    if (info) {
+      const meta = document.createElement("span");
+      meta.className = "ca-folder__meta";
+      meta.textContent = ` ${info.sessions} session${info.sessions === 1 ? "" : "s"} · ${info.compiled} compiled`;
+      summary.appendChild(meta);
+    }
     details.appendChild(summary);
     const list = document.createElement("ul");
     list.className = "ca-folder__list";
+    if (info) list.appendChild(treeInfo(info, project));
     for (const entry of entries) list.appendChild(treeLink(entry));
     for (const child of children) {
       const li = document.createElement("li");
@@ -946,7 +1255,8 @@ export async function wikiPage(api) {
   /** The `coding-agents/` folder on the home view: agent, then project. */
   function renderCodingAgents(rows, filtering) {
     if (!els.caSection || !els.caTree) return;
-    const tree = codingAgentsTree(rows);
+    // Filtering narrows to pages; the synced folders are the unfiltered view.
+    const tree = codingAgentsTree(rows, filtering ? null : state.caSessions);
     const empty = !tree.top.length && !tree.agents.length && !tree.rollups.length;
     els.caSection.hidden = empty;
     els.caTree.replaceChildren();
@@ -955,8 +1265,11 @@ export async function wikiPage(api) {
       treeFolder(
         agent.agent,
         agent.pages,
-        agent.projects.map((project) => treeFolder(project.project, project.pages, [], filtering)),
-        filtering,
+        agent.projects.map((project) =>
+          treeFolder(project.project, project.pages, [], filtering, project.info, true),
+        ),
+        filtering || Boolean(agent.info),
+        agent.info,
       ),
     );
     const folders = [...agents];
@@ -982,7 +1295,13 @@ export async function wikiPage(api) {
       return;
     }
     try {
-      const data = await api("/v1/pages?limit=200");
+      // The synced sessions' folders are a nicety: without them the tree is
+      // the compiled pages alone.
+      const [data, sessions] = await Promise.all([
+        api("/v1/pages?limit=200"),
+        api(TREE_PATH).catch(() => null),
+      ]);
+      state.caSessions = sessions && Array.isArray(sessions.agents) ? sessions : null;
       state.rows = data && Array.isArray(data.pages) ? data.pages : [];
       els.homeStatus.textContent = `${state.rows.length} ${
         state.rows.length === 1 ? "page" : "pages"
@@ -1023,6 +1342,30 @@ export async function wikiPage(api) {
     const known = state.projects.some((entry) => entry.project === selected);
     select.value = known ? selected : "";
     select.hidden = state.projects.length === 0;
+  }
+
+  /** Fills the agent filter: "All agents", the agents this build knows,
+   * and any other the tree names; keeps `selected` when it is one. */
+  function fillAgentSelect(select, selected) {
+    if (!select) return;
+    select.replaceChildren();
+    const names = new Map(Object.entries(AGENT_LABELS));
+    for (const entry of (state.caSessions && state.caSessions.agents) || []) {
+      if (entry && validAgent(entry.agent) && !names.has(entry.agent)) names.set(entry.agent, entry.agent);
+    }
+    if (validAgent(selected) && !names.has(selected)) names.set(selected, selected);
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All agents";
+    select.appendChild(all);
+    for (const [value, label] of names) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+    select.value = validAgent(selected) ? selected : "";
+    select.hidden = false;
   }
 
   /** The projects the asker's sources are filed under. A failure here costs
@@ -1224,13 +1567,17 @@ export async function wikiPage(api) {
       els.sessionsEmpty.hidden = true;
       els.sessionsMore.hidden = true;
       if (els.sessionsProject) els.sessionsProject.hidden = true;
+      if (els.sessionsAgent) els.sessionsAgent.hidden = true;
       els.sessionsStatus.textContent = "";
       signInNotice("Sign in to see your agent sessions.");
       return;
     }
     const cursor = more ? state.sessionsCursor : "";
+    fillAgentSelect(els.sessionsAgent, state.sessionsAgent);
     try {
-      const data = await api(sessionsPath({ project: state.sessionsProject, cursor }));
+      const data = await api(
+        sessionsPath({ project: state.sessionsProject, agent: state.sessionsAgent, cursor }),
+      );
       const rows = data && Array.isArray(data.sources) ? data.sources : [];
       state.sessions = more ? state.sessions.concat(rows) : rows;
       state.sessionsCursor = (data && data.next_cursor) || null;
@@ -1246,6 +1593,34 @@ export async function wikiPage(api) {
       }
       notice(els.notice, `Could not load agent sessions: ${error.message}`, "bad");
       els.notice.appendChild(mkButton("Retry", () => loadSessions({ more })));
+    }
+  }
+
+  /** Each subagent card's "Show steps" button: draws that subagent's turns
+   * the first time it is pressed (they can be hundreds, so never before),
+   * then shows and hides them. Nested cards drawn that way are wired too. */
+  function wireSubagents(container, subs) {
+    for (const button of container.querySelectorAll("[data-sub]")) {
+      if (button.dataset.wired) continue;
+      button.dataset.wired = "1";
+      const label = button.textContent;
+      button.addEventListener("click", () => {
+        const index = button.getAttribute("data-sub");
+        const sub = subs[Number(index)];
+        const steps = Array.from(button.parentNode.children).find(
+          (child) => child.getAttribute && child.getAttribute("data-sub-steps") === index,
+        );
+        if (!sub || !steps) return;
+        const open = button.getAttribute("aria-expanded") === "true";
+        if (!open && !steps.dataset.filled) {
+          renderInto(steps, subagentStepNodes(sub, subs));
+          steps.dataset.filled = "1";
+          wireSubagents(steps, subs);
+        }
+        steps.hidden = open;
+        button.setAttribute("aria-expanded", String(!open));
+        button.textContent = open ? label : "Hide steps";
+      });
     }
   }
 
@@ -1291,7 +1666,9 @@ export async function wikiPage(api) {
         els.transcriptTitle.textContent = `${record.agent || "agent"} session ${String(
           record.session_id || "",
         ).slice(0, 8)}${source.project ? ` · ${source.project}` : ""}`;
-        renderInto(els.transcriptBody, transcriptNodes(record));
+        const subs = [];
+        renderInto(els.transcriptBody, transcriptNodes(record, subs));
+        wireSubagents(els.transcriptBody, subs);
         await paintTranscriptCompile(id);
       } else {
         renderInto(els.transcriptBody, [
@@ -1988,18 +2365,25 @@ export async function wikiPage(api) {
     });
   }
 
+  /** The sessions list again under the filters now chosen; the address
+   * names them, so a reload or a shared link keeps them. */
+  async function refilterSessions() {
+    history.replaceState(null, "", sessionsHref(state.sessionsAgent, state.sessionsProject));
+    state.sessionsCursor = null;
+    await loadSessions();
+  }
   if (els.sessionsProject) {
     els.sessionsProject.addEventListener("change", async () => {
       state.sessionsProject = validProject(els.sessionsProject.value)
         ? els.sessionsProject.value
         : "";
-      // The address names the filter, so a reload or a shared link keeps it.
-      const query = state.sessionsProject
-        ? `?view=sessions&project=${encodeURIComponent(state.sessionsProject)}`
-        : "?view=sessions";
-      history.replaceState(null, "", `wiki.html${query}`);
-      state.sessionsCursor = null;
-      await loadSessions();
+      await refilterSessions();
+    });
+  }
+  if (els.sessionsAgent) {
+    els.sessionsAgent.addEventListener("change", async () => {
+      state.sessionsAgent = validAgent(els.sessionsAgent.value) ? els.sessionsAgent.value : "";
+      await refilterSessions();
     });
   }
   if (els.pageFactsAsOf) {

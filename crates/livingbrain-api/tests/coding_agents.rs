@@ -95,6 +95,45 @@ fn the_queue_lists_only_the_asker_s_sessions() {
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
 }
 
+/// The tree is the asker's sessions by agent and project, counted once per
+/// session, before anything compiled — and nobody else's. The sources
+/// listing narrows to one agent the same way.
+#[test]
+fn the_tree_and_the_agent_filter_show_the_asker_s_sessions_by_agent() {
+    let fx = fixture();
+    sync(&fx, "user-a", "s-1");
+    sync_on(&fx, "user-a", "s-2", "2026-10-15T02:00:00Z");
+    sync(&fx, "user-b", "s-b");
+
+    let response = get(&fx, TOKEN_A, "/v1/coding-agents/tree");
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        common::body_text(&response)
+    );
+    let tree = response.json();
+    let agents = tree["agents"].as_array().expect("agents");
+    assert_eq!(agents.len(), 1, "{tree}");
+    assert_eq!(agents[0]["agent"], "codex");
+    assert_eq!(agents[0]["folder"], "codex");
+    assert_eq!(agents[0]["sessions"], 2, "only mine: {tree}");
+    assert_eq!(agents[0]["compiled"], 0);
+    assert_eq!(agents[0]["projects"][0]["project"], "demo");
+    assert_eq!(agents[0]["projects"][0]["statuses"]["queued"], 2);
+
+    let codex = get(&fx, TOKEN_A, "/v1/sources?kind=agent_log&agent=codex").json();
+    assert_eq!(
+        codex["sources"].as_array().map(Vec::len),
+        Some(2),
+        "{codex}"
+    );
+    let none = get(&fx, TOKEN_A, "/v1/sources?kind=agent_log&agent=colonizer").json();
+    assert_eq!(none["sources"].as_array().map(Vec::len), Some(0), "{none}");
+    let refused = get(&fx, TOKEN_A, "/v1/sources?agent=Not%20One");
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+}
+
 #[test]
 fn process_now_with_no_model_parks_the_job_and_says_why() {
     let fx = fixture();

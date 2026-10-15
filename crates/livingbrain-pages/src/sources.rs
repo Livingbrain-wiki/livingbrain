@@ -233,6 +233,10 @@ pub struct SourceFilter {
     pub kind: Option<SourceKind>,
     /// Only sources filed under this project.
     pub project: Option<String>,
+    /// Only agent sessions this agent wrote: rows whose path is
+    /// `<agent> session …`, the title every producer files a session under
+    /// (`claude_code`, `codex`, `colonizer`).
+    pub agent: Option<String>,
     /// Only sources older than this id — the previous page's last id, which
     /// is the listing's cursor. Ids are ULIDs, so id order is arrival order.
     pub before: Option<String>,
@@ -713,6 +717,19 @@ impl SourceStore {
         if let Some(project) = &filter.project {
             sql.push_str(" AND project = ?");
             values.push(text(project));
+        }
+        if let Some(agent) = &filter.agent {
+            // A prefix match on the path, escaped: `_` is a wildcard in
+            // LIKE and `claude_code` is spelled with one.
+            sql.push_str(" AND rel_path LIKE ? ESCAPE '!'");
+            let escaped: String = agent
+                .chars()
+                .flat_map(|ch| match ch {
+                    '!' | '%' | '_' => vec!['!', ch],
+                    other => vec![other],
+                })
+                .collect();
+            values.push(text(&format!("{escaped} session %")));
         }
         if let Some(before) = &filter.before {
             sql.push_str(" AND id < ?");

@@ -172,9 +172,13 @@ pub fn temp_dir(tag: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
+    // The clock alone is not unique: tests run in parallel threads, and on
+    // macOS it ticks in microseconds, so two homes could be one directory.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut path = std::env::temp_dir();
     path.push(format!(
-        "livingbrain-cli-test-{tag}-{}-{nanos}",
+        "livingbrain-cli-test-{tag}-{}-{nanos}-{serial}",
         std::process::id()
     ));
     std::fs::create_dir_all(&path).expect("create temp dir");
