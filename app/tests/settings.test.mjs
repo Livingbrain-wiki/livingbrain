@@ -88,6 +88,8 @@ const FIXTURE_KEY = ["lb", "test", "byok", "fixture"].join("-");
 test("the sections the issue asks for are present", () => {
   assert.deepEqual(SECTIONS, [
     "models",
+    "model-switch",
+    "model-runner",
     "proactivity",
     "tools",
     "automations",

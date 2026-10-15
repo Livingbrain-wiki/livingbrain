@@ -31,6 +31,8 @@
 
 mod catalog;
 mod crypto;
+// The curated model lists behind the settings page's provider cards.
+mod curated;
 mod handlers;
 // The local runner: a member's jobs run on their own device, under their own
 // subscription, through their own `claude` / `codex` CLI.

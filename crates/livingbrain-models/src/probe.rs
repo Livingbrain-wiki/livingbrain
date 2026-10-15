@@ -25,8 +25,17 @@
 //! If the very first call fails (non-2xx or transport error), the endpoint
 //! is unreachable: the connection is refused with a 422 that names the
 //! HTTP status only — never the provider's response body, which can echo
-//! the key. The probe keeps `max_tokens` small and sets a tight
-//! `HttpPolicy` so a slow or chatty endpoint cannot cost much.
+//! the key. The probe sets a tight `HttpPolicy` so a slow or chatty
+//! endpoint cannot cost much, and a `max_tokens` just large enough for a
+//! thinking model: GLM-5.3 and its kind reason before they answer (a
+//! `thinking` block first on the Anthropic wire, `reasoning_content` on the
+//! OpenAI one) and cannot turn it off, so a ceiling of a few tokens is
+//! spent on the reasoning and the answer never arrives. The answer is read
+//! from every block of the reply, whatever came before it.
+//!
+//! When the endpoint reports no context size, the size the provider
+//! documents for the model (`app/assets/model-cards.json`, through
+//! [`crate::curated`]) is the answer.
 
 use std::time::Duration;
 
@@ -37,6 +46,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::catalog::{self, Auth, Wire};
+use crate::curated::{self, Listing};
+use crate::ssrf;
 
 /// The `anthropic-version` every Messages request names.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -50,9 +61,11 @@ const LIST_MAX_RESPONSE: usize = 1024 * 1024;
 const PROBE_MAX_RESPONSE: usize = 64 * 1024;
 /// The timeout for a probe request.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
-/// The `max_tokens` for a probe completion: small, because we only need to
-/// see whether the model calls a tool or emits JSON.
-const PROBE_MAX_TOKENS: u32 = 16;
+/// The `max_tokens` for a probe completion. Room for a thinking model's
+/// reasoning before its tool call or its JSON (see the module docs): the
+/// reply is still small, and the usage the provider reports — not this
+/// ceiling — is what the ledger records.
+const PROBE_MAX_TOKENS: u32 = 1024;
 
 /// The result of a capability probe.
 #[derive(Debug, Clone)]
@@ -157,6 +170,26 @@ impl Target<'_> {
         builder.body(bytes).map_err(|_| Unreachable(None))
     }
 
+    /// A `GET` to `url` itself — a provider's own list URL — signed the way
+    /// [`Target::request`] signs a request under the base.
+    fn get(&self, url: &Url) -> Result<http::Request<Bytes>, Unreachable> {
+        let builder = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(url.as_str())
+            .extension(HttpPolicy {
+                max_response_bytes: LIST_MAX_RESPONSE,
+                timeout: PROBE_TIMEOUT,
+            });
+        let builder = match self.auth {
+            Auth::Bearer => builder.header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key),
+            ),
+            Auth::XApiKey => builder.header("x-api-key", self.api_key),
+        };
+        builder.body(Bytes::new()).map_err(|_| Unreachable(None))
+    }
+
     /// The completion endpoint's path for this wire.
     fn chat_path(&self) -> &'static [&'static str] {
         match self.wire {
@@ -176,13 +209,16 @@ pub(crate) async fn probe(
     http: &dyn HttpClient,
     target: Target<'_>,
     model: &str,
+    documented_context: Option<u64>,
 ) -> Result<ProbeResult, Unreachable> {
     // (a) Tool calling.
     let (tool_ok, tool_usage) = tool_calling_probe(http, target, model).await?;
     // (b) JSON output.
     let (json_ok, json_usage) = json_output_probe(http, target, model).await?;
     // (c) Context size.
-    let context_size = context_size_probe(http, target, model).await?;
+    let context_size = context_size_probe(http, target, model)
+        .await?
+        .or_else(|| documented_context.map(|size| size.to_string()));
 
     let mut missing = Vec::new();
     if !tool_ok {
@@ -314,7 +350,7 @@ async fn json_output_probe(
             })
             .unwrap_or_default(),
     };
-    let emitted = serde_json::from_str::<Value>(content.trim()).is_ok_and(|v| v.is_object());
+    let emitted = serde_json::from_str::<Value>(unfenced(&content)).is_ok_and(|v| v.is_object());
     Ok((emitted, usage))
 }
 
@@ -356,48 +392,104 @@ async fn context_size_probe(
     Ok(None)
 }
 
-/// `GET {base}/v1/models`: the model ids the provider says the key can use.
-/// Both wires answer `{"data": [{"id": …}, …]}`; anything else is an empty
-/// list rather than an error, because a provider need not serve the route.
+/// What a provider's model list came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Listed {
+    /// The ids the provider listed, with the context size where it named one.
+    Models(Vec<curated::Model>),
+    /// The provider publishes no list we can read: it has no listing route
+    /// (`404`, `405`, `501` and the other refusals that are not about the
+    /// key), it answered with something that is not a list, it could not be
+    /// reached, or its card says it has none. Not an error: the curated
+    /// models are the answer.
+    Unsupported,
+}
+
+/// The model ids the provider says the key can use, from wherever `listing`
+/// says it lists them: `GET {base}/v1/models` (Anthropic itself included,
+/// with `x-api-key` and `anthropic-version`), an OpenAI-compatible list URL
+/// the provider's card names (SSRF-checked like every other destination), or
+/// nowhere. Both wires answer `{"data": [{"id": …}, …]}`.
 ///
 /// # Errors
 ///
-/// [`Unreachable`] with the HTTP status when the provider refuses the call
-/// (a wrong key is a 401 here, which is worth saying before a connect).
+/// [`Unreachable`] with the status only when the provider refused the key
+/// (`401` or `403`): that is worth saying before a connect, and it is the
+/// one refusal a curated list cannot paper over. Every other failure is
+/// [`Listed::Unsupported`].
 pub(crate) async fn list_models(
     http: &dyn HttpClient,
     target: Target<'_>,
-) -> Result<Vec<String>, Unreachable> {
-    let mut request = target.request(http::Method::GET, &["v1", "models"], None)?;
-    // A router's list is long (OpenRouter's runs to hundreds of KiB), so this
-    // one call gets a larger ceiling than the probe's completions.
-    request.extensions_mut().insert(HttpPolicy {
-        max_response_bytes: LIST_MAX_RESPONSE,
-        timeout: PROBE_TIMEOUT,
-    });
-    let response = http.send(request).await.map_err(|_| Unreachable(None))?;
+    listing: &Listing,
+) -> Result<Listed, Unreachable> {
+    let request = match listing {
+        Listing::None => return Ok(Listed::Unsupported),
+        Listing::Native => {
+            let mut request = target.request(http::Method::GET, &["v1", "models"], None)?;
+            // A router's list is long (OpenRouter's runs to hundreds of KiB),
+            // so this one call gets a larger ceiling than the probe's.
+            request.extensions_mut().insert(HttpPolicy {
+                max_response_bytes: LIST_MAX_RESPONSE,
+                timeout: PROBE_TIMEOUT,
+            });
+            request
+        }
+        Listing::Url(url) => {
+            let Ok(url) = ssrf::validate_url(url) else {
+                return Ok(Listed::Unsupported);
+            };
+            if ssrf::check_destination(http, &url).await.is_err() {
+                return Ok(Listed::Unsupported);
+            }
+            target.get(&url)?
+        }
+    };
+    let Ok(response) = http.send(request).await else {
+        return Ok(Listed::Unsupported);
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return Err(Unreachable(Some(status)));
+    }
     if !response.status().is_success() {
-        return Err(Unreachable(Some(response.status().as_u16())));
+        return Ok(Listed::Unsupported);
     }
     let Ok(body) = serde_json::from_slice::<Value>(response.body()) else {
-        return Ok(Vec::new());
+        return Ok(Listed::Unsupported);
     };
-    let mut ids: Vec<String> = body
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.get("id").and_then(Value::as_str))
-                .filter(|id| !id.is_empty() && id.len() <= MAX_ID_LEN)
-                .filter(|id| id.chars().all(|c| !c.is_control()))
-                .map(str::to_owned)
-                .collect()
+    // A provider that answers `200` with an error envelope (Z.AI's
+    // `{"code":401,…}`) has no `data`: no list, not an empty one.
+    let Some(rows) = body.get("data").and_then(Value::as_array) else {
+        return Ok(Listed::Unsupported);
+    };
+    let mut models: Vec<curated::Model> = rows
+        .iter()
+        .filter_map(|row| {
+            let id = row.get("id").and_then(Value::as_str)?;
+            if id.is_empty() || id.len() > MAX_ID_LEN || id.chars().any(char::is_control) {
+                return None;
+            }
+            let mut model = curated::Model::bare(id.to_owned());
+            model.context = ["context_length", "context_window", "max_input_tokens"]
+                .iter()
+                .find_map(|key| row.get(*key).and_then(Value::as_u64));
+            Some(model)
         })
-        .unwrap_or_default();
-    ids.sort();
-    ids.dedup();
-    ids.truncate(MAX_LISTED);
-    Ok(ids)
+        .collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    models.truncate(MAX_LISTED);
+    Ok(Listed::Models(models))
+}
+
+/// A reply's text without the Markdown code fence a model may wrap JSON in.
+fn unfenced(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest.strip_prefix("json").unwrap_or(rest);
+    rest.strip_suffix("```").unwrap_or(rest).trim()
 }
 
 /// Sends a completion request and parses the answer. The first call that

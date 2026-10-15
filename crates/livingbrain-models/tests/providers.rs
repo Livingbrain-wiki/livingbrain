@@ -298,7 +298,10 @@ fn discover_lists_the_providers_models_server_side() {
         .await;
 
         assert_eq!(res.status, StatusCode::OK, "{}", res.text());
-        assert_eq!(res.json(), json!({"models": ["model-a", "model-b"]}));
+        assert_eq!(
+            res.json(),
+            json!({"models": [{"id": "model-a"}, {"id": "model-b"}], "listed": true})
+        );
         assert!(!res.text().contains(KEY), "the key is never echoed");
         let calls = http.sent();
         assert_eq!(calls.len(), 1, "{calls:#?}");
@@ -335,7 +338,7 @@ fn discover_names_the_status_of_a_refused_key_and_stores_nothing() {
             Method::POST,
             "/v1/models/discover",
             &cookie,
-            Some(json!({"provider": "zhipu-glm-en", "api_key": KEY})),
+            Some(json!({"provider": "minimax", "api_key": KEY})),
         )
         .await;
         assert_eq!(

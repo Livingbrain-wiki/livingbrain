@@ -14,12 +14,9 @@
 import { settingRequest, describeOutcome } from "./settings.js";
 import {
   PROVIDERS,
-  POPULAR,
-  POPULAR_LABELS,
   CATALOG_SOURCE,
   WIRES,
   AUTHS,
-  CHIP_LIMIT,
   roleInfo,
   providerInfo,
   providerForConnection,
@@ -28,8 +25,26 @@ import {
   keyHint,
   validateConnect,
   discoverRequest,
+  slotView,
   slotViews,
   renderModelSlots,
+  ROLES,
+  BADGES,
+  cardInfo,
+  cardForConnection,
+  runnerCardFor,
+  protocolLabel,
+  modelOptions,
+  modelOptionLabel,
+  cardViews,
+  renderModelCards,
+  mainModelChoices,
+  lastSeenText,
+  runnerValue,
+  runnerCommand,
+  providerHost,
+  maskedKey,
+  statusView,
 } from "./models.js";
 import { providerMark } from "./marks.js";
 import {
@@ -311,7 +326,8 @@ export async function setSetting(section, key, value) {
     return { ok: true, sent: true, message: describeOutcome(request, true) };
   } catch (error) {
     const detail = error instanceof ApiError ? error.message : String(error);
-    return { ok: false, sent: true, message: detail };
+    const status = error instanceof ApiError ? error.status : 0;
+    return { ok: false, sent: true, message: detail, status };
   }
 }
 
@@ -667,47 +683,71 @@ function fillConnectPanel() {
 
 /* --- models ---------------------------------------------------------- */
 
+/**
+ * Settings → Models: the "Main model" picker, the provider cards, the job
+ * slots, and one detail sheet (a `<dialog>`) per card. An API card's sheet is
+ * the connect form; a subscription card's sheet sets the member's own device
+ * runner — their Claude Code or Codex, on their own machine, with their own
+ * subscription. No subscription credential ever reaches this page or the
+ * server: the runner is a choice, and the CLI on the device does the call.
+ */
 async function wireModels() {
+  const sheet = $("#model-sheet");
   const form = $("#model-form");
+  const cardsBox = $("#model-cards");
   const slots = $("#model-rows");
   const modelsStatus = $("#models-status");
+  const mainPick = $("#main-model");
+  const mainLine = $("#main-model-line");
   const baseUrl = $("#base-url");
   const editEndpoint = $("#edit-endpoint");
   const apiKey = $("#api-key");
   const model = $("#model-name");
+  const modelSelect = $("#model-select");
+  const modelNote = $("#model-note");
+  const roleSelect = $("#model-role");
   const submit = $("#connect-model");
-  const cancel = $("#cancel-replace");
   const discover = $("#discover-models");
   const search = $("#provider-search");
   const list = $("#provider-list");
+  const codingPlan = $("#coding-plan");
+  const runnerBox = $("#sheet-runner");
+  const runnerRole = $("#runner-role");
+  const runnerModel = $("#runner-model");
+  const runnerCustom = $("#runner-model-custom");
+  const runnerSave = $("#runner-save");
+  const OTHER = "__other";
+
   let rows = [];
-  // The endpoint is the catalog's, read-only, until the member unlocks it.
+  let mine = [];
+  // Whether this server has the device-runner routes yet (`/v1/models/mine`).
+  let runnersAvailable = true;
+  let lastSeen = null;
   let editing = false;
-  // The model list the server last fetched, by the provider it was for.
+  // What the server last listed, by provider: `{provider, models, listed, note}`.
   let listed = { provider: null, models: [] };
-  // The chosen provider. The popular cards and the full list are two radio
-  // groups (a provider can appear in both), so the choice lives here and
-  // both groups are painted from it.
   let selectedId = "anthropic";
-  // The slot the form is for. Main until a slot's Connect or Change opens it
-  // for another job; the slot cards are the only role chooser.
-  let activeRole = "main";
+  let activeCard = cardInfo("anthropic");
+  let choices = { current: "", options: [] };
 
-  /** The card's one small line: which API the provider speaks, never its host. */
-  const wireLabel = (provider) =>
-    provider.wire === "anthropic" ? "Anthropic API" : "OpenAI API";
+  // The role pickers in the sheet: Main, Triage, Research.
+  for (const select of [roleSelect, runnerRole]) {
+    select.replaceChildren();
+    for (const role of ROLES) {
+      const option = document.createElement("option");
+      option.value = role.id;
+      option.textContent = `${role.label} — ${role.hint}`;
+      select.appendChild(option);
+    }
+  }
 
+  // The provider picker only shows on the Custom card: Custom endpoint, or any
+  // of the catalog's providers by search.
   choiceCards(
     $("#provider-popular"),
     "provider",
-    [
-      ...POPULAR.map((id) => {
-        const p = providerInfo(id);
-        return { value: id, label: POPULAR_LABELS[id] || p.name, detail: wireLabel(p) };
-      }),
-      { value: "custom", label: "Custom endpoint", detail: "Any other API" },
-    ],
-    "anthropic",
+    [{ value: "custom", label: "Custom endpoint", detail: "Any URL you name" }],
+    "custom",
     true,
   );
   choiceCards($("#wire-choices"), "wire", WIRES, "openai");
@@ -718,46 +758,32 @@ async function wireModels() {
     const href = `https://github.com/${CATALOG_SOURCE.repo}/blob/${CATALOG_SOURCE.commit}/${CATALOG_SOURCE.path}`;
     if (isSafeHref(href)) source.setAttribute("href", href);
   }
-
-  // The full list: the same cards as the popular grid, in the same radio
-  // style, filtered by the search box. (A provider's site link waits in the
-  // "Selected:" line below — a link inside a card label would fight the
-  // radio for the click.)
   const renderList = () => {
     const matches = searchProviders(search.value);
     choiceCards(
       list,
       "provider-pick",
-      matches.map((provider) => ({
-        value: provider.id,
-        label: provider.name,
-        detail: wireLabel(provider),
-      })),
+      matches.map((provider) => ({ value: provider.id, label: provider.name, detail: providerHost(provider) })),
       selectedId,
       true,
     );
     $("#provider-empty").hidden = matches.length > 0;
   };
   search.addEventListener("input", renderList);
-  renderList();
 
-  /** Records the choice and checks its card in both groups. */
   const select = (id) => {
     selectedId = id;
     for (const input of form.querySelectorAll('input[name="provider"], input[name="provider-pick"]')) {
       input.checked = input.value === id;
     }
   };
-
   const currentProvider = () => providerInfo(selectedId) || providerInfo("anthropic");
-
   const variableValues = () => {
     const values = {};
     for (const input of $$("#provider-vars input")) values[input.dataset.var] = input.value;
     return values;
   };
 
-  /** The endpoint field follows the provider and its variables. */
   const paintEndpoint = () => {
     const provider = currentProvider();
     const custom = provider.id === "custom";
@@ -774,45 +800,44 @@ async function wireModels() {
         : "From the provider catalog.";
   };
 
-  /** Model chips: the catalog's list, else what the server listed. */
-  const paintModels = () => {
-    const provider = currentProvider();
-    const names =
-      provider.models && provider.models.length
-        ? provider.models
-        : listed.provider === provider.id
-          ? listed.models
-          : [];
-    const datalist = $("#model-suggestions");
-    const chips = $("#model-chips");
-    datalist.replaceChildren();
-    chips.replaceChildren();
-    for (const name of names) {
+  /** Fills a model `<select>` with options and an "Other model id" entry. */
+  const fillModelSelect = (selectEl, models, chosen) => {
+    selectEl.replaceChildren();
+    for (const entry of models) {
       const option = document.createElement("option");
-      option.value = name;
-      datalist.appendChild(option);
+      option.value = entry.id;
+      option.textContent = modelOptionLabel(entry);
+      selectEl.appendChild(option);
     }
-    for (const name of names.slice(0, CHIP_LIMIT)) {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "chip";
-      chip.textContent = name;
-      chip.setAttribute("aria-label", `Use ${name}`);
-      chip.addEventListener("click", () => {
-        model.value = name;
-        fieldError("model", "", model);
-      });
-      chips.appendChild(chip);
-    }
-    chips.hidden = !names.length;
-    discover.hidden = Boolean(provider.models && provider.models.length);
-    $("#model-hint").textContent =
-      names.length > CHIP_LIMIT
-        ? `${names.length} models; type to search them all.`
-        : names.length
-          ? "Pick one, or type the exact name."
-          : "Type the exact model name, or list what your key can use.";
+    const other = document.createElement("option");
+    other.value = OTHER;
+    other.textContent = "Other model id…";
+    selectEl.appendChild(other);
+    const known = models.some((entry) => entry.id === chosen);
+    selectEl.value = known ? chosen : models.length && !chosen ? models[0].id : OTHER;
+    return known || (models.length > 0 && !chosen);
   };
+
+  /** The API form's model picker: listed, else curated, else type it. */
+  const paintModels = (chosen) => {
+    const provider = currentProvider();
+    const card = activeCard && activeCard.kind === "api" && !codingPlan.checked ? activeCard : null;
+    const models = modelOptions(card, listed, provider.id);
+    const keep = chosen !== undefined ? chosen : model.value;
+    const picked = fillModelSelect(modelSelect, models, keep);
+    model.hidden = picked && modelSelect.value !== OTHER;
+    model.value = modelSelect.value === OTHER ? keep || "" : modelSelect.value;
+    const note = listed.provider === provider.id ? listed.note : "";
+    modelNote.textContent = note || "";
+    modelNote.hidden = !note;
+  };
+  modelSelect.addEventListener("change", () => {
+    const other = modelSelect.value === OTHER;
+    model.hidden = !other;
+    model.value = other ? "" : modelSelect.value;
+    fieldError("model", "", model);
+    if (other) model.focus();
+  });
 
   const applyProvider = (id, { keepModel = false } = {}) => {
     const provider = providerInfo(id) || providerInfo("anthropic");
@@ -821,7 +846,6 @@ async function wireModels() {
     const custom = provider.id === "custom";
     $("#custom-fields").hidden = !custom;
     if (custom) baseUrl.value = "";
-    // One field per URL variable, built from the catalog entry.
     const vars = $("#provider-vars");
     vars.replaceChildren();
     for (const variable of provider.variables || []) {
@@ -852,7 +876,7 @@ async function wireModels() {
     const picked = $("#provider-picked");
     picked.replaceChildren();
     if (!custom) {
-      picked.append("Selected: ");
+      picked.append("Provider: ");
       const strong = document.createElement("strong");
       strong.textContent = provider.name;
       picked.appendChild(strong);
@@ -867,29 +891,28 @@ async function wireModels() {
       }
     }
     $("#api-key-kind").textContent = custom ? "" : keyHint(provider);
-    if (!keepModel) model.value = "";
+    if (listed.provider !== provider.id) listed = { provider: null, models: [] };
     fieldError("baseUrl", "", baseUrl);
     fieldError("provider", "");
     paintEndpoint();
-    paintModels();
+    paintModels(keepModel ? undefined : "");
   };
 
   form.addEventListener("change", (event) => {
     if (event.target.name === "provider" || event.target.name === "provider-pick") {
       applyProvider(event.target.value);
     }
-    if (event.target.name === "wire") fieldError("wire", "");
-    if (event.target.name === "auth") {
-      fieldError("auth", "");
+    if (event.target.name === "wire") {
+      fieldError("wire", "");
+      $("#sheet-protocol").textContent = protocolLabel(null, event.target.value);
     }
+    if (event.target.name === "auth") fieldError("auth", "");
   });
   editEndpoint.addEventListener("click", () => {
     editing = !editing;
     paintEndpoint();
     if (editing) baseUrl.focus();
   });
-  applyProvider("anthropic");
-
   $("#toggle-key").addEventListener("click", (event) => {
     const show = apiKey.type === "password";
     apiKey.type = show ? "text" : "password";
@@ -904,10 +927,16 @@ async function wireModels() {
     input.addEventListener("input", () => fieldError(id, "", input));
   }
 
-  /** Reads the form into what `validateConnect` checks. The role is the
-   *  slot the form was opened for; there is no radio for it any more. */
+  // Switching the job in an API sheet shows what that job uses on this card.
+  roleSelect.addEventListener("change", () => {
+    if (!activeCard || activeCard.kind === "runner") return;
+    const row = rows.find((r) => r.role === roleSelect.value && cardForConnection(r) === activeCard);
+    paintModels(row ? row.model || "" : "");
+    submit.textContent = row ? "Save and test" : "Connect";
+  });
+
   const readForm = () => ({
-    role: activeRole,
+    role: roleSelect.value,
     provider: selectedId,
     variables: variableValues(),
     baseUrl: baseUrl.value,
@@ -915,10 +944,9 @@ async function wireModels() {
     wire: checked(form, "wire"),
     auth: checked(form, "auth"),
     apiKey: apiKey.value,
-    model: model.value,
+    model: modelSelect.value === OTHER ? model.value : modelSelect.value,
   });
 
-  /** Puts each error under its field; answers the first field with one. */
   const showErrors = (errors) => {
     fieldError("provider", errors.provider);
     fieldError("baseUrl", errors.baseUrl, baseUrl);
@@ -933,11 +961,10 @@ async function wireModels() {
   };
 
   // Listing models: the key goes to Living Brain's own API, which asks the
-  // provider; the page never calls a provider. Only the endpoint and key
-  // fields have to be valid for this, not the model name.
+  // provider; the page never calls a provider. A provider with no list of
+  // its own answers the curated one with a note — never a bare status.
   const listModels = async ({ quiet = false } = {}) => {
     const provider = currentProvider();
-    if (provider.models && provider.models.length) return;
     const check = validateConnect({ ...readForm(), model: "listing" });
     const blocking = Object.keys(check.errors).filter((k) => k !== "role");
     if (blocking.length) {
@@ -950,46 +977,241 @@ async function wireModels() {
     discover.textContent = "Listing…";
     try {
       const answer = await api(request.path, { method: request.method, body: request.body });
-      listed = { provider: provider.id, models: (answer && answer.models) || [] };
-      paintModels();
-      if (!listed.models.length && !quiet) {
-        toast("This provider does not list its models. Type the model name.", "warn");
-      }
+      listed = {
+        provider: provider.id,
+        models: (answer && answer.models) || [],
+        note: answer && answer.listed === false ? answer.note || DISCOVER_FALLBACK_NOTE : "",
+      };
     } catch (error) {
-      if (!quiet) toast(`Could not list models: ${error.message}`, "bad");
+      if (error instanceof ApiError && error.status === 422 && /key-refused/.test(JSON.stringify(error.body || {}))) {
+        fieldError("apiKey", error.message, apiKey);
+        if (!quiet) apiKey.focus();
+      } else if (error instanceof ApiError && error.status === 403) {
+        if (!quiet) toast("Only workspace owners and admins can list or connect models.", "warn");
+      }
+      // Anything else: the known models, said plainly.
+      listed = { provider: provider.id, models: [], note: DISCOVER_UNREACHABLE_NOTE };
     } finally {
       discover.disabled = false;
       discover.textContent = label;
+      paintModels();
     }
   };
   discover.addEventListener("click", () => listModels());
   apiKey.addEventListener("change", () => listModels({ quiet: true }));
 
-  const resetForm = () => {
+  /* ---- the Z.AI Coding Plan switch ---- */
+  const paintCodingPlan = () => {
+    const plan = activeCard && activeCard.coding_plan;
+    $("#coding-plan-field").hidden = !plan;
+    const on = Boolean(plan && codingPlan.checked);
+    $("#coding-plan-label").textContent = plan ? plan.label : "";
+    $("#connect-title").textContent = on ? "GLM Coding Plan" : "Connect with an API key";
+    const note = $("#coding-plan-note");
+    note.hidden = !on;
+    note.replaceChildren();
+    if (on) {
+      note.append(`${plan.note} `);
+      if (plan.guide && isSafeHref(plan.guide)) {
+        const guide = document.createElement("a");
+        guide.href = plan.guide;
+        guide.target = "_blank";
+        guide.rel = "noopener noreferrer";
+        guide.textContent = "Z.AI's Claude Code guide";
+        note.appendChild(guide);
+      }
+    }
+    // With the plan on, the key form is not the way: the device runner is.
+    // CSS hides the rest of the form (`.sheet__form.plan-on`).
+    form.classList.toggle("plan-on", on);
+    runnerBox.hidden = !on;
+    if (on) paintRunner();
+  };
+  codingPlan.addEventListener("change", paintCodingPlan);
+
+  /* ---- the device runner (subscription cards, and the Coding Plan) ---- */
+  const runnerRoute = () => {
+    if (!activeCard) return null;
+    if (activeCard.kind === "runner") return activeCard.runner;
+    if (activeCard.coding_plan && codingPlan.checked) return activeCard.coding_plan.runner;
+    return null;
+  };
+  const runnerModels = () => {
+    if (!activeCard) return [];
+    if (activeCard.kind === "runner") return activeCard.models;
+    return (activeCard.coding_plan && activeCard.coding_plan.models) || [];
+  };
+  const paintRunner = () => {
+    const route = runnerRoute();
+    if (!route) return;
+    const role = runnerRole.value || "main";
+    const existing = mine.find((r) => r.role === role);
+    const ownsRoute = existing && existing.agent === route.agent && (existing.settings || "isolated") === route.settings;
+    const models = runnerModels().map((m) => ({ ...m }));
+    if (ownsRoute && existing.model && !models.some((m) => m.id === existing.model)) {
+      models.unshift({ id: existing.model });
+    }
+    const picked = fillModelSelect(runnerModel, models, ownsRoute ? existing.model : undefined);
+    runnerCustom.hidden = picked && runnerModel.value !== OTHER;
+    if (runnerModel.value !== OTHER) runnerCustom.value = "";
+    $("#runner-explain").textContent =
+      `Jobs for you run on your own device through ${route.cli}, signed in with your own plan. ` +
+      "Your sign-in never leaves your device: the brain hands the job to it, and only the answer comes back.";
+    $("#runner-seen").textContent = runnersAvailable
+      ? lastSeenText(lastSeen)
+      : "Running jobs on your device is not available on this server yet.";
+    const how = $("#runner-how");
+    how.replaceChildren();
+    how.append("Turn on ");
+    const strong = document.createElement("strong");
+    strong.textContent = "Run brain jobs with my subscription";
+    how.appendChild(strong);
+    how.append(" in the Living Brain Mac app, or run ");
+    const code = document.createElement("code");
+    code.textContent = runnerCommand(route.agent);
+    how.appendChild(code);
+    how.append(" on a machine where you are signed in.");
+    runnerSave.disabled = !runnersAvailable;
+    runnerSave.textContent = ownsRoute ? "Save" : "Run this job on my device";
+  };
+  runnerRole.addEventListener("change", paintRunner);
+  runnerModel.addEventListener("change", () => {
+    const other = runnerModel.value === OTHER;
+    runnerCustom.hidden = !other;
+    if (other) runnerCustom.focus();
+  });
+  runnerSave.addEventListener("click", async () => {
+    const role = runnerRole.value;
+    const chosen = runnerModel.value === OTHER ? runnerCustom.value.trim() : runnerModel.value;
+    const value = runnerValue(activeCard, chosen, { codingPlan: activeCard.kind !== "runner" });
+    if (!value || !roleInfo(role)) return;
+    runnerSave.disabled = true;
+    try {
+      const outcome = await setSetting("model-runner", role, value);
+      if (outcome.ok) {
+        toast(`${roleInfo(role).label} now runs on your device.`, "ok");
+        await load();
+        paintSheet();
+      } else {
+        toast(runnerFailure(outcome), "bad");
+      }
+    } finally {
+      runnerSave.disabled = !runnersAvailable;
+    }
+  });
+
+  /* ---- the sheet ---- */
+  const paintConnected = () => {
+    const box = $("#sheet-connected");
+    box.replaceChildren();
+    const view = cardViews(rows, mine).find((v) => v.id === activeCard.id);
+    if (!view || !view.slots.length) return;
+    const heading = document.createElement("h3");
+    heading.textContent = "In use";
+    box.appendChild(heading);
+    const ul = document.createElement("ul");
+    ul.className = "sheet__uses";
+    for (const slot of view.slots) {
+      const li = document.createElement("li");
+      const row = rows.find((r) => r.role === slot.role);
+      const text = document.createElement("span");
+      const status = !slot.mine && row ? statusView(row) : null;
+      text.textContent = slot.mine
+        ? `${slot.label} · ${slot.model || "default model"} · on your device`
+        : `${slot.label} · ${slot.model} · key ${maskedKey(row && row.key)}${status ? ` · ${status.label}` : ""}`;
+      li.appendChild(text);
+      const actions = document.createElement("span");
+      actions.className = "sheet__use-actions";
+      if (!slot.mine) {
+        const test = document.createElement("button");
+        test.type = "button";
+        test.className = "btn-sm";
+        test.textContent = "Test";
+        test.setAttribute("data-sheet-action", "test");
+        test.setAttribute("data-role", slot.role);
+        test.setAttribute("aria-label", `Test the ${slot.label} connection`);
+        actions.appendChild(test);
+      }
+      const off = document.createElement("button");
+      off.type = "button";
+      off.className = "btn-sm";
+      off.textContent = slot.mine ? "Turn off" : "Disconnect";
+      off.setAttribute("data-sheet-action", slot.mine ? "stop-runner" : "remove");
+      off.setAttribute("data-role", slot.role);
+      off.setAttribute("aria-label", `${off.textContent} ${slot.label}`);
+      actions.appendChild(off);
+      li.appendChild(actions);
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+  };
+
+  const paintSheet = () => {
+    const card = activeCard;
+    $("#sheet-name").textContent = card.name;
+    $("#sheet-desc").textContent = card.description;
+    const logo = $("#sheet-logo");
+    logo.setAttribute("data-logo", String(card.logo || "").replace(/^.*\//, "").replace(/\.svg$/, ""));
+    const badges = $("#sheet-badges");
+    badges.replaceChildren();
+    for (const badge of card.badges || []) {
+      const tag = document.createElement("span");
+      tag.className = "mcard__badge";
+      tag.setAttribute("data-badge", String(BADGES.indexOf(badge)));
+      tag.textContent = badge;
+      badges.appendChild(tag);
+    }
+    $("#sheet-protocol").textContent = card.kind === "custom" ? protocolLabel(null, checked(form, "wire")) : protocolLabel(card);
+    paintConnected();
+    const runner = card.kind === "runner";
+    form.hidden = runner;
+    runnerBox.hidden = !runner;
+    $("#provider-fieldset").hidden = card.kind !== "custom";
+    if (runner) paintRunner();
+    else paintCodingPlan();
+  };
+
+  /** Opens a card's sheet, for `role` when one is named (a slot's Change). */
+  const openCard = (cardId, role) => {
+    activeCard = cardInfo(cardId) || cardInfo("custom");
+    codingPlan.checked = false;
+    const runnerRow = role ? mine.find((r) => r.role === role) : null;
+    if (activeCard.coding_plan && runnerRow && runnerRow.settings === "user") codingPlan.checked = true;
     form.reset();
+    codingPlan.checked = Boolean(activeCard.coding_plan && runnerRow && runnerRow.settings === "user");
     apiKey.type = "password";
     $("#toggle-key").textContent = "Show";
-    const info = roleInfo(activeRole);
-    $("#connect-title").textContent = `Connect ${info ? info.label : activeRole}`;
-    submit.textContent = "Connect model";
-    cancel.hidden = true;
     search.value = "";
-    renderList();
     listed = { provider: null, models: [] };
-    applyProvider("anthropic");
-  };
-  cancel.addEventListener("click", resetForm);
-
-  const load = async () => {
-    try {
-      rows = await api("/v1/models");
-      renderModelSlots(slots, slotViews(rows));
-      notice(modelsStatus, "");
-    } catch (error) {
-      rows = [];
-      slots.replaceChildren();
-      notice(modelsStatus, `Could not load your models: ${error.message}`, "warn");
+    const targetRole = role && roleInfo(role) ? role : "main";
+    roleSelect.value = targetRole;
+    runnerRole.value = targetRole;
+    if (activeCard.kind !== "runner") {
+      const row = rows.find((r) => r.role === targetRole && cardForConnection(r) === activeCard);
+      const providerId = activeCard.kind === "custom" ? (row ? row.provider : "custom") : activeCard.provider;
+      renderList();
+      applyProvider(providerId);
+      if (row) {
+        const stored = String(row.base_url || "").replace(/\/+$/, "");
+        const provider = providerForConnection(row);
+        if (provider.id === "custom") {
+          baseUrl.value = stored;
+          const wire = form.querySelector(`input[name="wire"][value="${row.wire}"]`);
+          const auth = form.querySelector(`input[name="auth"][value="${row.auth}"]`);
+          if (wire) wire.checked = true;
+          if (auth) auth.checked = true;
+        } else if (stored && stored !== String(provider.base_url).replace(/\/+$/, "")) {
+          editing = true;
+          paintEndpoint();
+          baseUrl.value = stored;
+        }
+        paintModels(row.model || "");
+      }
+      submit.textContent = row ? "Save and test" : "Connect";
     }
+    paintSheet();
+    if (typeof sheet.showModal === "function") sheet.showModal();
+    else sheet.setAttribute("open", "");
   };
 
   form.addEventListener("submit", async (event) => {
@@ -1007,8 +1229,9 @@ async function wireModels() {
       const outcome = await setSetting("models", check.role, check.value);
       if (outcome.ok) {
         toast(`${roleInfo(check.role).label} model connected.`, "ok");
-        resetForm();
+        apiKey.value = "";
         await load();
+        paintSheet();
       } else {
         toast(`Not connected: ${outcome.message}`, "bad");
       }
@@ -1018,76 +1241,180 @@ async function wireModels() {
     }
   });
 
-  /** Opens the form for one slot. Change prefills what the stored connection
-   *  can offer; the key never travels back out of the server, so it is always
-   *  typed again. */
-  const openSlot = (role, row) => {
-    const info = roleInfo(role);
-    const name = info ? info.label : role;
-    activeRole = role;
-    if (row) {
-      const provider = providerForConnection(row);
-      applyProvider(provider.id, { keepModel: true });
-      const stored = String(row.base_url || "").replace(/\/+$/, "");
-      if (provider.id === "custom") {
-        baseUrl.value = stored;
-        const wire = form.querySelector(`input[name="wire"][value="${row.wire}"]`);
-        const auth = form.querySelector(`input[name="auth"][value="${row.auth}"]`);
-        if (wire) wire.checked = true;
-        if (auth) auth.checked = true;
-      } else if (stored && stored !== provider.base_url.replace(/\/+$/, "")) {
-        // A regional host or a filled-in variable: keep exactly what was used.
-        editing = true;
-        paintEndpoint();
-        baseUrl.value = stored;
-      }
-      model.value = row.model || "";
-      $("#connect-title").textContent = `Change ${name}`;
-      submit.textContent = "Save and test";
-    } else {
-      applyProvider("anthropic");
-      $("#connect-title").textContent = `Connect ${name}`;
-      submit.textContent = "Connect model";
-    }
-    apiKey.value = "";
-    cancel.hidden = false;
-    form.scrollIntoView({ behavior: "smooth", block: "start" });
-    apiKey.focus({ preventScroll: true });
+  /** Turns a device runner off for a role. */
+  const stopRunner = async (role) => {
+    const outcome = await setSetting("model-runner", role, null);
+    if (outcome.ok) toast(`${roleInfo(role).label} no longer runs on your device.`, "ok");
+    else toast(runnerFailure(outcome), "bad");
+    return outcome.ok;
   };
 
-  // Connect, Change and Remove, one listener for every slot.
-  slots.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-action]");
-    if (!button) return;
-    const role = button.dataset.role;
+  /** Disconnect, Test and Turn off — the sheet's and the slots' buttons. */
+  const slotAction = async (action, role, button) => {
     const info = roleInfo(role);
-    const name = info ? info.label : role;
-    if (button.dataset.action === "remove") {
-      const mainGone = role === "main";
+    if (!info) return;
+    if (action === "stop-runner") {
+      button.disabled = true;
+      if (await stopRunner(role)) await load();
+      button.disabled = false;
+    } else if (action === "remove") {
       const ok = await confirmAction({
-        title: `Remove the ${name} model?`,
-        body: mainGone
-          ? "Its key is deleted. Until you connect another, the managed model answers for every job."
-          : "Its key is deleted. This job uses Main while Main is set, and the managed model when it is not.",
-        confirm: "Remove",
+        title: `Disconnect the ${info.label} model?`,
+        body:
+          role === "main"
+            ? "Its key is deleted. Until you connect another, the managed model answers for every job."
+            : "Its key is deleted. This job uses Main while Main is set, and the managed model when it is not.",
+        confirm: "Disconnect",
       });
       if (!ok) return;
       button.disabled = true;
       const outcome = await setSetting("models", role, null);
       if (outcome.ok) {
-        toast(`${name} model removed.`, "ok");
+        toast(`${info.label} model disconnected.`, "ok");
         await load();
       } else {
         button.disabled = false;
-        toast(`Not removed: ${outcome.message}`, "bad");
+        toast(`Not disconnected: ${outcome.message}`, "bad");
       }
+    } else if (action === "test") {
+      const row = rows.find((r) => r.role === role);
+      if (!row) return;
+      button.disabled = true;
+      button.textContent = "Testing…";
+      const outcome = await setSetting("model-switch", role, { model: row.model });
+      if (outcome.ok) {
+        await load();
+        const fresh = rows.find((r) => r.role === role);
+        const status = fresh ? statusView(fresh) : null;
+        toast(
+          status && status.state === "live" ? `${info.label} works.` : `${info.label}: ${status ? `${status.label}. ${status.detail}` : "checked"}`,
+          status && status.state === "live" ? "ok" : "warn",
+        );
+      } else {
+        toast(`Test failed: ${outcome.message}`, "bad");
+      }
+      button.disabled = false;
+      button.textContent = "Test";
+    }
+    if (sheet.open) paintSheet();
+  };
+
+  $("#sheet-connected").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-sheet-action]");
+    if (button) slotAction(button.dataset.sheetAction, button.dataset.role, button);
+  });
+  cardsBox.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-card]");
+    if (button) openCard(button.dataset.card);
+  });
+  slots.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const role = button.dataset.role;
+    if (button.dataset.action === "remove" || button.dataset.action === "stop-runner") {
+      await slotAction(button.dataset.action, role, button);
       return;
     }
-    const row = rows.find((r) => r.role === role) || null;
-    openSlot(role, button.dataset.action === "change" ? row : null);
+    const runner = mine.find((r) => r.role === role);
+    const row = rows.find((r) => r.role === role);
+    const card = runner ? runnerCardFor(runner) : row ? cardForConnection(row) : cardInfo("anthropic");
+    openCard(card ? card.id : "anthropic", role);
   });
 
+  /* ---- the "Main model" picker ---- */
+  const paintMainPick = () => {
+    choices = mainModelChoices(rows, mine, { runnersAvailable });
+    mainPick.replaceChildren();
+    const groups = new Map();
+    for (const option of choices.options) {
+      if (!groups.has(option.group)) {
+        const group = document.createElement("optgroup");
+        group.label = option.group;
+        groups.set(option.group, group);
+        mainPick.appendChild(group);
+      }
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      groups.get(option.group).appendChild(node);
+    }
+    mainPick.value = choices.current;
+    const view = slotView(rows, "main", mine);
+    mainLine.textContent = view.set ? view.line : "Nothing connected: the managed model answers.";
+  };
+  mainPick.addEventListener("change", async () => {
+    const option = choices.options.find((o) => o.value === mainPick.value);
+    if (!option) return;
+    mainPick.disabled = true;
+    try {
+      const action = option.action;
+      if (action.dropRunner && !(await stopRunner("main"))) return;
+      if (action.kind === "switch") {
+        const main = rows.find((r) => r.role === "main");
+        if (main && main.model !== action.model) {
+          mainLine.textContent = "Testing the new model…";
+          const outcome = await setSetting("model-switch", "main", { model: action.model });
+          if (outcome.ok) toast("Main model switched.", "ok");
+          else toast(`Not switched: ${outcome.message}`, "bad");
+        }
+      } else if (action.kind === "runner") {
+        const outcome = await setSetting("model-runner", "main", {
+          kind: "local_runner",
+          agent: action.agent,
+          model: action.model,
+          settings: action.settings,
+        });
+        if (outcome.ok) toast("Main now runs on your device.", "ok");
+        else toast(runnerFailure(outcome), "bad");
+      }
+    } finally {
+      mainPick.disabled = false;
+      await load();
+    }
+  });
+
+  const load = async () => {
+    const [connections, own] = await Promise.allSettled([
+      api("/v1/models"),
+      api("/v1/models/mine"),
+    ]);
+    if (connections.status === "fulfilled") {
+      rows = Array.isArray(connections.value) ? connections.value : [];
+      notice(modelsStatus, "");
+    } else {
+      rows = [];
+      notice(modelsStatus, `Could not load your models: ${connections.reason.message}`, "warn");
+    }
+    if (own.status === "fulfilled") {
+      runnersAvailable = true;
+      const value = own.value || {};
+      mine = Array.isArray(value.runners) ? value.runners : [];
+      lastSeen = mine.map((r) => r.last_seen_at).filter(Boolean).sort().pop() || null;
+    } else {
+      // A server without the device-runner routes yet answers 404: that is
+      // "not available", not an error worth a banner.
+      runnersAvailable = !(own.reason instanceof ApiError && (own.reason.status === 404 || own.reason.status === 405));
+      mine = [];
+      lastSeen = null;
+    }
+    renderModelCards(cardsBox, cardViews(rows, mine));
+    renderModelSlots(slots, slotViews(rows, mine));
+    paintMainPick();
+  };
+
   await load();
+}
+
+/** The note under a curated model list when the provider could not be asked. */
+const DISCOVER_FALLBACK_NOTE = "This provider doesn't publish a model list; showing known models.";
+const DISCOVER_UNREACHABLE_NOTE = "Couldn't get this provider's model list right now; showing known models.";
+
+/** A device-runner change that did not take, in words. */
+function runnerFailure(outcome) {
+  if (outcome.status === 404 || outcome.status === 405) {
+    return "Running jobs on your device is not available on this server yet.";
+  }
+  return `Not saved: ${outcome.message}`;
 }
 
 /* --- api tokens ------------------------------------------------------ */

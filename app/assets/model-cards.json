@@ -1,0 +1,223 @@
+{
+  "_comment": [
+    "Living Brain's own: the provider cards on Settings -> Models and the curated model lists behind them.",
+    "Hand-maintained; scripts/sync-providers never touches this file. The server compiles it in",
+    "(crates/livingbrain-models/src/curated.rs) so the curated fallback a discover answers is this list.",
+    "`provider` is a providers.json id (or `custom`); a `runner` card has none: it runs on the member's own",
+    "device through their own CLI and subscription, and nothing about it reaches the server but the choice.",
+    "`listing`: `native` = GET {base}/v1/models, an https URL = that OpenAI-compatible list (signed like the",
+    "provider's own calls), `none` = the provider publishes no list, so the curated models are the answer.",
+    "Model ids, context windows and prices were checked against each provider's own docs on 2026-10-15",
+    "(`models_source`); a price is per million input / output tokens, and omitted where the docs gave none.",
+    "Logos are self-hosted under assets/logos/ and drawn in currentColor; `logo_source` names each one."
+  ],
+  "cards": [
+    {
+      "id": "anthropic",
+      "kind": "api",
+      "provider": "anthropic",
+      "name": "Anthropic",
+      "description": "Claude models on your own Anthropic API key.",
+      "badges": ["API key"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/anthropic.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/anthropic.svg",
+      "listing": "native",
+      "models_source": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "models": [
+        { "id": "claude-opus-5-5", "label": "Claude Opus 5.5", "context": 1000000, "price": "$4 / $20" },
+        { "id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5", "context": 1000000, "price": "$2 / $10" },
+        { "id": "claude-haiku-5-5", "label": "Claude Haiku 5.5", "context": 1000000, "price": "from $0.10 / $0.50" },
+        { "id": "claude-fable-5-1", "label": "Claude Fable 5.1", "context": 1000000, "price": "$10 / $50" }
+      ]
+    },
+    {
+      "id": "claude-subscription",
+      "kind": "runner",
+      "name": "Claude subscription",
+      "description": "Your Pro or Max plan, through Claude Code on your device.",
+      "badges": ["Subscription (runs on your Mac)"],
+      "logo": "assets/logos/claude.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/claude.svg",
+      "runner": { "agent": "claude", "settings": "isolated", "cli": "Claude Code" },
+      "models_source": "`claude --help` (Claude Code 2.1.300): --model takes an alias for the latest model or a full model name",
+      "models": [
+        { "id": "sonnet", "label": "Sonnet (latest)" },
+        { "id": "opus", "label": "Opus (latest)" },
+        { "id": "haiku", "label": "Haiku (latest)" },
+        { "id": "fable", "label": "Fable (latest)" }
+      ]
+    },
+    {
+      "id": "openai",
+      "kind": "api",
+      "provider": "openai",
+      "name": "OpenAI",
+      "description": "GPT models on your own OpenAI API key.",
+      "badges": ["API key"],
+      "protocol": "openai",
+      "logo": "assets/logos/openai.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@13.21.0/icons/openai.svg",
+      "listing": "native",
+      "models_source": "https://developers.openai.com/api/docs/models",
+      "models": [
+        { "id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "context": 1050000, "price": "$2 / $10" },
+        { "id": "gpt-6-astra", "label": "GPT-6 Astra", "context": 1050000, "price": "$10 / $50" },
+        { "id": "gpt-6-luna", "label": "GPT-6 Luna", "context": 1050000, "price": "$0.10 / $0.50" }
+      ]
+    },
+    {
+      "id": "chatgpt-subscription",
+      "kind": "runner",
+      "name": "ChatGPT subscription",
+      "description": "Your Plus or Pro plan, through Codex on your device.",
+      "badges": ["Subscription (runs on your Mac)"],
+      "logo": "assets/logos/openai.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@13.21.0/icons/openai.svg",
+      "runner": { "agent": "codex", "settings": "isolated", "cli": "Codex" },
+      "models_source": "Codex CLI 0.148.0 model list (~/.codex/models_cache.json), passed with `codex exec -m`",
+      "models": [
+        { "id": "gpt-5.6-sol", "label": "GPT-5.6 Sol" },
+        { "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra" },
+        { "id": "gpt-5.6-luna", "label": "GPT-5.6 Luna" },
+        { "id": "gpt-5.5", "label": "GPT-5.5" },
+        { "id": "gpt-5.4-mini", "label": "GPT-5.4 mini" }
+      ]
+    },
+    {
+      "id": "zai",
+      "kind": "api",
+      "provider": "zhipu-glm-en",
+      "name": "Z.AI",
+      "description": "GLM models on a Z.AI API key.",
+      "badges": ["API key", "Coding plan"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/zai.svg",
+      "logo_source": "https://z-cdn.chatglm.cn/z-ai/static/logo.svg (Z.AI's own mark; the glyph only, background tile removed)",
+      "listing": "none",
+      "models_source": "https://docs.z.ai/guides/overview/pricing, https://docs.z.ai/guides/llm/glm-5.3, https://docs.z.ai/guides/llm/glm-5.3-flash",
+      "models": [
+        { "id": "glm-5.3", "label": "GLM-5.3", "context": 1000000, "price": "$1.40 / $4.40" },
+        { "id": "glm-5.3-flash", "label": "GLM-5.3-Flash", "context": 1000000, "price": "$0.15 / $0.50" },
+        { "id": "glm-5.3-flashx", "label": "GLM-5.3-FlashX", "price": "$0.37 / $1.25" }
+      ],
+      "coding_plan": {
+        "label": "I have a GLM Coding Plan",
+        "note": "Z.AI limits the GLM Coding Plan to its officially supported coding tools, so a Coding Plan key should not be connected here. Run it through Claude Code on your own device instead: point Claude Code at Z.AI as Z.AI's guide describes, then turn on the runner.",
+        "source": "https://docs.z.ai/devpack/faq",
+        "guide": "https://docs.z.ai/devpack/tool/claude",
+        "runner": { "agent": "claude", "settings": "user", "cli": "Claude Code" },
+        "models": [
+          { "id": "glm-5.3", "label": "GLM-5.3", "context": 1000000 },
+          { "id": "glm-5.3-flash", "label": "GLM-5.3-Flash", "context": 1000000 }
+        ]
+      }
+    },
+    {
+      "id": "deepseek",
+      "kind": "api",
+      "provider": "deepseek",
+      "name": "DeepSeek",
+      "description": "DeepSeek V4 models, priced low, half off at night.",
+      "badges": ["API key"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/deepseek.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/deepseek.svg",
+      "listing": "https://api.deepseek.com/models",
+      "models_source": "https://api-docs.deepseek.com/quick_start/pricing",
+      "models": [
+        { "id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro", "context": 1000000, "price": "$1.32 / $3.96 (peak)" },
+        { "id": "deepseek-flash", "label": "DeepSeek V4.1 Flash", "context": 1000000, "price": "$0.30 / $1.20 (peak)" }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "kind": "api",
+      "provider": "openrouter",
+      "name": "OpenRouter",
+      "description": "One key for hundreds of models from every lab.",
+      "badges": ["API key"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/openrouter.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/openrouter.svg",
+      "listing": "native",
+      "models_source": "https://openrouter.ai/api/v1/models",
+      "models": [
+        { "id": "anthropic/claude-sonnet-5.5", "label": "Claude Sonnet 5.5", "context": 1000000, "price": "$2 / $10" },
+        { "id": "anthropic/claude-opus-5.5", "label": "Claude Opus 5.5", "context": 1000000, "price": "$4 / $20" },
+        { "id": "openai/gpt-6.1-sol", "label": "GPT-6.1 Sol", "context": 1050000, "price": "$2 / $10" },
+        { "id": "z-ai/glm-5.3", "label": "GLM-5.3", "context": 1048576 },
+        { "id": "moonshotai/kimi-k3", "label": "Kimi K3", "context": 1048576 },
+        { "id": "deepseek/deepseek-v4-pro", "label": "DeepSeek V4 Pro", "context": 1048576 }
+      ]
+    },
+    {
+      "id": "minimax",
+      "kind": "api",
+      "provider": "minimax-en",
+      "name": "MiniMax",
+      "description": "MiniMax M3 models with a million-token context.",
+      "badges": ["API key"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/minimax.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/minimax.svg",
+      "listing": "none",
+      "models_source": "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
+      "models": [
+        { "id": "MiniMax-M3", "label": "MiniMax M3", "context": 1000000 },
+        { "id": "MiniMax-M3.1-Flash-Preview", "label": "MiniMax M3.1 Flash (preview)", "context": 1000000 },
+        { "id": "MiniMax-M2.7", "label": "MiniMax M2.7", "context": 204800 }
+      ]
+    },
+    {
+      "id": "kimi",
+      "kind": "api",
+      "provider": "kimi",
+      "name": "Kimi",
+      "description": "Moonshot's Kimi models, strong at agents and code.",
+      "badges": ["API key"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/kimi.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/kimi.svg",
+      "listing": "https://api.moonshot.cn/v1/models",
+      "models_source": "https://platform.kimi.ai/docs/guide/agent-support",
+      "models": [
+        { "id": "kimi-k3", "label": "Kimi K3", "context": 1000000 },
+        { "id": "kimi-k2.7-code", "label": "Kimi K2.7 Code", "context": 256000 },
+        { "id": "kimi-k2.7-code-highspeed", "label": "Kimi K2.7 Code (high speed)" },
+        { "id": "kimi-k2.6", "label": "Kimi K2.6", "context": 256000 }
+      ]
+    },
+    {
+      "id": "qwen",
+      "kind": "api",
+      "provider": "qwencloud",
+      "name": "Qwen",
+      "description": "Alibaba's Qwen models through Model Studio.",
+      "badges": ["API key"],
+      "protocol": "anthropic",
+      "logo": "assets/logos/qwen.svg",
+      "logo_source": "https://cdn.jsdelivr.net/npm/simple-icons@16.35.0/icons/qwen.svg",
+      "listing": "none",
+      "models_source": "https://www.alibabacloud.com/help/en/model-studio/anthropic-api-messages",
+      "models": [
+        { "id": "qwen3.8-max", "label": "Qwen3.8 Max" },
+        { "id": "qwen3.7-plus", "label": "Qwen3.7 Plus" },
+        { "id": "qwen3.8-flash", "label": "Qwen3.8 Flash" },
+        { "id": "qwen3-coder-flash", "label": "Qwen3 Coder Flash" }
+      ]
+    },
+    {
+      "id": "custom",
+      "kind": "custom",
+      "provider": "custom",
+      "name": "Custom endpoint",
+      "description": "Any OpenAI- or Anthropic-compatible URL.",
+      "badges": ["API key"],
+      "logo": "assets/logos/custom.svg",
+      "logo_source": "Living Brain's own glyph",
+      "listing": "native",
+      "models": []
+    }
+  ]
+}
