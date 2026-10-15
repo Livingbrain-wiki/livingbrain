@@ -20,7 +20,7 @@ deployed.
 | R2 bucket | simulated by `--local` | `livingbrain-blobs-staging` | `livingbrain-blobs` |
 | KV namespace | simulated by `--local` | a per-environment namespace | a per-environment namespace |
 | Deployed by | nothing — `wrangler dev` | every push, `main` or `v*` tag | a `v*` tag, after approval |
-| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | `api.livingbrain.wiki` (custom domain, `[env.production]`) |
+| Public host | `127.0.0.1:8787` | `staging-api.livingbrain.wiki` (Worker API and the `app/` web app, one origin) | `app.livingbrain.wiki` (API and app) and `mcp.livingbrain.wiki`; `api.livingbrain.wiki` stays on the waitlist Worker |
 
 `ENV` is not decoration. The harness reads it twice: it names the
 environment to the production readiness gate at boot, and it binds every
@@ -45,8 +45,9 @@ and the Slack install answers 503), `MODEL_KEYS_SECRET`, `OWLPOST_API_KEY`,
 
 ## Production
 
-Public host `api.livingbrain.wiki`, a custom domain routed in
-`[env.production]`; nothing reaches it without a human.
+Public hosts `app.livingbrain.wiki` (API and app) and `mcp.livingbrain.wiki`,
+custom domains routed in `[env.production]`; `api.livingbrain.wiki` stays on
+the waitlist Worker; nothing reaches it without a human.
 
 ```sh
 # Resources, once each; the ids go into the matching [env.production] lines.
@@ -57,7 +58,7 @@ npx wrangler kv namespace create KV-production
 
 Paste the ids into `[env.production.d1_databases]` and
 `[env.production.kv_namespaces]` — both are placeholders in `wrangler.toml`
-until this is done. The route is `api.livingbrain.wiki` with
+until this is done. Both routes use
 `custom_domain = true`, which requires the `livingbrain.wiki` zone on the
 same Cloudflare account.
 
@@ -83,7 +84,7 @@ ciphertext already sealed under it.
 Production deploys run only on `v*` tags and wait for approval from the
 GitHub environment `production`'s required reviewers — that approval is the
 owner's go-ahead. `PRODUCTION_URL` must be set to
-`https://api.livingbrain.wiki` for the health smoke. The smoke is
+`https://app.livingbrain.wiki` for the health smoke. The smoke is
 health-only here — production is never seeded, and its signing key never
 reaches a runner, unlike staging's authenticated read — and a deploy that
 fails it is rolled back with `scripts/deploy/rollback.sh production`.
@@ -102,7 +103,7 @@ Record the date and a screenshot or link in the pilot log.
 Each day, as a workspace admin with a personal access token:
 
 ```sh
-curl -sH "Authorization: Bearer $LIVINGBRAIN_TOKEN" "https://api.livingbrain.wiki/v1/usage/daily?days=14"
+curl -sH "Authorization: Bearer $LIVINGBRAIN_TOKEN" "https://app.livingbrain.wiki/v1/usage/daily?days=14"
 ```
 
 It returns per-day counts (model requests/tokens, D1 queries, emails sent),
