@@ -2128,6 +2128,17 @@ input[readonly] {
   border-color: var(--bad);
 }
 
+/* "Living Brain was updated" (assets/update.js): the toast, plus a button. */
+.update-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-notice__reload {
+  flex: none;
+}
+
 .dialog {
   width: min(28rem, calc(100vw - 32px));
   padding: 24px;

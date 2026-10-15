@@ -117,6 +117,7 @@ import {
   cropToSquare,
 } from "./profile.js";
 import { mountGithub } from "./github.js";
+import { startUpdateWatch } from "./update.js";
 
 /**
  * The API base. Same-origin by default, because the app is served from the
@@ -472,6 +473,9 @@ function boot() {
     navigator.serviceWorker.register("sw.js").catch(() => {
       /* an unavailable service worker is not an error worth showing */
     });
+    // A deploy installs a new worker, which takes over this tab at once; if
+    // the modules running here are not that build's, offer a reload.
+    startUpdateWatch(navigator.serviceWorker, document, import.meta.url, () => location.reload());
   }
 }
 

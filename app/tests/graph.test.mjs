@@ -186,7 +186,7 @@ test("brain.html is a shell page whose scripts and styles are all its own", () =
     assert.match(html, new RegExp(`id="${id}"`), id);
   }
   const headers = readFileSync(new URL("../_headers", import.meta.url), "utf8");
-  assert.match(headers, /\/brain\.html\n  Cache-Control: no-store/);
+  assert.match(headers, /\/brain\.html\n  Cache-Control: private, no-cache/);
   const scriptSrc = /script-src ([^;]*);/.exec(headers)[1];
   assert.doesNotMatch(scriptSrc, /unsafe|https?:|\*/, "scripts stay 'self' (and the one hash)");
   const vendor = readFileSync(new URL("../assets/vendor/VENDOR.md", import.meta.url), "utf8");

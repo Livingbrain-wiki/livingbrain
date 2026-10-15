@@ -5,6 +5,12 @@ ES modules loaded with `<script type="module">`, no bundler, no npm
 dependencies and no `package.json`. It is served as static assets from
 Cloudflare and talks to the existing Rust Worker API over the session cookie.
 
+`app/` runs as-is (below). A deploy serves `build/app/` instead, which
+`tools/stamp-assets.mjs` makes from it — the same files plus a content-hashed
+copy of each asset, with every reference pointing at the hashed copy so a
+deploy never leaves a browser on old modules (docs/deploy.md, "The web app's
+build"). The source tree is never rewritten.
+
 ## Run it locally
 
 ```sh
@@ -254,6 +260,13 @@ The test files (`node --test` prints the current count):
 - `tests/graph.test.mjs` — the map's shaping, filters before the time
   slider, search, tooltips, and the layout keeping every node inside its
   hemisphere; brain.html's shell and that nothing it loads leaves `'self'`.
+- `tests/stamp.test.mjs` — the deploy build (`tools/stamp-assets.mjs`): every
+  page reference, module import, stylesheet `url()`, manifest icon and
+  precache entry names a content-hashed file; `_headers` per kind; the CSP's
+  inline-script hash still matches the built pages.
+- `tests/sw.test.mjs` — `sw.js` as built, in a VM with an in-memory Cache
+  Storage: precache, old-cache cleanup, cache-first hashed assets,
+  network-first pages, and `assets/update.js`'s reload notice.
 - `tests/session.test.mjs` — the `/me` check and sign-out from
   `assets/session.js`: signed in, signed out and "could not tell", what each
   one shows, and the hidden-until-checked markup of `index.html`.
@@ -288,9 +301,10 @@ quietly.
 | `assets/settings.js` | Pure settings request builder |
 | `assets/favicon.svg`, `assets/*.png` | The mark and the PWA icons, copied from the website |
 | `assets/fonts/` | Bricolage Grotesque, Hanken Grotesk, JetBrains Mono: the website's self-hosted fonts (OFL, latin, variable) |
-| `sw.js` | App-shell cache; minimal and defensive, never caches `/v1/*` |
+| `sw.js` | App-shell cache: pages network first, hashed `static/*` cache first, versioned and precached by the build; never caches `/v1/*` |
+| `assets/update.js` | Notices a new deploy's service worker taking over an open tab and offers a reload |
 | `manifest.webmanifest` | The white-label PWA manifest |
-| `_headers` | CSP and security headers for Cloudflare Pages |
+| `_headers` | CSP, security headers and caching (pages revalidate; hashed `static/*` immutable) |
 
 ## Theming
 

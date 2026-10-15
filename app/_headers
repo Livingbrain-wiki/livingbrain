@@ -35,23 +35,46 @@
   Cross-Origin-Opener-Policy: same-origin
   Strict-Transport-Security: max-age=31536000; includeSubDomains
 
-# The session is an HttpOnly cookie on the API. No HTML page carries a token,
-# but nothing here may be cached either: a shared cache that held a signed-in
-# person's rendered page would be a leak.
+# Caching (tools/stamp-assets.mjs builds what is deployed; app/ is its source).
+#
+# The pages are revalidated on every load, so a deploy is visible on the next
+# one. `private`: the session is an HttpOnly cookie on the API and no page
+# carries per-person data, but a shared cache still never keeps a copy. Each
+# page is listed under both spellings, because the assets server answers
+# `/wiki.html` with a redirect to `/wiki` and the rule matches the request path.
+/
+  Cache-Control: private, no-cache
 /index.html
-  Cache-Control: no-store
+  Cache-Control: private, no-cache
+/settings
+  Cache-Control: private, no-cache
 /settings.html
-  Cache-Control: no-store
+  Cache-Control: private, no-cache
+/wiki
+  Cache-Control: private, no-cache
 /wiki.html
-  Cache-Control: no-store
+  Cache-Control: private, no-cache
+/brain
+  Cache-Control: private, no-cache
 /brain.html
-  Cache-Control: no-store
+  Cache-Control: private, no-cache
 
-# The static shell carries no per-person data, so a short shared cache is safe.
+# Content-hashed copies: the name changes whenever the bytes do, so a copy is
+# good forever. Every page, module import, stylesheet url(), manifest icon and
+# the service worker's precache list points here.
+/static/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The unhashed originals, at the paths the Worker's device pages link by name
+# (`/assets/app.css`, `/assets/device.css`, `/assets/favicon.svg`) and an
+# already-open pre-deploy page may still ask for. Revalidated every time, so
+# they can never be an hour behind. Not under `/static/`, so the two rules
+# never both apply to one file.
 /assets/*
-  Cache-Control: public, max-age=3600
+  Cache-Control: public, no-cache
+# The worker and the manifest are rebuilt with every deploy, at fixed names.
 /sw.js
   Cache-Control: no-cache
 /manifest.webmanifest
   Content-Type: application/manifest+json
-  Cache-Control: public, max-age=3600
+  Cache-Control: public, no-cache
