@@ -38,9 +38,10 @@ use crate::events;
 use crate::events::events as slack_events;
 use crate::flow::{self, Flow, Session};
 use crate::install;
+use crate::members;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
-use crate::{EmailLedger, SignInMail, SignInMailInput};
+use crate::{EmailLedger, MemberRemoval, SignInMail, SignInMailInput};
 
 /// A cookie-carrying write a browser reports as coming from another site.
 /// The same refusal `livingbrain-tokens` answers its cookie writes with.
@@ -211,6 +212,10 @@ pub(crate) struct ModuleState {
     /// What renders a sign-in mail: the composition's branded renderer when
     /// one was injected, [`PlainSignInMail`] otherwise.
     sign_in_mail: Arc<dyn SignInMail>,
+    /// What the composition does once a member is removed (ADR 0004):
+    /// revoke their tokens, disable their agent accounts. `None` does
+    /// nothing more than the tombstone, which already refuses both.
+    pub(crate) removal: Option<Arc<dyn MemberRemoval>>,
 }
 
 impl ModuleState {
@@ -223,13 +228,19 @@ impl ModuleState {
     /// The origin a sign-in link is built from, or the 503 that says the
     /// deployment has not said where it lives. A relative link in a mail is
     /// a dead link, so this is refused rather than guessed.
-    fn public_base(&self) -> Result<&str, Problem> {
+    pub(crate) fn public_base(&self) -> Result<&str, Problem> {
         self.public_base.as_deref().ok_or_else(|| {
             Problem::new(&NOT_CONFIGURED).with_detail(
                 "an operator sets WORKSPACES_REDIRECT_BASE to the public origin \
                  sign-in links point at",
             )
         })
+    }
+
+    /// A sign-in or invitation mail to `to`, rendered through the
+    /// composition's renderer and keyed per link.
+    pub(crate) fn message(&self, to: &str, link: &str, input: SignInMailInput<'_>) -> Message {
+        sign_in_message_with(&*self.sign_in_mail, &self.mail_from, to, link, input)
     }
 
     /// The Events API signing secret, or [`None`] when this deployment takes
@@ -253,6 +264,7 @@ pub(crate) fn router(
     turns: Option<Arc<dyn Turns>>,
     ledger: Option<Arc<dyn EmailLedger>>,
     sign_in_mail: Option<Arc<dyn SignInMail>>,
+    removal: Option<Arc<dyn MemberRemoval>>,
 ) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
@@ -270,6 +282,7 @@ pub(crate) fn router(
         turns: turns.unwrap_or_else(|| Arc::new(LocalTurns::default())),
         ledger,
         sign_in_mail: sign_in_mail.unwrap_or_else(|| Arc::new(PlainSignInMail)),
+        removal,
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))
@@ -280,7 +293,18 @@ pub(crate) fn router(
         .route("/slack/manifest", get(slack_manifest))
         .route("/slack/events", post(slack_events))
         .route("/me", get(me))
+        .route("/", get(members::list_workspaces))
+        .route("/switch", post(members::switch))
         .route("/members", get(members))
+        .route(
+            "/members/{user_id}",
+            axum::routing::patch(members::change_role).delete(members::remove),
+        )
+        .route("/invites", get(members::invites).post(members::invite))
+        .route(
+            "/invites/{id}",
+            axum::routing::delete(members::revoke_invite),
+        )
         .route("/signout", post(signout))
         .route("/email/start", post(email_start))
         .route("/email/verify", get(email_verify_form).post(email_verify))
@@ -480,7 +504,7 @@ fn secret(id_gen: &dyn IdGen) -> String {
 /// the state and nonce, in the 64 characters ADR 0002 asks for. Only the
 /// token's SHA-256 is ever stored — see [`token_hash`] — so nothing anybody
 /// can read out of `sign_in_links` is a value they could present.
-fn sign_in_token(id_gen: &dyn IdGen) -> String {
+pub(crate) fn sign_in_token(id_gen: &dyn IdGen) -> String {
     hex(&Sha256::digest(secret(id_gen).as_bytes()))
 }
 
@@ -500,7 +524,7 @@ fn hex(bytes: &[u8]) -> String {
 /// The SHA-256 of a sign-in token, hex encoded: what `sign_in_links` stores
 /// in place of the token. A read of that table therefore yields nothing
 /// anybody can present.
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     hex(&Sha256::digest(token.as_bytes()))
 }
 
@@ -682,7 +706,13 @@ async fn link_slack_workspace(
             .await
             .map_err(database)?
             .ok_or_else(no_session)?;
-        if workspace.owner_id != user_id {
+        // An owner's call (ADR 0004): the role, read now, not the founder
+        // column, so an owner who has been demoted cannot link a team.
+        let is_owner = store::member(db, workspace_id, user_id)
+            .await
+            .map_err(database)?
+            .is_some_and(|member| member.role == store::Role::Owner);
+        if workspace.id != workspace_id || !is_owner {
             return Err(not_allowed());
         }
         match store::link_connection(db, workspace_id, "slack", &identity.team_id, now)
@@ -914,6 +944,7 @@ struct MemberView {
     name: String,
     timezone: Option<String>,
     is_admin: bool,
+    role: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -953,14 +984,19 @@ async fn members(
     let rows = store::members(&*db, &workspace.id)
         .await
         .map_err(database)?;
-    Ok(Json(rows.into_iter().map(member_view).collect::<Vec<_>>()).into_response())
+    Ok(Json(
+        rows.into_iter()
+            .map(members::MemberView::from)
+            .collect::<Vec<_>>(),
+    )
+    .into_response())
 }
 
 /// Resolves the signed-in person from the session cookie, and only from
 /// it: the workspace id is the one the verified claims name, so no request
 /// can point the query at another workspace. A verified session whose
 /// member row is gone is refused exactly like no session at all.
-async fn session_scope(
+pub(crate) async fn session_scope(
     state: &ModuleState,
     headers: &HeaderMap,
 ) -> Result<(Workspace, Member, bool), Problem> {
@@ -993,8 +1029,14 @@ pub struct Caller {
     pub workspace_id: String,
     /// The member within that workspace.
     pub user_id: String,
-    /// The workspace's owner, or a member the sign-in method marks admin.
+    /// An owner or admin role, or a member Slack marks admin.
     pub is_admin: bool,
+    /// The member's role (ADR 0004).
+    pub role: store::Role,
+    /// The member's display name.
+    pub name: String,
+    /// The workspace's name.
+    pub workspace_name: String,
 }
 
 /// Resolves the caller from the session cookie, through the same
@@ -1020,9 +1062,12 @@ pub async fn caller(
     };
     let (workspace, member, is_owner) = session_scope_of(db, &session).await?;
     Ok(Caller {
+        is_admin: is_owner || member.may_administer(),
+        role: member.role,
+        name: member.name,
+        workspace_name: workspace.name,
         workspace_id: workspace.id,
         user_id: member.user_id,
-        is_admin: is_owner || member.is_admin,
     })
 }
 
@@ -1049,9 +1094,12 @@ pub async fn caller_for(
         return Ok(None);
     };
     Ok(Some(Caller {
+        is_admin: member.may_administer(),
+        role: member.role,
+        name: member.name,
+        workspace_name: workspace.name,
         workspace_id: workspace.id,
         user_id: member.user_id,
-        is_admin: workspace.owner_id == user_id || member.is_admin,
     }))
 }
 
@@ -1075,7 +1123,9 @@ async fn session_scope_of(
     else {
         return Err(no_session());
     };
-    let is_owner = workspace.owner_id == session.user_id;
+    // The role, not the founder column (ADR 0004): ownership can be shared,
+    // handed on and given up.
+    let is_owner = member.role == store::Role::Owner;
     Ok((workspace, member, is_owner))
 }
 
@@ -1117,7 +1167,7 @@ async fn signout(headers: HeaderMap) -> Result<Response, Problem> {
 /// present, must be this request's own origin, compared as an RFC 6454
 /// origin rather than as a string. A request carrying neither header is not
 /// a browser and is accepted.
-fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
+pub(crate) fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
     let refused = |detail: String| Problem::new(&CROSS_SITE_REQUEST).with_detail(detail);
     if let Some(site) = headers.get("sec-fetch-site") {
         let site = site.to_str().unwrap_or_default().to_ascii_lowercase();
@@ -1168,6 +1218,7 @@ fn member_view(member: Member) -> MemberView {
         name: member.name,
         timezone: member.timezone,
         is_admin: member.is_admin,
+        role: member.role.as_str(),
     }
 }
 
@@ -1310,7 +1361,34 @@ pub(crate) struct PlainSignInMail;
 
 impl SignInMail for PlainSignInMail {
     fn render(&self, input: &SignInMailInput<'_>) -> Rendered {
-        let SignInMailInput { link, minutes, .. } = *input;
+        let link = input.link;
+        let lifetime = input.lifetime();
+        if let Some(invitation) = input.invitation {
+            // Names are the workspace's and a member's own text: escaped in
+            // the HTML part, and the text part is plain text anyway.
+            let (workspace, by) = (invitation.workspace, invitation.invited_by);
+            let text = format!(
+                "{by} invited you to the {workspace} workspace on Living Brain.\n\n\
+                 Accept:\n\n{link}\n\nThe link works once, for the next {lifetime}. If you \
+                 were not expecting it, ignore this message — nothing has happened yet."
+            );
+            let (workspace, by) = (html_escape(workspace), html_escape(by));
+            let html = format!(
+                "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+                 <title>You're invited to Living Brain</title>\n</head>\n<body>\n\
+                 <h1>Join {workspace} on Living Brain</h1>\n\
+                 <p>{by} invited you. This link works once, for the next {lifetime}.</p>\n\
+                 <p><a href=\"{link}\">Accept the invitation</a></p>\n\
+                 <p>If you were not expecting it, ignore this message — nothing has happened \
+                 yet.</p>\n</body>\n</html>\n"
+            );
+            return Rendered {
+                subject: "You're invited to Living Brain".to_owned(),
+                html,
+                text,
+            };
+        }
+        let minutes = input.minutes;
         let text = format!(
             "Your Living Brain sign-in link:\n\n{link}\n\nIt works once, and for the next \
              {minutes} minutes. If you did not ask for it, ignore this message — nothing has \
@@ -1340,15 +1418,34 @@ impl SignInMail for PlainSignInMail {
 /// for the venture's branded one cannot change when a provider collapses a
 /// retried send.
 fn sign_in_message(renderer: &dyn SignInMail, from: &str, to: &str, link: &str) -> Message {
+    sign_in_message_with(
+        renderer,
+        from,
+        to,
+        link,
+        SignInMailInput {
+            link,
+            minutes: flow::SIGN_IN_TTL_SECS / 60,
+            recipient: to,
+            invitation: None,
+        },
+    )
+}
+
+/// [`sign_in_message`] over an input the caller built — an invitation's,
+/// which names the workspace and lives for days.
+fn sign_in_message_with(
+    renderer: &dyn SignInMail,
+    from: &str,
+    to: &str,
+    link: &str,
+    input: SignInMailInput<'_>,
+) -> Message {
     let Rendered {
         subject,
         html,
         text,
-    } = renderer.render(&SignInMailInput {
-        link,
-        minutes: flow::SIGN_IN_TTL_SECS / 60,
-        recipient: to,
-    });
+    } = renderer.render(&input);
     Message::new(to.to_owned(), from.to_owned(), subject, text, html)
         // A provider that retried the same send collapses it instead of
         // mailing twice. The key is per *link*, not per address: keyed on the
@@ -1372,7 +1469,7 @@ fn sign_in_mail(from: &str, to: &str, link: &str) -> Message {
 /// A mail the provider refused. The error's `Display` is already scrubbed
 /// of addresses, so it is safe as a detail — and the response body still
 /// says nothing about whether the address is one anybody here has.
-fn mail_failed(_error: MailError) -> Problem {
+pub(crate) fn mail_failed(_error: MailError) -> Problem {
     Problem::new(&MAIL_FAILED)
 }
 
@@ -1548,15 +1645,36 @@ async fn email_verify(
     // means "write nothing": an address is not a display name, and a member
     // who signed in with Slack has a real one that an email sign-in must
     // not overwrite.
-    let (workspace_id, member_id, display_name) = match row.workspace_id.as_deref() {
+    let (workspace_id, member_id, display_name, invited_role) = match row.workspace_id.as_deref() {
         Some(workspace_id) => {
-            let Some(member) = store::member_for_identity(&*db, workspace_id, "email", &row.email)
+            match store::member_for_identity(&*db, workspace_id, "email", &row.email)
                 .await
                 .map_err(database)?
-            else {
-                return Err(Problem::new(&NOT_A_MEMBER));
-            };
-            (workspace_id.to_owned(), member.user_id, None)
+            {
+                Some(member) => (workspace_id.to_owned(), member.user_id, None, None),
+                // Not a member yet: an open invitation for this address is
+                // what lets them in, with the role it carried (ADR 0004).
+                None => match members::accept_on_sign_in(
+                    &*db,
+                    &*id_gen,
+                    workspace_id,
+                    &row.email,
+                    &now_text,
+                )
+                .await?
+                {
+                    Some((user_id, role)) => (
+                        workspace_id.to_owned(),
+                        user_id,
+                        Some(workspace_name(&store::SignInLinkRow {
+                            workspace_name: String::new(),
+                            ..row.clone()
+                        })),
+                        Some(role),
+                    ),
+                    None => return Err(Problem::new(&NOT_A_MEMBER)),
+                },
+            }
         }
         None => {
             let owner_id = new_user_id(&*id_gen);
@@ -1604,7 +1722,7 @@ async fn email_verify(
             .map_err(database)?;
             // The local part is the closest thing to a name an address
             // carries, and it is what the person would have typed anyway.
-            (workspace_id, owner_id, Some(name))
+            (workspace_id, owner_id, Some(name), None)
         }
     };
 
@@ -1620,6 +1738,13 @@ async fn email_verify(
     )
     .await
     .map_err(database)?;
+    // A member an invitation just created takes the role it carried; the
+    // insert above made them a plain member, which is never more than that.
+    if let Some(role) = invited_role {
+        store::set_initial_role(&*db, &workspace_id, &member_id, role)
+            .await
+            .map_err(database)?;
+    }
 
     let session_value = flow::seal(
         &*signer,

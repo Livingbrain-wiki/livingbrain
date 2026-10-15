@@ -49,6 +49,7 @@ mod events;
 mod flow;
 mod handlers;
 mod install;
+mod members;
 mod reply;
 mod slack;
 mod store;
@@ -64,7 +65,7 @@ pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
 pub use handlers::{Caller, caller, caller_for};
 pub use install::{BotTokenError, bot_token};
 pub use livingbrain_pages::Answers;
-pub use store::{LinkOutcome, UserChange, apply_user_change, link_connection, link_identity};
+pub use store::{LinkOutcome, Role, UserChange, apply_user_change, link_connection, link_identity};
 pub use turn::set_proactivity;
 
 use std::sync::Arc;
@@ -143,6 +144,42 @@ const MIGRATION_0004_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0004_turn.sql"),
 );
 
+/// Members, roles and invitations (ADR 0004): the `role` and `removed_at`
+/// columns and the invitations table.
+const MIGRATION_0005: SqlMigration = SqlMigration::new(
+    "0005",
+    "members",
+    include_str!("../migrations/sqlite/0005_members.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_0005`], the same file byte for byte.
+const MIGRATION_0005_POSTGRES: SqlMigration = SqlMigration::new(
+    "0005",
+    "members",
+    include_str!("../migrations/postgres/0005_members.sql"),
+);
+
+/// What the composition does once a member has been removed (ADR 0004).
+///
+/// The tombstone this module writes already refuses the removed member's
+/// sessions and personal access tokens, because both re-read the member row.
+/// The seam is for the rows other modules own — the token rows themselves,
+/// so a re-admitted person's old tokens stay dead; agent accounts the member
+/// owned; grants naming them — which this module may not reach (the graph
+/// runs `tokens` → `workspaces`).
+#[async_trait::async_trait]
+pub trait MemberRemoval: Send + Sync {
+    /// `user_id` was just removed from `workspace_id`. Best effort: the
+    /// removal has happened, and a failure here must not undo it.
+    async fn removed(
+        &self,
+        db: &dyn Database,
+        now: OffsetDateTime,
+        workspace_id: &str,
+        user_id: &str,
+    );
+}
+
 /// Records an email send into the cost ledger, for the composition to
 /// inject (issue #12). A seam rather than a dependency because the graph
 /// runs the other way: the usage module reaches this one through `tokens`
@@ -171,6 +208,34 @@ pub struct SignInMailInput<'a> {
     pub minutes: i64,
     /// The address the mail goes to, for a "sent to … because …" line.
     pub recipient: &'a str,
+    /// Set when the link is an invitation to join a workspace (ADR 0004)
+    /// rather than a sign-in the recipient asked for.
+    pub invitation: Option<Invitation<'a>>,
+}
+
+/// What an invitation mail says beyond the link.
+#[derive(Debug, Clone, Copy)]
+pub struct Invitation<'a> {
+    /// The workspace's name.
+    pub workspace: &'a str,
+    /// The display name of the member who sent it.
+    pub invited_by: &'a str,
+}
+
+impl SignInMailInput<'_> {
+    /// How long the link lives, in words: minutes under two hours, hours
+    /// under two days, days beyond.
+    #[must_use]
+    pub fn lifetime(&self) -> String {
+        let minutes = self.minutes;
+        if minutes < 120 {
+            format!("{minutes} minutes")
+        } else if minutes < 2 * 24 * 60 {
+            format!("{} hours", minutes / 60)
+        } else {
+            format!("{} days", minutes / (24 * 60))
+        }
+    }
 }
 
 /// Renders the sign-in mail's subject, HTML and text, for the composition to
@@ -208,6 +273,8 @@ pub struct Workspaces {
     /// The seam the sign-in mail renders through. `None` is the module's
     /// own plain mail.
     sign_in_mail: Option<Arc<dyn SignInMail>>,
+    /// The seam a member removal cleans up through (ADR 0004).
+    removal: Option<Arc<dyn MemberRemoval>>,
 }
 
 // The seams are `dyn`s and not a `Debug`; the module itself is still
@@ -219,6 +286,7 @@ impl std::fmt::Debug for Workspaces {
             .field("turns", &self.turns.is_some())
             .field("ledger", &self.ledger.is_some())
             .field("sign_in_mail", &self.sign_in_mail.is_some())
+            .field("removal", &self.removal.is_some())
             .finish()
     }
 }
@@ -280,6 +348,13 @@ impl Workspaces {
         self.sign_in_mail = Some(mail);
         self
     }
+
+    /// Clean up through `removal` once a member is removed (ADR 0004).
+    #[must_use]
+    pub fn on_member_removed(mut self, removal: Arc<dyn MemberRemoval>) -> Self {
+        self.removal = Some(removal);
+        self
+    }
 }
 
 impl Module for Workspaces {
@@ -334,6 +409,7 @@ impl Module for Workspaces {
             "slack_installs",
             "turn_policies",
             "turn_triage",
+            "workspace_invites",
         ]
     }
 
@@ -422,6 +498,17 @@ impl Module for Workspaces {
             // policy row is a workspace's (or channel's) choice of
             // proactivity, and the triage row is what one *message* decided
             // and cost — platform ids and numbers, never text or author.
+            PersonalDataSet {
+                table: "workspace_invites",
+                subject: "email",
+                kind: DataKind::Contact,
+                disposition: Disposition::Erase,
+                description: "An invitation to a workspace sent to your email address: \
+                              the role offered, who sent it, when it lapses, and whether \
+                              you accepted it.",
+                redacted: &["link_hash", "invited_by"],
+                subject_via: None,
+            },
             PersonalDataSet::none(
                 "turn_policies",
                 "the row is one channel's (or the workspace's org-wide) \
@@ -440,20 +527,22 @@ impl Module for Workspaces {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 4] = [
+        const MIGRATIONS: [SqlMigration; 5] = [
             MIGRATION_INIT,
             MIGRATION_0002,
             MIGRATION_0003,
             MIGRATION_0004,
+            MIGRATION_0005,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or
         // an entry out of order at build time.
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 4] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 5] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_0002_POSTGRES,
             MIGRATION_0003_POSTGRES,
             MIGRATION_0004_POSTGRES,
+            MIGRATION_0005_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
@@ -496,6 +585,7 @@ impl Module for Workspaces {
             self.turns.clone(),
             self.ledger.clone(),
             self.sign_in_mail.clone(),
+            self.removal.clone(),
         )
     }
 }

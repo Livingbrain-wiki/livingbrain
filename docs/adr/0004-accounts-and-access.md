@@ -79,7 +79,9 @@ in `.harness-lock.json`, like 0019/0020) and does **not** mount the
 
 Roles on `workspace_members.role`: `owner`, `admin`, `member`, `viewer`.
 
-- Backfill: `owner_id` → `owner`; `is_admin = 1` → `admin`; else `member`.
+- Backfill: `owner_id` → `owner`; everyone else `member`. Slack's
+  `is_admin` is **not** copied into `role` (it stays its own mirrored
+  column), so a later Slack demotion still takes effect.
 - `workspaces.owner_id` stays as the *founder* (never rewritten, ADR 0001);
   authority comes from `role`. There may be several owners.
 - **Last-owner protection:** demoting or removing the last `owner` is one
@@ -279,8 +281,11 @@ rewrite is no trail.
 
 Known, accepted: session cookies are self-contained (ADR 0001) — a removed
 member's cookie stops working because the member row is checked on every
-request, not because the cookie is revoked; a re-added member with the same
-id would find an old cookie live again until its 7-day expiry.
+request, not because the cookie is revoked. Removal therefore **tombstones**
+the row (`removed_at`) instead of deleting it: a removed Slack member who signs
+in with Slack again lands on the tombstone and is refused, and the Slack member
+mirror cannot revive it. Re-inviting a removed person mints a fresh member id,
+so none of their old cookies or tokens come back.
 
 ## Migration path
 
@@ -296,6 +301,16 @@ mean what they meant. Migrations, in order:
    (from `cratefield-module-orgs`), collected into the venture.
 
 All portable SQL (harness ADR 0004), one file per dialect, re-runnable.
+
+## Implementation notes (phase a)
+
+- `viewer` is accepted by the model but refused by the routes (`422`) until
+  phase c makes it read-only everywhere: a role that says "read-only" and is
+  not would be worse than none.
+- The audit log arrives with the module-orgs release (phases b/c); phase a
+  writes none.
+- Removal runs the composition's `MemberRemoval` seam after the tombstone; the
+  venture revokes the member's PATs there.
 
 ## Phases
 

@@ -148,6 +148,7 @@ fn sign_in() -> Rendered {
         link: SIGN_IN_LINK,
         minutes: 15,
         recipient: "ada@example.com",
+        invitation: None,
     })
 }
 

@@ -86,5 +86,9 @@
   "pages/0006": {
     "file": "0022_pages_0006_facts.sql",
     "sha256": "7eb6480af9e61e81e876a16e85e67cfd1742f6b2a87e74780ccab75905725533"
+  },
+  "workspaces/0005": {
+    "file": "0023_workspaces_0005_members.sql",
+    "sha256": "ae6fc1ffa6eed6f2db27d527be294dfa3bd77cff6ed842036c0cf4a18cca1da4"
   }
 }

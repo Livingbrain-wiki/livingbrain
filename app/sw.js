@@ -11,7 +11,7 @@
  */
 
 
-const CACHE = "lb-app-v9";
+const CACHE = "lb-app-v10";
 
 const SHELL = [
   "./",
@@ -29,6 +29,8 @@ const SHELL = [
   // app.js and models.js import the provider marks beside the names.
   "./assets/marks.js",
   "./assets/tokens.js",
+  // app.js imports the members section's helpers statically (ADR 0004).
+  "./assets/members.js",
   // wiki.js is app.js's import for the wiki page, and wiki.css its sheet;
   // an ES module import fails atomically, so an offline wiki needs both.
   "./assets/wiki.js",

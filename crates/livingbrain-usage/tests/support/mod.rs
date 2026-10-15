@@ -120,6 +120,13 @@ pub async fn seed_member(kit: &TestHarness, workspace_id: &str, user_id: &str, i
         ))
         .await
         .expect("the member row seeds");
+    // The founder is an owner, as migration workspaces/0005 backfills.
+    kit.db
+        .execute(&Statement::new(
+            "UPDATE workspace_members SET role = 'owner' WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.id = workspace_members.workspace_id AND w.owner_id = workspace_members.user_id)",
+        ))
+        .await
+        .expect("the owner role seeds");
 }
 
 /// A session cookie the way the workspaces module seals one. The

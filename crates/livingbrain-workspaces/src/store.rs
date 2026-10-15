@@ -29,7 +29,58 @@ pub(crate) struct Member {
     pub user_id: String,
     pub name: String,
     pub timezone: Option<String>,
+    /// Slack's admin flag, mirrored. Not the member's role: see [`Role`].
     pub is_admin: bool,
+    /// What the member may do here (ADR 0004).
+    pub role: Role,
+}
+
+impl Member {
+    /// Whether the member may administer the workspace: an owner or admin
+    /// role, or Slack's admin flag (kept so nobody who was an admin before
+    /// roles existed stops being one).
+    pub(crate) fn may_administer(&self) -> bool {
+        matches!(self.role, Role::Owner | Role::Admin) || self.is_admin
+    }
+}
+
+/// A member's role (ADR 0004). Ordered by reach: an owner may do everything
+/// an admin may, and so on down to a viewer, who reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Role {
+    /// Reads the shared space; writes only their own.
+    Viewer,
+    /// Reads and writes the shared space.
+    Member,
+    /// Manages members (not owners), invitations and agent accounts.
+    Admin,
+    /// Everything, including other owners. A workspace keeps at least one.
+    Owner,
+}
+
+impl Role {
+    /// The stored spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Member => "member",
+            Self::Admin => "admin",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// The role a stored or requested spelling names, or `None`.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "viewer" => Some(Self::Viewer),
+            "member" => Some(Self::Member),
+            "admin" => Some(Self::Admin),
+            "owner" => Some(Self::Owner),
+            _ => None,
+        }
+    }
 }
 
 /// What [`apply_user_change`] did with an event.
@@ -95,8 +146,8 @@ pub(crate) async fn member(
     user_id: &str,
 ) -> Result<Option<Member>, DbError> {
     let statement = Statement::with_values(
-        "SELECT user_id, name, timezone, is_admin FROM workspace_members \
-         WHERE workspace_id = ? AND user_id = ?",
+        "SELECT user_id, name, timezone, is_admin, role FROM workspace_members \
+         WHERE workspace_id = ? AND user_id = ? AND removed_at IS NULL",
         vec![text(workspace_id), text(user_id)],
     );
     Ok(db.query(&statement).await?.first().map(member_from))
@@ -106,8 +157,8 @@ pub(crate) async fn member(
 /// stable across engines.
 pub(crate) async fn members(db: &dyn Database, workspace_id: &str) -> Result<Vec<Member>, DbError> {
     let statement = Statement::with_values(
-        "SELECT user_id, name, timezone, is_admin FROM workspace_members \
-         WHERE workspace_id = ? ORDER BY user_id",
+        "SELECT user_id, name, timezone, is_admin, role FROM workspace_members \
+         WHERE workspace_id = ? AND removed_at IS NULL ORDER BY user_id",
         vec![text(workspace_id)],
     );
     Ok(db
@@ -150,8 +201,11 @@ pub(crate) async fn upsert_member(
         is_admin,
     } = fields;
     let insert = Statement::with_values(
-        "INSERT INTO workspace_members (workspace_id, user_id, name, timezone, is_admin, updated_at) \
-         VALUES (?, ?, COALESCE(?, ''), ?, COALESCE(?, 0), ?) \
+        "INSERT INTO workspace_members \
+           (workspace_id, user_id, name, timezone, is_admin, updated_at, role) \
+         VALUES (?, ?, COALESCE(?, ''), ?, COALESCE(?, 0), ?, \
+           CASE WHEN EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ? AND w.owner_id = ?) \
+                THEN 'owner' ELSE 'member' END) \
          ON CONFLICT (workspace_id, user_id) DO NOTHING",
         vec![
             text(workspace_id),
@@ -160,6 +214,8 @@ pub(crate) async fn upsert_member(
             nullable_text(timezone.filter(|timezone| !timezone.is_empty())),
             nullable_flag(is_admin),
             text(now),
+            text(workspace_id),
+            text(user_id),
         ],
     );
     db.execute(&insert).await?;
@@ -300,10 +356,11 @@ pub(crate) async fn member_for_identity(
     external_id: &str,
 ) -> Result<Option<Member>, DbError> {
     let statement = Statement::with_values(
-        "SELECT m.user_id, m.name, m.timezone, m.is_admin FROM member_identities i \
+        "SELECT m.user_id, m.name, m.timezone, m.is_admin, m.role FROM member_identities i \
          JOIN workspace_members m \
            ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
-         WHERE i.workspace_id = ? AND i.platform = ? AND i.external_id = ?",
+         WHERE i.workspace_id = ? AND i.platform = ? AND i.external_id = ? \
+           AND m.removed_at IS NULL",
         vec![text(workspace_id), text(platform), text(external_id)],
     );
     Ok(db.query(&statement).await?.first().map(member_from))
@@ -554,6 +611,12 @@ fn member_from(row: &Row) -> Member {
         name: row.get::<String>("name").unwrap_or_default(),
         timezone: row.get::<Option<String>>("timezone").flatten(),
         is_admin: row.get::<i64>("is_admin").unwrap_or_default() != 0,
+        // An unreadable role reads as the least one, so a corrupt row fails
+        // closed rather than open.
+        role: row
+            .get::<String>("role")
+            .and_then(|role| Role::parse(&role))
+            .unwrap_or(Role::Viewer),
     }
 }
 
@@ -567,4 +630,408 @@ fn sign_in_link_from(row: &Row) -> SignInLinkRow {
         workspace_name: row.get::<String>("workspace_name").unwrap_or_default(),
         expires_at: row.get::<String>("expires_at").unwrap_or_default(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Roles, removal and invitations (ADR 0004, phase a)
+//
+// Every write that could leave a workspace without an owner is one guarded
+// statement inside a `batch_atomic` whose first statement takes the
+// workspace's row lock, so two owners demoting or removing each other at
+// once cannot both succeed under Postgres `READ COMMITTED` (on D1 writes are
+// serialized anyway). `batch_atomic` reports no row counts, so the caller
+// reads the row back to learn which way it went.
+
+/// The lock the guarded writes below take first: a no-op write on the
+/// workspace row.
+fn lock_workspace(workspace_id: &str) -> Statement {
+    Statement::with_values(
+        "UPDATE workspaces SET id = id WHERE id = ?",
+        vec![text(workspace_id)],
+    )
+}
+
+/// The `WHERE` fragment that holds an owner row in place while it is the
+/// last live owner. Non-owner rows are never held by it.
+const ANOTHER_OWNER_REMAINS: &str = "(role <> 'owner' OR \
+     (SELECT COUNT(*) FROM workspace_members o \
+       WHERE o.workspace_id = workspace_members.workspace_id \
+         AND o.role = 'owner' AND o.removed_at IS NULL) > 1)";
+
+/// What a role change or a removal did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RosterOutcome {
+    /// Applied.
+    Done,
+    /// No live member with that id in this workspace.
+    NotFound,
+    /// Refused: it would leave the workspace with no owner.
+    LastOwner,
+}
+
+/// Sets a live member's role, unless they are the last owner and the new
+/// role is not `owner`.
+pub(crate) async fn set_role(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+    role: Role,
+    now: &str,
+) -> Result<RosterOutcome, DbError> {
+    // Making somebody an owner can never leave the workspace without one, so
+    // the guard is only on the way down. Decided here rather than as a bound
+    // `? = 'owner'`, which Postgres cannot type.
+    let guard = if role == Role::Owner {
+        String::new()
+    } else {
+        format!(" AND {ANOTHER_OWNER_REMAINS}")
+    };
+    let update = Statement::with_values(
+        format!(
+            "UPDATE workspace_members SET role = ?, updated_at = ? \
+              WHERE workspace_id = ? AND user_id = ? AND removed_at IS NULL{guard}"
+        ),
+        vec![
+            text(role.as_str()),
+            text(now),
+            text(workspace_id),
+            text(user_id),
+        ],
+    );
+    db.batch_atomic(&[lock_workspace(workspace_id), update])
+        .await?;
+    Ok(match member(db, workspace_id, user_id).await? {
+        None => RosterOutcome::NotFound,
+        Some(row) if row.role == role => RosterOutcome::Done,
+        Some(_) => RosterOutcome::LastOwner,
+    })
+}
+
+/// Removes a live member: tombstones the row and deletes the identities that
+/// sign them in, unless they are the last owner. Their sessions and tokens
+/// stop working at once, because both re-read the member row on every
+/// request and a removed row is no row.
+pub(crate) async fn remove_member(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+    now: &str,
+) -> Result<RosterOutcome, DbError> {
+    if member(db, workspace_id, user_id).await?.is_none() {
+        return Ok(RosterOutcome::NotFound);
+    }
+    let tombstone = Statement::with_values(
+        format!(
+            "UPDATE workspace_members SET removed_at = ?, updated_at = ? \
+              WHERE workspace_id = ? AND user_id = ? AND removed_at IS NULL \
+                AND {ANOTHER_OWNER_REMAINS}"
+        ),
+        vec![text(now), text(now), text(workspace_id), text(user_id)],
+    );
+    // Only once the tombstone above landed: an identity row of somebody the
+    // guard held back is left exactly where it was.
+    let identities = Statement::with_values(
+        "DELETE FROM member_identities WHERE workspace_id = ? AND user_id = ? \
+           AND EXISTS (SELECT 1 FROM workspace_members m \
+                        WHERE m.workspace_id = ? AND m.user_id = ? \
+                          AND m.removed_at IS NOT NULL)",
+        vec![
+            text(workspace_id),
+            text(user_id),
+            text(workspace_id),
+            text(user_id),
+        ],
+    );
+    db.batch_atomic(&[lock_workspace(workspace_id), tombstone, identities])
+        .await?;
+    Ok(if member(db, workspace_id, user_id).await?.is_none() {
+        RosterOutcome::Done
+    } else {
+        RosterOutcome::LastOwner
+    })
+}
+
+/// The email addresses a member signs in with, in this workspace.
+pub(crate) async fn email_identities(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Vec<String>, DbError> {
+    let statement = Statement::with_values(
+        "SELECT external_id FROM member_identities \
+          WHERE workspace_id = ? AND user_id = ? AND platform = 'email' \
+          ORDER BY external_id",
+        vec![text(workspace_id), text(user_id)],
+    );
+    Ok(db
+        .query(&statement)
+        .await?
+        .rows
+        .iter()
+        .filter_map(|row| row.get::<String>("external_id"))
+        .collect())
+}
+
+/// One workspace a person's address signs them in to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Membership {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub user_id: String,
+    pub role: Role,
+}
+
+/// Every workspace where one of `addresses` is a live member's email
+/// identity, ordered by name — the workspace switcher's list.
+pub(crate) async fn memberships_for(
+    db: &dyn Database,
+    addresses: &[String],
+) -> Result<Vec<Membership>, DbError> {
+    if addresses.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marks = vec!["?"; addresses.len()].join(", ");
+    let statement = Statement::with_values(
+        format!(
+            "SELECT DISTINCT w.id AS workspace_id, w.name AS workspace_name, \
+                    m.user_id AS user_id, m.role AS role \
+               FROM member_identities i \
+               JOIN workspace_members m \
+                 ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
+               JOIN workspaces w ON w.id = i.workspace_id \
+              WHERE i.platform = 'email' AND i.external_id IN ({marks}) \
+                AND m.removed_at IS NULL \
+              ORDER BY workspace_name, workspace_id"
+        ),
+        addresses.iter().map(|address| text(address)).collect(),
+    );
+    Ok(db
+        .query(&statement)
+        .await?
+        .rows
+        .iter()
+        .map(|row| Membership {
+            workspace_id: row.get::<String>("workspace_id").unwrap_or_default(),
+            workspace_name: row.get::<String>("workspace_name").unwrap_or_default(),
+            user_id: row.get::<String>("user_id").unwrap_or_default(),
+            role: row
+                .get::<String>("role")
+                .and_then(|role| Role::parse(&role))
+                .unwrap_or(Role::Viewer),
+        })
+        .collect())
+}
+
+/// One invitation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Invite {
+    pub id: String,
+    pub email: String,
+    pub role: Role,
+    pub invited_by: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub accepted_at: Option<String>,
+    pub accepted_user_id: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+const INVITE_COLUMNS: &str = "id, email, role, invited_by, created_at, expires_at, \
+                              accepted_at, accepted_user_id, revoked_at";
+
+fn invite_from(row: &Row) -> Invite {
+    let optional = |name: &str| {
+        row.get::<Option<String>>(name)
+            .flatten()
+            .filter(|value| !value.is_empty())
+    };
+    Invite {
+        id: row.get::<String>("id").unwrap_or_default(),
+        email: row.get::<String>("email").unwrap_or_default(),
+        role: row
+            .get::<String>("role")
+            .and_then(|role| Role::parse(&role))
+            .unwrap_or(Role::Viewer),
+        invited_by: row.get::<String>("invited_by").unwrap_or_default(),
+        created_at: row.get::<String>("created_at").unwrap_or_default(),
+        expires_at: row.get::<String>("expires_at").unwrap_or_default(),
+        accepted_at: optional("accepted_at"),
+        accepted_user_id: optional("accepted_user_id"),
+        revoked_at: optional("revoked_at"),
+    }
+}
+
+/// What a new invitation records.
+pub(crate) struct NewInvite<'a> {
+    pub id: &'a str,
+    pub workspace_id: &'a str,
+    pub email: &'a str,
+    pub role: Role,
+    pub invited_by: &'a str,
+    pub link_hash: &'a str,
+    pub expires_at: &'a str,
+}
+
+/// Records an invitation. Any earlier invitation still open for the same
+/// address in the same workspace is revoked in the same transaction (and
+/// its link spent), so one address holds at most one live invitation.
+pub(crate) async fn put_invite(
+    db: &dyn Database,
+    invite: &NewInvite<'_>,
+    now: &str,
+) -> Result<(), DbError> {
+    let spend_old_links = Statement::with_values(
+        "UPDATE sign_in_links SET spent_at = ? WHERE spent_at IS NULL AND token_hash IN \
+           (SELECT link_hash FROM workspace_invites \
+             WHERE workspace_id = ? AND email = ? \
+               AND accepted_at IS NULL AND revoked_at IS NULL)",
+        vec![text(now), text(invite.workspace_id), text(invite.email)],
+    );
+    let revoke_old = Statement::with_values(
+        "UPDATE workspace_invites SET revoked_at = ? \
+          WHERE workspace_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL",
+        vec![text(now), text(invite.workspace_id), text(invite.email)],
+    );
+    let insert = Statement::with_values(
+        "INSERT INTO workspace_invites \
+           (id, workspace_id, email, role, invited_by, link_hash, created_at, expires_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![
+            text(invite.id),
+            text(invite.workspace_id),
+            text(invite.email),
+            text(invite.role.as_str()),
+            text(invite.invited_by),
+            text(invite.link_hash),
+            text(now),
+            text(invite.expires_at),
+        ],
+    );
+    db.batch_atomic(&[spend_old_links, revoke_old, insert])
+        .await
+}
+
+/// The invitations of one workspace that are still open (not accepted, not
+/// revoked, not expired), newest first.
+pub(crate) async fn open_invites(
+    db: &dyn Database,
+    workspace_id: &str,
+    now: &str,
+) -> Result<Vec<Invite>, DbError> {
+    let statement = Statement::with_values(
+        format!(
+            "SELECT {INVITE_COLUMNS} FROM workspace_invites \
+              WHERE workspace_id = ? AND accepted_at IS NULL AND revoked_at IS NULL \
+                AND expires_at > ? \
+              ORDER BY created_at DESC, id"
+        ),
+        vec![text(workspace_id), text(now)],
+    );
+    Ok(db
+        .query(&statement)
+        .await?
+        .rows
+        .iter()
+        .map(invite_from)
+        .collect())
+}
+
+/// One invitation of this workspace, in any state.
+pub(crate) async fn invite(
+    db: &dyn Database,
+    workspace_id: &str,
+    id: &str,
+) -> Result<Option<Invite>, DbError> {
+    let statement = Statement::with_values(
+        format!("SELECT {INVITE_COLUMNS} FROM workspace_invites WHERE workspace_id = ? AND id = ?"),
+        vec![text(workspace_id), text(id)],
+    );
+    Ok(db.query(&statement).await?.first().map(invite_from))
+}
+
+/// Revokes an open invitation and spends its link. Answers whether one was
+/// open.
+pub(crate) async fn revoke_invite(
+    db: &dyn Database,
+    workspace_id: &str,
+    id: &str,
+    now: &str,
+) -> Result<bool, DbError> {
+    let Some(found) = invite(db, workspace_id, id).await? else {
+        return Ok(false);
+    };
+    if found.accepted_at.is_some() || found.revoked_at.is_some() {
+        return Ok(false);
+    }
+    db.batch_atomic(&[
+        Statement::with_values(
+            "UPDATE sign_in_links SET spent_at = ? WHERE spent_at IS NULL AND token_hash IN \
+               (SELECT link_hash FROM workspace_invites WHERE workspace_id = ? AND id = ?)",
+            vec![text(now), text(workspace_id), text(id)],
+        ),
+        Statement::with_values(
+            "UPDATE workspace_invites SET revoked_at = ? \
+              WHERE workspace_id = ? AND id = ? AND accepted_at IS NULL AND revoked_at IS NULL",
+            vec![text(now), text(workspace_id), text(id)],
+        ),
+    ])
+    .await?;
+    Ok(true)
+}
+
+/// Accepts the open invitation for `email` in `workspace_id`, if there is
+/// one: one guarded `UPDATE` claims it for `user_id`, so two accepts cannot
+/// both win. Answers the role it carried.
+pub(crate) async fn accept_invite(
+    db: &dyn Database,
+    workspace_id: &str,
+    email: &str,
+    user_id: &str,
+    now: &str,
+) -> Result<Option<Role>, DbError> {
+    let claim = Statement::with_values(
+        "UPDATE workspace_invites SET accepted_at = ?, accepted_user_id = ? \
+          WHERE id = (SELECT id FROM workspace_invites \
+                       WHERE workspace_id = ? AND email = ? AND accepted_at IS NULL \
+                         AND revoked_at IS NULL AND expires_at > ? \
+                       ORDER BY created_at DESC, id LIMIT 1) \
+            AND accepted_at IS NULL AND revoked_at IS NULL",
+        vec![
+            text(now),
+            text(user_id),
+            text(workspace_id),
+            text(email),
+            text(now),
+        ],
+    );
+    if db.execute(&claim).await? == 0 {
+        return Ok(None);
+    }
+    let read = Statement::with_values(
+        "SELECT role FROM workspace_invites \
+          WHERE workspace_id = ? AND email = ? AND accepted_user_id = ? AND accepted_at = ?",
+        vec![text(workspace_id), text(email), text(user_id), text(now)],
+    );
+    Ok(db
+        .query(&read)
+        .await?
+        .first()
+        .and_then(|row| row.get::<String>("role"))
+        .and_then(|role| Role::parse(&role)))
+}
+
+/// Gives a member just created by an accepted invitation the role it
+/// carried. Only ever called on a row this request created.
+pub(crate) async fn set_initial_role(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+    role: Role,
+) -> Result<(), DbError> {
+    let statement = Statement::with_values(
+        "UPDATE workspace_members SET role = ? \
+          WHERE workspace_id = ? AND user_id = ? AND removed_at IS NULL",
+        vec![text(role.as_str()), text(workspace_id), text(user_id)],
+    );
+    db.execute(&statement).await.map(|_| ())
 }

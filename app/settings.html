@@ -68,6 +68,7 @@
           <nav class="snav" aria-label="Settings sections">
             <a href="#models" aria-current="true">Models</a>
             <a href="#tokens">API tokens</a>
+            <a href="#members">Members</a>
             <a href="#connect">Connect</a>
             <a href="#soon">Coming soon</a>
           </nav>
@@ -289,6 +290,80 @@
                   </button>
                 </div>
               </form>
+            </section>
+
+            <!-- members and invitations (ADR 0004). Painted by
+                 `assets/members.js` with elements and text nodes only. -->
+            <section class="card sect" id="members" aria-labelledby="members-h">
+              <header class="sect__head">
+                <h2 id="members-h">Members</h2>
+                <p class="muted">
+                  Who is in this workspace and what they may do. Owners and
+                  admins invite people by email; removing someone signs them
+                  out everywhere and revokes their API tokens.
+                </p>
+              </header>
+              <div id="members-status" class="notice" role="status" aria-live="polite"></div>
+
+              <div class="table-scroll table-cards" role="region" aria-label="Members" tabindex="0">
+                <table class="table">
+                  <caption class="sr">Members of this workspace</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">Role</th>
+                      <th scope="col"><span class="sr">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="member-rows"></tbody>
+                </table>
+              </div>
+
+              <div id="invite-admin" hidden>
+                <form id="invite-form" class="connect" novalidate>
+                  <h3>Invite someone</h3>
+                  <div class="field">
+                    <label for="invite-email">Email address</label>
+                    <input
+                      id="invite-email"
+                      type="email"
+                      autocomplete="off"
+                      maxlength="254"
+                      placeholder="name@example.com"
+                      aria-describedby="err-inviteEmail"
+                    />
+                    <p class="field-error" id="err-inviteEmail"></p>
+                  </div>
+                  <div class="field">
+                    <label for="invite-role">Role</label>
+                    <select id="invite-role"></select>
+                  </div>
+                  <div class="form-actions">
+                    <button type="submit" data-variant="primary" id="send-invite">
+                      Send invitation
+                    </button>
+                  </div>
+                </form>
+
+                <h3>Open invitations</h3>
+                <div class="table-scroll table-cards" role="region" aria-label="Open invitations" tabindex="0">
+                  <table class="table">
+                    <caption class="sr">Invitations not yet accepted</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Address</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Expires</th>
+                        <th scope="col"><span class="sr">Actions</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="invite-rows"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <h3>Your workspaces</h3>
+              <ul id="workspace-list" class="plain-list"></ul>
             </section>
 
             <!-- connect your coding agent -->

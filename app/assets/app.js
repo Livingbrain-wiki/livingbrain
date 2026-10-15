@@ -46,6 +46,24 @@ import {
   safeReturnTo,
   RETURN_TO_PARAM,
 } from "./tokens.js";
+import {
+  membersRequest,
+  invitesRequest,
+  workspacesRequest,
+  inviteRequest,
+  roleChangeRequest,
+  removeRequest,
+  withdrawRequest,
+  switchRequest,
+  memberViews,
+  inviteViews,
+  canManage,
+  assignableRoles,
+  memberErrorMessage,
+  renderMemberRows,
+  renderInviteRows,
+  renderWorkspaces,
+} from "./members.js";
 import { isSafeHref } from "./markdown.js";
 import {
   checkSession,
@@ -501,7 +519,7 @@ pages.settings = async function settings() {
   wireSectionNav();
   wireCopyButtons();
   fillConnectPanel();
-  await Promise.all([wireModels(), wireTokens()]);
+  await Promise.all([wireModels(), wireTokens(), wireMembers()]);
 };
 
 /* --- small shared pieces ------------------------------------------- */
@@ -1186,6 +1204,138 @@ function wireTokens() {
 
   // Leaving the page is a dismissal too.
   window.addEventListener("pagehide", forget);
+
+  return load();
+}
+
+/* --- members ---------------------------------------------------------- */
+
+/**
+ * The members section (ADR 0004): the roster for everyone, the invite form and
+ * open invitations for owners and admins, and the workspace switcher. The
+ * server decides every permission; the page only hides what would be refused.
+ */
+async function wireMembers() {
+  const status = $("#members-status");
+  const rows = $("#member-rows");
+  const admin = $("#invite-admin");
+  const form = $("#invite-form");
+  const email = $("#invite-email");
+  const role = $("#invite-role");
+  const invites = $("#invite-rows");
+  const spaces = $("#workspace-list");
+  let me = null;
+
+  const send = (request) =>
+    api(request.path, request.body === undefined
+      ? { method: request.method }
+      : { method: request.method, body: request.body });
+
+  const load = async () => {
+    try {
+      me = await api("/v1/workspaces/me");
+      renderMemberRows(rows, memberViews(await send(membersRequest())), me);
+      const manage = canManage(me);
+      admin.hidden = !manage;
+      if (manage) {
+        role.replaceChildren();
+        for (const option of assignableRoles(me)) {
+          const el = document.createElement("option");
+          el.value = option.value;
+          el.textContent = option.label;
+          role.appendChild(el);
+        }
+        renderInviteRows(invites, inviteViews(await send(invitesRequest())));
+      }
+      renderWorkspaces(spaces, await send(workspacesRequest()));
+      notice(status, "");
+    } catch (error) {
+      rows.replaceChildren();
+      notice(status, memberErrorMessage(error, "load the members"), "warn");
+    }
+  };
+
+  email.addEventListener("input", () => fieldError("inviteEmail", "", email));
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    let request;
+    try {
+      request = inviteRequest(email.value, role.value);
+    } catch {
+      fieldError("inviteEmail", "Enter an email address.", email);
+      email.focus();
+      return;
+    }
+    try {
+      await send(request);
+      toast(`Invitation sent to ${request.body.email}.`, "ok");
+      form.reset();
+      await load();
+    } catch (error) {
+      toast(memberErrorMessage(error, "send the invitation"), "bad");
+    }
+  });
+
+  rows.addEventListener("change", async (event) => {
+    const select = event.target.closest("[data-role-for]");
+    if (!select) return;
+    try {
+      await send(roleChangeRequest(select.dataset.roleFor, select.value));
+      toast("Role changed.", "ok");
+    } catch (error) {
+      toast(memberErrorMessage(error, "change the role"), "bad");
+    }
+    await load();
+  });
+
+  rows.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-remove]");
+    if (!button) return;
+    const leaving = button.dataset.self === "1";
+    const ok = await confirmAction({
+      title: leaving ? "Leave this workspace?" : `Remove ${button.dataset.name}?`,
+      body: leaving
+        ? "You will be signed out, and only an invitation brings you back."
+        : "They are signed out everywhere and their API tokens stop working.",
+      confirm: leaving ? "Leave" : "Remove",
+    });
+    if (!ok) return;
+    try {
+      await send(removeRequest(button.dataset.remove));
+      if (leaving) {
+        location.assign("/");
+        return;
+      }
+      toast(`Removed ${button.dataset.name}.`, "ok");
+      await load();
+    } catch (error) {
+      toast(memberErrorMessage(error, leaving ? "leave" : "remove them"), "bad");
+    }
+  });
+
+  invites.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-withdraw]");
+    if (!button) return;
+    try {
+      await send(withdrawRequest(button.dataset.withdraw));
+      toast(`Withdrew the invitation to ${button.dataset.email}.`, "ok");
+      await load();
+    } catch (error) {
+      toast(memberErrorMessage(error, "withdraw the invitation"), "bad");
+    }
+  });
+
+  spaces.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-switch]");
+    if (!button) return;
+    try {
+      await send(switchRequest(button.dataset.switch));
+      location.assign("/");
+    } catch (error) {
+      toast(memberErrorMessage(error, "switch workspace"), "bad");
+    }
+  });
 
   return load();
 }

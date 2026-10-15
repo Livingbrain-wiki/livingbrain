@@ -17,6 +17,7 @@
 
 mod device;
 mod handlers;
+mod me;
 mod store;
 
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use cratefield_core::{
 use livingbrain_access::{Location, Scope, scopes_for};
 
 pub use device::{DevicePorts, PatIssuer, SessionApprover};
+pub use me::Me;
 
 const MIGRATION_INIT: SqlMigration = SqlMigration::new(
     "0001",
@@ -68,9 +70,13 @@ pub struct Member {
     pub workspace_id: String,
     pub user_id: String,
     pub is_admin: bool,
+    /// The member's role (ADR 0004).
+    pub role: livingbrain_workspaces::Role,
     /// The scope subset this credential was cut down to, or `None` for one
     /// that carries everything its member holds.
     pub scopes: Option<Vec<String>>,
+    /// The token's public prefix, or `None` for the session cookie.
+    pub credential: Option<String>,
 }
 
 impl std::fmt::Debug for Member {
@@ -79,6 +85,8 @@ impl std::fmt::Debug for Member {
             .field("workspace_id", &self.workspace_id)
             .field("user_id", &self.user_id)
             .field("is_admin", &self.is_admin)
+            .field("role", &self.role)
+            .field("credential", &self.credential)
             .field(
                 "scopes",
                 &self
@@ -178,7 +186,9 @@ pub async fn session(ports: &Ports, headers: &HeaderMap) -> Result<Member, AuthE
         workspace_id: caller.workspace_id,
         user_id: caller.user_id,
         is_admin: caller.is_admin,
+        role: caller.role,
         scopes: None,
+        credential: None,
     })
 }
 
@@ -200,8 +210,32 @@ async fn member_for(
         // A narrowed token is not admin: a scope subset must not carry
         // workspace-wide rights the subset does not describe.
         is_admin: principal.scopes.is_none() && caller.is_admin,
+        role: caller.role,
         scopes: principal.scopes,
+        credential: Some(principal.prefix),
     })
+}
+
+/// Revokes every live token `user_id` holds in `workspace_id` — what
+/// removing a member does (ADR 0004), so a person who is later re-admitted
+/// with the same member id does not find their old tokens working again.
+/// Answers how many were revoked.
+///
+/// # Errors
+///
+/// [`DbError`] when the update fails.
+pub async fn revoke_member_tokens(
+    db: &dyn Database,
+    workspace_id: &str,
+    user_id: &str,
+    now: &str,
+) -> Result<u64, DbError> {
+    db.execute(&cratefield_core::Statement::with_values(
+        "UPDATE personal_access_tokens SET revoked_at = ? \
+          WHERE workspace_id = ? AND user_id = ? AND revoked_at IS NULL",
+        vec![now.into(), workspace_id.into(), user_id.into()],
+    ))
+    .await
 }
 
 // ---------------------------------------------------------------------------

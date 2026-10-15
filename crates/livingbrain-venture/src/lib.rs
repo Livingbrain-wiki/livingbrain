@@ -55,12 +55,12 @@ use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
-use livingbrain_tokens::{DevicePorts, Tokens};
+use livingbrain_tokens::{DevicePorts, Me, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
-    Admit, EmailLedger, Exchange, LocalTurns, Pending, SignInMail, SignInMailInput, Turn,
-    TurnError, Turns, Workspaces,
+    Admit, EmailLedger, Exchange, LocalTurns, MemberRemoval, Pending, SignInMail, SignInMailInput,
+    Turn, TurnError, Turns, Workspaces,
 };
 use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
@@ -179,6 +179,31 @@ impl ThemedSignInMail {
 
 impl SignInMail for ThemedSignInMail {
     fn render(&self, input: &SignInMailInput<'_>) -> Rendered {
+        if let Some(invitation) = input.invitation {
+            let lifetime = input.lifetime();
+            // The mail template escapes every text it is handed; the names
+            // are the workspace's and a member's own words.
+            return MailBody::new(
+                "You're invited to Living Brain",
+                format!("Join {} on Living Brain", invitation.workspace),
+            )
+            .preheader(format!(
+                "{} invited you. The link works once, for the next {lifetime}.",
+                invitation.invited_by
+            ))
+            .paragraph(format!(
+                "{} invited you to the {} workspace on Living Brain.",
+                invitation.invited_by, invitation.workspace
+            ))
+            .button("Accept the invitation", input.link)
+            .fallback_link()
+            .note(format!("This link works once, for the next {lifetime}."))
+            .note("If you weren't expecting it, ignore it — nothing has happened.")
+            .recipient(input.recipient)
+            .why("a member of a Living Brain workspace invited this address")
+            .render(&self.theme)
+            .into();
+        }
         let minutes = input.minutes;
         MailBody::new("Your Living Brain sign-in link", "Sign in to Living Brain")
             .preheader(format!(
@@ -323,12 +348,17 @@ fn build(
                     .email_ledger(Arc::new(UsageLedger))
                     // The sign-in mail in the venture's theme, not the
                     // module's plain fallback.
-                    .sign_in_mail(sign_in_mail()),
+                    .sign_in_mail(sign_in_mail())
+                    // ADR 0004: a removed member's tokens are revoked, not
+                    // only refused, so re-admitting them revives nothing.
+                    .on_member_removed(Arc::new(RevokeOnRemoval)),
             )
             .module(Models::new())
             .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
+            // `GET /v1/me` (ADR 0004): who a bearer or a session speaks for.
+            .module(Me::new())
             .module(pages_module(kms.clone(), &answers))
             .module(waitlist_module())
             // The cost ledger (issue #12): `GET /v1/usage/daily`, backed by
@@ -421,6 +451,30 @@ struct UsageLedger;
 impl EmailLedger for UsageLedger {
     async fn record_email(&self, db: &dyn Database, now: OffsetDateTime, workspace_id: &str) {
         let _ = livingbrain_usage::record_email(db, now, workspace_id).await;
+    }
+}
+
+/// What removing a member does beyond the workspaces module's own tombstone
+/// (ADR 0004): every personal access token they hold is revoked. The
+/// tombstone already refuses them; revoking means a person re-admitted later
+/// with the same member id (a Slack user id is stable) starts with none.
+///
+/// Best effort, per the seam's contract: the removal has happened.
+struct RevokeOnRemoval;
+
+#[async_trait::async_trait]
+impl MemberRemoval for RevokeOnRemoval {
+    async fn removed(
+        &self,
+        db: &dyn Database,
+        now: OffsetDateTime,
+        workspace_id: &str,
+        user_id: &str,
+    ) {
+        let now = now
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let _ = livingbrain_tokens::revoke_member_tokens(db, workspace_id, user_id, &now).await;
     }
 }
 
