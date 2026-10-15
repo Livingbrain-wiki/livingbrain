@@ -216,6 +216,10 @@ fn a_member_reads_the_effective_limits_and_their_source() {
     );
     assert_eq!(setting(body, "spend", "monthly_cents")["value"], json!(300));
     assert_eq!(setting(body, "coding_agents", "batch")["max"], json!(20));
+    let concurrency = setting(body, "coding_agents", "concurrency");
+    assert_eq!(concurrency["value"], json!(4), "the built-in default");
+    assert_eq!(concurrency["max"], json!(8));
+    assert_eq!(body["ceilings"]["concurrency"], json!(8));
     assert_eq!(body["usage"]["compile_tokens_today"], json!(0));
     assert_eq!(body["usage"]["compile_tokens_month"], json!(0));
     assert_eq!(body["ceilings"]["job_tokens"], json!(1_000_000));
@@ -342,6 +346,10 @@ fn a_bad_value_is_a_422_that_names_the_setting() {
         (
             json!({"coding_agents": {"job_tokens": 5_000_000}}),
             "coding_agents.job_tokens",
+        ),
+        (
+            json!({"coding_agents": {"concurrency": 9}}),
+            "coding_agents.concurrency",
         ),
         (
             json!({"coding_agents": {"daily_tokens": "lots"}}),

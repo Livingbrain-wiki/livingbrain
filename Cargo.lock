@@ -1883,6 +1883,7 @@ dependencies = [
  "cratefield-core",
  "cratefield-kms",
  "cratefield-testing",
+ "futures-util",
  "livingbrain-access",
  "livingbrain-pages",
  "livingbrain-redact",

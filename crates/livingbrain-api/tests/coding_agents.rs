@@ -97,6 +97,7 @@ fn the_queue_lists_only_the_asker_s_sessions() {
     assert_eq!(body["model"]["connected"], false);
     assert_eq!(body["model"]["role"], "main");
     assert!(body["budget"]["daily_tokens"].as_u64().is_some());
+    assert_eq!(body["budget"]["concurrency"], 4, "{body}");
 
     // The same user id in another workspace sees nothing of it.
     let elsewhere = get(&fx, TOKEN_A_ELSEWHERE, "/v1/coding-agents/queue").json();

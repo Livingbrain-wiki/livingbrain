@@ -17,12 +17,16 @@
 //! rest, so one person's sessions can never compile into another person's
 //! pages or into the shared wiki.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use cratefield_core::{Classifier, Clock, Config, DbError, ScheduledBudget};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use livingbrain_pages::{
-    Author, EntityType, Page, PageError, PageStore, PageWrite, SourceError, SourceStore,
+    Author, AuthorKind, EntityType, Page, PageError, PageStore, PageWrite, SourceError, SourceStore,
 };
 use livingbrain_redact::{Policy, redact};
 use time::{Duration, OffsetDateTime};
@@ -31,6 +35,8 @@ use crate::compact::{self, CallRef, Keep};
 use crate::edits::{self, PageEdit};
 use crate::facts::{Fact, FactSink};
 use crate::layout::{self, Allowed, Place};
+use crate::merge;
+use crate::pool::{CONCURRENCY_CEILING, MAX_IN_FLIGHT, Tick};
 use crate::prompt::{self, SessionHead, Shown};
 use crate::queue::{ClaimFilter, Finish, Job, JobStatus, MAX_ATTEMPTS, Queue, utc_day};
 use crate::record::{self, Session};
@@ -63,6 +69,7 @@ pub const MAX_OUTPUT_TOKENS_CEILING: u32 = 32_000;
 pub struct Overrides {
     pub paused: Option<bool>,
     pub batch: Option<u64>,
+    pub concurrency: Option<u64>,
     pub chunk_chars: Option<u64>,
     pub max_chunks: Option<u64>,
     pub max_output_tokens: Option<u64>,
@@ -104,6 +111,12 @@ pub struct Settings {
     pub paused: bool,
     /// Jobs one cron tick compiles (`CODING_AGENTS_BATCH`, default 1).
     pub batch: usize,
+    /// Jobs of the workspace one drain compiles at once
+    /// (`CODING_AGENTS_CONCURRENCY`, default 4, never more than
+    /// [`CONCURRENCY_CEILING`]; the invocation runs at most
+    /// [`crate::MAX_IN_FLIGHT`] across workspaces). A 429 halves it for a
+    /// while ([`crate::pool`]).
+    pub concurrency: usize,
     /// Transcript characters per model call (`CODING_AGENTS_CHUNK_CHARS`,
     /// default 32 000 — about 8 000 tokens).
     pub chunk_chars: usize,
@@ -145,6 +158,7 @@ impl Default for Settings {
         Self {
             paused: false,
             batch: 1,
+            concurrency: 4,
             chunk_chars: 32_000,
             max_chunks: 4,
             context_chars: 32_000,
@@ -188,6 +202,7 @@ impl Settings {
         Self {
             paused: false,
             batch: size("CODING_AGENTS_BATCH", default.batch),
+            concurrency: size("CODING_AGENTS_CONCURRENCY", default.concurrency),
             chunk_chars: size("CODING_AGENTS_CHUNK_CHARS", default.chunk_chars),
             max_chunks: size("CODING_AGENTS_MAX_CHUNKS", default.max_chunks),
             context_chars: size("CODING_AGENTS_CONTEXT_CHARS", default.context_chars).max(1_000),
@@ -225,6 +240,7 @@ impl Settings {
         Self {
             paused: overrides.paused.unwrap_or(self.paused),
             batch: size(overrides.batch, self.batch),
+            concurrency: size(overrides.concurrency, self.concurrency),
             chunk_chars: size(overrides.chunk_chars, self.chunk_chars),
             max_chunks: size(overrides.max_chunks, self.max_chunks),
             context_chars: self.context_chars,
@@ -247,6 +263,7 @@ impl Settings {
     /// The floors and the hard ceilings, applied to every source alike.
     fn bounded(mut self) -> Self {
         self.batch = self.batch.clamp(1, BATCH_CEILING);
+        self.concurrency = self.concurrency.clamp(1, CONCURRENCY_CEILING);
         self.chunk_chars = self.chunk_chars.clamp(1_000, CHUNK_CHARS_CEILING);
         self.max_chunks = self.max_chunks.clamp(1, MAX_CHUNKS_CEILING);
         self.max_output_tokens = self.max_output_tokens.clamp(256, MAX_OUTPUT_TOKENS_CEILING);
@@ -462,12 +479,22 @@ impl Compiler {
     /// (no `filter.workspace`: the cron) also takes at most each
     /// workspace's own `batch` of jobs. `budget` is the scheduled
     /// invocation's cooperative budget (unbounded outside a cron tick); the
-    /// drain stops when it runs out.
+    /// drain starts nothing once it runs out.
+    ///
+    /// **In parallel.** Up to each workspace's `concurrency` compiles run at
+    /// once, never more than [`MAX_IN_FLIGHT`] in all, the next one started
+    /// as soon as one ends — taken from the workspace that has started the
+    /// fewest, so one workspace's backlog does not starve another's. Within
+    /// a compile the chunks stay in order (each builds on the pages the last
+    /// one wrote). A 429 pauses that workspace's pool; a cron drain starts a
+    /// compile only while its deadline leaves room for a call of average
+    /// length ([`crate::pool`]).
     ///
     /// # Errors
     ///
     /// [`DbError`] when the queue itself cannot be read or written. A
-    /// failing job is a `failed` row, not an error here.
+    /// failing job is a `failed` row, not an error here; the compiles
+    /// already running when an error comes are finished first.
     pub async fn drain(
         &self,
         filter: &ClaimFilter,
@@ -478,109 +505,93 @@ impl Compiler {
         self.queue
             .enqueue_from_ledger(now, filter.workspace.as_deref())
             .await?;
+        self.queue.clear_lapsed_holds(now).await?;
+        let per_workspace = max_jobs.saturating_mul(2).max(4);
         let ready = self
             .queue
-            .ready(now, filter, max_jobs.saturating_mul(4).max(4))
+            .ready_fair(
+                now,
+                filter,
+                per_workspace.saturating_mul(16),
+                filter.workspace.is_none().then_some(per_workspace),
+            )
             .await?;
-        let mut models: BTreeMap<(String, String), bool> = BTreeMap::new();
-        let mut tuned: BTreeMap<String, Settings> = BTreeMap::new();
-        let mut per_workspace: BTreeMap<String, usize> = BTreeMap::new();
-        let mut out = Vec::new();
-        let mut compiled = 0usize;
+        let tick = Tick::new(budget, filter.ignore_backoff);
+        let mut lanes: Vec<Lane> = Vec::new();
         for job in ready {
-            if compiled >= max_jobs || budget.exhausted(self.clock.now()) {
-                break;
-            }
-            let now = self.clock.now();
-            let settings = match tuned.get(&job.workspace) {
-                Some(settings) => settings.clone(),
-                None => {
-                    let settings = self.settings_for(&job.workspace).await;
-                    tuned.insert(job.workspace.clone(), settings.clone());
-                    settings
-                }
-            };
-            if settings.paused {
-                // Parked, not skipped: a skipped job would be read again on
-                // every tick and crowd out the workspaces that are running.
-                if self
-                    .queue
-                    .park(
-                        &job,
-                        JobStatus::OverBudget,
-                        now,
-                        now + Duration::minutes(15),
-                        "paused",
-                    )
-                    .await?
-                {
-                    out.push(parked(&job, JobStatus::OverBudget, "paused"));
-                }
-                continue;
-            }
-            if filter.workspace.is_none()
-                && per_workspace.get(&job.workspace).copied().unwrap_or(0) >= settings.batch
+            match lanes
+                .iter_mut()
+                .find(|lane| lane.workspace == job.workspace)
             {
-                continue;
+                Some(lane) => lane.jobs.push_back(job),
+                None => lanes.push(Lane::new(job)),
             }
-            let who = (job.workspace.clone(), job.owner.clone());
-            let available = match models.get(&who) {
-                Some(known) => *known,
-                None => {
-                    let known = self
-                        .model
-                        .available(&job.workspace, &job.owner)
-                        .await
-                        .unwrap_or(false);
-                    models.insert(who, known);
-                    known
+        }
+        let mut models: BTreeMap<(String, String), bool> = BTreeMap::new();
+        let mut out = Vec::new();
+        let mut started = 0usize;
+        let mut stop = false;
+        let mut failure: Option<DbError> = None;
+        let mut running: FuturesUnordered<Running<'_>> = FuturesUnordered::new();
+        loop {
+            while !stop && failure.is_none() && running.len() < MAX_IN_FLIGHT && started < max_jobs
+            {
+                let Some(index) = next_lane(&lanes, &tick, filter) else {
+                    break;
+                };
+                let lane = &mut lanes[index];
+                if lane.settings.is_none() {
+                    let settings = self.settings_for(&lane.workspace).await;
+                    // A pool that cannot be read starts from the setting.
+                    let pool = self.queue.pool(&lane.workspace).await.unwrap_or_default();
+                    tick.open(&lane.workspace, &pool, settings.concurrency);
+                    lane.settings = Some(settings);
                 }
-            };
-            if !available {
-                if self
-                    .queue
-                    .park(
-                        &job,
-                        JobStatus::SkippedNoModel,
-                        now,
-                        now + Duration::hours(1),
-                        "no-model",
-                    )
-                    .await?
-                {
-                    out.push(parked(&job, JobStatus::SkippedNoModel, "no-model"));
+                let settings = lane.settings.clone().unwrap_or_default();
+                let Some(job) = lane.jobs.pop_front() else {
+                    continue;
+                };
+                let admitted = match self.admit(job, &settings, &mut models, &tick, budget).await {
+                    Ok(admitted) => admitted,
+                    // Start nothing more; what runs is finished first.
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                        continue;
+                    }
+                };
+                match admitted {
+                    Admit::Parked(processed) => out.push(processed),
+                    Admit::Gone => {}
+                    Admit::Later => lane.closed = true,
+                    Admit::Stop => stop = true,
+                    Admit::Run(claimed) => {
+                        lane.started += 1;
+                        lane.running += 1;
+                        started += 1;
+                        let tick = &tick;
+                        let claimed = *claimed;
+                        running.push(Box::pin(async move {
+                            let finish = self.process(&claimed, &settings, tick).await;
+                            let recorded =
+                                self.queue.finish(&claimed, &finish, self.clock.now()).await;
+                            (index, claimed, finish, recorded)
+                        }));
+                    }
                 }
-                continue;
             }
-            if let Some(until) = self.over_budget(&job.workspace, now, &settings).await? {
-                if self
-                    .queue
-                    .park(&job, JobStatus::OverBudget, now, until, "over-budget")
-                    .await?
-                {
-                    out.push(parked(&job, JobStatus::OverBudget, "over-budget"));
-                }
-                continue;
-            }
-            // A cron tick's share is counted in subrequest-shaped steps; a
-            // compile is several (the source, the pages, the model calls).
-            if !budget.try_spend(if self.classifier.is_some() { 9 } else { 8 }) {
+            let Some((index, claimed, finish, recorded)) = running.next().await else {
                 break;
-            }
-            if !self.queue.claim(&job, now, self.settings.lease).await? {
+            };
+            let lane = &mut lanes[index];
+            lane.running = lane.running.saturating_sub(1);
+            if let Err(error) = recorded {
+                // Finish what is running, start nothing more, then say so.
+                failure.get_or_insert(error);
                 continue;
             }
-            let claimed = Job {
-                attempts: job.attempts + 1,
-                status: JobStatus::Processing,
-                ..job
-            };
-            let finish = self.process(&claimed, &settings).await;
-            self.queue
-                .finish(&claimed, &finish, self.clock.now())
-                .await?;
-            compiled += 1;
-            *per_workspace.entry(claimed.workspace.clone()).or_default() += 1;
+            if finish.status == JobStatus::Done {
+                lane.done += 1;
+            }
             if finish.status == JobStatus::Failed {
                 // Workers Logs: the one place a cron tick's failure shows
                 // without opening the queue. The reason is fixed-vocabulary
@@ -598,46 +609,164 @@ impl Compiler {
                 pages: finish.pages.clone(),
                 error: finish.error.clone(),
             });
-            // A rate-limited provider refuses the next job too: stop, and
-            // let the backoff space the calls out.
-            if finish.status == JobStatus::Failed && finish.refund_attempt {
-                break;
+        }
+        // What the next drain finds: each pool, paused or grown, and the
+        // average call it timed.
+        let end = self.clock.now();
+        for lane in lanes.iter().filter(|lane| lane.settings.is_some()) {
+            if let Some(row) = tick.row(&lane.workspace, lane.done) {
+                self.queue.save_pool(&lane.workspace, &row, end).await?;
             }
         }
-        Ok(out)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(out),
+        }
     }
 
-    /// `Some(when it may reset)` when the workspace may not compile now:
-    /// its daily or monthly compile tokens are spent, or the usage gate
-    /// says it is over its budget.
+    /// Whether one job read by the drain runs now: parked (no model, no
+    /// budget, paused), left for later (its pool is waiting or full, or the
+    /// tick has no time for it), the end of the drain (no subrequests left),
+    /// or claimed.
+    async fn admit(
+        &self,
+        job: Job,
+        settings: &Settings,
+        models: &mut BTreeMap<(String, String), bool>,
+        tick: &Tick,
+        budget: &ScheduledBudget,
+    ) -> Result<Admit, DbError> {
+        let now = self.clock.now();
+        if budget.exhausted(now) {
+            return Ok(Admit::Stop);
+        }
+        if settings.paused {
+            // Parked, not skipped: a skipped job would be read again on
+            // every tick and crowd out the workspaces that are running.
+            let parked = self
+                .queue
+                .park(
+                    &job,
+                    JobStatus::OverBudget,
+                    now,
+                    now + Duration::minutes(15),
+                    "paused",
+                )
+                .await?;
+            return Ok(if parked {
+                Admit::Parked(self::parked(&job, JobStatus::OverBudget, "paused"))
+            } else {
+                Admit::Gone
+            });
+        }
+        let who = (job.workspace.clone(), job.owner.clone());
+        let available = match models.get(&who) {
+            Some(known) => *known,
+            None => {
+                let known = self
+                    .model
+                    .available(&job.workspace, &job.owner)
+                    .await
+                    .unwrap_or(false);
+                models.insert(who, known);
+                known
+            }
+        };
+        if !available {
+            let parked = self
+                .queue
+                .park(
+                    &job,
+                    JobStatus::SkippedNoModel,
+                    now,
+                    now + Duration::hours(1),
+                    "no-model",
+                )
+                .await?;
+            return Ok(if parked {
+                Admit::Parked(self::parked(&job, JobStatus::SkippedNoModel, "no-model"))
+            } else {
+                Admit::Gone
+            });
+        }
+        match self.over_budget(&job.workspace, now, settings).await? {
+            Budget::Spent(until) => {
+                let parked = self
+                    .queue
+                    .park(&job, JobStatus::OverBudget, now, until, "over-budget")
+                    .await?;
+                return Ok(if parked {
+                    Admit::Parked(self::parked(&job, JobStatus::OverBudget, "over-budget"))
+                } else {
+                    Admit::Gone
+                });
+            }
+            // What is left is held by calls in flight: it may come back
+            // when they settle, so the job stays queued.
+            Budget::Held => return Ok(Admit::Later),
+            Budget::Open => {}
+        }
+        // A paused pool (a 429) or a tick without time for another call
+        // leaves the job queued, untouched.
+        if !tick.may_start(&job.workspace, now) {
+            return Ok(Admit::Later);
+        }
+        // A cron tick's share is counted in subrequest-shaped steps; a
+        // compile is several (the source, the pages, the model calls).
+        if !budget.try_spend(if self.classifier.is_some() { 9 } else { 8 }) {
+            return Ok(Admit::Stop);
+        }
+        if !self.queue.claim(&job, now, self.settings.lease).await? {
+            return Ok(Admit::Gone);
+        }
+        Ok(Admit::Run(Box::new(Job {
+            attempts: job.attempts + 1,
+            status: JobStatus::Processing,
+            ..job
+        })))
+    }
+
+    /// Whether the workspace may compile now: `Spent` (until when it may
+    /// reset) when its daily or monthly compile tokens are spent or the
+    /// usage gate says it is over its budget, `Held` when what is left is
+    /// held by calls in flight, else `Open`.
     async fn over_budget(
         &self,
         workspace: &str,
         now: OffsetDateTime,
         settings: &Settings,
-    ) -> Result<Option<OffsetDateTime>, DbError> {
+    ) -> Result<Budget, DbError> {
         let today = utc_day(now);
         let month_start = format!("{}-01", &today[..7]);
         let spent_today = self.queue.spent(workspace, &today, &today).await?;
         let spent_month = self.queue.spent(workspace, &month_start, &today).await?;
-        let tomorrow = start_of_next_day(now);
         if spent_month >= settings.monthly_tokens {
-            return Ok(Some(start_of_next_month(now)));
+            return Ok(Budget::Spent(start_of_next_month(now)));
         }
         if spent_today >= settings.daily_tokens {
-            return Ok(Some(tomorrow));
+            return Ok(Budget::Spent(start_of_next_day(now)));
         }
         if self.gate.over_budget(workspace).await {
-            return Ok(Some(now + Duration::hours(6)));
+            return Ok(Budget::Spent(now + Duration::hours(6)));
         }
-        Ok(None)
+        let held_today = self.queue.held(workspace, &today, &today, now).await?;
+        let held_month = self
+            .queue
+            .held(workspace, &month_start, &today, now)
+            .await?;
+        if spent_month.saturating_add(held_month) >= settings.monthly_tokens
+            || spent_today.saturating_add(held_today) >= settings.daily_tokens
+        {
+            return Ok(Budget::Held);
+        }
+        Ok(Budget::Open)
     }
 
     /// Compiles one claimed job, and says how it ended. Never fails: every
     /// failure is a status the queue records.
-    async fn process(&self, job: &Job, settings: &Settings) -> Finish {
+    async fn process(&self, job: &Job, settings: &Settings, tick: &Tick) -> Finish {
         let mut stamp = Stamp::default();
-        let finish = self.process_job(job, settings, &mut stamp).await;
+        let finish = self.process_job(job, settings, &mut stamp, tick).await;
         Finish {
             triage: stamp.triage,
             estimate: stamp.estimate,
@@ -648,7 +777,13 @@ impl Compiler {
     /// [`Compiler::process`]'s body. What triage decided and what the
     /// compile is estimated to send go on `stamp` as soon as they are known,
     /// so every way out of here records them.
-    async fn process_job(&self, job: &Job, settings: &Settings, stamp: &mut Stamp) -> Finish {
+    async fn process_job(
+        &self,
+        job: &Job,
+        settings: &Settings,
+        stamp: &mut Stamp,
+        tick: &Tick,
+    ) -> Finish {
         let now = self.clock.now();
         let source = match self.sources.by_id(&job.source_id).await {
             Ok(Some(source)) if source.scope == job.scope && source.workspace == job.workspace => {
@@ -734,7 +869,7 @@ impl Compiler {
                 let line = summary_line(&head, &signals, &plan.decision.reason, now);
                 let mut finish =
                     Finish::status(JobStatus::SummaryOnly, Some(&plan.decision.reason));
-                if self.append_log(&job.scope, &line).await {
+                if self.append_log(&job.scope, &line, tick).await {
                     finish.pages.push(layout::LOG.to_owned());
                 }
                 return finish;
@@ -788,17 +923,80 @@ impl Compiler {
                 omitted = true;
                 break;
             }
+            // Before each call: the pool is not waiting out a 429 and the
+            // invocation has time for it — else the job stops here and is
+            // queued again, carrying on from this chunk.
+            if let Some(halt) = tick.halt(&job.workspace, self.clock.now()) {
+                return Finish {
+                    chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                    refund_attempt: true,
+                    ..self.with_tally(JobStatus::Queued, Some(halt.reason()), tally)
+                };
+            }
             let ref_key = format!("{}:{}:{index}", job.scope, job.body_sha256);
+            // The call's share of the budget is held before it is made, so
+            // parallel compiles cannot together spend past the budget.
+            let hold = format!("{ref_key}:{}", job.attempts);
+            let at = self.clock.now();
+            match self
+                .queue
+                .reserve(
+                    &hold,
+                    &job.workspace,
+                    at,
+                    estimate,
+                    settings.daily_tokens,
+                    settings.monthly_tokens,
+                    at + settings.lease,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let chunks_done = Some(u32::try_from(index).unwrap_or(u32::MAX));
+                    return match self.over_budget(&job.workspace, at, settings).await {
+                        Ok(Budget::Spent(until)) => Finish {
+                            retry_at: Some(until),
+                            chunks_done,
+                            refund_attempt: true,
+                            ..self.with_tally(JobStatus::OverBudget, Some("over-budget"), tally)
+                        },
+                        // Held by the calls in flight: queued again, to carry
+                        // on when they settled.
+                        Ok(_) => Finish {
+                            chunks_done,
+                            refund_attempt: true,
+                            ..self.with_tally(JobStatus::Queued, Some("budget-held"), tally)
+                        },
+                        Err(_) => self.failed(job, now, "store", tally),
+                    };
+                }
+                Err(_) => return self.failed(job, now, "store", tally),
+            }
             let call = Call {
                 workspace: &job.workspace,
                 owner: &job.owner,
                 ref_key: &ref_key,
             };
-            let reply = match self
+            let call_started = self.clock.now();
+            let answered = self
                 .model
                 .complete(&call, prompt::SYSTEM, &user, settings.max_output_tokens)
-                .await
-            {
+                .await;
+            let at = self.clock.now();
+            // A runner's tokens were the owner's subscription, not the
+            // workspace's compile budget; a call that did not answer spent
+            // nothing.
+            let spent = answered
+                .as_ref()
+                .ok()
+                .filter(|reply| !reply.runner)
+                .map(|reply| reply.prompt_tokens + reply.completion_tokens);
+            let _ = self.queue.settle(&hold, at, &job.workspace, spent).await;
+            if spent.is_some() {
+                tick.timed(&job.workspace, at - call_started);
+            }
+            let reply = match answered {
                 Ok(reply) => reply,
                 Err(ModelFailure::NoModel) => {
                     return Finish {
@@ -808,23 +1006,29 @@ impl Compiler {
                 }
                 Err(ModelFailure::Failed(reason)) => {
                     let reason = format!("model-{reason}");
-                    self.log_failure(job, &head, &reason, now).await;
+                    self.log_failure(job, &head, &reason, now, tick).await;
                     return self.failed(job, now, &reason, tally);
                 }
                 // Rate-limited: retried soon, without spending an attempt —
                 // a busy key is not this job's fault. What this run applied
-                // stays; the retry carries on from this chunk.
+                // stays; the retry carries on from this chunk. The whole
+                // pool of the workspace waits with it.
                 Err(ModelFailure::Busy {
                     reason,
                     retry_after_secs,
                 }) => {
                     let reason = format!("model-{reason}");
-                    self.log_failure(job, &head, &reason, now).await;
                     let wait = retry_after_secs
                         .unwrap_or(BUSY_RETRY_SECS)
                         .clamp(60, MAX_BUSY_RETRY_SECS);
+                    let until = at + Duration::seconds(wait as i64);
+                    tick.rate_limited(&job.workspace, until);
+                    if let Some(row) = tick.row(&job.workspace, 0) {
+                        let _ = self.queue.save_pool(&job.workspace, &row, at).await;
+                    }
+                    self.log_failure(job, &head, &reason, now, tick).await;
                     return Finish {
-                        retry_at: Some(now + Duration::seconds(wait as i64)),
+                        retry_at: Some(until),
                         chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
                         refund_attempt: true,
                         ..self.with_tally(JobStatus::Failed, Some(&reason), tally)
@@ -845,15 +1049,6 @@ impl Compiler {
             };
             tally.prompt = tally.prompt.saturating_add(reply.prompt_tokens);
             tally.completion = tally.completion.saturating_add(reply.completion_tokens);
-            // A runner's tokens were the owner's subscription, not the
-            // workspace's compile budget.
-            if !reply.runner {
-                let spent = reply.prompt_tokens + reply.completion_tokens;
-                let _ = self
-                    .queue
-                    .record_spend(self.clock.now(), &job.workspace, spent)
-                    .await;
-            }
 
             let Ok(output) = edits::parse(&reply.text) else {
                 tally.rejected += 1;
@@ -865,7 +1060,7 @@ impl Compiler {
             tally.rejected += output.refused;
             for edit in &output.pages {
                 match self
-                    .apply(&job.scope, &allowed, &shown, edit, &head, now)
+                    .apply(&job.scope, &allowed, &shown, edit, &head, now, tick)
                     .await
                 {
                     Applied::Written => tally.written(&edit.slug),
@@ -908,7 +1103,7 @@ impl Compiler {
             return self.failed(job, now, "conflict", tally);
         }
         let line = log_line(&head, &tally, omitted, now);
-        if self.append_log(&job.scope, &line).await {
+        if self.append_log(&job.scope, &line, tick).await {
             tally.written(layout::LOG);
         }
         let error = match (tally.conflicts, tally.rejected) {
@@ -928,7 +1123,14 @@ impl Compiler {
     /// (`model-http 429`, the part before the provider's body, which names
     /// a fresh request id every time), so a job retried every few minutes
     /// for the same 429 writes one line.
-    async fn log_failure(&self, job: &Job, head: &SessionHead, reason: &str, now: OffsetDateTime) {
+    async fn log_failure(
+        &self,
+        job: &Job,
+        head: &SessionHead,
+        reason: &str,
+        now: OffsetDateTime,
+        tick: &Tick,
+    ) {
         let kind = |text: &str| text.split(':').next().unwrap_or_default().trim().to_owned();
         if job.last_error.as_deref().map(kind) == Some(kind(reason)) {
             return;
@@ -944,7 +1146,7 @@ impl Compiler {
             edits::one_line(&redacted_text(reason), 400),
             prompt::source_href(&head.source_id)
         );
-        let _ = self.append_log(&job.scope, &line).await;
+        let _ = self.append_log(&job.scope, &line, tick).await;
     }
 
     /// A `failed` finish, with the retry time its attempt count earns: 15
@@ -1177,8 +1379,18 @@ impl Compiler {
         Ok(shown)
     }
 
-    /// Writes one edit, if the session may write it and the version it was
-    /// based on is still the head.
+    /// Writes one edit, if the session may write it.
+    ///
+    /// When the page moved on since the version the model was shown —
+    /// another compile wrote it, in this drain or in another — the edit is
+    /// merged onto the page as it is now ([`crate::merge`]) and written over
+    /// that, re-read and merged again if it moves once more, a few times at
+    /// most. Two compiles of one page take turns on it ([`Tick::page`]), so
+    /// inside one drain the read, the merge and the write are one step. A
+    /// page a *person* edited since the model's version is a conflict, as it
+    /// always was: the next run shows the model their edit rather than
+    /// merging around it.
+    #[allow(clippy::too_many_arguments)]
     async fn apply(
         &self,
         scope: &str,
@@ -1187,6 +1399,7 @@ impl Compiler {
         edit: &PageEdit,
         head: &SessionHead,
         now: OffsetDateTime,
+        tick: &Tick,
     ) -> Applied {
         // The namespace rule: the session's own folder and its parents,
         // never the log, never the conventions, never a page outside
@@ -1203,60 +1416,123 @@ impl Compiler {
         let Some(place) = layout::place(&edit.slug) else {
             return Applied::Rejected;
         };
-        let current: Option<Page> = match self.pages.read(scope, &edit.slug).await {
-            Ok(page) => page,
-            Err(_) => return Applied::Conflict,
-        };
-        let base = current.as_ref().map(|page| page.version);
-        if base != edit.base_version {
-            return Applied::Conflict;
-        }
         let Ok((body, _)) = redact(&strip_frontmatter(&edit.body), Policy::Redact) else {
             return Applied::Rejected;
         };
-        let body = with_citation(&fix_links(&body), head);
+        let ours = with_citation(&fix_links(&body), head);
         let title = edit
             .title
             .as_deref()
             .map(redacted_line)
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| default_title(&place));
-        let mut sources: Vec<String> = vec![head.source_id.clone()];
-        if let Some(page) = &current
-            && let Some(listed) = page.frontmatter.get("sources")
-        {
-            for id in listed.split(',').map(str::trim).filter(|id| !id.is_empty()) {
-                if !sources.iter().any(|seen| seen == id) && sources.len() < 20 {
-                    sources.push(id.to_owned());
-                }
-            }
-        }
-        let markdown = frontmatter(&place, &title, &utc_day(now), &sources) + &body;
-        let mut reconciles = None;
-        for _ in 0..2 {
-            let write = PageWrite {
-                entity_type: EntityType::Topic,
-                markdown: markdown.clone(),
-                author: Author::Brain { reconciles },
-                base_version: base,
+        let _turn = tick.page(scope, &edit.slug).await;
+        // The body the model was shown: the base a merge replays it over.
+        let mut base_body: Option<String> = None;
+        for _ in 0..MERGE_ATTEMPTS {
+            let current: Option<Page> = match self.pages.read(scope, &edit.slug).await {
+                Ok(page) => page,
+                Err(_) => return Applied::Conflict,
             };
-            match self.pages.write(scope, &edit.slug, write).await {
-                Ok(_) => return Applied::Written,
-                // A person edited the page, and the head the model was
-                // shown *is* that edit (the base is the head): the body
-                // already incorporates it, so the brain may say so.
-                Err(PageError::HumanEditPending { version })
-                    if base.is_some_and(|base| version <= base) && reconciles.is_none() =>
+            let at = current.as_ref().map(|page| page.version);
+            let body = if at == edit.base_version {
+                ours.clone()
+            } else {
+                // Moved on. Merged only over the brain's own versions, and
+                // only forward from the one the model saw.
+                let Some(head_version) = at else {
+                    return Applied::Conflict;
+                };
+                let since = edit.base_version.unwrap_or(0);
+                if since > head_version
+                    || !self
+                        .brain_only_since(scope, &edit.slug, since, head_version)
+                        .await
                 {
-                    reconciles = Some(version);
-                }
-                Err(PageError::Conflict { .. } | PageError::HumanEditPending { .. }) => {
                     return Applied::Conflict;
                 }
-                Err(_) => return Applied::Rejected,
+                if base_body.is_none() {
+                    base_body = Some(match edit.base_version {
+                        None => String::new(),
+                        Some(version) => match shown
+                            .iter()
+                            .find(|page| page.slug == edit.slug && page.version == Some(version))
+                        {
+                            Some(page) => page.body.clone(),
+                            None => match self.pages.read_version(scope, &edit.slug, version).await
+                            {
+                                Ok(Some(page)) => strip_frontmatter(&page.markdown),
+                                _ => return Applied::Conflict,
+                            },
+                        },
+                    });
+                }
+                let theirs = current
+                    .as_ref()
+                    .map(|page| strip_frontmatter(&page.markdown))
+                    .unwrap_or_default();
+                merge::three_way(base_body.as_deref().unwrap_or_default(), &theirs, &ours)
+            };
+            let mut sources: Vec<String> = vec![head.source_id.clone()];
+            if let Some(page) = &current
+                && let Some(listed) = page.frontmatter.get("sources")
+            {
+                for id in listed.split(',').map(str::trim).filter(|id| !id.is_empty()) {
+                    if !sources.iter().any(|seen| seen == id) && sources.len() < 20 {
+                        sources.push(id.to_owned());
+                    }
+                }
+            }
+            let markdown = frontmatter(&place, &title, &utc_day(now), &sources) + &body;
+            let mut reconciles = None;
+            let mut lost_race = false;
+            for _ in 0..2 {
+                let write = PageWrite {
+                    entity_type: EntityType::Topic,
+                    markdown: markdown.clone(),
+                    author: Author::Brain { reconciles },
+                    base_version: at,
+                };
+                match self.pages.write(scope, &edit.slug, write).await {
+                    Ok(_) => return Applied::Written,
+                    // A person edited the page, and the model was shown that
+                    // edit (it is at or before the version the model saw):
+                    // the body already incorporates it, so the brain may say
+                    // so.
+                    Err(PageError::HumanEditPending { version })
+                        if edit.base_version.is_some_and(|seen| version <= seen)
+                            && reconciles.is_none() =>
+                    {
+                        reconciles = Some(version);
+                    }
+                    // Another writer, outside this drain, won the race:
+                    // read again and merge onto theirs.
+                    Err(PageError::Conflict { .. }) => {
+                        lost_race = true;
+                        break;
+                    }
+                    Err(PageError::HumanEditPending { .. }) => return Applied::Conflict,
+                    Err(_) => return Applied::Rejected,
+                }
+            }
+            if !lost_race {
+                return Applied::Conflict;
             }
         }
         Applied::Conflict
+    }
+
+    /// Whether every version of the page after `since`, up to `head`, was
+    /// written by the brain (another compile), not by a person. A history
+    /// that cannot be read is not.
+    async fn brain_only_since(&self, scope: &str, slug: &str, since: u32, head: u32) -> bool {
+        let Ok(history) = self.pages.history(scope, slug).await else {
+            return false;
+        };
+        history
+            .iter()
+            .filter(|meta| meta.version > since && meta.version <= head)
+            .all(|meta| meta.author_kind == AuthorKind::Brain)
     }
 
     /// The facts as the layer will store them: the session's source cited,
@@ -1306,7 +1582,9 @@ impl Compiler {
     /// Appends one line to the log page — the one page only the server
     /// writes. Re-read and re-appended on a lost race, so a line is never
     /// dropped and never written twice.
-    async fn append_log(&self, scope: &str, line: &str) -> bool {
+    async fn append_log(&self, scope: &str, line: &str, tick: &Tick) -> bool {
+        // Compiles running side by side append to the same log: one at a time.
+        let _turn = tick.page(scope, layout::LOG).await;
         for _ in 0..4 {
             let Ok(Some(page)) = self.pages.read(scope, layout::LOG).await else {
                 return false;
@@ -1437,6 +1715,87 @@ impl Compiler {
             Err(error) => Err(error),
         }
     }
+}
+
+/// How many times one edit is merged onto a page that keeps moving before
+/// it counts as a conflict.
+const MERGE_ATTEMPTS: usize = 3;
+
+/// One running compile, as the drain awaits it: the workspace lane it ran
+/// in, the claimed job, how it ended, and whether the end was recorded.
+type Running<'a> =
+    Pin<Box<dyn Future<Output = (usize, Job, Finish, Result<(), DbError>)> + Send + 'a>>;
+
+/// One workspace's jobs in a drain, and how far the drain got with them.
+struct Lane {
+    workspace: String,
+    jobs: VecDeque<Job>,
+    /// Its settings, read when the drain first takes one of its jobs.
+    settings: Option<Settings>,
+    /// Jobs claimed (and so counted against its `batch`).
+    started: usize,
+    running: usize,
+    /// Jobs that ended `done`.
+    done: usize,
+    /// Nothing more of it starts in this drain (its pool waits out a 429,
+    /// its budget is held, or the tick has no time for it).
+    closed: bool,
+}
+
+impl Lane {
+    fn new(job: Job) -> Self {
+        Self {
+            workspace: job.workspace.clone(),
+            jobs: VecDeque::from([job]),
+            settings: None,
+            started: 0,
+            running: 0,
+            done: 0,
+            closed: false,
+        }
+    }
+}
+
+/// What the drain does with one job it read.
+enum Admit {
+    /// Parked without a call (no model, no budget, paused).
+    Parked(Processed),
+    /// Somebody else changed or claimed it.
+    Gone,
+    /// Not now: its lane stops for this drain, the job stays as it is.
+    Later,
+    /// The drain starts nothing more.
+    Stop,
+    /// Claimed: compile it.
+    Run(Box<Job>),
+}
+
+/// A workspace's compile budget, right now.
+enum Budget {
+    Open,
+    /// What is left is held by calls in flight.
+    Held,
+    /// Spent until then.
+    Spent(OffsetDateTime),
+}
+
+/// The lane the next compile is taken from: one with a job left, under its
+/// pool's limit and (in a cron drain) its `batch`, that has started the
+/// fewest so far — the oldest such lane first.
+fn next_lane(lanes: &[Lane], tick: &Tick, filter: &ClaimFilter) -> Option<usize> {
+    lanes
+        .iter()
+        .enumerate()
+        .filter(|(_, lane)| !lane.closed && !lane.jobs.is_empty())
+        .filter(|(_, lane)| match &lane.settings {
+            None => true,
+            Some(settings) => {
+                lane.running < tick.limit(&lane.workspace)
+                    && (filter.workspace.is_some() || lane.started < settings.batch)
+            }
+        })
+        .min_by_key(|(index, lane)| (lane.started, *index))
+        .map(|(index, _)| index)
 }
 
 fn parked(job: &Job, status: JobStatus, reason: &str) -> Processed {

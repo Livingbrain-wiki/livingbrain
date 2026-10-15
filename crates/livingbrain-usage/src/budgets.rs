@@ -33,6 +33,8 @@ pub struct Budgets {
     pub compiler_job_tokens: Option<u64>,
     /// Sessions one cron run compiles for this workspace.
     pub compiler_batch: Option<u64>,
+    /// Sessions one run compiles at once.
+    pub compiler_concurrency: Option<u64>,
     /// Model calls one session may take.
     pub compiler_max_chunks: Option<u64>,
     /// Transcript characters per model call.
@@ -64,7 +66,7 @@ pub struct StoredBudgets {
 }
 
 /// The columns, in one place, so the read and the write cannot disagree.
-const COLUMNS: [&str; 14] = [
+const COLUMNS: [&str; 15] = [
     "compiler_paused",
     "compiler_daily_tokens",
     "compiler_monthly_tokens",
@@ -79,11 +81,12 @@ const COLUMNS: [&str; 14] = [
     "compiler_triage",
     "compiler_compaction",
     "compiler_triage_strictness",
+    "compiler_concurrency",
 ];
 
 impl Budgets {
     /// The values in [`COLUMNS`] order, the switches as 0/1.
-    fn values(&self) -> [Option<u64>; 14] {
+    fn values(&self) -> [Option<u64>; 15] {
         [
             self.compiler_paused.map(u64::from),
             self.compiler_daily_tokens,
@@ -99,6 +102,7 @@ impl Budgets {
             self.compiler_triage.map(u64::from),
             self.compiler_compaction.map(u64::from),
             self.compiler_triage_strictness,
+            self.compiler_concurrency,
         ]
     }
 
@@ -119,6 +123,7 @@ impl Budgets {
             compiler_triage: number("compiler_triage").map(|flag| flag != 0),
             compiler_compaction: number("compiler_compaction").map(|flag| flag != 0),
             compiler_triage_strictness: number("compiler_triage_strictness"),
+            compiler_concurrency: number("compiler_concurrency"),
         }
     }
 }

@@ -68,7 +68,7 @@ hook.
 
 | Status | Meaning |
 | :--- | :--- |
-| `queued` | waiting |
+| `queued` | waiting. A compile stopped between two chunks is queued again with `error` saying why — `pool-backoff` (another compile of the workspace got a 429), `tick-deadline` (the cron run had no time for another call), `budget-held` (what is left of the budget is held by calls in flight) — and carries on from the chunk it reached, without spending an attempt |
 | `processing` | claimed under a 15-minute lease; a dead worker's lease lapses |
 | `done` | compiled; `pages` lists what it wrote |
 | `failed` | retried after 15 min, then 1 h; after 3 attempts it stays failed. `error` says why — for a model call, the provider's status and its (redacted, 300-character) error body, e.g. `model-http 429: {"error":{"code":"1302",…}}`. A rate limit (HTTP 429) is retried after `Retry-After` (or 5 min, at most 30) without counting an attempt, and stops that drain. **Retry failed** (`POST /v1/coding-agents/retry`) puts your failed jobs back to `queued` with their attempts reset |
@@ -88,11 +88,12 @@ Jobs are processed in two places:
 - **Cron.** The Worker fires every 15 minutes (`*/15 * * * *` in
   `wrangler.toml`) and compiles, oldest first, up to each workspace's
   sessions-per-run (its own setting, else `CODING_AGENTS_BATCH`, default 1;
-  never more than 20) under the invocation's subrequest budget. It then runs
-  the lint over the scopes it wrote to. A paused workspace's jobs are parked
+  never more than 20) under the invocation's subrequest budget — several at
+  once ([Parallel compiles](#parallel-compiles)). It then runs the lint over
+  the scopes it wrote to. A paused workspace's jobs are parked
   as `over-budget` (`paused`) and looked at again every 15 minutes.
 - **`POST /v1/coding-agents/process`** (`{"max": 1..3}`) compiles up to
-  `max` of *your* jobs inside the request. Cookie callers must be on the
+  `max` of *your* jobs inside the request, side by side. Cookie callers must be on the
   same origin.
 
 `POST /v1/coding-agents/retry` requeues *your* `failed` jobs (attempts
@@ -119,6 +120,57 @@ jobs in your own scopes.
 fully**: it puts one of *your* `skipped-trivial` or `summary-only` jobs back
 to `queued` with no triage and no compaction, and compiles it in the
 request. Someone else's job, or one that triage did not hold back, is a 404.
+
+## Parallel compiles
+
+A drain — a cron run or **Process now** — runs several compiles at once.
+
+- **How many.** Up to the workspace's sessions-at-once
+  (`coding_agents.concurrency`, `CODING_AGENTS_CONCURRENCY`, default 4,
+  1 – **8**), and never more than **6** in one invocation across every
+  workspace: a Worker keeps at most six outbound connections open, and
+  each running compile holds one (its model call). Process now runs its
+  `max` (at most 3) side by side.
+- **In order within a session.** A session's chunks still go one after
+  another — each builds on the pages the last one wrote. Different
+  sessions, of one project or not, run in parallel.
+- **Fair.** The next compile is taken from the workspace that has started
+  the fewest in this run, so one workspace's backlog cannot starve
+  another's; the drain reads at most `2 × batch` jobs of each workspace.
+- **Pages.** Two compiles writing one page take turns on it, and the second
+  merges its edit onto the first's version instead of overwriting it: lines
+  it removed are removed, lines it added go in after the nearest line before
+  them (a new section after the section it follows), lines the other compile
+  added stay. A version written by a *person* since the model's is still a
+  conflict — the next run shows the model their edit. The log page is
+  appended to one compile at a time.
+- **Budgets.** Before each call the compiler holds the call's estimate
+  (prompt plus its output ceiling) of the workspace's daily and monthly
+  compile tokens, in one statement that checks spend plus live holds
+  (`coding_agent_reservations`); the hold is settled with what the call
+  really spent. Parallel calls therefore cannot spend past a budget by more
+  than one call — the same overshoot a single compile always had. A
+  compile whose hold is refused while others hold the rest is queued again
+  (`budget-held`); once the budget is spent the rest are parked
+  `over-budget` as before.
+- **Rate limits.** A 429 pauses the workspace's whole pool for the
+  provider's `Retry-After` (or 5 minutes; 1 – 30): no compile of that
+  workspace starts a call until then, in this run or the next, and the
+  running ones stop before their next call (`pool-backoff`). The pool also
+  halves (at least 1); a run that used its whole pool without a 429 raises
+  it by one, up to the setting. The pool lives in `coding_agent_pool`.
+- **Time.** A cron run starts a compile only while its budget (5 minutes)
+  leaves room for one call of the workspace's average length (a rolling
+  average, also in `coding_agent_pool`), and never starts a call that could
+  outlast the invocation (the budget's deadline plus 9 minutes, less the
+  8-minute call ceiling): a compile that reaches that point stops between
+  chunks (`tick-deadline`) and the next run carries on.
+- **Your own runner.** Compiles that run on your device hand several calls
+  to your runner at once; each waits as `waiting-runner` as before.
+
+The cron's share of the invocation's subrequest budget (45, a compile
+counted as 8, 9 with Jev) still caps a run at five compiles, now started
+together rather than one after another.
 
 ## Triage and compaction
 
@@ -334,8 +386,8 @@ them. The effective value is, in order:
 3. else the built-in default.
 
 Clearing a setting (`null`, or an empty field in the app) returns the
-workspace to 2 and 3. The table is `usage_budgets` (usage migrations 0002
-and 0003); NULL means "not set here".
+workspace to 2 and 3. The table is `usage_budgets` (usage migrations 0002,
+0003 and 0004); NULL means "not set here".
 
 | Setting (`group.key`) | Env var | Default | Range |
 | --- | --- | --- | --- |
@@ -343,6 +395,7 @@ and 0003); NULL means "not set here".
 | `coding_agents.daily_tokens` | `CODING_AGENTS_DAILY_TOKENS` | 400 000 | 0 – 10¹² |
 | `coding_agents.monthly_tokens` | `CODING_AGENTS_MONTHLY_TOKENS` | 4 000 000 | 0 – 10¹² |
 | `coding_agents.batch` (sessions per run) | `CODING_AGENTS_BATCH` | 1 | 1 – **20** |
+| `coding_agents.concurrency` (sessions at once) | `CODING_AGENTS_CONCURRENCY` | 4 | 1 – **8** (6 at most run per invocation) |
 | `coding_agents.job_tokens` (per-session cap) | `CODING_AGENTS_JOB_TOKENS` | 80 000 | 1 000 – **1 000 000** |
 | `coding_agents.max_chunks` | `CODING_AGENTS_MAX_CHUNKS` | 4 | 1 – **20** |
 | `coding_agents.chunk_chars` | `CODING_AGENTS_CHUNK_CHARS` | 32 000 | 1 000 – **200 000** |

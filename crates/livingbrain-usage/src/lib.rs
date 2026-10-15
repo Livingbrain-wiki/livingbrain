@@ -224,12 +224,28 @@ impl Module for Usage {
             include_str!("../migrations/postgres/0003_triage.sql"),
         );
 
-        const MIGRATIONS: [SqlMigration; 3] = [MIGRATION_INIT, MIGRATION_BUDGETS, MIGRATION_TRIAGE];
+        const MIGRATION_CONCURRENCY: SqlMigration = SqlMigration::new(
+            "0004",
+            "concurrency",
+            include_str!("../migrations/sqlite/0004_concurrency.sql"),
+        );
+        const MIGRATION_CONCURRENCY_POSTGRES: SqlMigration = SqlMigration::new(
+            "0004",
+            "concurrency",
+            include_str!("../migrations/postgres/0004_concurrency.sql"),
+        );
+        const MIGRATIONS: [SqlMigration; 4] = [
+            MIGRATION_INIT,
+            MIGRATION_BUDGETS,
+            MIGRATION_TRIAGE,
+            MIGRATION_CONCURRENCY,
+        ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 3] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 4] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_BUDGETS_POSTGRES,
             MIGRATION_TRIAGE_POSTGRES,
+            MIGRATION_CONCURRENCY_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {

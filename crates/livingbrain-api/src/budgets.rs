@@ -20,7 +20,8 @@
 //! else the env var (`CODING_AGENTS_*`, `ASK_CONTEXT_CHARS_MAX`,
 //! `USAGE_BUDGET_CENTS_MONTHLY`), else the built-in default. **Hard
 //! ceilings** sit above all three where a Worker's limits need them — the
-//! sessions one run compiles ([`BATCH_CEILING`]), the calls and tokens one
+//! sessions one run compiles ([`BATCH_CEILING`]) and how many at once
+//! ([`CONCURRENCY_CEILING`]), the calls and tokens one
 //! session may take ([`MAX_CHUNKS_CEILING`], [`JOB_TOKENS_CEILING`]), and
 //! the size of one compile call ([`CHUNK_CHARS_CEILING`],
 //! [`MAX_OUTPUT_TOKENS_CEILING`]): no setting and no env var lifts a compile
@@ -45,8 +46,8 @@ use cratefield_core::{
     ProblemDef,
 };
 use livingbrain_compiler::{
-    BATCH_CEILING, CHUNK_CHARS_CEILING, JOB_TOKENS_CEILING, MAX_CHUNKS_CEILING,
-    MAX_OUTPUT_TOKENS_CEILING, Overrides, Queue, Settings, Tuning,
+    BATCH_CEILING, CHUNK_CHARS_CEILING, CONCURRENCY_CEILING, JOB_TOKENS_CEILING,
+    MAX_CHUNKS_CEILING, MAX_OUTPUT_TOKENS_CEILING, Overrides, Queue, Settings, Tuning,
 };
 use livingbrain_models::invoke;
 use livingbrain_usage::Budgets;
@@ -106,7 +107,7 @@ struct Field {
 const UNBOUNDED: u64 = 1_000_000_000_000;
 
 /// Every setting the tab shows, in the order it shows them.
-const FIELDS: [Field; 14] = [
+const FIELDS: [Field; 15] = [
     Field {
         group: "coding_agents",
         key: "paused",
@@ -146,6 +147,16 @@ const FIELDS: [Field; 14] = [
         max: BATCH_CEILING as u64,
         get: |b| b.compiler_batch,
         set: |b, v| b.compiler_batch = v,
+    },
+    Field {
+        group: "coding_agents",
+        key: "concurrency",
+        switch: false,
+        choices: &[],
+        min: 1,
+        max: CONCURRENCY_CEILING as u64,
+        get: |b| b.compiler_concurrency,
+        set: |b, v| b.compiler_concurrency = v,
     },
     Field {
         group: "coding_agents",
@@ -259,6 +270,7 @@ pub fn overrides(budgets: &Budgets) -> Overrides {
     Overrides {
         paused: budgets.compiler_paused,
         batch: budgets.compiler_batch,
+        concurrency: budgets.compiler_concurrency,
         chunk_chars: budgets.compiler_chunk_chars,
         max_chunks: budgets.compiler_max_chunks,
         max_output_tokens: budgets.compiler_max_output_tokens,
@@ -508,6 +520,7 @@ async fn view(ctx: &ModuleContext, member: &livingbrain_tokens::Member) -> Resul
             "daily_tokens" => settings.daily_tokens,
             "monthly_tokens" => settings.monthly_tokens,
             "batch" => settings.batch as u64,
+            "concurrency" => settings.concurrency as u64,
             "job_tokens" => settings.job_tokens,
             "max_chunks" => settings.max_chunks as u64,
             "chunk_chars" => settings.chunk_chars as u64,
@@ -595,6 +608,7 @@ async fn view(ctx: &ModuleContext, member: &livingbrain_tokens::Member) -> Resul
         },
         "ceilings": {
             "batch": BATCH_CEILING,
+            "concurrency": CONCURRENCY_CEILING,
             "job_tokens": JOB_TOKENS_CEILING,
             "max_chunks": MAX_CHUNKS_CEILING,
             "chunk_chars": CHUNK_CHARS_CEILING,

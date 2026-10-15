@@ -49,10 +49,11 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 3] = [
+        const SET: [cratefield_core::SqlMigration; 4] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
+            livingbrain_compiler::MIGRATION_PARALLEL,
         ];
         Migrations {
             sqlite: &SET,
@@ -731,7 +732,8 @@ fn a_model_failure_retries_with_backoff_then_stays_failed() {
 /// The production failure (2026-10-15): Z.AI answered the compile 429
 /// "Rate limit reached for requests". The job says so in `last_error` and
 /// in the log page, keeps its attempts, comes back after `Retry-After`,
-/// and the drain stops rather than spending the next job on the same 429.
+/// and the workspace's whole pool waits with it rather than spending the
+/// next job on the same 429.
 #[test]
 fn a_rate_limited_call_is_retried_without_spending_an_attempt() {
     let world = world();
@@ -778,17 +780,17 @@ fn a_rate_limited_call_is_retried_without_spending_an_attempt() {
         "{log}"
     );
 
-    // The next drain reaches the second job (the first waits out its
-    // Retry-After); then nothing is ready until the wait is over.
-    assert_eq!(world.drain(&world.compiler(&busy)).len(), 1);
+    // The whole pool waits out the Retry-After: the next drain starts
+    // nothing, the second job included — the same key would refuse it too.
     assert!(world.drain(&world.compiler(&busy)).is_empty());
+    assert_eq!(busy.calls(), 1);
     // After it, the same 429 again is not logged a second time.
     world.clock.advance(Duration::minutes(3));
-    world.drain(&world.compiler(&busy));
+    assert_eq!(world.drain(&world.compiler(&busy)).len(), 1);
     assert_eq!(
         world.log("u1").matches("not compiled").count(),
-        2,
-        "one per job"
+        1,
+        "one line per job and reason"
     );
     assert!(world.jobs().iter().all(|job| job.attempts == 0));
     world.clock.advance(Duration::minutes(3));
@@ -1310,4 +1312,534 @@ fn a_wired_classifier_is_asked_once_per_session_and_can_raise_the_rule() {
         job_of(&world, &source).triage_reason.as_deref(),
         Some("jev:full")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Parallel compiles
+
+/// A future that is pending once, so the other compiles of the drain run
+/// before this one carries on: a model call in flight.
+struct YieldNow(bool);
+
+impl std::future::Future for YieldNow {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            std::task::Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+impl Moving {
+    /// The clock moved to `at`, if it is not past it already: the calls in
+    /// flight together take as long as the longest, not their sum.
+    fn reach(&self, at: OffsetDateTime) {
+        let mut now = self.0.lock().expect("clock");
+        if *now < at {
+            *now = at;
+        }
+    }
+}
+
+/// A model whose every call takes `took` on the test's clock, with the
+/// other compiles running meanwhile. It records each call (workspace, start
+/// time) and how many were in flight at most.
+#[derive(Clone)]
+struct Slow {
+    clock: Moving,
+    took: Duration,
+    script: Arc<Script>,
+    started: Arc<Mutex<Vec<(String, OffsetDateTime)>>>,
+    in_flight: Arc<Mutex<(usize, usize)>>,
+}
+
+impl Slow {
+    fn new(
+        world: &World,
+        took: Duration,
+        script: impl Fn(&str, usize) -> Result<Reply, ModelFailure> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            clock: world.clock.clone(),
+            took,
+            script: Arc::new(Box::new(script)),
+            started: Arc::default(),
+            in_flight: Arc::default(),
+        }
+    }
+
+    fn peak(&self) -> usize {
+        self.in_flight.lock().expect("flight").1
+    }
+
+    fn calls(&self) -> Vec<(String, OffsetDateTime)> {
+        self.started.lock().expect("calls").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Model for Slow {
+    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+    async fn complete(
+        &self,
+        call: &Call<'_>,
+        _system: &str,
+        user: &str,
+        _max_tokens: u32,
+    ) -> Result<Reply, ModelFailure> {
+        let start = self.clock.now();
+        let index = {
+            let mut started = self.started.lock().expect("calls");
+            started.push((call.workspace.to_owned(), start));
+            started.len() - 1
+        };
+        {
+            let mut flight = self.in_flight.lock().expect("flight");
+            flight.0 += 1;
+            flight.1 = flight.1.max(flight.0);
+        }
+        let answer = (self.script)(user, index);
+        for _ in 0..3 {
+            YieldNow(false).await;
+        }
+        self.clock.reach(start + self.took);
+        self.in_flight.lock().expect("flight").0 -= 1;
+        answer
+    }
+}
+
+impl World {
+    fn compiler_over(&self, model: Arc<dyn Model>, settings: Settings) -> Compiler {
+        Compiler::new(
+            self.pages(),
+            self.sources(),
+            Queue::new(self.db.clone()),
+            model,
+            Arc::new(NoFacts),
+            Arc::new(NoGate),
+            Arc::new(self.clock.clone()),
+            settings,
+        )
+    }
+
+    fn pool(&self, workspace: &str) -> livingbrain_compiler::PoolRow {
+        pollster::block_on(Queue::new(self.db.clone()).pool(workspace)).expect("the pool")
+    }
+}
+
+fn tuned(batch: u64, concurrency: u64) -> Overrides {
+    Overrides {
+        batch: Some(batch),
+        concurrency: Some(concurrency),
+        ..Overrides::default()
+    }
+}
+
+/// Up to the workspace's concurrency compile at once, and the drain takes
+/// as long as its rounds, not the sum of its calls.
+#[test]
+fn compiles_run_side_by_side_up_to_the_workspace_s_concurrency() {
+    let world = world();
+    for n in 0..6 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Slow::new(&world, Duration::seconds(60), |_, _| Ok(reply(&[])));
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(6, 3))])));
+    let start = world.clock.now();
+    let processed = world.drain(&compiler);
+    assert_eq!(processed.len(), 6, "{processed:?}");
+    assert!(processed.iter().all(|p| p.status == JobStatus::Done));
+    assert_eq!(model.peak(), 3, "three at once, never more");
+    assert_eq!(
+        world.clock.now() - start,
+        Duration::minutes(2),
+        "two rounds of three, not six calls one after another"
+    );
+    // The pool ran full without a 429 and is at its setting; the drain
+    // timed the calls.
+    let pool = world.pool(WORKSPACE);
+    assert_eq!(pool.concurrency, Some(3));
+    assert_eq!(pool.calls, 6);
+    assert_eq!(pool.avg_call_ms, 60_000);
+}
+
+/// Every workspace gets its turn — the one that started the fewest goes
+/// next — and the invocation never has more than six calls open, whatever
+/// the workspaces ask for.
+#[test]
+fn the_pool_is_fair_across_workspaces_and_never_past_six_at_once() {
+    let world = world();
+    for n in 0..8 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    for n in 0..2 {
+        world.sync(OTHER_WORKSPACE, "u9", &format!("t-{n}"), "two");
+    }
+    let model = Slow::new(&world, Duration::seconds(30), |_, _| Ok(reply(&[])));
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![
+            (WORKSPACE, tuned(20, 8)),
+            (OTHER_WORKSPACE, tuned(20, 8)),
+        ])));
+    let processed = world.drain(&compiler);
+    assert_eq!(processed.len(), 10, "{processed:?}");
+    assert_eq!(model.peak(), livingbrain_compiler::MAX_IN_FLIGHT);
+    let first: Vec<String> = model
+        .calls()
+        .into_iter()
+        .take(4)
+        .map(|(workspace, _)| workspace)
+        .collect();
+    assert_eq!(
+        first,
+        [WORKSPACE, OTHER_WORKSPACE, WORKSPACE, OTHER_WORKSPACE],
+        "the older backlog does not starve the other workspace"
+    );
+}
+
+/// "Process now" compiles its few side by side, never more than asked.
+#[test]
+fn process_now_runs_its_jobs_side_by_side_within_its_max() {
+    let world = world();
+    for n in 0..5 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Slow::new(&world, Duration::seconds(30), |_, _| Ok(reply(&[])));
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(1, 8))])));
+    let processed = pollster::block_on(compiler.drain(
+        &ClaimFilter {
+            workspace: Some(WORKSPACE.to_owned()),
+            scopes: Some(vec![personal(WORKSPACE, "u1")]),
+            ignore_backoff: true,
+            source_id: None,
+        },
+        3,
+        &ScheduledBudget::unbounded(),
+    ))
+    .expect("a drain");
+    assert_eq!(processed.len(), 3, "{processed:?}");
+    assert_eq!(model.peak(), 3);
+}
+
+/// Several compiles of one owner who runs their own runner hand their calls
+/// out at once: each waits as `waiting-runner`, none spends an attempt.
+#[test]
+fn several_runner_calls_are_handed_out_at_once() {
+    let world = world();
+    for n in 0..3 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Slow::new(&world, Duration::seconds(1), |_, _| {
+        Err(ModelFailure::Pending)
+    });
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(3, 3))])));
+    let processed = world.drain(&compiler);
+    assert_eq!(processed.len(), 3);
+    assert!(
+        processed
+            .iter()
+            .all(|p| p.status == JobStatus::WaitingRunner)
+    );
+    assert_eq!(model.peak(), 3);
+    assert!(world.jobs().iter().all(|job| job.attempts == 0));
+    // Nothing held of the budget once the calls are out.
+    assert_eq!(world.count("coding_agent_reservations"), 0);
+}
+
+/// Two compiles that write the same project page at the same time: the
+/// second merges onto the first's version rather than overwrite it, for a
+/// new page and for one both were shown at the same version.
+#[test]
+fn two_compiles_writing_one_page_both_land() {
+    let world = world();
+    let scope = personal(WORKSPACE, "u1");
+    let slug = decisions();
+    let first = world.sync(WORKSPACE, "u1", "s-1", "one");
+    let second = world.sync(WORKSPACE, "u1", "s-2", "two");
+    let page = slug.clone();
+    let model = Slow::new(&world, Duration::seconds(30), move |_, index| {
+        Ok(reply(&[(
+            &page,
+            None,
+            &format!("# Decisions\n\n- **2026-10-15** · decision from call {index}"),
+        )]))
+    });
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(4, 4))])));
+    let processed = world.drain(&compiler);
+    assert_eq!(model.peak(), 2, "both compiles were in flight together");
+    assert!(
+        processed.iter().all(|p| p.status == JobStatus::Done),
+        "{processed:?}"
+    );
+    let read = || {
+        pollster::block_on(world.pages().read(&scope, &slug))
+            .expect("a read")
+            .expect("the page")
+    };
+    let written = read();
+    assert_eq!(written.version, 2);
+    for line in ["decision from call 0", "decision from call 1"] {
+        assert!(
+            written.markdown.contains(line),
+            "{line}:\n{}",
+            written.markdown
+        );
+    }
+    for source in [&first, &second] {
+        assert!(
+            written.markdown.contains(source.as_str()),
+            "{source} not cited"
+        );
+    }
+    assert_eq!(written.markdown.matches("# Decisions").count(), 1);
+
+    // Both shown version 2, both add a line to it: both lines land, and
+    // what was there stays.
+    world.sync(WORKSPACE, "u1", "s-3", "three");
+    world.sync(WORKSPACE, "u1", "s-4", "four");
+    let (pages, at, page) = (world.pages(), scope.clone(), slug.clone());
+    let model = Slow::new(&world, Duration::seconds(30), move |_, index| {
+        let seen = pollster::block_on(pages.read(&at, &page))
+            .expect("a read")
+            .expect("the page");
+        let body = livingbrain_compiler::compile::strip_frontmatter(&seen.markdown);
+        Ok(reply(&[(
+            &page,
+            Some(seen.version),
+            &format!(
+                "{}\n- **2026-10-16** · later decision {index}",
+                body.trim_end()
+            ),
+        )]))
+    });
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(4, 4))])));
+    let processed = world.drain(&compiler);
+    assert!(
+        processed.iter().all(|p| p.status == JobStatus::Done),
+        "{processed:?}"
+    );
+    let written = read();
+    assert_eq!(written.version, 4);
+    for line in [
+        "decision from call 0",
+        "decision from call 1",
+        "later decision 0",
+        "later decision 1",
+    ] {
+        assert!(
+            written.markdown.contains(line),
+            "{line}:\n{}",
+            written.markdown
+        );
+    }
+}
+
+/// Parallel compiles hold their share of the budget before each call, so
+/// together they never spend past it by more than one call — however many
+/// were admitted at once.
+#[test]
+fn parallel_compiles_never_spend_past_the_budget() {
+    let world = world();
+    for n in 0..6 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Slow::new(&world, Duration::seconds(30), |_, _| Ok(reply(&[])));
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(
+            WORKSPACE,
+            Overrides {
+                daily_tokens: Some(5_000),
+                ..tuned(6, 4)
+            },
+        )])));
+    // Four were admitted at once; the first call's hold took more than the
+    // whole budget, so the other three were queued again without a call.
+    let processed = world.drain(&compiler);
+    assert_eq!(
+        processed
+            .iter()
+            .filter(|p| p.error.as_deref() == Some("budget-held"))
+            .count(),
+        3,
+        "{processed:?}"
+    );
+    // Drain on until the budget is spent and the rest is parked.
+    let mut parked = false;
+    for _ in 0..10 {
+        let processed = world.drain(&compiler);
+        if processed.iter().any(|p| p.status == JobStatus::OverBudget) {
+            parked = true;
+            break;
+        }
+    }
+    assert!(parked, "the budget ran out");
+    let queue = Queue::new(world.db.clone());
+    let today = livingbrain_compiler::queue::utc_day(world.clock.now());
+    let spent = pollster::block_on(queue.spent(WORKSPACE, &today, &today)).expect("spend");
+    // Each call spends 1 200: the calls ran until the budget was spent, and
+    // the last went over by at most its own spend.
+    assert!(spent >= 5_000, "{spent}");
+    assert!(
+        spent <= 5_000 + 1_200,
+        "{spent} overshoots by more than one call"
+    );
+    assert_eq!(model.peak(), 1, "never two calls on the last of a budget");
+    assert_eq!(
+        world.count("coding_agent_reservations"),
+        0,
+        "every hold settled"
+    );
+}
+
+/// One 429 pauses the workspace's whole pool for its Retry-After and halves
+/// it; the pool grows back by one after a full run without one.
+#[test]
+fn a_429_pauses_the_whole_pool_and_halves_it() {
+    let world = world();
+    for n in 0..4 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Slow::new(&world, Duration::seconds(10), |_, index| {
+        if index == 0 {
+            Err(ModelFailure::Busy {
+                reason: "http 429: slow down".to_owned(),
+                retry_after_secs: Some(120),
+            })
+        } else {
+            Ok(reply(&[]))
+        }
+    });
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(4, 2))])));
+    let processed = world.drain(&compiler);
+    assert_eq!(
+        processed.len(),
+        2,
+        "the two in flight end, nothing more starts: {processed:?}"
+    );
+    assert_eq!(model.calls().len(), 2);
+    let pool = world.pool(WORKSPACE);
+    assert_eq!(pool.concurrency, Some(1), "halved");
+    assert!(pool.paused_until.is_some());
+
+    // Within the Retry-After nothing of the workspace starts.
+    assert!(world.drain(&compiler).is_empty());
+    assert_eq!(model.calls().len(), 2);
+
+    // After it, the pool runs again — one at a time — and, having run full
+    // without a 429, grows back by one.
+    world.clock.advance(Duration::minutes(3));
+    let processed = world.drain(&compiler);
+    assert_eq!(processed.len(), 3, "{processed:?}");
+    assert!(processed.iter().all(|p| p.status == JobStatus::Done));
+    assert_eq!(model.peak(), 2);
+    assert_eq!(world.pool(WORKSPACE).concurrency, Some(2));
+}
+
+/// A cron tick starts a compile only while its deadline leaves room for a
+/// call of average length, and a compile whose next call could outlast the
+/// invocation stops between chunks and is queued again, carrying on later.
+#[test]
+fn a_cron_tick_starts_only_what_it_has_time_for() {
+    let world = world();
+    for n in 0..10 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Slow::new(&world, Duration::minutes(2), |_, _| Ok(reply(&[])));
+    let compiler = world
+        .compiler_over(Arc::new(model.clone()), Settings::default())
+        .with_tuning(Arc::new(Tuned(vec![(WORKSPACE, tuned(10, 2))])));
+    let start = world.clock.now();
+    let deadline = start + Duration::minutes(5);
+    let processed = pollster::block_on(compiler.drain(
+        &ClaimFilter::default(),
+        BATCH_CEILING,
+        &ScheduledBudget::new(Some(deadline), None),
+    ))
+    .expect("a drain");
+    // 0–2 and 2–4 minutes: a third round would end past the deadline.
+    assert_eq!(processed.len(), 4, "{processed:?}");
+    for (_, at) in model.calls() {
+        assert!(
+            at + Duration::minutes(2) <= deadline,
+            "a call started at {at}"
+        );
+    }
+
+    // One long session, four-minute calls: the third call could outlast the
+    // wall (deadline + 9 minutes, less one call's ceiling), so it stops
+    // after two chunks, queued with both applied.
+    let world = self::world();
+    let turns: Vec<serde_json::Value> = (0..8)
+        .map(|n| {
+            serde_json::json!({
+                "role": if n % 2 == 0 { "user" } else { "assistant" },
+                "at": "2026-10-15T01:00:00Z",
+                "text": format!("turn {n}: {}", "a decision about the demo. ".repeat(40)),
+                "tool_calls": if n % 2 == 0 { serde_json::json!([]) } else { serde_json::json!([{"name": "Edit"}]) },
+            })
+        })
+        .collect();
+    let body = serde_json::json!({
+        "schema_version": 1, "agent": "claude_code", "collector_version": 1,
+        "session_id": "long", "repo": "~/code/demo", "branch": "main",
+        "models": ["m"], "started_at": "2026-10-15T01:00:00Z",
+        "ended_at": "2026-10-15T02:00:00Z", "turns": turns,
+        "totals": {"input_tokens": 10}, "outcome": null, "truncated": false
+    })
+    .to_string();
+    world.sync_record("u1", "long", body);
+    let slug = decisions();
+    let model = Slow::new(&world, Duration::minutes(4), move |_, index| {
+        Ok(reply(&[(
+            &slug,
+            if index == 0 { None } else { Some(index as u32) },
+            &format!("- chunk {index}"),
+        )]))
+    });
+    let settings = Settings {
+        chunk_chars: 1_000,
+        max_chunks: 6,
+        job_tokens: 1_000_000,
+        ..Settings::default()
+    };
+    let compiler = world.compiler_over(Arc::new(model.clone()), settings);
+    let deadline = world.clock.now() + Duration::minutes(5);
+    let processed = pollster::block_on(compiler.drain(
+        &ClaimFilter::default(),
+        1,
+        &ScheduledBudget::new(Some(deadline), None),
+    ))
+    .expect("a drain");
+    assert_eq!(processed[0].status, JobStatus::Queued, "{processed:?}");
+    assert_eq!(processed[0].error.as_deref(), Some("tick-deadline"));
+    assert_eq!(model.calls().len(), 2);
+    let job = &world.jobs()[0];
+    assert_eq!((job.chunks_done, job.attempts), (2, 0));
+    // The next run carries on from the third chunk.
+    let processed = world.drain(&compiler);
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    assert!(model.calls().len() > 2);
 }
