@@ -32,7 +32,7 @@ use crate::facts::{Fact, FactSink};
 use crate::layout::{self, Allowed, Place};
 use crate::prompt::{self, SessionHead, Shown};
 use crate::queue::{ClaimFilter, Finish, Job, JobStatus, MAX_ATTEMPTS, Queue, utc_day};
-use crate::record::{self, Session};
+use crate::record;
 
 /// The knobs, all from config (`CODING_AGENTS_*`), all with defaults that
 /// keep one session's compile small and a workspace's month bounded.
@@ -199,7 +199,10 @@ struct Tally {
     rejected: u32,
     conflicts: u32,
     facts: u32,
-    pending_facts: u32,
+    /// One reason per fact the store refused, in order.
+    skipped_facts: Vec<String>,
+    /// Facts the sink could not try at all, and why.
+    unrecorded_facts: Option<(u32, String)>,
     summaries: Vec<String>,
 }
 
@@ -390,6 +393,8 @@ impl Compiler {
             }
             Err(_) => return self.failed(job, now, "source-unreadable", Tally::default()),
         };
+        // `me` in a fact is the person who synced the session.
+        let me = livingbrain_pages::person_subject(&source.imported_by);
         let Ok(session) = record::parse(&body) else {
             return Finish::status(JobStatus::Skipped, Some("not-a-session"));
         };
@@ -506,17 +511,28 @@ impl Compiler {
                 }
             }
             if !output.facts.is_empty() {
-                let facts = self.prepare_facts(&output.facts, job, &session);
+                let (facts, refused): (Vec<Fact>, Vec<Fact>) = self
+                    .prepare_facts(&output.facts, job, &head, me.as_deref(), now)
+                    .into_iter()
+                    .partition(crate::facts::valid);
+                tally.skipped_facts.extend(
+                    refused
+                        .iter()
+                        .map(|_| "outside the v1 format once redacted".to_owned()),
+                );
+                // A refusal is per fact, and a sink that cannot try at all
+                // is a note in the log: neither fails the job.
                 match self.facts.emit(&job.workspace, &job.scope, &facts).await {
-                    Ok(accepted) => {
-                        let accepted = u32::try_from(accepted).unwrap_or(u32::MAX);
-                        tally.facts += accepted;
-                        tally.pending_facts += u32::try_from(facts.len())
-                            .unwrap_or(u32::MAX)
-                            .saturating_sub(accepted);
+                    Ok(emitted) => {
+                        tally.facts = tally
+                            .facts
+                            .saturating_add(u32::try_from(emitted.recorded).unwrap_or(u32::MAX));
+                        tally.skipped_facts.extend(emitted.skipped);
                     }
-                    Err(_) => {
-                        tally.pending_facts += u32::try_from(facts.len()).unwrap_or(u32::MAX);
+                    Err(reason) => {
+                        let count = u32::try_from(facts.len()).unwrap_or(u32::MAX);
+                        let (before, _) = tally.unrecorded_facts.take().unwrap_or_default();
+                        tally.unrecorded_facts = Some((before.saturating_add(count), reason));
                     }
                 }
             }
@@ -750,29 +766,47 @@ impl Compiler {
         Applied::Conflict
     }
 
-    /// The facts as the layer will store them: the source cited, the
-    /// observation dated by the session when the model left it out, and
-    /// the free text redacted.
-    fn prepare_facts(&self, facts: &[Fact], job: &Job, session: &Session) -> Vec<Fact> {
-        let observed = session
-            .ended_at
-            .clone()
-            .or_else(|| session.started_at.clone());
+    /// The facts as the layer will store them: the session's source cited,
+    /// observed at compile time (when the brain learned it), valid from the
+    /// session's day when the model gave no time, and the free text
+    /// redacted. `me` becomes the syncing person's own subject.
+    fn prepare_facts(
+        &self,
+        facts: &[Fact],
+        job: &Job,
+        head: &SessionHead,
+        me: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Vec<Fact> {
+        let observed = now
+            .to_offset(time::UtcOffset::UTC)
+            .replace_nanosecond(0)
+            .unwrap_or(now)
+            .format(&time::format_description::well_known::Rfc3339)
+            .ok();
         facts
             .iter()
             .map(|fact| Fact {
+                subject: match (fact.subject.as_str(), me) {
+                    ("me", Some(me)) => me.to_owned(),
+                    _ => fact.subject.clone(),
+                },
                 source: Some(
                     fact.source
                         .clone()
                         .filter(|source| source.contains(&job.source_id))
                         .unwrap_or_else(|| format!("source:{}", job.source_id)),
                 ),
-                observed_at: fact.observed_at.clone().or_else(|| observed.clone()),
+                observed_at: observed.clone(),
+                valid_from: fact
+                    .valid_from
+                    .clone()
+                    .filter(|from| !from.trim().is_empty())
+                    .or_else(|| Some(head.day.clone())),
                 value: redacted_text(&fact.value),
                 quote: fact.quote.as_deref().map(redacted_text),
                 ..fact.clone()
             })
-            .filter(crate::facts::valid)
             .collect()
     }
 
@@ -1047,6 +1081,9 @@ fn redacted_text(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The most fact refusals one log line spells out; the rest are counted.
+const MAX_SKIPS_LOGGED: usize = 5;
+
 /// The log line for one compiled session.
 fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTime) -> String {
     let short: String = head.session_id.chars().take(8).collect();
@@ -1075,10 +1112,32 @@ fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTim
     if omitted {
         line.push_str(" · transcript cut to budget");
     }
-    if tally.pending_facts > 0 {
+    if tally.facts > 0 {
+        line.push_str(&format!(" · facts recorded: {}", tally.facts));
+    }
+    if !tally.skipped_facts.is_empty() {
+        let shown = tally
+            .skipped_facts
+            .iter()
+            .take(MAX_SKIPS_LOGGED)
+            .map(|reason| edits::one_line(&redacted_text(reason), 160))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let more = tally.skipped_facts.len().saturating_sub(MAX_SKIPS_LOGGED);
         line.push_str(&format!(
-            " · {} facts pending the facts layer",
-            tally.pending_facts
+            " · facts skipped: {} ({shown}{})",
+            tally.skipped_facts.len(),
+            if more > 0 {
+                format!("; {more} more")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    if let Some((count, reason)) = &tally.unrecorded_facts {
+        line.push_str(&format!(
+            " · facts not recorded: {count} ({})",
+            edits::one_line(&redacted_text(reason), 160)
         ));
     }
     line.push_str(&format!(

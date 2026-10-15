@@ -34,7 +34,7 @@ pub mod queue;
 pub mod record;
 
 pub use compile::{Compiler, Gate, Model, ModelFailure, NoGate, Processed, Reply, Settings};
-pub use facts::{Fact, FactSink, NoFacts};
+pub use facts::{Emitted, Fact, FactSink, NoFacts};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, Queue};
 
 use cratefield_core::SqlMigration;

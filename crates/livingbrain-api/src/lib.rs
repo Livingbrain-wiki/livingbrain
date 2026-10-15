@@ -78,7 +78,7 @@ mod sources;
 mod zip;
 
 pub use ask::Ask;
-pub use coding_agents::{CodingAgents, MODEL_ROLE};
+pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, StoreFacts};
 pub use export::Export;
 pub use facts::Facts;
 pub use notes::Notes;

@@ -41,7 +41,7 @@ OUTPUT — reply with one JSON object and nothing else:
     {"slug": "<an allowed slug>", "base_version": <the version shown for that page, or null if it is new>, "title": "<page title>", "body": "<the FULL new Markdown body of the page, without frontmatter>"}
   ],
   "facts": [
-    {"subject": "project/<project>" | "system/<agent>" | "me", "attribute": "snake_case_key", "value": "text", "valid_from": "YYYY[-MM[-DD]]", "observed_at": "<RFC 3339 time of the message>", "source": "source:<source id>", "quote": "the words it was read from", "confidence": 0.0-1.0}
+    {"subject": "project/<project>" | "system/<agent>" | "me", "attribute": "snake_case_key", "value": "text", "valid_from": "YYYY[-MM[-DD]], omitted when it is the session's day", "source": "source:<source id>", "quote": "the words it was read from", "confidence": 0.0-1.0}
   ]
 }
 Only include pages you actually change. A page body you return replaces the whole page, so keep everything in it that should stay. If the session teaches nothing worth keeping, return "pages": [] and say so in the summary."#;

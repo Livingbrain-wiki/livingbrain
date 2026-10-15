@@ -101,6 +101,47 @@ impl Fixture {
             defer,
         )
     }
+
+    /// The coding-agents compiler over this fixture's own ports, with
+    /// `model` scripted by the test and the composition's real facts sink
+    /// ([`StoreFacts`](livingbrain_api::StoreFacts)), so what a compile
+    /// records is what `/v1/facts` reads.
+    #[must_use]
+    pub fn compiler(
+        &self,
+        model: Arc<dyn livingbrain_compiler::Model>,
+    ) -> livingbrain_compiler::Compiler {
+        let blob: Arc<dyn Blob> = Arc::new(ScopedBlob::new(self.blob.clone(), "pages"));
+        livingbrain_compiler::Compiler::new(
+            PageStore::new(
+                self.db.clone(),
+                blob.clone(),
+                self.key.clone(),
+                self.clock.clone(),
+                Arc::new(UlidIdGen),
+            ),
+            SourceStore::new(
+                self.db.clone(),
+                blob,
+                self.key.clone(),
+                self.clock.clone(),
+                Arc::new(UlidIdGen),
+            ),
+            livingbrain_compiler::Queue::new(self.db.clone()),
+            model,
+            Arc::new(livingbrain_api::StoreFacts::new(
+                livingbrain_pages::FactStore::new(
+                    self.db.clone(),
+                    self.key.clone(),
+                    self.clock.clone(),
+                    Arc::new(UlidIdGen),
+                ),
+            )),
+            Arc::new(livingbrain_compiler::NoGate),
+            self.clock.clone(),
+            livingbrain_compiler::Settings::default(),
+        )
+    }
 }
 
 /// One workspace with two people, and the first person's id again in a

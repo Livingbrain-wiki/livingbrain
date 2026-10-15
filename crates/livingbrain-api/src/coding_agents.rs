@@ -39,10 +39,11 @@ use cratefield_core::{
     SqlMigration,
 };
 use livingbrain_compiler::{
-    ClaimFilter, Compiler, Gate, Job, JobStatus, Model, ModelFailure, NoFacts, Queue, Reply,
-    Settings,
+    ClaimFilter, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model, ModelFailure,
+    Queue, Reply, Settings,
 };
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError};
+use livingbrain_pages::{FactError, FactInput, FactStore};
 use serde_json::{Value, json};
 
 use crate::Wiki;
@@ -239,8 +240,14 @@ fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
         blob,
         wiki.kms.clone(),
         clock.clone(),
-        id_gen,
+        id_gen.clone(),
     );
+    let facts = Arc::new(StoreFacts::new(FactStore::new(
+        db.clone(),
+        wiki.kms.clone(),
+        clock.clone(),
+        id_gen,
+    )));
     let model = Arc::new(WorkspaceModel {
         db: db.clone(),
         http,
@@ -257,11 +264,76 @@ fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
         sources,
         Queue::new(db),
         model,
-        Arc::new(NoFacts),
+        facts,
         gate,
         clock,
         Settings::from_config(&*ctx.config),
     ))
+}
+
+/// Who the fact store records as the writer of a compiled fact.
+pub const FACT_WRITER: &str = "brain:coding-agents";
+
+/// The compiler's [`FactSink`] over the temporal facts store
+/// (`docs/temporal-facts.md`): each fact is recorded in the scope the
+/// session's source is in — the person's own — and nowhere else. A fact
+/// the store refuses (a cardinality conflict, a field redaction will not
+/// let through, anything outside the format) is that fact's skip, with a
+/// reason the coding-agents log names; the rest of the batch is still
+/// recorded and the job is never failed for it.
+pub struct StoreFacts {
+    store: FactStore,
+}
+
+impl StoreFacts {
+    #[must_use]
+    pub fn new(store: FactStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait::async_trait]
+impl FactSink for StoreFacts {
+    async fn emit(&self, _workspace: &str, scope: &str, facts: &[Fact]) -> Result<Emitted, String> {
+        let mut emitted = Emitted::default();
+        for fact in facts {
+            let input = FactInput {
+                subject: fact.subject.clone(),
+                attribute: fact.attribute.clone(),
+                value: fact.value.clone(),
+                unit: fact.unit.clone(),
+                valid_from: fact.valid_from.clone(),
+                valid_to: fact.valid_to.clone(),
+                observed_at: fact.observed_at.clone(),
+                source: fact.source.clone(),
+                quote: fact.quote.clone(),
+                confidence: fact.confidence,
+                cardinality: fact.cardinality.clone(),
+            };
+            match self.store.record(scope, input, FACT_WRITER).await {
+                Ok(_) => emitted.recorded += 1,
+                Err(error) => emitted.skipped.push(skip_reason(fact, &error)),
+            }
+        }
+        Ok(emitted)
+    }
+}
+
+/// A refusal, said safely for the log. The store's own messages name a
+/// field, never its content, and a refused fact's subject or attribute may
+/// be the very thing redaction objected to, so only a cardinality conflict
+/// (which passed those checks) names its timeline. A store failure is
+/// named, not detailed.
+fn skip_reason(fact: &Fact, error: &FactError) -> String {
+    match error {
+        FactError::CardinalityMismatch { attribute, stored } => format!(
+            "cardinality conflict: `{attribute}` of `{}` is `{}` in this memory",
+            fact.subject,
+            stored.as_str()
+        ),
+        FactError::Invalid(message) => format!("refused: {message}"),
+        FactError::Store(_) => "store error".to_owned(),
+    }
 }
 
 /// The workspace's own connected model, on [`MODEL_ROLE`].

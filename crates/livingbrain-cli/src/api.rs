@@ -9,7 +9,7 @@
 //! | :--- | :--- | :--- |
 //! | `POST /v1/device-auth/code` | `{"client_id":"livingbrain-cli"}` | `{device_code, user_code, verification_uri, verification_uri_complete?, interval, expires_in}` |
 //! | `POST /v1/device-auth/token` | form `grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=…&client_id=livingbrain-cli` | `{access_token}` |
-//! | `POST /v1/ask` | `{question, project?}` | `{answer, citations:[{title, url, quote?}]}` |
+//! | `POST /v1/ask` | `{question, project?, as_of?}` | `{answer, citations:[{title, url, quote?}]}` |
 //! | `GET /v1/search` | `?q=&project=&limit=` | `{results:[{title, url, snippet}]}` |
 //! | `POST /v1/notes` | `{body, project?, title?, slug?}` | `{id, url, version, redacted, unchanged}` |
 //! | `GET /v1/pages/{slug}` | — (slug percent-encoded) | `{slug, title, markdown, url}` |
@@ -141,9 +141,19 @@ impl Client {
         }
     }
 
-    /// `POST /v1/ask`.
-    pub fn ask(&self, question: &str, project: Option<&str>) -> CliResult<Value> {
-        self.post_json("/v1/ask", json!({ "question": question }), project)
+    /// `POST /v1/ask`. `as_of` asks for the answer as of that partial date
+    /// (docs/temporal-facts.md §5); the server validates it.
+    pub fn ask(
+        &self,
+        question: &str,
+        project: Option<&str>,
+        as_of: Option<&str>,
+    ) -> CliResult<Value> {
+        let mut body = json!({ "question": question });
+        if let Some(as_of) = as_of {
+            body["as_of"] = Value::String(as_of.to_owned());
+        }
+        self.post_json("/v1/ask", body, project)
     }
 
     /// `GET /v1/search`.
