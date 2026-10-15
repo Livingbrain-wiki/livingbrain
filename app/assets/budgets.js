@@ -40,7 +40,7 @@ export const FIELDS = Object.freeze([
     group: "coding_agents",
     key: "batch",
     label: "Sessions per run",
-    hint: "Sessions one scheduled run (every 15 minutes) compiles.",
+    hint: "Sessions one scheduled run (every 5 minutes) compiles.",
     unit: "sessions",
   },
   {

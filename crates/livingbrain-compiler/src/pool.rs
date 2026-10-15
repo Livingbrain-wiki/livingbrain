@@ -44,9 +44,10 @@ pub const CONCURRENCY_CEILING: usize = 8;
 pub const MAX_CALL: Duration = Duration::minutes(8);
 
 /// How far past the cron budget's deadline the invocation's own wall is.
-/// A scheduled Worker runs for at most 15 minutes; the coding-agents share
-/// of the budget ends at most 5 minutes in, so the wall is 10 minutes after
-/// it — 9 here, one kept for the finish and the lint.
+/// A scheduled Worker runs for at most 15 minutes; the venture holds the
+/// coding-agents share's deadline at most 5.5 minutes in (`module_budget`
+/// in `livingbrain-venture`, whatever its wall), so the wall is at most
+/// 9.5 minutes after it — 9 here, the rest kept for the finish and the lint.
 pub const WALL_AFTER_BUDGET: Duration = Duration::minutes(9);
 
 /// The average call length a workspace starts with before one was timed.

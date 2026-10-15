@@ -8,7 +8,8 @@
 //!
 //! The loop a driver runs, once per tick:
 //!
-//! 1. `plan(&state, DEFAULT_BUDGET)` gives at most that many requests.
+//! 1. `plan(&state, budget)` gives at most `budget` requests (the tick's:
+//!    [`tick_budget`], within what the invocation has left).
 //! 2. For each request, the driver makes the call and, on success, calls
 //!    [`apply`] with the request and the parsed response. A response whose
 //!    kind does not match its request is refused, not applied.
@@ -28,9 +29,38 @@ use serde::{Deserialize, Serialize};
 use crate::api::{CommitDetail, CommitSummary, IssueComment, Item, PullReview};
 use crate::record::RepoRef;
 
-/// Requests per tick. Each request is one API call; a tick of 45 stays well
-/// inside the installation's hourly limit with room for webhook-driven work.
+/// Requests per tick on the Workers **Free** plan, whose invocation allows 50
+/// subrequests. Each request is one API call; a tick of 45 stays well inside
+/// the installation's hourly limit with room for webhook-driven work.
 pub const DEFAULT_BUDGET: u32 = 45;
+
+/// Requests per tick when the deployment does not say
+/// (`GITHUB_TICK_BUDGET`): sized for Workers **Paid**, where a scheduled
+/// invocation may make 10,000 subrequests. The cron fires every five
+/// minutes, twelve ticks an hour, so 400 a tick is at most 4,800 calls an
+/// hour — under the 5,000 an installation token gets from GitHub even if a
+/// single installation took every one. The scheduled split still bounds a
+/// tick: the drain makes `min(tick_budget, what the invocation has left)`.
+pub const PAID_TICK_BUDGET: u32 = 400;
+
+/// The most a deployment may set `GITHUB_TICK_BUDGET` to. Past 416 a tick
+/// can outrun the hourly limit; `rate::decide` then backs the installation
+/// off, so a higher number only front-loads the hour.
+pub const MAX_TICK_BUDGET: u32 = 1_000;
+
+/// The per-tick request budget from the deployment's `GITHUB_TICK_BUDGET`:
+/// [`PAID_TICK_BUDGET`] when it is absent, blank or not a number, else the
+/// number clamped to `1..=`[`MAX_TICK_BUDGET`].
+#[must_use]
+pub fn tick_budget(configured: Option<&str>) -> u32 {
+    configured
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map_or(PAID_TICK_BUDGET, |n| {
+            u32::try_from(n.clamp(1, i64::from(MAX_TICK_BUDGET))).unwrap_or(PAID_TICK_BUDGET)
+        })
+}
 
 /// The page size asked for on every list. GitHub's maximum.
 pub const PER_PAGE: u32 = 100;
@@ -426,6 +456,42 @@ pub fn parse_next_page(link: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_tick_budget_defaults_to_the_paid_plan_and_clamps() {
+        assert_eq!(tick_budget(None), PAID_TICK_BUDGET);
+        assert_eq!(tick_budget(Some(" ")), PAID_TICK_BUDGET);
+        assert_eq!(tick_budget(Some("many")), PAID_TICK_BUDGET);
+        assert_eq!(tick_budget(Some("45")), DEFAULT_BUDGET);
+        assert_eq!(tick_budget(Some(" 250 ")), 250);
+        assert_eq!(tick_budget(Some("0")), 1);
+        assert_eq!(tick_budget(Some("-3")), 1);
+        assert_eq!(tick_budget(Some("99999999999")), MAX_TICK_BUDGET);
+        // Twelve ticks an hour at the default stay under GitHub's 5,000.
+        const { assert!(PAID_TICK_BUDGET * 12 < 5_000) };
+    }
+
+    #[test]
+    fn a_paid_tick_never_plans_past_its_budget() {
+        let state = BackfillState {
+            item_queue: (1..=900)
+                .map(|number| ItemJob {
+                    number,
+                    pull_request: number % 2 == 0,
+                    comments: Some(1),
+                    reviews: Some(1),
+                })
+                .collect(),
+            ..BackfillState::default()
+        };
+        let requests = plan(&state, PAID_TICK_BUDGET);
+        assert_eq!(requests.len(), PAID_TICK_BUDGET as usize);
+        assert!(
+            requests.len() > DEFAULT_BUDGET as usize,
+            "{}",
+            requests.len()
+        );
+    }
 
     fn repo() -> RepoRef {
         RepoRef::parse("EarthOS-world/EarthOS.world").unwrap()

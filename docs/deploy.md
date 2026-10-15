@@ -118,6 +118,53 @@ Never reuse a staging secret value in production, and never rotate a KEK
 casually: rotating `HARNESS_KEK_CURRENT` or `MODEL_KEYS_SECRET` orphans the
 ciphertext already sealed under it.
 
+### Scheduled limits (Workers Paid)
+
+The Factory0 account that runs Living Brain is on **Workers Paid**, and the
+cron is sized for it. Cloudflare's numbers, from
+[Workers limits](https://developers.cloudflare.com/workers/platform/limits/)
+and the [Wrangler `limits` key](https://developers.cloudflare.com/workers/wrangler/configuration/):
+
+| Limit | Free | Paid | What the venture uses |
+|---|---|---|---|
+| Subrequests per invocation (Fetch, D1, R2, KV) | 50 | 10,000 by default (`[limits] subrequests`, up to 10M) | 2,000 steps (`SCHEDULED_SUBREQUESTS`) |
+| Simultaneous open connections | 6 | 6 | at most 6 compiles in flight (`MAX_IN_FLIGHT`) |
+| Wall time of a Cron Trigger invocation | 15 min | 15 min | 12 min (`SCHEDULED_WALL_SECS`) |
+| CPU time | 10 ms | 30 s default, up to 5 min with `[limits] cpu_ms`; a Cron Trigger under an hourly interval is listed at 30 s | `cpu_ms = 300_000` in `wrangler.toml` |
+| Cron Triggers | 5 per account | 250 per account | 2: `19 4 * * *` and `*/5 * * * *` |
+
+One invocation's budget is split across the modules in mount order, each
+module's unspent share rolling forward (`ScheduledSplit`); the compiler
+is third from last and the GitHub drain last, so with nothing else busy the
+compiler may start compiles for about four minutes (never past 5.5 minutes
+in: its compiles may run 9 minutes past that) and the GitHub drain inherits
+whatever is left.
+
+Two vars, both optional, override the defaults; neither is set in
+`wrangler.toml`:
+
+| Var | Default | Range (clamped) | What it is |
+|---|---|---|---|
+| `SCHEDULED_WALL_SECS` | `720` | 30 – 840 | wall time of one cron invocation, split across the modules |
+| `SCHEDULED_SUBREQUESTS` | `2000` | 10 – 5,000 | subrequest-shaped steps of one invocation (a compile counts 8, 9 with Jev; a GitHub call 1). A step undercounts the D1 and R2 work behind it, so this stays well under the 10,000 limit |
+| `GITHUB_TICK_BUDGET` | `400` | 1 – 1,000 | GitHub calls one tick may make, within what the invocation has left. Twelve ticks an hour × 400 = 4,800, under an installation's 5,000/h; past that `rate::decide` backs the installation off |
+
+A value that is blank or not a number is the default. **A deployment on
+Workers Free** sets `SCHEDULED_WALL_SECS = "300"`, `SCHEDULED_SUBREQUESTS =
+"45"` and `GITHUB_TICK_BUDGET = "45"` in its `[env.*.vars]`, moves the
+cron back to `*/15 * * * *`, and drops `[limits] cpu_ms` (Free cannot raise
+it).
+
+**Overlap.** A run may last 15 minutes and the cron fires every five, so
+runs overlap. That is safe by leases, not by timing: a compile job is
+claimed with a compare-and-set under a 15-minute lease (no invocation can
+outlive it); a GitHub queue item is claimed the same way and completed only
+with its lease token; and a repository's backfill pass holds the repository
+under a 15-minute lease in its cursor, taken and saved with a
+compare-and-set (docs/github.md). Two runs can each have six compiles in
+flight, so a workspace's model may see more than its `concurrency`; a 429
+pauses and halves its pool as usual.
+
 ### The go-ahead gate
 
 Production deploys run only on `v*` tags and wait for approval from the

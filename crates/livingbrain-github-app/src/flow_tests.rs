@@ -1535,6 +1535,107 @@ fn the_drain_backfills_within_its_budget_resumes_and_files_the_right_records() {
     });
 }
 
+/// Holds `repo`'s pass for another run until `until`, as that run's lease
+/// would: the cursor it read, with `lease_until` set.
+async fn lease_for_another_run(k: &Kit, repo: i64, until: i64) {
+    let row = crate::get_repo(k.db(), W1, INST1, repo)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut cursor = DrainCursor::parse(row.backfill_cursor.as_deref());
+    cursor.lease_until = Some(until);
+    k.db()
+        .execute(&Statement::with_values(
+            "UPDATE github_repos SET backfill_cursor = ? WHERE repo_id = ?",
+            vec![text(&serde_json::to_string(&cursor).unwrap()), int(repo)],
+        ))
+        .await
+        .unwrap();
+}
+
+#[test]
+fn two_runs_never_pass_one_repository_at_once() {
+    pollster::block_on(async {
+        let k = kit();
+        k.connected().await;
+        // Another run holds EarthOS for ten minutes: this run leaves it be.
+        lease_for_another_run(&k, REPO1, NOW + 600).await;
+        k.gh.clear_log();
+        k.tick(45).await;
+        assert!(
+            k.gh.log().iter().all(|c| !c.contains("EarthOS")),
+            "{:?}",
+            k.gh.log()
+        );
+        let repo = crate::get_repo(k.db(), W1, INST1, REPO1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.backfill_state, BackfillPhase::Pending);
+
+        // Once the lease has lapsed (a run that died) the repository is due
+        // again, and a pass that saved gives its own lease back.
+        k.tick_at(3, Some(NOW + 601)).await;
+        let repo = crate::get_repo(k.db(), W1, INST1, REPO1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repo.backfill_state, BackfillPhase::Running);
+        let cursor = DrainCursor::parse(repo.backfill_cursor.as_deref());
+        assert_eq!(cursor.lease_until, None);
+        assert!(!repo.backfill_cursor.unwrap().contains("lease_until"));
+
+        // A push to a repository another run is passing waits for it,
+        // rather than flag a cursor that run's save would overwrite.
+        lease_for_another_run(&k, REPO1, NOW + 900).await;
+        let res = k
+            .deliver(
+                APP1,
+                "push",
+                "eeee-0001",
+                &json!({
+                    "ref": "refs/heads/main", "before": "a", "after": "b",
+                    "repository": {"id": REPO1, "full_name": "EarthOS-world/EarthOS.world"},
+                    "installation": {"id": INST1}, "commits": [],
+                }),
+                &webhook_secret(APP1),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::OK);
+        let queued = k.queue_len().await;
+        assert!(queued >= 1);
+        k.tick(45).await;
+        assert_eq!(k.queue_len().await, queued, "the push is retried later");
+        let repo = crate::get_repo(k.db(), W1, INST1, REPO1)
+            .await
+            .unwrap()
+            .unwrap();
+        let cursor = DrainCursor::parse(repo.backfill_cursor.as_deref());
+        assert!(!cursor.rerun, "nothing written under another run's lease");
+        assert_eq!(cursor.lease_until, Some(NOW + 900));
+    });
+}
+
+#[test]
+fn the_tick_budget_comes_from_the_deployment() {
+    pollster::block_on(async {
+        let k = kit_with(vec![("GITHUB_TICK_BUDGET".to_owned(), "2".to_owned())]);
+        k.connected().await;
+        k.gh.clear_log();
+        // The invocation could give 45; the deployment says 2.
+        k.tick(45).await;
+        assert_eq!(k.gh.log().len(), 2, "{:?}", k.gh.log());
+
+        // Unset, a tick takes what the invocation gives it, past the
+        // free plan's 45.
+        let k = kit();
+        k.connected().await;
+        k.gh.clear_log();
+        k.tick(500).await;
+        assert!(!k.gh.log().is_empty());
+    });
+}
+
 #[test]
 fn a_rate_limit_backs_the_installation_off_and_stores_when_to_return() {
     pollster::block_on(async {

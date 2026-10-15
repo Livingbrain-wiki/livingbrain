@@ -85,13 +85,15 @@ was already compiled, the model is told so and adds only what is new.
 
 Jobs are processed in two places:
 
-- **Cron.** The Worker fires every 15 minutes (`*/15 * * * *` in
+- **Cron.** The Worker fires every 5 minutes (`*/5 * * * *` in
   `wrangler.toml`) and compiles, oldest first, up to each workspace's
   sessions-per-run (its own setting, else `CODING_AGENTS_BATCH`, default 1;
-  never more than 20) under the invocation's subrequest budget — several at
+  never more than 20) under the invocation's budget — several at
   once ([Parallel compiles](#parallel-compiles)). It then runs the lint over
   the scopes it wrote to. A paused workspace's jobs are parked
-  as `over-budget` (`paused`) and looked at again every 15 minutes.
+  as `over-budget` (`paused`) and looked at again after 15 minutes. Runs can
+  overlap (one may last 15 minutes); a job is claimed with a compare-and-set
+  under a 15-minute lease, so no two runs compile the same job.
 - **`POST /v1/coding-agents/process`** (`{"max": 1..3}`) compiles up to
   `max` of *your* jobs inside the request, side by side. Cookie callers must be on the
   same origin.
@@ -159,8 +161,9 @@ A drain — a cron run or **Process now** — runs several compiles at once.
   running ones stop before their next call (`pool-backoff`). The pool also
   halves (at least 1); a run that used its whole pool without a 429 raises
   it by one, up to the setting. The pool lives in `coding_agent_pool`.
-- **Time.** A cron run starts a compile only while its budget (5 minutes)
-  leaves room for one call of the workspace's average length (a rolling
+- **Time.** A cron run starts a compile only while its share of the
+  invocation's wall (about 4 minutes of the 12, never past 5.5 minutes in;
+  docs/deploy.md, "Scheduled limits") leaves room for one call of the workspace's average length (a rolling
   average, also in `coding_agent_pool`), and never starts a call that could
   outlast the invocation (the budget's deadline plus 9 minutes, less the
   8-minute call ceiling): a compile that reaches that point stops between
@@ -168,9 +171,13 @@ A drain — a cron run or **Process now** — runs several compiles at once.
 - **Your own runner.** Compiles that run on your device hand several calls
   to your runner at once; each waits as `waiting-runner` as before.
 
-The cron's share of the invocation's subrequest budget (45, a compile
-counted as 8, 9 with Jev) still caps a run at five compiles, now started
-together rather than one after another.
+The cron's share of the invocation's steps (about 660 of 2,000 on Workers
+Paid, a compile counted as 8, 9 with Jev) no longer caps a run: time and the
+six connections do. With the production setting of five sessions per run
+and five at once, a workspace compiles up to five sessions a run, twelve
+runs an hour — about 60 an hour, where the free plan's 45 steps allowed one
+a run, four an hour. A higher sessions-per-run setting lets a run start
+more, up to what six connections get through in its four minutes.
 
 ## Triage and compaction
 
@@ -409,8 +416,8 @@ workspace to 2 and 3. The table is `usage_budgets` (usage migrations 0002,
 
 **Hard ceilings** (bold) hold over the setting *and* the env var: they
 protect the Worker, not the bill. One cron invocation has a fixed wall and
-the Workers subrequest limit (the venture keeps 45 of 50; a compile spends
-8, 9 with Jev), and a compile — or a "Process now" request — has to finish inside it, so
+a subrequest budget (Workers Paid: the venture keeps 2,000 steps of the
+10,000 subrequests; a compile spends 8, 9 with Jev), and a compile — or a "Process now" request — has to finish inside it, so
 no number may ask for more sessions per run, calls per session, tokens per
 session or a bigger call than one invocation can complete. A value past a
 ceiling is refused by the API with a 422 that names the setting and its

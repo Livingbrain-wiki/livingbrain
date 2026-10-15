@@ -7,9 +7,11 @@
 //!
 //! # One tick
 //!
-//! 1. **Budget.** The tick may make `min(planner::DEFAULT_BUDGET,
-//!    ctx.scheduled.remaining)` GitHub calls, and stops at the scheduled
-//!    deadline. Every call — token mint included — spends one step first.
+//! 1. **Budget.** The tick may make `min(planner::tick_budget(
+//!    GITHUB_TICK_BUDGET), ctx.scheduled.remaining)` GitHub calls (400 a
+//!    tick unless the deployment says otherwise), and stops at the
+//!    scheduled deadline. Every call — token mint included — spends one
+//!    step first.
 //! 2. **Stale reopen.** A repository done for more than a day goes back to
 //!    `running`: its stored cursor is the planner's `next_run`, so this is
 //!    an incremental pass that catches anything a lost webhook missed.
@@ -22,6 +24,15 @@
 //!    getting `ceil(left / repositories left)` calls, at least 4.
 //!
 //! # A repository's pass
+//!
+//! A pass holds its repository under a **lease** kept in the cursor
+//! (`lease_until`, [`REPO_LEASE_SECS`]), taken with a compare-and-set on the
+//! cursor it read and given back when it saves. The cron fires every five
+//! minutes and an invocation may run for fifteen, so two runs can be in
+//! the drain at once; the lease is what keeps them off the same
+//! repository. A leased repository is not due, a push to it waits for the
+//! lease, and every cursor write is a compare-and-set on the cursor the
+//! writer read, so a stale writer lands nothing.
 //!
 //! The planner (`livingbrain_github::planner`) decides the order: the commit
 //! listing, the issue listing, then each queued item's comments and
@@ -102,6 +113,10 @@ pub(crate) const MAX_REVIEW_PAGES: u32 = 3;
 const MIN_SHARE: u32 = 4;
 /// How long a claimed queue item is held.
 const QUEUE_LEASE_SECS: i64 = 5 * 60;
+/// How long a pass holds its repository: Cloudflare's wall for one
+/// scheduled invocation, so a run that is still alive still holds it, and
+/// one that died lets go no later than that.
+pub(crate) const REPO_LEASE_SECS: i64 = 15 * 60;
 /// A finished repository's incremental pass reopens after this long.
 pub(crate) const STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 /// The first failure backoff; it doubles per consecutive failure.
@@ -137,6 +152,10 @@ pub(crate) struct DrainCursor {
     pub etag_commits: Option<String>,
     #[serde(default)]
     pub etag_issues: Option<String>,
+    /// A run's pass holds this repository until this unix second. Written
+    /// only while it does, so a cursor at rest reads as it always has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_until: Option<i64>,
 }
 
 const CURSOR_VERSION: u32 = 1;
@@ -183,10 +202,10 @@ pub(crate) async fn run(
     );
     let budget = Arc::clone(&ctx.scheduled);
     let start = budget.spent();
+    let ceiling = planner::tick_budget(ctx.config.get("GITHUB_TICK_BUDGET").as_deref());
     let cap = budget
         .remaining_subrequests()
-        .unwrap_or(planner::DEFAULT_BUDGET)
-        .min(planner::DEFAULT_BUDGET);
+        .map_or(ceiling, |remaining| remaining.min(ceiling));
     let mut tick = Tick {
         db: &*db,
         http: &*http,
@@ -210,9 +229,9 @@ pub(crate) async fn run(
         .await?
         .into_iter()
         .filter(|repo| {
-            DrainCursor::parse(repo.backfill_cursor.as_deref())
-                .wait_until
-                .is_none_or(|until| until <= now)
+            let cursor = DrainCursor::parse(repo.backfill_cursor.as_deref());
+            cursor.wait_until.is_none_or(|until| until <= now)
+                && cursor.lease_until.is_none_or(|until| until <= now)
         })
         .collect();
 
@@ -557,10 +576,7 @@ impl Tick<'_> {
             return Ok(ItemOutcome::Done);
         }
         match item.kind.as_str() {
-            "push" => {
-                self.turn_on_incremental(&repo).await?;
-                Ok(ItemOutcome::Done)
-            }
+            "push" => self.turn_on_incremental(&repo).await,
             "item" => {
                 let Ok(number) = item.subject.parse::<u64>() else {
                     return Ok(ItemOutcome::Done);
@@ -573,20 +589,33 @@ impl Tick<'_> {
 
     /// A push: a finished repository starts its incremental pass; a running
     /// one is flagged to run again when it finishes. No call to GitHub.
-    async fn turn_on_incremental(&self, repo: &Repo) -> Result<(), StoreError> {
+    ///
+    /// A repository another run's pass holds is left alone: the item is
+    /// retried once the lease ends, since the pass's own save would
+    /// overwrite the flag. The write is a compare-and-set on the cursor read
+    /// here, and one that lost a race is retried the same way.
+    async fn turn_on_incremental(&self, repo: &Repo) -> Result<ItemOutcome, StoreError> {
         let mut cursor = DrainCursor::parse(repo.backfill_cursor.as_deref());
         if repo.backfill_state == BackfillPhase::Pending {
             // The first pass has not started; it will read the push anyway.
-            return Ok(());
+            return Ok(ItemOutcome::Done);
+        }
+        let now = self.now();
+        if let Some(until) = cursor.lease_until.filter(|until| *until > now) {
+            return Ok(ItemOutcome::Retry {
+                after: (until - now).max(60),
+                error: "the repository's pass is running".to_owned(),
+            });
         }
         if repo.backfill_state != BackfillPhase::Done {
             if cursor.rerun {
-                return Ok(());
+                return Ok(ItemOutcome::Done);
             }
             cursor.rerun = true;
         }
         cursor.v = CURSOR_VERSION;
-        drain::save_backfill_progress(
+        cursor.lease_until = None;
+        let landed = drain::save_backfill_progress_if(
             self.db,
             self.drain,
             self.clock.now(),
@@ -598,9 +627,17 @@ impl Tick<'_> {
                 items: 0,
                 done: false,
             },
+            repo.backfill_cursor.as_deref(),
         )
         .await?;
-        Ok(())
+        Ok(if landed {
+            ItemOutcome::Done
+        } else {
+            ItemOutcome::Retry {
+                after: 60,
+                error: "the repository's cursor moved".to_owned(),
+            }
+        })
     }
 
     /// An `item` reference: re-read the issue or pull request and file it.
@@ -826,6 +863,22 @@ impl Tick<'_> {
                 .await;
         };
         let mut cursor = DrainCursor::parse(repo.backfill_cursor.as_deref());
+        // The lease: a compare-and-set on the cursor `repos_due` read, so a
+        // repository another run took (or moved on) since is not passed
+        // twice. `leased` is what settling compares against.
+        cursor.lease_until = Some(self.now() + REPO_LEASE_SECS);
+        let leased = cursor.to_json();
+        if !drain::swap_cursor(
+            self.db,
+            self.drain,
+            (&repo.workspace_id, repo.installation_id, repo.repo_id),
+            repo.backfill_cursor.as_deref(),
+            Some(&leased),
+        )
+        .await?
+        {
+            return Ok(());
+        }
         let token = match self.token(&creds, repo.installation_id).await {
             Ok(token) => token,
             Err(got) => {
@@ -835,9 +888,12 @@ impl Tick<'_> {
                         Stop::Wait(seconds)
                     }
                     Got::Fail(error) => Stop::Fail(error),
-                    _ => return Ok(()),
+                    _ => {
+                        self.release(repo, &leased).await?;
+                        return Ok(());
+                    }
                 };
-                return self.settle(repo, cursor, stop, 0).await;
+                return self.settle(repo, &leased, cursor, stop, 0).await;
             }
         };
 
@@ -876,7 +932,7 @@ impl Tick<'_> {
                 Err(stop) => break stop,
             }
         };
-        self.settle(repo, cursor, stop, filed).await
+        self.settle(repo, &leased, cursor, stop, filed).await
     }
 
     /// Makes the next planned request and applies it. Answers how many
@@ -1037,15 +1093,20 @@ impl Tick<'_> {
 
     /// Writes where a pass stopped: the cursor, the counters and, for a
     /// finished pass, the incremental cursor of the next one.
+    ///
+    /// The save is a compare-and-set on `leased`, the cursor this pass
+    /// leased the repository with, and it gives the lease back.
     async fn settle(
         &mut self,
         repo: &Repo,
+        leased: &str,
         mut cursor: DrainCursor,
         stop: Stop,
         filed: u32,
     ) -> Result<(), StoreError> {
         let now = self.now();
         cursor.v = CURSOR_VERSION;
+        cursor.lease_until = None;
         let mut done = false;
         let mut error = None;
         match stop {
@@ -1074,9 +1135,14 @@ impl Tick<'_> {
                 cursor.wait_until = Some(now + backoff);
                 error = Some(message);
             }
-            Stop::Abort(message) => return self.record_error(repo, &message).await,
+            Stop::Abort(message) => {
+                // Nothing from this pass is saved: the cursor goes back to
+                // what it was, unleased, and the next run re-reads it.
+                self.release(repo, leased).await?;
+                return self.record_error(repo, &message).await;
+            }
         }
-        let saved = drain::save_backfill_progress(
+        let saved = drain::save_backfill_progress_if(
             self.db,
             self.drain,
             self.clock.now(),
@@ -1088,11 +1154,15 @@ impl Tick<'_> {
                 items: filed,
                 done,
             },
+            Some(leased),
         )
         .await;
         match saved {
+            // Not landing means the lease was lost: the repository's cursor
+            // is another pass's now, and nothing of this one is written.
             Ok(_) => {}
             Err(StoreError::Invalid(_)) => {
+                self.release(repo, leased).await?;
                 error = Some("the backfill cursor outgrew its limit".to_owned());
             }
             Err(other) => return Err(other),
@@ -1100,6 +1170,20 @@ impl Tick<'_> {
         if let Some(message) = error {
             self.record_error(repo, &message).await?;
         }
+        Ok(())
+    }
+
+    /// Gives a repository's lease back unused: its cursor as `repos_due`
+    /// read it, if this pass still holds it.
+    async fn release(&self, repo: &Repo, leased: &str) -> Result<(), StoreError> {
+        drain::swap_cursor(
+            self.db,
+            self.drain,
+            (&repo.workspace_id, repo.installation_id, repo.repo_id),
+            Some(leased),
+            repo.backfill_cursor.as_deref(),
+        )
+        .await?;
         Ok(())
     }
 
