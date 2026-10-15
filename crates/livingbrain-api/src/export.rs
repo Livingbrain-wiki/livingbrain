@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cratefield_core::axum::extract::{Query, State};
-use cratefield_core::axum::http::{HeaderMap, StatusCode, header};
+use cratefield_core::axum::http::{HeaderMap, Method, StatusCode, header};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
@@ -101,10 +101,11 @@ impl Module for Export {
 /// [`SUPPORTED_FORMAT`], and the store's mapped problem otherwise.
 async fn export(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let format = query
         .get("format")
         .map(String::as_str)

@@ -1964,6 +1964,7 @@ dependencies = [
  "livingbrain-usage",
  "livingbrain-workspaces",
  "pollster",
+ "sea-query",
  "serde_json",
  "sha2 0.10.9",
  "time",

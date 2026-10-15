@@ -89,3 +89,7 @@ pollster = { workspace = true }
 # trusted. Both are versions the tree already resolves.
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# The web-session test (`tests/web_session.rs`) seeds the workspace and
+# member rows a session cookie resolves to, bound the way the tokens tests
+# bind them. Already in the tree through the modules.
+sea-query = { workspace = true }

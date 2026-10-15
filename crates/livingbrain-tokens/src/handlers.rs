@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use cratefield_core::axum::extract::{OriginalUri, Path, State};
-use cratefield_core::axum::http::{HeaderMap, StatusCode, Uri, header};
+use cratefield_core::axum::http::{HeaderMap, StatusCode, Uri};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::get;
 use cratefield_core::axum::{self, Json};
-use cratefield_core::{ModuleContext, Problem, ProblemDef, origin_of};
+use cratefield_core::{ModuleContext, Problem, ProblemDef};
 use livingbrain_access::{ChannelMemberships, Location, Scope, UserId, scopes_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -237,40 +237,11 @@ async fn revoke(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Refuses a write a browser reports as coming from another site.
-///
-/// `sec-fetch-site` is checked first — `same-origin` and `none` pass and
-/// everything else, including `same-site`, is refused, because a sibling
-/// subdomain can post here — then `Origin`, when present, must be this
-/// request's own origin, compared with `origin_of` as RFC 6454 origins
-/// rather than as strings. A request carrying neither header is not a
-/// browser and is accepted.
+/// Refuses a write a browser reports as coming from another site: the
+/// [`crate::same_origin`] rule, answered as this module's 403.
 fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
-    let refused = |detail: &str| Problem::new(&CROSS_SITE_REQUEST).with_detail(detail.to_owned());
-    if let Some(site) = headers.get("sec-fetch-site") {
-        let site = site.to_str().unwrap_or_default().to_ascii_lowercase();
-        if !matches!(site.as_str(), "same-origin" | "none") {
-            return Err(refused(&format!(
-                "sec-fetch-site is {site}; only same-origin or none is accepted"
-            )));
-        }
-    }
-    let Some(origin) = headers.get(header::ORIGIN) else {
-        return Ok(());
-    };
-    let presented = origin
-        .to_str()
-        .map_err(|_| refused("origin was not valid UTF-8"))?;
-    let presented = origin_of(presented)
-        .map_err(|err| refused(&format!("origin {presented:?} is not an origin: {err}")))?;
-    let own = crate::own_origin(headers)
-        .ok_or_else(|| refused("origin was present but the request named no host"))?;
-    if presented != own {
-        return Err(refused(&format!(
-            "origin {presented} does not match the host this request reached ({own})"
-        )));
-    }
-    Ok(())
+    crate::same_origin(headers)
+        .map_err(|refused| Problem::new(&CROSS_SITE_REQUEST).with_detail(refused.detail))
 }
 
 /// An authorization server for exactly one grant and one client: the device

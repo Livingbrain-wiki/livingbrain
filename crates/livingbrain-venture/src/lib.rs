@@ -48,7 +48,7 @@ use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, WorkersClock, install_tracing, serve, serve_scheduled,
 };
-use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, Sources, Wiki};
+use livingbrain_api::{Ask, Export, Notes, PagesRebind, Search, SessionAuth, Sources, Wiki};
 use livingbrain_canary::Canary;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
@@ -365,8 +365,7 @@ fn cli_modules(kms: Option<Arc<dyn Kms>>) -> Vec<Arc<dyn Module>> {
     let Some(kms) = kms else {
         return Vec::new();
     };
-    let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
-    let wiki = Wiki::new(kms, Arc::clone(&auth));
+    let wiki = wiki(kms);
     vec![
         Arc::new(Notes::new(wiki.clone())),
         Arc::new(Search::new(wiki.clone())),
@@ -466,13 +465,13 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
     let mcp_kms = Arc::clone(&kms);
     let mcp_auth = Arc::clone(&auth);
-    let surface_kms = Arc::clone(&kms);
-    let surface_auth = Arc::clone(&auth);
+    // The page routes the web app reads and writes answer to its session
+    // cookie as well as to a bearer; the MCP endpoint and the importer
+    // below take the bearer resolver alone and stay bearer-only.
+    let surface = wiki(Arc::clone(&kms));
     let cell = answers.clone();
     Pages::new()
-        .surface(move |ctx| {
-            livingbrain_api::pages_routes(ctx, Arc::clone(&surface_kms), Arc::clone(&surface_auth))
-        })
+        .surface(move |ctx| livingbrain_api::pages_routes(ctx, &surface))
         .nest("/mcp", move |ctx| {
             // Read apart from `ctx`, which the MCP router below takes whole.
             if let (Some(db), Some(blob), Some(clock), Some(id_gen)) = (
@@ -610,6 +609,49 @@ fn build_kms(env: &Env) -> Option<Arc<dyn Kms>> {
     })
     .ok()?;
     Some(Arc::new(kms))
+}
+
+/// The [`Wiki`] every route of `livingbrain-api` is built with: the key
+/// custodian, the [`TokenBearer`] for the CLI's personal access token, and
+/// the [`WebSession`] for the web app's session cookie. One function, so the
+/// pages surface and the five CLI modules answer to exactly the same
+/// credentials — and so a native test mounts what the Worker serves.
+#[must_use]
+pub fn wiki(kms: Arc<dyn Kms>) -> Wiki {
+    let session: Arc<dyn SessionAuth> = Arc::new(WebSession);
+    Wiki::new(kms, Arc::new(TokenBearer)).with_session(session)
+}
+
+/// The [`SessionAuth`] behind the web app's calls to `livingbrain-api`: the
+/// session cookie, resolved by the tokens module's [`livingbrain_tokens::session`]
+/// — the cookie half of the one `authenticate` every cookie route here
+/// answers to (`/v1/models`, `/v1/usage`, `/v1/tokens`), so a browser is
+/// the same member on the wiki as on the settings page. It never reads a
+/// bearer: `livingbrain-api` only consults it for a request with no
+/// `Authorization` header, and a token goes through [`TokenBearer`].
+///
+/// The same-origin rule is the tokens module's too
+/// ([`livingbrain_tokens::same_origin`]), so a cookie write is held to one
+/// rule wherever it lands.
+struct WebSession;
+
+#[async_trait::async_trait]
+impl SessionAuth for WebSession {
+    async fn session(&self, ports: &Ports, headers: &HeaderMap) -> Result<Asker, AuthError> {
+        livingbrain_tokens::session(ports, headers)
+            .await
+            .map(|member| Asker {
+                workspace_id: member.workspace_id,
+                user_id: member.user_id,
+                // A session is the whole member, never a narrowed subset.
+                token_scopes: member.scopes,
+            })
+            .map_err(|_| AuthError::Rejected)
+    }
+
+    fn same_origin(&self, headers: &HeaderMap) -> Result<(), String> {
+        livingbrain_tokens::same_origin(headers).map_err(|refused| refused.detail)
+    }
 }
 
 /// The [`BearerAuth`] for the MCP endpoint (issue #24), now resolving a real

@@ -1,6 +1,6 @@
 //! Per-request plumbing shared by every route in this crate: the page store
-//! over the module's own blob view, the asker behind the bearer token, and
-//! the scopes that asker may read. One [`Service`] per module router, built
+//! over the module's own blob view, the asker behind the bearer token or
+//! the session cookie, and the scopes that asker may read. One [`Service`] per module router, built
 //! once from the module context and the injected [`Wiki`].
 //!
 //! The blob the store is built over is `ctx.ports.blob` — **this module's
@@ -13,14 +13,49 @@
 
 use std::sync::Arc;
 
-use cratefield_core::axum::http::{HeaderMap, header};
-use cratefield_core::{ModuleContext, Problem};
+use cratefield_core::axum::http::{HeaderMap, Method, header};
+use cratefield_core::{ModuleContext, Ports, Problem};
 use cratefield_kms::Kms;
-use livingbrain_mcp::{Asker, BearerAuth, page_scopes};
+use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scopes};
 use livingbrain_pages::{PageStore, SourceStore};
 
-use crate::problems::UNAUTHORIZED;
+use crate::problems::{CROSS_SITE_REQUEST, UNAUTHORIZED};
 use crate::{Wiki, port};
+
+/// Resolves the web app's **session cookie** to the asker it speaks for —
+/// the second way into these routes, beside [`BearerAuth`].
+///
+/// The web app never sends an `Authorization` header (`app/assets/app.js`):
+/// its session is an `HttpOnly` cookie the browser attaches on its own. So
+/// without this seam every call the wiki page makes is a 401. The seam is
+/// separate from [`BearerAuth`] on purpose: the MCP endpoint takes that one
+/// and stays bearer-only, and a composition that wires no session here
+/// gets exactly the bearer-only surface it had before.
+///
+/// Like [`BearerAuth`] it is implemented by the composition, which can see
+/// the module that owns sessions; this crate only decides **when** it is
+/// consulted (no `Authorization` header at all) and **what** a cookie may
+/// do (a write must pass [`SessionAuth::same_origin`]).
+#[async_trait::async_trait]
+pub trait SessionAuth: Send + Sync {
+    /// The member the request's session cookie names, as an [`Asker`] — a
+    /// full session carries `token_scopes: None`.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError`] when there is no cookie, it does not verify, it has
+    /// expired, or its member is gone. Every case is the same 401.
+    async fn session(&self, ports: &Ports, headers: &HeaderMap) -> Result<Asker, AuthError>;
+
+    /// Whether the browser signals (`sec-fetch-site`, then `Origin`) place
+    /// this request on the deployment's own origin. Consulted for every
+    /// cookie-authenticated request whose method is not safe.
+    ///
+    /// # Errors
+    ///
+    /// The detail a 403 problem carries, saying which signal failed.
+    fn same_origin(&self, headers: &HeaderMap) -> Result<(), String>;
+}
 
 /// The state behind every route in this crate.
 ///
@@ -38,6 +73,9 @@ pub(crate) struct Service {
     ctx: Arc<ModuleContext>,
     kms: Arc<dyn Kms>,
     auth: Arc<dyn BearerAuth>,
+    /// The cookie resolver, when the composition wired one; `None` is a
+    /// bearer-only surface.
+    session: Option<Arc<dyn SessionAuth>>,
 }
 
 impl Service {
@@ -45,23 +83,20 @@ impl Service {
     /// the module context, the custodian and credential resolver from the
     /// injected [`Wiki`].
     pub(crate) fn from_wiki(ctx: ModuleContext, wiki: &Wiki) -> Self {
-        Self::new(Arc::new(ctx), wiki.kms.clone(), wiki.auth.clone())
+        Self::for_pages(Arc::new(ctx), wiki)
     }
 
     /// The service for the merged pages surface. It runs *inside* the pages
     /// module, so the blob it reads through is the module's own port view —
     /// already scoped to `pages` by the harness, which is the same view the
     /// page store itself is built on.
-    pub(crate) fn for_pages(
-        ctx: Arc<ModuleContext>,
-        kms: Arc<dyn Kms>,
-        auth: Arc<dyn BearerAuth>,
-    ) -> Self {
-        Self::new(ctx, kms, auth)
-    }
-
-    fn new(ctx: Arc<ModuleContext>, kms: Arc<dyn Kms>, auth: Arc<dyn BearerAuth>) -> Self {
-        Self { ctx, kms, auth }
+    pub(crate) fn for_pages(ctx: Arc<ModuleContext>, wiki: &Wiki) -> Self {
+        Self {
+            ctx,
+            kms: wiki.kms.clone(),
+            auth: wiki.auth.clone(),
+            session: wiki.session.clone(),
+        }
     }
 
     /// The page store for one request, over this module's own blob view —
@@ -103,22 +138,56 @@ impl Service {
         ))
     }
 
-    /// The asker the request's bearer credential speaks for.
+    /// The asker the request's credential speaks for: the bearer token when
+    /// the request carries an `Authorization` header, else the session
+    /// cookie when the composition wired a [`SessionAuth`].
     ///
-    /// The token is read the way the MCP server reads it (a mirror of
-    /// `bearer` in `livingbrain-mcp/src/protocol.rs`), and a missing token
-    /// and a rejected one answer with the **same** 401 problem — which of
-    /// the two it was is not the caller's business.
+    /// **A request with an `Authorization` header is decided by it alone.**
+    /// A rejected or malformed one is a 401 even when a cookie rides along —
+    /// a caller that presented a header has said what it wants to be, the
+    /// rule `livingbrain_tokens::authenticate` follows — so the CLI and MCP
+    /// path is exactly what it was. The token is read the way the MCP server
+    /// reads it (a mirror of `bearer` in `livingbrain-mcp/src/protocol.rs`).
+    ///
+    /// **The cookie is an ambient credential**, so a cookie-authenticated
+    /// request whose method is not safe (`PUT`, `POST`, `DELETE`, …) must
+    /// pass the same-origin check first; a bearer request never does, as it
+    /// carries nothing a browser attaches on its own. Safe methods need no
+    /// check: the harness's CORS layer never allows credentials, so another
+    /// origin cannot read a cookie-authenticated answer, and every `/v1/*`
+    /// answer is `Cache-Control: no-store`, so no cache can serve one to
+    /// somebody else.
+    ///
+    /// A missing credential and a rejected one answer with the **same** 401
+    /// problem — which of the two it was is not the caller's business.
     ///
     /// # Errors
     ///
     /// [`UNAUTHORIZED`] when no credential was presented, it was malformed,
-    /// or it named no live asker.
-    pub(crate) async fn asker(&self, headers: &HeaderMap) -> Result<Asker, Problem> {
-        let Some(token) = bearer(headers) else {
-            return Err(Problem::new(&UNAUTHORIZED));
+    /// or it named no live asker; [`CROSS_SITE_REQUEST`] (403) for a
+    /// cookie-authenticated write from another origin.
+    pub(crate) async fn asker(
+        &self,
+        method: &Method,
+        headers: &HeaderMap,
+    ) -> Result<Asker, Problem> {
+        let resolved = if headers.contains_key(header::AUTHORIZATION) {
+            let Some(token) = bearer(headers) else {
+                return Err(Problem::new(&UNAUTHORIZED));
+            };
+            self.auth.authenticate(&self.ctx.ports, token).await
+        } else {
+            let Some(session) = &self.session else {
+                return Err(Problem::new(&UNAUTHORIZED));
+            };
+            if !method.is_safe() {
+                session
+                    .same_origin(headers)
+                    .map_err(|detail| Problem::new(&CROSS_SITE_REQUEST).with_detail(detail))?;
+            }
+            session.session(&self.ctx.ports, headers).await
         };
-        match self.auth.authenticate(&self.ctx.ports, token).await {
+        match resolved {
             // An asker with no workspace or no user id names nobody: the
             // credential is wrong, and the 401 says so without saying how.
             Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => Ok(asker),

@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::{Path, Query, State};
-use cratefield_core::axum::http::HeaderMap;
+use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use livingbrain_pages::{SourceFilter, SourceKind, is_project};
@@ -129,10 +129,11 @@ const MAX_CURSOR_LEN: usize = 64;
 /// fails.
 async fn list(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let kind = kind_param(&query)?;
     let project = match query.get("project").map(|raw| raw.trim()) {
         None | Some("") => None,
@@ -219,10 +220,11 @@ async fn list(
 /// unknown `kind`, and [`Problem::internal`] when the ledger fails.
 async fn projects(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let kind = kind_param(&query)?;
     let scopes = state.scopes(&asker);
     let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
@@ -271,10 +273,11 @@ fn scope_label(scope: &str) -> &'static str {
 /// [`Problem::internal`] when the row is there and its body is not.
 async fn one(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     let store = state.sources_store()?;
     let Some(source) = store.by_id(&id).await.map_err(source_failed)? else {
         return Err(Problem::new(&SOURCE_NOT_FOUND));

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::State;
-use cratefield_core::axum::http::HeaderMap;
+use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::post;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use livingbrain_access::{Scope, UserId};
@@ -129,10 +129,11 @@ struct NoteRequest {
 /// page has a conflict pending, and the store's mapped problem otherwise.
 async fn note(
     State(state): State<Arc<Service>>,
+    method: Method,
     headers: HeaderMap,
     Json(request): Json<NoteRequest>,
 ) -> Result<Json<Value>, Problem> {
-    let asker = state.asker(&headers).await?;
+    let asker = state.asker(&method, &headers).await?;
     if request.body.trim().is_empty() {
         return Err(Problem::validation_failed("`body` is required"));
     }

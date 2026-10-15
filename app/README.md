@@ -110,11 +110,13 @@ These are shown on purpose, marked in the UI, and never sent:
 
 **Signed out is a state, not an error.** These routes answer `401` without a
 session, and the page treats that as its signed-out view: a sign-in link
-instead of lists, and no Edit button. (Today the server actually answers
-`401` for a cookie-only browser session on `/v1/pages*` — it wants a bearer
-token there — so the signed-out view is what a signed-in browser sees on
-those routes until the server-side gap closes; the UI already does the right
-thing either way.)
+instead of lists, and no Edit button. Every route above answers to the
+session cookie as well as to a CLI bearer token (`SessionAuth` in
+`crates/livingbrain-api`, wired by `livingbrain-venture`); a cookie-signed
+write (`PUT /v1/pages/{slug}`, `POST /v1/ask`, `POST /v1/notes`) must come
+from this origin — `sec-fetch-site: same-origin`, or an `Origin` naming this
+host — or it is refused with `403`, which the app's own `fetch` always
+satisfies.
 
 The shapes above are pinned by `tests/wiki.test.mjs`, which boots the real
 `wikiPage` against stub DOM and fetch — the home list and pins, the signed-out
