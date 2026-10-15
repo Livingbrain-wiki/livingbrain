@@ -6,48 +6,75 @@ struct SessionsView: View {
     @ObservedObject var model: SessionsModel
 
     var body: some View {
-        Group {
-            switch model.load {
-            case .idle:
-                StatePlaceholder(kind: .loading, title: "Reading local agent sessions…")
-            case .loading where model.rows.isEmpty:
-                StatePlaceholder(kind: .loading, title: "Reading local agent sessions…")
-            case let .failed(message) where model.rows.isEmpty:
-                StatePlaceholder(kind: .error, title: "Could not read sessions", message: message, retry: model.reload)
-            default:
-                if model.rows.isEmpty {
-                    StatePlaceholder(kind: .empty, title: "No agent sessions",
-                                     message: "Claude Code and Codex sessions on this Mac appear here.",
-                                     systemImage: "bubble.left.and.text.bubble.right")
-                } else {
-                    HSplitView {
-                        SessionTable(model: model).frame(minWidth: 420)
-                        SessionDetail(model: model).frame(minWidth: 320)
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .navigationTitle("Recent Sessions")
+            .navigationSubtitle(subtitle)
+            .searchable(text: $model.search, placement: .toolbar, prompt: "Filter sessions")
+            .toolbar {
+                ToolbarItemGroup {
+                    Toggle(isOn: $model.optedInOnly) {
+                        Label("Opted-in Only", systemImage: "checkmark.seal")
                     }
+                    .help("Show only sessions from opted-in repositories")
+                    Picker("Project", selection: $model.projectFilter) {
+                        Text("All Projects").tag(String?.none)
+                        Divider()
+                        ForEach(model.projectNames, id: \.self) { Text($0).tag(String?.some($0)) }
+                    }
+                    .frame(minWidth: 150)
+                    Button { model.reload() } label: {
+                        Label("Reload", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.load == .loading)
+                    .help("Re-read local sessions (nothing is sent)")
                 }
+            }
+            .onAppear { if model.load == .idle { model.reload() } }
+    }
+
+    private var subtitle: String {
+        guard let at = model.loadedAt else { return "" }
+        let shown = model.filteredRows.count
+        return "\(shown) of \(model.rows.count) sessions · read \(at.formatted(date: .omitted, time: .shortened))"
+    }
+
+    @ViewBuilder private var content: some View {
+        switch model.load {
+        case .idle:
+            StatePlaceholder(kind: .loading, title: "Reading local agent sessions…")
+        case .loading where model.rows.isEmpty:
+            StatePlaceholder(kind: .loading, title: "Reading local agent sessions…")
+        case let .failed(message) where model.rows.isEmpty:
+            StatePlaceholder(kind: .error, title: "Could not read sessions", message: message, retry: model.reload)
+        default:
+            if model.rows.isEmpty {
+                StatePlaceholder(kind: .empty, title: "No agent sessions",
+                                 message: "Claude Code and Codex sessions on this Mac appear here.",
+                                 systemImage: "bubble.left.and.text.bubble.right")
+            } else {
+                HSplitView {
+                    SessionTable(model: model)
+                        .frame(minWidth: 520, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                    SessionDetail(model: model)
+                        .frame(minWidth: 320, idealWidth: 400, maxWidth: 560, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle("Recent Sessions")
-        .navigationSubtitle(model.loadedAt.map { "Read \($0.formatted(date: .omitted, time: .shortened))" } ?? "")
-        .searchable(text: $model.search, placement: .toolbar, prompt: "Filter sessions")
-        .toolbar {
-            ToolbarItem {
-                Picker("Project", selection: $model.projectFilter) {
-                    Text("All Projects").tag(String?.none)
-                    Divider()
-                    ForEach(model.projectNames, id: \.self) { Text($0).tag(String?.some($0)) }
-                }
-                .frame(minWidth: 150)
-            }
-            ToolbarItem {
-                Button { model.reload() } label: {
-                    Label("Reload", systemImage: "arrow.clockwise")
-                }
-                .disabled(model.load == .loading)
-                .help("Re-read local sessions (nothing is sent)")
-            }
-        }
-        .onAppear { if model.load == .idle { model.reload() } }
+    }
+}
+
+enum RelativeTime {
+    static let formatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
+    /// "12 min. ago", "just now".
+    static func string(_ date: Date, now: Date = Date()) -> String {
+        now.timeIntervalSince(date) < 60 ? "just now" : formatter.localizedString(for: date, relativeTo: now)
     }
 }
 
@@ -56,31 +83,49 @@ struct SessionTable: View {
 
     var body: some View {
         Table(model.filteredRows, selection: $model.selection) {
-            TableColumn("Project") { row in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(row.session.projectName).fontWeight(.medium)
-                    Text(row.session.branch ?? "—").font(.caption).foregroundStyle(.secondary)
+            TableColumn("Repository") { row in
+                Text(row.repoName)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .help(row.session.repo)
+            }
+            .width(min: 100, ideal: 150)
+            TableColumn("Branch") { row in
+                Text(row.branch ?? "—").foregroundStyle(.secondary).lineLimit(1).help(row.branch ?? "")
+            }
+            .width(min: 60, ideal: 110)
+            TableColumn("Agent") { row in
+                Text(row.session.agent == "codex" ? "Codex" : "Claude Code").lineLimit(1)
+            }
+            .width(min: 60, ideal: 90)
+            TableColumn("Last Active") { row in
+                if let date = row.lastActivity {
+                    Text(RelativeTime.string(date))
+                        .foregroundStyle(.secondary)
+                        .help(date.formatted(date: .complete, time: .standard))
+                } else {
+                    Text("—").foregroundStyle(.secondary)
                 }
             }
-            .width(min: 120, ideal: 160)
-            TableColumn("Agent") { row in
-                Label(row.session.agent == "codex" ? "Codex" : "Claude Code",
-                      systemImage: row.session.agent == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkles")
-                    .labelStyle(.titleAndIcon)
+            .width(min: 70, ideal: 100)
+            TableColumn("Turns") { row in
+                Text("\(row.session.turns)").monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .width(min: 90, ideal: 110)
-            TableColumn("Ended") { row in
-                Text(row.session.endedDate.map { $0.formatted(.relative(presentation: .named)) } ?? "—")
-                    .foregroundStyle(.secondary)
+            .width(min: 44, ideal: 52)
+            TableColumn("Tokens") { row in
+                Text(row.session.totalTokens.compact).monospacedDigit().frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .width(min: 80, ideal: 110)
-            TableColumn("Turns") { row in Text("\(row.session.turns)").monospacedDigit() }
-                .width(50)
-            TableColumn("Tokens") { row in Text(row.session.totalTokens.compact).monospacedDigit() }
-                .width(60)
+            .width(min: 50, ideal: 62)
+            TableColumn("Cost") { row in
+                Text(row.session.totals?.costUsd.map { $0.formatted(.currency(code: "USD")) } ?? "—")
+                    .monospacedDigit().foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 44, ideal: 60)
             TableColumn("Status") { row in SyncBadge(row: row) }
-                .width(min: 90, ideal: 110)
+                .width(min: 120, ideal: 128)
         }
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
         .contextMenu(forSelectionType: SessionRow.ID.self) { _ in
             Button("Sync This Session") { model.syncSelected() }
                 .disabled(model.selectedRow?.session.isOptedIn != true)
@@ -88,7 +133,7 @@ struct SessionTable: View {
                 if let row = model.selectedRow { model.bar.open(row.webURL(base: model.bar.serverURL)) }
             }
             Button("Reveal Log in Finder") {
-                if let file = model.selectedRow?.session.file { model.bar.reveal(path: file) }
+                if let file = model.selectedRow?.file { model.bar.reveal(path: file) }
             }
         }
     }
@@ -101,11 +146,25 @@ struct SyncBadge: View {
         let (text, color, symbol): (String, Color, String) = {
             switch row.status {
             case .notOptedIn: return ("Not opted in", .secondary, "minus.circle")
-            case .pending: return ("Pending", .orange, "clock")
+            case .pending: return ("Pending", .orange, "clock.fill")
             case .synced: return ("Synced", Theme.accent, "checkmark.circle.fill")
+            case .failed: return ("Error", .red, "exclamationmark.triangle.fill")
             }
         }()
-        Label(text, systemImage: symbol).foregroundStyle(color).font(.callout)
+        Label(text, systemImage: symbol)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.12)))
+            .lineLimit(1)
+            .help({
+                switch row.status {
+                case let .synced(date): return "Synced \(date.formatted(date: .abbreviated, time: .shortened))"
+                case let .failed(message): return message
+                case .pending: return "Opted in; uploads on the next sync"
+                case .notOptedIn: return "This repository is not opted in, so this session never uploads"
+                }
+            }())
     }
 }
 
@@ -117,8 +176,9 @@ struct SessionDetail: View {
             VStack(alignment: .leading, spacing: 0) {
                 header(row).padding(16)
                 Divider()
-                transcript
+                transcript.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
             StatePlaceholder(kind: .empty, title: "Select a session",
                              message: "See the redacted record that sync sends.",
@@ -129,16 +189,16 @@ struct SessionDetail: View {
     @ViewBuilder private func header(_ row: SessionRow) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(row.session.projectName).font(.title2.weight(.semibold))
+                Text(row.repoName).font(.title2.weight(.semibold))
                 Spacer()
                 SyncBadge(row: row)
             }
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
                 GridRow { Text("Repo").foregroundStyle(.secondary); Text(row.session.repo).textSelection(.enabled) }
-                GridRow { Text("Branch").foregroundStyle(.secondary); Text(row.session.branch ?? "—") }
+                GridRow { Text("Branch").foregroundStyle(.secondary); Text(row.branch ?? "—") }
                 GridRow {
-                    Text("When").foregroundStyle(.secondary)
-                    Text(row.session.startedDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "—")
+                    Text("Last active").foregroundStyle(.secondary)
+                    Text(row.lastActivity.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "—")
                 }
                 GridRow {
                     Text("Models").foregroundStyle(.secondary)
@@ -147,6 +207,12 @@ struct SessionDetail: View {
                 GridRow {
                     Text("Usage").foregroundStyle(.secondary)
                     Text(usage(row.session))
+                }
+                if case let .failed(message) = row.status {
+                    GridRow {
+                        Text("Error").foregroundStyle(.secondary)
+                        Text(message).foregroundStyle(.red)
+                    }
                 }
                 if case let .synced(date) = row.status {
                     GridRow {
@@ -163,10 +229,10 @@ struct SessionDetail: View {
                     .disabled(!row.session.isOptedIn || model.bar.state.isSyncing)
                     .help(row.session.isOptedIn ? "Upload this session now" : "Opt this repo in under Projects & Sync first")
                 Button {
-                    if let file = row.session.file { model.bar.reveal(path: file) }
+                    if let file = row.file { model.bar.reveal(path: file) }
                 } label: { Image(systemName: "folder") }
                     .help("Reveal the log file in Finder")
-                    .disabled(row.session.file == nil)
+                    .disabled(row.file == nil)
             }
         }
     }
@@ -194,10 +260,18 @@ struct SessionDetail: View {
                         Text(shown.redacted == 0
                              ? "Redacted on this Mac before upload — nothing needed removing."
                              : "Redacted on this Mac before upload — \(shown.redacted) secret(s) removed.")
-                        if shown.record.truncated { Text("· truncated to fit") }
                     }
                     .font(.caption).foregroundStyle(.secondary)
-                    ForEach(shown.record.turns) { turn in TurnBubble(turn: turn) }
+                    if let record = shown.displayRecord {
+                        if record.truncated { Text("Truncated to fit the upload limit.").font(.caption).foregroundStyle(.secondary) }
+                        ForEach(record.turns) { turn in TurnBubble(turn: turn) }
+                    } else if let body = shown.body {
+                        Text("Shown as the exact text sync sends (redaction left it unparseable as JSON).")
+                            .font(.caption).foregroundStyle(.orange)
+                        Text(body.count > 60_000 ? String(body.prefix(60_000)) + "…" : body)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
                 }
                 .padding(16)
             }

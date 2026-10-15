@@ -909,6 +909,11 @@ fn show_prints_the_redacted_record_locally() {
     let shown = json_of(&output);
     assert_eq!(shown["opted_in"], false, "{shown}");
     assert_eq!(shown["record"]["session_id"], SIDE_SESSION, "{shown}");
+    let body = shown["body"]
+        .as_str()
+        .expect("the exact body is printed too");
+    let reparsed: Value = serde_json::from_str(body).expect("the fixture body parses");
+    assert_eq!(reparsed, shown["record"], "record is the parse of body");
     let text = shown["record"].to_string();
     assert!(!text.contains(planted_key().as_str()), "{text}");
     assert!(!text.contains("/home/alice"), "{text}");
