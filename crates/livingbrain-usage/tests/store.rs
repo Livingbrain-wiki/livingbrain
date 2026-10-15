@@ -208,3 +208,50 @@ fn a_day_outside_the_format_is_refused() {
         }
     });
 }
+
+/// A workspace's budgets round-trip, a save replaces every column (so a
+/// `None` clears), and one workspace's row is never another's.
+#[test]
+fn budgets_round_trip_clear_and_stay_in_their_workspace() {
+    use livingbrain_usage::{Budgets, budgets, budgets_or_default, save_budgets};
+    pollster::block_on(async {
+        let kit = support::harness();
+        assert_eq!(
+            budgets(&*kit.db, WORKSPACE).await.expect("a read").budgets,
+            Budgets::default(),
+            "nothing saved reads as nothing set"
+        );
+        let own = Budgets {
+            compiler_paused: Some(true),
+            compiler_daily_tokens: Some(3_000_000),
+            compiler_monthly_tokens: Some(90_000_000_000),
+            compiler_batch: Some(3),
+            ask_context_chars: Some(120_000),
+            spend_cents_monthly: Some(0),
+            ..Budgets::default()
+        };
+        save_budgets(&*kit.db, now(), WORKSPACE, &own)
+            .await
+            .expect("the save lands");
+        let stored = budgets(&*kit.db, WORKSPACE).await.expect("a read");
+        assert_eq!(stored.budgets, own);
+        assert!(stored.updated_at.is_some());
+
+        let cleared = Budgets {
+            compiler_batch: None,
+            ..own.clone()
+        };
+        save_budgets(&*kit.db, now(), WORKSPACE, &cleared)
+            .await
+            .expect("the second save lands");
+        assert_eq!(budgets_or_default(&*kit.db, WORKSPACE).await, cleared);
+        assert_eq!(
+            budgets_or_default(&*kit.db, "T9SOMEONE-ELSE").await,
+            Budgets::default()
+        );
+        assert!(matches!(
+            budgets(&*kit.db, "not a workspace").await,
+            Err(UsageError::InvalidWorkspace(_))
+        ));
+    });
+}

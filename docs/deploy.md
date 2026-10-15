@@ -107,7 +107,8 @@ curl -sH "Authorization: Bearer $LIVINGBRAIN_TOKEN" "https://app.livingbrain.wik
 ```
 
 It returns per-day counts (model requests/tokens, D1 queries, emails sent),
-attributed cost, month-to-date, and `status` — `ok` or `over` against
+attributed cost, month-to-date, and `status` — `ok` or `over` against the
+workspace's monthly spend limit (Settings → Usage & limits), else
 `USAGE_BUDGET_CENTS_MONTHLY`, 300 cents by default: the $3.00 infra share of
 the $9/mo hosted Teams plan at a ~2/3 margin (pricing v3 in
 [origin-and-plan.md](origin-and-plan.md)). Model keys are BYO, so provider
@@ -116,9 +117,17 @@ credit accounting.
 
 `POST /v1/ask` sizes the sources it sends a model to that model's own context
 window (the `context_size` the connection probe stored): a quarter of the
-window, never more than `ASK_CONTEXT_CHARS_MAX` characters (200,000 by
-default), and 32,000 when the provider reported no window. Lower the ceiling
-to cut per-question token spend on a large-window model.
+window, never more than the workspace's context size (Settings → Usage &
+limits), else `ASK_CONTEXT_CHARS_MAX` characters (200,000 by default), and
+32,000 when the provider reported no window. Lower it to cut per-question
+token spend on a large-window model.
+
+The `CODING_AGENTS_*`, `ASK_CONTEXT_CHARS_MAX` and
+`USAGE_BUDGET_CENTS_MONTHLY` vars are now the **deployment defaults** a
+workspace inherits; owners and admins override them per workspace without a
+deploy (`PATCH /v1/settings/budgets`, see
+[coding-agents.md](coding-agents.md#budgets-are-settings) for the table, the
+precedence and the hard ceilings).
 
 Honesty notes: D1 cost has no per-workspace attribution yet, so while the
 pilot is single-workspace, read account-level D1 from the Cloudflare

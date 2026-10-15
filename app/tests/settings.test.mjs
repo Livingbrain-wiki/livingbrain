@@ -90,6 +90,7 @@ test("the sections the issue asks for are present", () => {
     "models",
     "model-switch",
     "model-runner",
+    "budgets",
     "proactivity",
     "tools",
     "automations",
@@ -99,6 +100,17 @@ test("the sections the issue asks for are present", () => {
   ]);
   for (const section of SECTIONS) assert.ok(isSection(section));
   assert.ok(!isSection("billing"));
+});
+
+test("a budgets change is one PATCH carrying the patch beside the audit triple", () => {
+  const patch = { coding_agents: { daily_tokens: 3000000, batch: null } };
+  const request = settingRequest("budgets", "limits", patch);
+  assert.equal(request.wired, true);
+  assert.equal(request.method, "PATCH");
+  assert.equal(request.path, "/v1/settings/budgets");
+  assert.deepEqual(request.body.coding_agents, patch.coding_agents);
+  assert.equal(request.body.section, "budgets");
+  assert.equal(request.body.key, "limits");
 });
 
 test("a models change is a PUT to the role's path", () => {

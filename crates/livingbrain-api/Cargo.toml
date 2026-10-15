@@ -41,6 +41,10 @@ async-trait = { workspace = true }
 livingbrain-compiler = { path = "../livingbrain-compiler" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-usage = { path = "../livingbrain-usage" }
+# Who may change a workspace's budgets (`GET`/`PATCH /v1/settings/budgets`):
+# the one `authenticate` every settings route answers to, which carries the
+# member's role, and the same-origin rule for a cookie write.
+livingbrain-tokens = { path = "../livingbrain-tokens" }
 # Request bodies, and the SHA-256 behind a note slug.
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -57,6 +61,9 @@ async-trait = { workspace = true }
 pollster = { workspace = true }
 # The instant a test seeds a runner row at.
 time = { workspace = true }
+# The module that owns sessions and member roles, for the settings route's
+# tests: a cookie it sealed is what `authenticate` resolves.
+livingbrain-workspaces = { path = "../livingbrain-workspaces" }
 # `oneshot` for the one test that sends a request with cookie and origin
 # headers, which the kit's request helpers do not set.
 tower = { workspace = true }

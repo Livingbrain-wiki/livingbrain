@@ -1,0 +1,22 @@
+{
+  "workspace_id": "T0",
+  "role": "member",
+  "editable": false,
+  "settings": {
+    "coding_agents": {
+      "paused": {"value": false, "source": "default", "inherited": false, "min": null, "max": null},
+      "daily_tokens": {"value": 3000000, "source": "default", "inherited": 3000000, "min": 0, "max": 1000000000000},
+      "monthly_tokens": {"value": 90000000, "source": "default", "inherited": 90000000, "min": 0, "max": 1000000000000},
+      "batch": {"value": 5, "source": "workspace", "inherited": 3, "min": 1, "max": 20},
+      "job_tokens": {"value": 80000, "source": "default", "inherited": 80000, "min": 1000, "max": 1000000}
+    },
+    "ask": {
+      "context_chars": {"value": 200000, "source": "default", "inherited": 200000, "min": 2000, "max": 1000000},
+      "max_output_tokens": {"value": 1024, "source": "default", "inherited": 1024, "min": 128, "max": 8192}
+    },
+    "spend": {
+      "monthly_cents": {"value": 2500, "source": "workspace", "inherited": 300, "min": 0, "max": 100000000}
+    }
+  },
+  "usage": {"compile_tokens_today": 2400000, "compile_tokens_month": 9000000, "spend_month_usd_micros": 1500000, "spend_model_priced": true}
+}

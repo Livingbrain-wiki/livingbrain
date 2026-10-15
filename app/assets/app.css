@@ -2657,3 +2657,76 @@ main > p.tiny:last-child {
 /* The workspace switcher in Settings → Members (ADR 0004). */
 .plain-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
 .plain-list li { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+
+/* Settings → Usage & limits: the budget cards and their usage bars. */
+.budget-form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.budget-cards {
+  display: grid;
+  gap: 16px;
+}
+
+.budget-card {
+  gap: 14px;
+}
+
+.budget-card__title {
+  margin: 0;
+}
+
+.budget-advanced {
+  display: grid;
+  gap: 14px;
+}
+
+.usebar {
+  display: grid;
+  gap: 6px;
+}
+
+.usebar__head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  font-size: 14px;
+}
+
+.usebar__label {
+  font-weight: 600;
+}
+
+.usebar__text {
+  color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+}
+
+.usebar__track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg3);
+  overflow: hidden;
+}
+
+.usebar__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.usebar[data-tone="near"] .usebar__fill {
+  background: var(--warn);
+}
+
+.usebar[data-tone="over"] .usebar__fill {
+  background: var(--bad);
+}
+
+.usebar[data-tone="over"] .usebar__text {
+  color: var(--bad);
+}

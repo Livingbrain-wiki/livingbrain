@@ -211,6 +211,18 @@ final class APIClientTests: XCTestCase {
         }
     }
 
+    func testBudgets() async throws {
+        mock.on("GET", "/v1/settings/budgets", try apiFixture("budgets"))
+        let budgets = try await client.budgets()
+        XCTAssertFalse(budgets.editable)
+        XCTAssertFalse(budgets.compilerPaused)
+        XCTAssertEqual(budgets.entry("coding_agents", "daily_tokens")?.number, 3_000_000)
+        XCTAssertEqual(budgets.entry("coding_agents", "batch")?.isWorkspaceSetting, true)
+        XCTAssertEqual(budgets.entry("coding_agents", "batch")?.inheritedNumber, 3)
+        XCTAssertEqual(budgets.entry("spend", "monthly_cents")?.number, 2500)
+        XCTAssertEqual(budgets.usage?.compileTokensToday, 2_400_000)
+    }
+
     func testModels() async throws {
         mock.on("GET", "/v1/models", try apiFixture("models"))
         let models = try await client.models()

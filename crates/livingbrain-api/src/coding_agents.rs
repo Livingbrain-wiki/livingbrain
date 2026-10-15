@@ -16,8 +16,14 @@
 //! Both answer only for the asker's own scopes — the same two clauses the
 //! source listing applies — so a member sees and spends nothing of anybody
 //! else's. The cron tick (`scheduled`) drains every workspace in bounded
-//! batches (`CODING_AGENTS_BATCH`) under the invocation's cooperative
-//! budget, then runs the model-free lint over the scopes it compiled into.
+//! batches — each workspace's own sessions-per-run setting, else
+//! `CODING_AGENTS_BATCH`, never past [`livingbrain_compiler::BATCH_CEILING`]
+//! — under the invocation's cooperative budget, then runs the model-free
+//! lint over the scopes it compiled into.
+//!
+//! Every budget and limit here is the workspace's **effective** one
+//! (`crate::budgets`): its own setting (Settings → Usage & limits), else the
+//! env var, else the default; a paused workspace compiles nothing.
 //!
 //! The model is the workspace's own, through `livingbrain_models::invoke`,
 //! on the **Main** job slot: there is no managed fallback, so a workspace
@@ -51,6 +57,7 @@ use livingbrain_pages::{FactError, FactInput, FactStore};
 use serde_json::{Value, json};
 
 use crate::Wiki;
+use crate::budgets::StoredTuning;
 use crate::port;
 use crate::service::Service;
 
@@ -197,9 +204,15 @@ impl Module for CodingAgents {
             let Some(compiler) = compiler(ctx, &self.wiki) else {
                 return Ok(());
             };
-            let settings = Settings::from_config(&*ctx.config);
+            // Each workspace's own batch caps its share inside the drain;
+            // the tick as a whole is bounded by the hard ceiling and by the
+            // invocation's cooperative budget.
             let processed = compiler
-                .drain(&ClaimFilter::default(), settings.batch, &ctx.scheduled)
+                .drain(
+                    &ClaimFilter::default(),
+                    livingbrain_compiler::BATCH_CEILING,
+                    &ctx.scheduled,
+                )
                 .await
                 .map_err(|error| Box::new(error) as AnyError)?;
             // The lint runs over the scopes this tick compiled into: cheap,
@@ -270,16 +283,19 @@ pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
         config: Arc::clone(&ctx.config),
         clock: clock.clone(),
     });
-    Some(Compiler::new(
-        pages,
-        sources,
-        Queue::new(db),
-        model,
-        facts,
-        gate,
-        clock,
-        Settings::from_config(&*ctx.config),
-    ))
+    Some(
+        Compiler::new(
+            pages,
+            sources,
+            Queue::new(db.clone()),
+            model,
+            facts,
+            gate,
+            clock,
+            Settings::from_config(&*ctx.config),
+        )
+        .with_tuning(Arc::new(StoredTuning { db })),
+    )
 }
 
 /// Who the fact store records as the writer of a compiled fact.
@@ -436,12 +452,45 @@ impl Gate for UsageGate {
     }
 }
 
-/// Whether `workspace` is past its monthly budget
-/// (`USAGE_BUDGET_CENTS_MONTHLY`), read the way `GET /v1/usage/daily` reads
-/// it: month-to-date model tokens priced by `serving` (the connection that
-/// would run the call; unpriced or `None` counts zero), plus mail. The one
-/// rule both the compiler's gate and `POST /v1/ask` answer to. A ledger
-/// that cannot be read is not over — a lost read must not stop the brain.
+/// The month's attributed spend for `workspace`, in micro-USD, read the way
+/// `GET /v1/usage/daily` reads it: month-to-date model tokens priced by
+/// `serving` (the connection that would run the call), plus mail. The bool
+/// says whether the model's tokens could be priced at all (an unpriced or
+/// absent model counts zero, which is unknown rather than free). `None`
+/// when the ledger cannot be read.
+pub(crate) async fn month_spend_micro_usd(
+    db: &dyn Database,
+    clock: &dyn Clock,
+    workspace: &str,
+    serving: Option<&invoke::Serving>,
+) -> Option<(u64, bool)> {
+    let now = clock.now();
+    let today = livingbrain_usage::utc_day(now);
+    let first = format!("{}-01", &today[..7]);
+    let rows = livingbrain_usage::days(db, workspace, &first, &today)
+        .await
+        .ok()?;
+    let mtd = livingbrain_usage::month_to_date(&rows, now);
+    let model = serving.and_then(|serving| {
+        livingbrain_usage::model_cost_micro_usd(
+            &serving.provider,
+            &serving.model,
+            mtd.prompt_tokens,
+            mtd.completion_tokens,
+        )
+    });
+    let priced = model.is_some();
+    Some((
+        model.unwrap_or(0) + livingbrain_usage::email_cost_micro_usd(mtd.emails_sent),
+        priced,
+    ))
+}
+
+/// Whether `workspace` is past its monthly spend limit — its own (Settings
+/// → Usage & limits), else `USAGE_BUDGET_CENTS_MONTHLY`, else the default —
+/// counting [`month_spend_micro_usd`]. The one rule both the compiler's gate
+/// and `POST /v1/ask` answer to. A ledger that cannot be read is not over —
+/// a lost read must not stop the brain.
 pub(crate) async fn over_budget(
     db: &dyn Database,
     config: &dyn Config,
@@ -449,28 +498,11 @@ pub(crate) async fn over_budget(
     workspace: &str,
     serving: Option<&invoke::Serving>,
 ) -> bool {
-    let now = clock.now();
-    let today = livingbrain_usage::utc_day(now);
-    let first = format!("{}-01", &today[..7]);
-    let Ok(rows) = livingbrain_usage::days(db, workspace, &first, &today).await else {
+    let Some((total, _)) = month_spend_micro_usd(db, clock, workspace, serving).await else {
         return false;
     };
-    let mtd = livingbrain_usage::month_to_date(&rows, now);
-    let model = serving
-        .and_then(|serving| {
-            livingbrain_usage::model_cost_micro_usd(
-                &serving.provider,
-                &serving.model,
-                mtd.prompt_tokens,
-                mtd.completion_tokens,
-            )
-        })
-        .unwrap_or(0);
-    let total = model + livingbrain_usage::email_cost_micro_usd(mtd.emails_sent);
-    let budget = config
-        .get("USAGE_BUDGET_CENTS_MONTHLY")
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(livingbrain_usage::DEFAULT_BUDGET_CENTS_MONTHLY);
+    let own = livingbrain_usage::budgets_or_default(db, workspace).await;
+    let budget = livingbrain_usage::budget_cents(config, &own);
     livingbrain_usage::status(total, budget) == livingbrain_usage::BudgetStatus::Over
 }
 
@@ -513,7 +545,9 @@ async fn queue(
         .counts(&asker.workspace_id, &scopes)
         .await
         .map_err(|_| Problem::internal())?;
-    let settings = Settings::from_config(&*ctx.config);
+    // The workspace's effective settings: its own, else the env vars.
+    let own = livingbrain_usage::budgets_or_default(&*db, &asker.workspace_id).await;
+    let settings = crate::budgets::compiler_settings(&*ctx.config, &own);
     let today = livingbrain_compiler::queue::utc_day(now);
     let first = format!("{}-01", &today[..7]);
     let spent_today = queue
@@ -555,6 +589,8 @@ async fn queue(
             (None, None) => json!({"connected": false, "role": MODEL_ROLE}),
         },
         "budget": {
+            "paused": settings.paused,
+            "batch": settings.batch,
             "daily_tokens": settings.daily_tokens,
             "monthly_tokens": settings.monthly_tokens,
             "job_tokens": settings.job_tokens,

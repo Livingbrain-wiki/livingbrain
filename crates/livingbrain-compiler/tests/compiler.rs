@@ -14,8 +14,8 @@ use cratefield_testing::{FakeDefer, MemoryBlob, TestHarness};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_compiler::layout;
 use livingbrain_compiler::{
-    Call, ClaimFilter, Compiler, Gate, JobStatus, Model, ModelFailure, NoFacts, NoGate, Queue,
-    Reply, Settings,
+    BATCH_CEILING, Call, ClaimFilter, Compiler, Gate, JOB_TOKENS_CEILING, JobStatus, Model,
+    ModelFailure, NoFacts, NoGate, Overrides, Queue, Reply, Settings, Tuning,
 };
 use livingbrain_pages::{
     Author, EntityType, Ingestor, PageStore, PageWrite, Pages, SourceIngest, SourceKind,
@@ -828,4 +828,151 @@ fn a_runner_compile_waits_and_resumes_chunk_by_chunk() {
     let today = livingbrain_compiler::queue::utc_day(world.clock.now());
     let spent = pollster::block_on(queue.spent(WORKSPACE, &today, &today)).expect("spend");
     assert_eq!(spent, 1_200, "only the API-shaped reply of chunk 1 counted");
+}
+
+/// A workspace's own overrides, per workspace, the way the composition's
+/// stored tuning answers.
+struct Tuned(Vec<(&'static str, Overrides)>);
+
+#[async_trait::async_trait]
+impl Tuning for Tuned {
+    async fn overrides(&self, workspace: &str) -> Overrides {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == workspace)
+            .map(|(_, overrides)| *overrides)
+            .unwrap_or_default()
+    }
+}
+
+/// Each workspace compiles under its own settings: a paused one parks its
+/// jobs without a model call, a tighter daily budget parks it as over
+/// budget, and the workspace with no overrides runs on the deployment's.
+#[test]
+fn each_workspace_compiles_under_its_own_settings() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "one");
+    world.sync(OTHER_WORKSPACE, "u9", "s-9", "nine");
+    let model = Fake::answering(|_, _| Ok(reply(&[])));
+    let tuning = Tuned(vec![(
+        WORKSPACE,
+        Overrides {
+            paused: Some(true),
+            ..Overrides::default()
+        },
+    )]);
+    let compiler = world.compiler(&model).with_tuning(Arc::new(tuning));
+    let processed = world.drain(&compiler);
+    let mine = processed
+        .iter()
+        .find(|p| p.status == JobStatus::OverBudget)
+        .expect("the paused workspace's job is parked");
+    assert_eq!(mine.error.as_deref(), Some("paused"));
+    assert!(
+        processed.iter().any(|p| p.status == JobStatus::Done),
+        "the other workspace compiled: {processed:?}"
+    );
+    assert_eq!(
+        model.calls(),
+        1,
+        "only the running workspace asked the model"
+    );
+
+    // A daily budget of its own, already spent, parks it the same way.
+    let world = self::world();
+    world.sync(WORKSPACE, "u1", "s-1", "one");
+    let queue = Queue::new(world.db.clone());
+    pollster::block_on(queue.record_spend(world.clock.now(), WORKSPACE, 5_000)).expect("spend");
+    let tuning = Tuned(vec![(
+        WORKSPACE,
+        Overrides {
+            daily_tokens: Some(1_000),
+            ..Overrides::default()
+        },
+    )]);
+    let model = Fake::answering(|_, _| Ok(reply(&[])));
+    let compiler = world.compiler(&model).with_tuning(Arc::new(tuning));
+    assert_eq!(world.drain(&compiler)[0].status, JobStatus::OverBudget);
+    // The deployment's 400k would have let it through.
+    let world = self::world();
+    world.sync(WORKSPACE, "u1", "s-1", "one");
+    pollster::block_on(Queue::new(world.db.clone()).record_spend(
+        world.clock.now(),
+        WORKSPACE,
+        5_000,
+    ))
+    .expect("spend");
+    assert_eq!(
+        world.drain(&world.compiler(&model))[0].status,
+        JobStatus::Done
+    );
+}
+
+/// The cron drain (no workspace filter) takes at most each workspace's own
+/// batch; "Process now" (one workspace) is bounded by its own `max` only.
+#[test]
+fn the_cron_drain_takes_each_workspace_s_own_batch() {
+    let world = world();
+    for n in 0..4 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let model = Fake::answering(|_, _| Ok(reply(&[])));
+    let tuning = Tuned(vec![(
+        WORKSPACE,
+        Overrides {
+            batch: Some(3),
+            ..Overrides::default()
+        },
+    )]);
+    let compiler = world.compiler(&model).with_tuning(Arc::new(tuning));
+    let processed = world.drain(&compiler);
+    assert_eq!(
+        processed
+            .iter()
+            .filter(|p| p.status == JobStatus::Done)
+            .count(),
+        3,
+        "{processed:?}"
+    );
+    // The deployment's default batch (1) is the cap without an override.
+    let world = self::world();
+    for n in 0..3 {
+        world.sync(WORKSPACE, "u1", &format!("s-{n}"), "one");
+    }
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed.len(), 1, "{processed:?}");
+}
+
+/// Overrides replace the deployment's values and are clamped to the same
+/// floors and hard ceilings as the env vars.
+#[test]
+fn overrides_win_and_the_hard_ceilings_hold() {
+    let base = Settings::default();
+    let tuned = base.with_overrides(&Overrides {
+        daily_tokens: Some(3_000_000),
+        batch: Some(3),
+        ..Overrides::default()
+    });
+    assert_eq!(tuned.daily_tokens, 3_000_000);
+    assert_eq!(tuned.batch, 3);
+    assert_eq!(
+        tuned.monthly_tokens, base.monthly_tokens,
+        "unset keeps the base"
+    );
+    let wild = base.with_overrides(&Overrides {
+        batch: Some(10_000),
+        job_tokens: Some(u64::MAX),
+        max_chunks: Some(0),
+        chunk_chars: Some(1),
+        max_output_tokens: Some(u64::MAX),
+        ..Overrides::default()
+    });
+    assert_eq!(wild.batch, BATCH_CEILING);
+    assert_eq!(wild.job_tokens, JOB_TOKENS_CEILING);
+    assert_eq!(wild.max_chunks, 1);
+    assert_eq!(wild.chunk_chars, 1_000);
+    assert_eq!(
+        wild.max_output_tokens,
+        livingbrain_compiler::MAX_OUTPUT_TOKENS_CEILING
+    );
 }
