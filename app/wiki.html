@@ -63,6 +63,7 @@
         <nav class="nav" aria-label="App">
           <a href="wiki.html" aria-current="page">Wiki</a>
           <a href="wiki.html?view=sessions">Agent sessions</a>
+          <a href="wiki.html?view=facts">Facts</a>
           <a href="settings.html">Settings</a>
           <a href="index.html" id="header-signin">Sign in</a>
         </nav>
@@ -90,6 +91,7 @@
       <nav class="wiki-drawer__nav" aria-label="App">
         <a href="wiki.html">Home</a>
         <a href="wiki.html?view=sessions">Agent sessions</a>
+        <a href="wiki.html?view=facts">Facts</a>
         <a href="settings.html">Settings</a>
         <a href="index.html" id="drawer-signin">Sign in</a>
         <button type="button" id="drawer-signout" class="wiki-drawer__signout" hidden>Sign out</button>
@@ -197,6 +199,30 @@
         <div id="transcript-body" class="transcript"></div>
       </section>
 
+      <!-- facts: every temporal fact the reader may see, as of a date
+           (docs/temporal-facts.md) — what holds, and what held before -->
+      <section id="facts-view" hidden>
+        <h1>Facts</h1>
+        <div class="wiki-toolbar">
+          <label class="facts__asof"
+            >As of
+            <input id="facts-as-of" type="date" aria-label="Show what was true on this date" />
+          </label>
+          <button id="facts-now" type="button">Now</button>
+          <span class="status" id="facts-status" role="status"></span>
+        </div>
+        <div id="facts-list" class="card facts"></div>
+        <div id="facts-empty" class="card wiki-empty" hidden>
+          <h2>No facts yet</h2>
+          <p>
+            Facts arrive with notes (<code>livingbrain note</code>, the MCP
+            <code>brain_note</code> tool) and from the pages the brain writes.
+            A new value never overwrites an old one: the old one is kept with
+            the dates it was true.
+          </p>
+        </div>
+      </section>
+
       <!-- page: one page, read -->
       <section id="page-view" hidden>
         <div class="wiki-page">
@@ -210,6 +236,18 @@
               <button type="button" data-new-page>New page</button>
             </div>
             <article id="page-body" class="card prose" aria-live="polite"></article>
+            <section id="page-facts-card" class="card facts" hidden>
+              <h3>Facts</h3>
+              <p class="tiny">
+                What is true about this, and since when. Earlier values stay as
+                history.
+              </p>
+              <label class="facts__asof"
+                >As of
+                <input id="page-facts-as-of" type="date" aria-label="Show what was true on this date" />
+              </label>
+              <div id="page-facts"></div>
+            </section>
             <div class="aside-grid">
               <section class="card">
                 <h3>Backlinks</h3>

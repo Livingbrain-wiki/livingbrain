@@ -1765,3 +1765,172 @@ test("coding-agents: a queue the API cannot answer hides the card, never the ses
   assert.equal(walk(el("sessions-list"), ".wiki-row__slug").length, 1);
   assert.equal(walk(el("sessions-list"), ".ca-status").length, 0);
 });
+
+/* ------------------------------------------- temporal facts (facts.js) */
+
+const SHOE_KEY = {
+  subject: "person/ada",
+  attribute: "shoe_size",
+  scope: "personal",
+  cardinality: "one",
+  current: [
+    {
+      id: "fact-b",
+      value: "41",
+      unit: "EU",
+      valid_from: "2026",
+      valid_to: null,
+      observed_at: "2026-10-15T09:12:00Z",
+      status: "current",
+    },
+  ],
+  history: [
+    {
+      id: "fact-b",
+      value: "41",
+      unit: "EU",
+      valid_from: "2026",
+      valid_to: null,
+      observed_at: "2026-10-15T09:12:00Z",
+      status: "current",
+    },
+    {
+      id: "fact-a",
+      value: "40",
+      unit: "EU",
+      valid_from: "2025",
+      valid_to: "2026",
+      observed_at: "2025-03-02T10:00:00Z",
+      status: "superseded",
+      superseded_by: "fact-b",
+    },
+  ],
+};
+
+const SHOE_KEY_2025 = {
+  ...SHOE_KEY,
+  current: [SHOE_KEY.history[1]],
+};
+
+test("facts: the pure helpers build paths and a Current + History description", async () => {
+  const { factsPath, factsDescription, displayValue, displayRange } = await import(
+    "../assets/facts.js"
+  );
+  assert.equal(factsPath(), "/v1/facts");
+  assert.equal(
+    factsPath({ subject: "person/ada", asOf: "2025-06-01" }),
+    "/v1/facts?subject=person%2Fada&as_of=2025-06-01",
+  );
+  assert.equal(factsPath({ asOf: "not a date" }), "/v1/facts", "a bad date is not sent");
+  assert.equal(displayValue({ value: "41", unit: "EU" }), "41 EU");
+  assert.equal(displayValue({ value: "jj" }), "jj");
+  assert.equal(displayRange({ valid_from: "2025", valid_to: "2026" }), "2025 – 2026");
+  assert.equal(displayRange({ valid_from: "2026" }), "2026 – now");
+  assert.deepEqual(factsDescription([]), []);
+  assert.deepEqual(factsDescription(undefined), []);
+
+  const description = factsDescription([SHOE_KEY]);
+  const text = JSON.stringify(description);
+  assert.match(text, /"Current"/);
+  assert.match(text, /"History"/);
+  assert.match(text, /41 EU/);
+  assert.match(text, /2025 – 2026/);
+  assert.match(text, /superseded/);
+  // Text only: nothing in a description is markup.
+  assert.ok(!text.includes("<"), "no markup in a fact description");
+});
+
+test("facts: a page with facts shows the card, and the as-of picker re-reads it", async () => {
+  reset({ search: "?slug=ada" });
+  seedTriggers();
+  seedPageCards();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [] });
+    if (url === "/v1/pages/ada") {
+      return json({
+        ...HELLO,
+        slug: "ada",
+        title: "Ada",
+        entity_type: "person",
+        subject: "person/ada",
+        facts: [SHOE_KEY],
+      });
+    }
+    if (url === "/v1/facts?subject=person%2Fada&as_of=2025-12-31") {
+      return json({ as_of: "2025-12-31", keys: [SHOE_KEY_2025] });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+
+  assert.equal(el("page-facts-card").hidden, false);
+  const cells = () => walk(el("page-facts"), "td").map((n) => n.textContent);
+  assert.deepEqual(cells(), ["shoe_size", "41 EU", "2026 – now", "2026-10-15"]);
+  const history = walk(el("page-facts"), "li").map((n) => n.textContent);
+  assert.equal(history.length, 2);
+  assert.match(history[1], /2025 – 2026.*shoe_size = 40 EU.*superseded/);
+
+  el("page-facts-as-of").value = "2025-12-31";
+  await el("page-facts-as-of").fire("change");
+  await drain();
+  assert.deepEqual(cells(), ["shoe_size", "40 EU", "2025 – 2026", "2025-03-02"]);
+});
+
+test("facts: a page without facts has no Facts card", async () => {
+  reset({ search: "?slug=hello" });
+  seedTriggers();
+  seedPageCards();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/pages/hello") return json(HELLO);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("page-facts-card").hidden, true);
+});
+
+test("facts: ?view=facts lists every timeline, as of a date and back to now", async () => {
+  reset({ search: "?view=facts" });
+  seedTriggers();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [] });
+    if (url === "/v1/facts") return json({ as_of: "now", keys: [SHOE_KEY] });
+    if (url === "/v1/facts?as_of=2025-06-01") return json({ as_of: "2025-06-01", keys: [SHOE_KEY_2025] });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("facts-view").hidden, false);
+  assert.equal(el("home-view").hidden, true);
+  const first = () => walk(el("facts-list"), "td").map((n) => n.textContent);
+  assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "41 EU"]);
+  assert.equal(el("facts-status").textContent, "Now");
+
+  el("facts-as-of").value = "2025-06-01";
+  await el("facts-as-of").fire("change");
+  await drain();
+  assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "40 EU"]);
+  assert.equal(el("facts-status").textContent, "As of 2025-06-01");
+
+  await el("facts-now").click();
+  await drain();
+  assert.equal(el("facts-as-of").value, "");
+  assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "41 EU"]);
+});
+
+test("facts: signed out, the Facts view asks to sign in and fetches nothing", async () => {
+  reset({ search: "?view=facts" });
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json({ title: "unauthorized" }, 401);
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("facts-view").hidden, false);
+  assert.ok(!calls.some((call) => call.url.startsWith("/v1/facts")));
+  assert.match(el("wiki-notice").textContent, /Sign in/);
+});

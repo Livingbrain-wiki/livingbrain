@@ -15,7 +15,7 @@
 //! MCP tools share: turning a request into [`FactInput`]s, choosing the
 //! timelines a question is about, and rendering them for a model.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cratefield_core::axum::Json;
@@ -28,6 +28,7 @@ use livingbrain_access::{Scope, UserId};
 use livingbrain_mcp::{Asker, page_scope};
 use livingbrain_memory::timeline::{self, PartialDate, TimedFact, normalize_attribute};
 use livingbrain_pages::{FactInput, FactStore, Recorded, Timeline, fact_json, person_subject};
+pub(crate) use livingbrain_pages::{brief_lines, brief_section};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -37,8 +38,6 @@ use crate::service::Service;
 
 /// The most facts one request may carry.
 pub(crate) const MAX_FACTS_PER_REQUEST: usize = 50;
-/// The most timelines a question pulls into a brief.
-pub(crate) const MAX_BRIEF_TIMELINES: usize = 20;
 
 /// The `facts` module, constructed with the page access the venture
 /// injected ([`Wiki`]): the key custodian facts are sealed with and the
@@ -393,66 +392,8 @@ pub(crate) fn timeline_json(
     })
 }
 
-/// Words that say nothing about which fact a question is after.
-const STOP: &[&str] = &[
-    "the",
-    "and",
-    "for",
-    "what",
-    "whats",
-    "what's",
-    "was",
-    "were",
-    "is",
-    "are",
-    "who",
-    "which",
-    "when",
-    "how",
-    "does",
-    "did",
-    "do",
-    "has",
-    "have",
-    "had",
-    "now",
-    "currently",
-    "current",
-    "this",
-    "that",
-    "there",
-    "their",
-    "about",
-    "with",
-    "from",
-    "into",
-    "you",
-    "your",
-    "our",
-];
-
-/// The words of a question, lowercased, at least three letters, no stop
-/// words.
-fn words(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .map(str::to_lowercase)
-        .filter(|w| w.len() >= 3 && !STOP.contains(&w.as_str()))
-        .collect()
-}
-
-/// Whether a question speaks about the person asking it.
-fn about_self(text: &str) -> bool {
-    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .map(str::to_lowercase)
-        .any(|w| matches!(w.as_str(), "my" | "me" | "i" | "mine" | "i'm" | "myself"))
-}
-
-/// The timelines a question is about, read in full: those whose attribute
-/// shares a word with the question (`shoe size` → `shoe_size`), on a
-/// subject the question names or the asker themselves for `my`/`me`; or
-/// every attribute of a subject the question names outright. Chosen from
-/// the plaintext index, so only the chosen ones are decrypted. At most
-/// [`MAX_BRIEF_TIMELINES`].
+/// The timelines a question is about ([`livingbrain_pages::relevant`]),
+/// in the asker's scopes, with the store's failure as a problem.
 ///
 /// # Errors
 ///
@@ -463,110 +404,7 @@ pub(crate) async fn relevant(
     scopes: &[String],
     question: &str,
 ) -> Result<Vec<Timeline>, Problem> {
-    let asked = words(question);
-    if asked.is_empty() && !about_self(question) {
-        return Ok(Vec::new());
-    }
-    let me = person_subject(&asker.user_id);
-    let me_too = about_self(question);
-    let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let index = store.index(&names).await.map_err(fact_error)?;
-    let mut chosen: Vec<(usize, (String, String, String))> = Vec::new();
-    for key in index {
-        let (_, subject, attribute) = &key;
-        let slug = subject.split_once('/').map_or("", |(_, slug)| slug);
-        let subject_named = slug
-            .split('-')
-            .filter(|part| part.len() >= 3)
-            .any(|part| asked.contains(part))
-            || (me_too && me.as_deref() == Some(subject.as_str()));
-        let attribute_hits = attribute
-            .split('_')
-            .filter(|part| asked.contains(*part))
-            .count();
-        let named_outright = slug.len() >= 3 && asked.contains(slug);
-        let score = match (subject_named, attribute_hits) {
-            (true, hits) if hits > 0 => 10 + hits,
-            (_, hits) if hits > 0 && !me_too => hits,
-            (true, _) if named_outright => 1,
-            _ => 0,
-        };
-        if score > 0 {
-            chosen.push((score, key));
-        }
-    }
-    chosen.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    chosen.truncate(MAX_BRIEF_TIMELINES);
-    let mut out = Vec::with_capacity(chosen.len());
-    for (_, (scope, subject, attribute)) in chosen {
-        out.push(
-            store
-                .timeline(&scope, &subject, &attribute)
-                .await
-                .map_err(fact_error)?,
-        );
-    }
-    Ok(out)
-}
-
-/// Fact lines for a brief, each with the index of the timeline it renders
-/// (a timeline with nothing but retractions renders none), each fact's
-/// source cited as `F1`, `F2`, … in first-seen order, and the citations
-/// those labels name.
-pub(crate) fn brief_lines(timelines: &[Timeline], at: i64) -> (Vec<(usize, String)>, Vec<Value>) {
-    let mut labels: Vec<(String, Option<String>)> = Vec::new();
-    let mut lines = Vec::new();
-    for (index, timeline) in timelines.iter().enumerate() {
-        // Labels are assigned before the line is rendered, in the order the
-        // line cites them (the facts valid at `at`), so two facts on one
-        // line never share a label and the numbering is stable.
-        for fact in timeline::valid_at(&timeline.facts, at) {
-            if let Some(source) = &fact.source
-                && !labels.iter().any(|(seen, _)| seen == source)
-            {
-                labels.push((source.clone(), fact.quote.clone()));
-            }
-        }
-        let cite = |fact: &TimedFact| -> Option<String> {
-            let source = fact.source.as_ref()?;
-            labels
-                .iter()
-                .position(|(seen, _)| seen == source)
-                .map(|p| format!("F{}", p + 1))
-        };
-        if let Some(line) = timeline::render_line(&timeline.facts, at, &cite) {
-            lines.push((index, line));
-        }
-    }
-    let citations = labels
-        .into_iter()
-        .enumerate()
-        .map(|(index, (source, quote))| {
-            json!({
-                "title": format!("F{}", index + 1),
-                "source": source,
-                "quote": quote,
-            })
-        })
-        .collect();
-    (lines, citations)
-}
-
-/// The facts section of a brief: the convention, then one line per
-/// timeline. Empty when there are no lines.
-pub(crate) fn brief_section(lines: &[(usize, String)], at: i64) -> String {
-    if lines.is_empty() {
-        return String::new();
-    }
-    let mut out = format!(
-        "Facts (as of {}):\n{}\n\n",
-        timeline::rfc3339(at),
-        timeline::PROMPT_CONVENTION
-    );
-    for (_, line) in lines {
-        out.push_str("- ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+    livingbrain_pages::relevant(store, &asker.user_id, scopes, question)
+        .await
+        .map_err(fact_error)
 }

@@ -316,7 +316,8 @@ fn the_transport_and_the_method_table_behave_as_the_specification_says() {
             "brain_search",
             "brain_page",
             "brain_context_for",
-            "brain_note"
+            "brain_note",
+            "brain_facts"
         ]
     );
     for tool in listed {
@@ -515,6 +516,96 @@ fn brain_note_redacts_before_it_stores_and_lands_in_the_callers_own_scope() {
         call("brain_search", json!({ "query": "staging password" })),
     ));
     assert!(!theirs.contains("Deploy keys"), "B read A's note: {theirs}");
+}
+
+/// Temporal facts over MCP (docs/temporal-facts.md): `brain_note` states
+/// them, `brain_facts` reads them now and as of a date, and
+/// `brain_context_for` puts the line ahead of the pages. Nobody else sees
+/// them.
+#[test]
+fn brain_note_facts_keep_their_history_and_brain_facts_reads_it() {
+    let fixture = world();
+    let shoe = |value: &str, from: &str, observed: &str| {
+        json!({ "subject": "me", "attribute": "shoe_size", "value": value, "unit": "EU",
+                "valid_from": from, "observed_at": observed })
+    };
+    let first = result_of(&post(
+        &fixture,
+        "token-a",
+        call(
+            "brain_note",
+            json!({ "text": "my shoe size is 40",
+                    "facts": [shoe("40", "2025", "2025-03-02T10:00:00Z")] }),
+        ),
+    ));
+    assert_eq!(
+        first["structuredContent"]["facts"][0]["outcome"], "created",
+        "{first}"
+    );
+    result_of(&post(
+        &fixture,
+        "token-a",
+        call(
+            "brain_note",
+            json!({ "text": "my shoe size is now 41",
+                    "facts": [shoe("41", "2026", "2026-10-15T09:12:00Z")] }),
+        ),
+    ));
+
+    let now = text_of(&post(
+        &fixture,
+        "token-a",
+        call("brain_facts", json!({ "subject": "me" })),
+    ));
+    assert!(now.contains("Facts below are temporal."), "{now}");
+    assert!(
+        now.contains(
+            "shoe_size(person/u-a) = 41 EU [valid 2026..now, observed 2026-10-15, source F1] \
+             (was 40 EU 2025..2026)"
+        ),
+        "{now}"
+    );
+    let then = text_of(&post(
+        &fixture,
+        "token-a",
+        call("brain_facts", json!({ "subject": "me", "as_of": "2025" })),
+    ));
+    assert!(
+        then.contains("shoe_size(person/u-a) = 40 EU [valid 2025..2026"),
+        "{then}"
+    );
+
+    let brief = text_of(&post(
+        &fixture,
+        "token-a",
+        call(
+            "brain_context_for",
+            json!({ "repo": "shop", "task": "buy shoes in my shoe size" }),
+        ),
+    ));
+    assert!(brief.contains("shoe_size(person/u-a) = 41 EU"), "{brief}");
+
+    for other in ["token-b", "token-a2"] {
+        let theirs = text_of(&post(&fixture, other, call("brain_facts", json!({}))));
+        assert!(!theirs.contains("shoe_size"), "{other}: {theirs}");
+    }
+
+    // An emitter may not resolve conflicts itself.
+    let refused = post(
+        &fixture,
+        "token-a",
+        call(
+            "brain_note",
+            json!({ "text": "x", "facts": [{ "subject": "me", "attribute": "a",
+                                            "value": "b", "status": "current" }] }),
+        ),
+    );
+    assert_eq!(
+        refused.json()["result"]["isError"],
+        true,
+        "{:?}",
+        refused.body()
+    );
 }
 
 // ---------------------------------------------------------------------------

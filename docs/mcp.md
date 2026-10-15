@@ -24,7 +24,8 @@ and answers with a cited brief.
 | `brain_search(query, limit?)` | pages you may read holding **every** word of the query |
 | `brain_page(slug)` | one page's Markdown, by slug |
 | `brain_context_for(repo, task)` | a brief: the pages that mention the task, full text, cited |
-| `brain_note(text, title?)` | writes to your own private memory, redacted first |
+| `brain_note(text, title?, facts?)` | writes to your own private memory, redacted first; `facts` are temporal facts the note states ([format](temporal-facts.md)) |
+| `brain_facts(subject?, attribute?, as_of?)` | what is true about an entity now, or as of a date, with the history of earlier values ([format](temporal-facts.md)) |
 
 Every page a tool quotes comes back as a numbered citation — title, `scope/slug`
 ref and URL — and `initialize` tells the model to cite the `[n]` markers.

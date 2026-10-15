@@ -26,6 +26,9 @@ livingbrain-access = { path = "../livingbrain-access" }
 # inside — the harness scopes `Blob` per module name, so only a nested
 # surface can open a body `pages` writes.
 livingbrain-pages = { path = "../livingbrain-pages" }
+# Temporal facts (docs/temporal-facts.md): partial dates and the attribute
+# rule `brain_facts` reads with. Pure Rust, no I/O, wasm-safe.
+livingbrain-memory = { path = "../livingbrain-memory" }
 # Secrets and PII leave `brain_note` before it reaches a body (issue #108).
 livingbrain-redact = { path = "../livingbrain-redact" }
 # The 401 challenge names the protected-resource metadata on the origin the

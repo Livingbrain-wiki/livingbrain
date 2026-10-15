@@ -29,6 +29,7 @@ import {
   isSafeHref,
 } from "./markdown.js";
 import { applyHeader, checkSession, signOutRequest } from "./session.js";
+import { factsDescription, factsPath } from "./facts.js";
 
 /** Where the per-browser list of pinned `scope/slug` keys lives. */
 const PIN_KEY = "lb-wiki-pinned";
@@ -622,6 +623,7 @@ export async function wikiPage(api) {
       new: $("#new-page-view"),
       sessions: $("#sessions-view"),
       transcript: $("#transcript-view"),
+      facts: $("#facts-view"),
     },
     notice: $("#wiki-notice"),
     status: $("#wiki-status"),
@@ -638,6 +640,14 @@ export async function wikiPage(api) {
     pageBody: $("#page-body"),
     pageBacklinks: $("#page-backlinks"),
     pageCitations: $("#page-citations"),
+    pageFactsCard: $("#page-facts-card"),
+    pageFacts: $("#page-facts"),
+    pageFactsAsOf: $("#page-facts-as-of"),
+    factsAsOf: $("#facts-as-of"),
+    factsNow: $("#facts-now"),
+    factsStatus: $("#facts-status"),
+    factsList: $("#facts-list"),
+    factsEmpty: $("#facts-empty"),
     tocDesktop: $("#toc-desktop"),
     tocList: $("#toc-list"),
     tocDrawerHeading: $("#toc-drawer-heading"),
@@ -719,7 +729,7 @@ export async function wikiPage(api) {
 
   /* -- small shared pieces ------------------------------------------ */
 
-  const VIEWS = ["home", "page", "editor", "new", "sessions", "transcript"];
+  const VIEWS = ["home", "page", "editor", "new", "sessions", "transcript", "facts"];
 
   function showView(name) {
     for (const view of VIEWS) {
@@ -1306,6 +1316,7 @@ export async function wikiPage(api) {
     renderInto(els.pageCitations, []);
     els.pageMeta.replaceChildren();
     paintCards([], []);
+    paintPageFacts([]);
     wireHeadingsAndToc();
   }
 
@@ -1392,7 +1403,62 @@ export async function wikiPage(api) {
     renderInto(els.pageBacklinks, renderBacklinks(backlinks));
     renderInto(els.pageCitations, renderCitations(citations));
     paintCards(backlinks, citations);
+    if (els.pageFactsAsOf) els.pageFactsAsOf.value = "";
+    paintPageFacts(page.facts);
     paintPin();
+  }
+
+  /* -- temporal facts (docs/temporal-facts.md) ------------------------ */
+
+  /** The page's Facts card: Current then History, or no card at all when the
+   * entity has no facts the reader may see. */
+  function paintPageFacts(keys) {
+    const description = factsDescription(keys);
+    renderInto(els.pageFacts, description);
+    els.pageFactsCard.hidden = description.length === 0;
+  }
+
+  /** Re-reads the open page's facts as of the picked date ("" = now). */
+  async function pageFactsAsOf(asOf) {
+    const page = state.page;
+    if (!page || !page.subject) return;
+    try {
+      const data = await api(factsPath({ subject: page.subject, asOf }));
+      paintPageFacts(data && data.keys);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) return;
+      notice(els.notice, `Could not load facts: ${error.message}`, "bad");
+    }
+  }
+
+  /** The Facts view: every timeline the reader may see, as of a date. */
+  async function loadFacts(asOf = "") {
+    showView("facts");
+    if (!state.signedIn) {
+      renderInto(els.factsList, []);
+      els.factsList.hidden = true;
+      els.factsEmpty.hidden = true;
+      els.factsStatus.textContent = "";
+      signInNotice("Sign in to see the facts you can read.");
+      return;
+    }
+    els.factsStatus.textContent = "Loading…";
+    try {
+      const data = await api(factsPath({ asOf }));
+      const keys = (data && data.keys) || [];
+      const description = factsDescription(keys, { showSubject: true });
+      renderInto(els.factsList, description);
+      els.factsList.hidden = description.length === 0;
+      els.factsEmpty.hidden = description.length !== 0;
+      els.factsStatus.textContent = asOf ? `As of ${asOf}` : "Now";
+    } catch (error) {
+      els.factsStatus.textContent = "";
+      if (error instanceof ApiError && error.status === 401) {
+        signInNotice("Sign in to see the facts you can read.");
+        return;
+      }
+      notice(els.notice, `Could not load facts: ${error.message}`, "bad");
+    }
   }
 
   async function openPage(targetSlug, { edit = false } = {}) {
@@ -1840,6 +1906,20 @@ export async function wikiPage(api) {
       await loadSessions();
     });
   }
+  if (els.pageFactsAsOf) {
+    els.pageFactsAsOf.addEventListener("change", () =>
+      pageFactsAsOf(els.pageFactsAsOf.value || ""),
+    );
+  }
+  if (els.factsAsOf) {
+    els.factsAsOf.addEventListener("change", () => loadFacts(els.factsAsOf.value || ""));
+  }
+  if (els.factsNow) {
+    els.factsNow.addEventListener("click", () => {
+      if (els.factsAsOf) els.factsAsOf.value = "";
+      loadFacts("");
+    });
+  }
   if (els.sessionsMore) {
     els.sessionsMore.addEventListener("click", () => loadSessions({ more: true }));
   }
@@ -1952,5 +2032,6 @@ export async function wikiPage(api) {
   if (startSlug) await openPage(startSlug, { edit: startInEdit });
   else if (startView === "sessions" && params.get("source")) await loadTranscript(params.get("source"));
   else if (startView === "sessions") await loadSessions();
+  else if (startView === "facts") await loadFacts();
   else await loadHome();
 }

@@ -1796,6 +1796,7 @@ dependencies = [
  "cratefield-kms",
  "cratefield-testing",
  "livingbrain-access",
+ "livingbrain-memory",
  "livingbrain-pages",
  "livingbrain-redact",
  "livingbrain-tokens",

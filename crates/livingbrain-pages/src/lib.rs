@@ -43,8 +43,9 @@ pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
 pub use facts::{
-    FactError, FactInput, FactOutcome, FactStore, MAX_FACT_ROWS, MAX_FACT_TEXT, MAX_INDEX_KEYS,
-    Recorded, Timeline, fact_json, is_subject, person_subject,
+    FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
+    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
+    is_subject, person_subject, relevant,
 };
 pub use ingest::{
     Extract, IngestError, IngestOutcome, Ingested, Ingestor, NoExtract, NoScreen, Screen,

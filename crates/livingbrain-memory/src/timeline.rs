@@ -582,7 +582,7 @@ pub fn valid_at(timeline: &[TimedFact], at: i64) -> Vec<&TimedFact> {
 #[must_use]
 pub fn history(timeline: &[TimedFact]) -> Vec<&TimedFact> {
     let mut all: Vec<&TimedFact> = timeline.iter().collect();
-    all.sort_by(|a, b| b.order_key().cmp(&a.order_key()));
+    all.sort_by_key(|fact| std::cmp::Reverse(fact.order_key()));
     all
 }
 

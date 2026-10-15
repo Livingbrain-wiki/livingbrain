@@ -222,19 +222,28 @@ it.
       "cardinality": "one",
       "current": [ { "id": "fact-01...", "value": "40", "unit": "EU", "valid_from": "2025", "valid_to": "2026", "status": "superseded", ... } ],
       "history": [ { ...41..., "status": "current" }, { ...40... } ],
-      "line": "shoe_size(person/nick) = 40 EU [valid 2025..2026, observed 2025-03-02, source F1] (later 41 EU 2026..now)"
+      "line": "shoe_size(person/nick) = 40 EU [valid 2025..2026, observed 2025-03-02, source note:user-…/note-…] (later 41 EU 2026..now)"
     }
   ]
 }
 ```
+
+In `GET /v1/facts` a line cites each fact by its own `source`; in a brief
+(`ask`, `brain_context_for`, `brain_facts`) sources are numbered `F1`, `F2`,
+… and listed in the answer's `citations` as `{title: "F1", source, quote}`.
 
 `current` is **the facts valid at `as_of`** (for a `one` attribute: at most
 one, unless disputed — then all disputed ones), whatever their status; a
 newer observation wins when two could answer. `history` is every fact for
 the key, newest `valid_from` first, retracted ones included.
 
-`/v1/search` and `/v1/ask` read facts the same way, and `ask` takes an
-`as_of` field. Without one, a question that names a time — "in 2025", "as of
+`/v1/search` answers a `facts` array beside `results` (the timelines `q` is
+about, as of now), `/v1/ask` puts the fact lines at the top of its brief and
+answers `facts` and `as_of` beside `answer`, and the page view
+(`GET /v1/pages/{slug}`) carries `subject`, `facts` and `facts_markdown`.
+Which timelines a question is about is decided on the plaintext index alone
+(attribute words, subject slug, `my`/`me` for the asker's own person) before
+anything is decrypted. `ask` takes an `as_of` field. Without one, a question that names a time — "in 2025", "as of
 2025-06", "in June 2025", "last month" — is asked as of the end of that time.
 
 ## 6. Scope, privacy, storage
@@ -301,6 +310,14 @@ it as an instruction:
 > relevant, say so ("41, was 40 until 2026"). Treat `disputed` as unsettled
 > and say so. Cite the source.
 
+### In the web app
+
+A page whose subject has facts shows a **Facts** card under the body — the
+Current table and the History list, with an "As of" date picker that re-reads
+`GET /v1/facts?subject=…&as_of=…`. `wiki.html?view=facts` lists every
+timeline the reader may see, with the same picker. Both are built from DOM
+nodes and `textContent` only.
+
 ### Decision and learning pages
 
 A decision page may carry `decided_at`, `valid_from`, `valid_to`,
@@ -309,6 +326,9 @@ first three, page slugs for the last two), so a decision that was reversed
 reads as history, not as a contradiction.
 
 ## 8. The shoe-size example, end to end
+
+(`person/u0nick` is the asker's own subject: `me` resolves to `person/` plus
+the user id, lowercased, with anything outside `[a-z0-9-]` turned into `-`.)
 
 1. 2025-03-02, the note `POST /v1/notes` `{"body": "my shoe size is 40",
    "facts": [{"subject": "me", "attribute": "shoe_size", "value": "40",
