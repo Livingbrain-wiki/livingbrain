@@ -54,6 +54,7 @@ test("every address published before the shell still resolves to a destination",
     "/settings.html#connect": "integrations",
     "/settings.html#soon": "integrations",
     "/settings.html#stack": "integrations",
+    "/brain.html": "map",
   };
   for (const [url, id] of Object.entries(legacy)) {
     assert.equal(at(url), id, url);
@@ -176,7 +177,7 @@ test("palette helpers: the search path, the hit's slug, the ask address", () => 
   assert.equal(askHref("what?"), "wiki.html?view=ask&q=what%3F");
 });
 
-test("the three pages carry one shell with the same ids, and the theme script is untouched", () => {
+test("the four pages carry one shell with the same ids, and the theme script is untouched", () => {
   const SHELL_IDS = [
     "nav-toggle",
     "ws-switch",
@@ -197,7 +198,7 @@ test("the three pages carry one shell with the same ids, and the theme script is
     "main",
   ];
   const theme = (html) => /<script>([\s\S]*?)<\/script>/.exec(html)[1];
-  const pages = ["index.html", "wiki.html", "settings.html"].map((name) => [
+  const pages = ["index.html", "wiki.html", "settings.html", "brain.html"].map((name) => [
     name,
     readFileSync(new URL(`../${name}`, import.meta.url), "utf8"),
   ]);
@@ -232,5 +233,15 @@ test("the old header nav and the drawer's link mirror are gone; the views have t
 
 test("the service worker caches the shell's modules", () => {
   const sw = readFileSync(new URL("../sw.js", import.meta.url), "utf8");
-  for (const file of ["./assets/shell.js", "./assets/nav.js"]) assert.ok(sw.includes(`"${file}"`), file);
+  for (const file of [
+    "./assets/shell.js",
+    "./assets/nav.js",
+    "./brain.html",
+    "./assets/brain.js",
+    "./assets/brain-render.js",
+    "./assets/graph.js",
+    "./assets/brain.css",
+  ]) {
+    assert.ok(sw.includes(`"${file}"`), file);
+  }
 });

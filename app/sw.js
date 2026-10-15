@@ -11,13 +11,14 @@
  */
 
 
-const CACHE = "lb-app-v12";
+const CACHE = "lb-app-v13";
 
 const SHELL = [
   "./",
   "./index.html",
   "./settings.html",
   "./wiki.html",
+  "./brain.html",
   "./assets/app.css",
   "./assets/app.js",
   "./assets/markdown.js",
@@ -44,6 +45,12 @@ const SHELL = [
   // app.js imports the shell and the destinations it is built from.
   "./assets/shell.js",
   "./assets/nav.js",
+  // app.js imports the brain map's page, renderer and data shaping, and
+  // brain.html loads its own sheet.
+  "./assets/brain.js",
+  "./assets/brain-render.js",
+  "./assets/graph.js",
+  "./assets/brain.css",
   // settings.js imports this statically, and an ES module import fails
   // atomically, so an offline settings page would not render at all without it.
   "./assets/stack.json",

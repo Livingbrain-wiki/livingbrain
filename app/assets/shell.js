@@ -304,6 +304,7 @@ export function mountShell(deps) {
     }
     const view = sessionView(state.me, deps.origin || "");
     if (wsBox) wsBox.hidden = false;
+    if (body.dataset.page === "signin") doc.title = `${view.workspaceName} — Living Brain`;
     const name = doc.getElementById("ws-name");
     if (name) name.textContent = view.workspaceName;
     const initial = doc.getElementById("user-initial");

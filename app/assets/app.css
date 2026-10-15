@@ -89,6 +89,21 @@
   --glow: 0 0 10px var(--accent);
   --header-bg: oklch(0.16 0.014 215 / 0.84);
 
+  /* The brain map's node colours: the website's graph palette
+     (Livingbrain-wiki/website assets/livingbrain.css), extended. */
+  --graph-edge: oklch(0.72 0.04 200);
+  --t-person: oklch(0.8 0.075 235);
+  --t-project: oklch(0.79 0.075 295);
+  --t-decision: oklch(0.85 0.085 85);
+  --t-customer: oklch(0.8 0.08 25);
+  --t-fact: oklch(0.62 0.02 210);
+  --t-system: oklch(0.8 0.07 190);
+  --t-topic: oklch(0.82 0.06 140);
+  --t-agents: oklch(0.86 0.16 162);
+  --t-session: oklch(0.76 0.09 320);
+  --t-github: oklch(0.85 0.01 250);
+  --t-source: oklch(0.78 0.08 55);
+
   /* The older names, kept so nothing that reads them goes blank. */
   --bg-raised: var(--bg2);
   --bg-sunken: var(--bg3);
@@ -131,11 +146,36 @@
     --bad: oklch(0.5 0.13 30);
     --glow: none;
     --header-bg: oklch(0.975 0.006 190 / 0.86);
+    --graph-edge: oklch(0.45 0.03 210);
+    --t-person: oklch(0.5 0.11 240);
+    --t-project: oklch(0.48 0.12 300);
+    --t-decision: oklch(0.58 0.12 75);
+    --t-customer: oklch(0.5 0.13 30);
+    --t-fact: oklch(0.6 0.02 210);
+    --t-system: oklch(0.5 0.09 200);
+    --t-topic: oklch(0.52 0.1 145);
+    --t-agents: oklch(0.48 0.11 165);
+    --t-session: oklch(0.5 0.13 325);
+    --t-github: oklch(0.4 0.02 250);
+    --t-source: oklch(0.55 0.12 55);
   }
 }
 
 /* An explicit choice beats the system, in both directions. */
 :root[data-theme="light"] {
+  --graph-edge: oklch(0.45 0.03 210);
+  --t-person: oklch(0.5 0.11 240);
+  --t-project: oklch(0.48 0.12 300);
+  --t-decision: oklch(0.58 0.12 75);
+  --t-customer: oklch(0.5 0.13 30);
+  --t-fact: oklch(0.6 0.02 210);
+  --t-system: oklch(0.5 0.09 200);
+  --t-topic: oklch(0.52 0.1 145);
+  --t-agents: oklch(0.48 0.11 165);
+  --t-session: oklch(0.5 0.13 325);
+  --t-github: oklch(0.4 0.02 250);
+  --t-source: oklch(0.55 0.12 55);
+
   color-scheme: light;
   --bg: oklch(0.975 0.006 190);
   --bg2: oklch(0.995 0.003 190);
@@ -156,6 +196,19 @@
 }
 
 :root[data-theme="dark"] {
+  --graph-edge: oklch(0.72 0.04 200);
+  --t-person: oklch(0.8 0.075 235);
+  --t-project: oklch(0.79 0.075 295);
+  --t-decision: oklch(0.85 0.085 85);
+  --t-customer: oklch(0.8 0.08 25);
+  --t-fact: oklch(0.62 0.02 210);
+  --t-system: oklch(0.8 0.07 190);
+  --t-topic: oklch(0.82 0.06 140);
+  --t-agents: oklch(0.86 0.16 162);
+  --t-session: oklch(0.76 0.09 320);
+  --t-github: oklch(0.85 0.01 250);
+  --t-source: oklch(0.78 0.08 55);
+
   color-scheme: dark;
   --bg: oklch(0.16 0.014 215);
   --bg2: oklch(0.195 0.016 215);

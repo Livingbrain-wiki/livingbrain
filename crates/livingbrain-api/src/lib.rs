@@ -68,6 +68,7 @@ mod budgets;
 mod coding_agents;
 mod export;
 mod facts;
+mod graph;
 mod model_jobs;
 mod notes;
 mod pages;
@@ -91,6 +92,9 @@ pub use budgets::{
 pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, StoreFacts};
 pub use export::Export;
 pub use facts::Facts;
+pub use graph::{
+    Compiled, DEFAULT_LIMIT as GRAPH_DEFAULT_LIMIT, Graph, GraphQuery, MAX_LIMIT as GRAPH_MAX_LIMIT,
+};
 pub use model_jobs::ModelJobs;
 pub use notes::Notes;
 pub use pages::pages_routes;

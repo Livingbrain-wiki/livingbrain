@@ -50,7 +50,7 @@ use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
 use livingbrain_api::{
-    Ask, BudgetSettings, CodingAgents, Export, Facts, ModelJobs, Notes, PagesRebind, Search,
+    Ask, BudgetSettings, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind, Search,
     SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
@@ -465,6 +465,9 @@ fn cli_modules(
         Arc::new(Export::new(wiki.clone())),
         Arc::new(Facts::new(wiki.clone())),
         Arc::new(Sources::new(wiki.clone())),
+        // The brain map's data (`GET /v1/graph`): the asker's own pages,
+        // sources and facts as nodes and edges, read-only.
+        Arc::new(Graph::new(wiki.clone())),
         // The coding-agents compiler: its queue and status routes, and the
         // cron drain that compiles synced sessions into `coding-agents/`.
         Arc::new(CodingAgents::new(wiki.clone())),
@@ -835,9 +838,10 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
 /// The CLI paths `fetch` diverts to [`serve_cli`] — the routes the
 /// [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 8] = [
+const CLI_ROUTES: [&str; 9] = [
     "/v1/notes",
     "/v1/search",
+    "/v1/graph",
     "/v1/ask",
     "/v1/export",
     "/v1/sources",

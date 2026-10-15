@@ -44,6 +44,8 @@
   Cache-Control: no-store
 /wiki.html
   Cache-Control: no-store
+/brain.html
+  Cache-Control: no-store
 
 # The static shell carries no per-person data, so a short shared cache is safe.
 /assets/*

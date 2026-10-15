@@ -66,6 +66,7 @@ To talk to a local Worker, set the API base in each page's `<head>`:
 | `GET /v1/sources?kind=agent_log&limit=50&project=&cursor=` | `wiki.html?view=sessions` | **yes** — `{sources:[{id, kind, scope, path, project, held, created_at}], next_cursor}`, newest first; "Load more" sends the cursor, and the chosen project is kept in the address (`&project=`) |
 | `GET /v1/coding-agents/queue?limit=100` / `?source=` | `wiki.html?view=sessions` | **yes** — `{counts, model, budget, triage, jobs:[{source_id, status, error, pages, triage, estimate, can_compile_fully, …}]}`; the queue card above the sessions (with a triage line: skipped, summarised, compiled in full, tokens saved) and a status pill plus "Wrote …" links on each session, and the compile line above a transcript. Any failure hides the card and leaves the list |
 | `POST /v1/coding-agents/process` | `wiki.html?view=sessions` | **yes** — body `{max: 1}`; the card's **Process now** compiles the next of your sessions and refreshes the list |
+| `GET /v1/graph?project=&kind=&limit=` | `brain.html` | **yes** — `{nodes:[{id, kind, label, slug?, project?, agent?, created_at, updated_at, backlinks, facts, degree, url?}], edges:[{source, target, kind}], counts, projects, agents, limit, truncated}`: the asker's own readable pages, sources, projects and fact subjects (same scope and workspace rules as the listings; nothing unsealed). Filters apply before the limit (default 800, clamped to 2000); the page asks for 2000 |
 | `POST /v1/coding-agents/retry` | `wiki.html?view=sessions` | **yes** — the card's **Retry failed** (shown when something failed) requeues your failed sessions with their attempts reset |
 | `POST /v1/coding-agents/compile-fully` | `wiki.html?view=sessions` | **yes** — body `{source_id}`; **Compile fully** on a `skipped-trivial` or `summary-only` session compiles it in full (no triage, no compaction) and refreshes the list |
 
@@ -110,6 +111,19 @@ drawer behind the ☰ button; on wider ones it collapses to an icon rail.
   Enter asks), `?view=coding-agents` (the #187 tree, moved off the Pages
   list), `?view=imports` (`GET /v1/sources?kind=import`, each readable in
   place) and `?view=new`.
+
+## The Brain map
+
+`brain.html` (Brain → Brain map) draws `GET /v1/graph` as a 3D graph in the
+website brain's style. `assets/graph.js` is the pure part — shaping the
+answer, the filters, the time slider, search, and the 3D force layout
+(Barnes–Hut repulsion inside a two-hemisphere brain envelope: knowledge
+left, sources right); `assets/brain-render.js` is the canvas renderer, ported
+from the website's `assets/brain.js` (provenance in `assets/vendor/VENDOR.md`;
+no third-party library, so the CSP stays `'self'`); `assets/brain.js` is the
+page. It needs only a canvas 2D context — no WebGL — and "Flat" draws the
+same nodes face-on; without a canvas the list under the stage is the map.
+`prefers-reduced-motion` stops the spin, the pulses and the animated settling.
 
 ## The wiki page: wired end to end
 
@@ -232,6 +246,9 @@ The test files (`node --test` prints the current count):
   carry one shell with the same ids and an untouched theme script.
 - `tests/shell.test.mjs` — the shell on a stub DOM: the sidebar, the current
   item, the drawer and rail, the switcher, and the palette by keyboard.
+- `tests/graph.test.mjs` — the map's shaping, filters before the time
+  slider, search, tooltips, and the layout keeping every node inside its
+  hemisphere; brain.html's shell and that nothing it loads leaves `'self'`.
 - `tests/session.test.mjs` — the `/me` check and sign-out from
   `assets/session.js`: signed in, signed out and "could not tell", what each
   one shows, and the hidden-until-checked markup of `index.html`.
@@ -253,6 +270,11 @@ quietly.
 | `assets/app.js` | Browser glue: `$`, `$$`, `esc`, `api`, theme, `LB.setting`, sign-out, the settings tabs, mounting the shell |
 | `assets/nav.js` | The information architecture as data: destinations, settings tabs, `activeId`, breadcrumbs, palette rows |
 | `assets/shell.js` | The app shell: sidebar, drawer, collapse rail, workspace switcher, user menu, ⌘K palette |
+| `brain.html` | The Brain map: the 3D graph of the asker's brain, its filters, time slider, side panel and list |
+| `assets/graph.js` | The map's data shaping, filters, search and 3D force layout (pure) |
+| `assets/brain-render.js` | The map's canvas renderer, ported from the website's brain |
+| `assets/brain.js` | The Brain map page controller |
+| `assets/brain.css` | The Brain map's own styles |
 | `assets/wiki.js` | The wiki controller (`wikiPage`) and its pure helpers (`slugify`, `validSlug`, `parseBrainUrl`, `highlightTerms`); imported by `app.js`, dispatched for `body[data-page="wiki"]` |
 | `assets/models.js` | The roles, the provider catalog as the picker uses it, connect-form validation, and the connected-model cards |
 | `assets/providers.json` | The provider catalog: every provider Colonizer supports, vendored by `scripts/sync-providers`. The server compiles in the same file |

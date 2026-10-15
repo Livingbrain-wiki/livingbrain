@@ -1,0 +1,348 @@
+/* The Brain map page's own styles, on the shared tokens in `app.css`.
+ * Same rules as the rest: fluid lengths, nothing wider than its column, and
+ * the canvas sized by its box (the renderer reads the box, never the
+ * other way round). */
+
+main.map-main {
+  max-width: none;
+}
+
+.map-head {
+  margin-bottom: var(--space-3);
+}
+
+.map-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.map-tools select {
+  flex: 0 1 12rem;
+  min-width: 0;
+  min-height: 40px;
+  font-size: 14px;
+}
+
+.map-search {
+  position: relative;
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 26rem;
+}
+
+.map-search input {
+  min-height: 40px;
+  font-size: 14px;
+}
+
+.map-status {
+  margin-inline-start: auto;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  color: var(--ink3);
+}
+
+.map-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 18rem;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  box-shadow: 0 12px 30px oklch(0 0 0 / 0.35);
+}
+
+.map-results__opt {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.map-results__opt.is-active,
+.map-results__opt:hover {
+  background: var(--accent-soft);
+}
+
+.map-results__opt .muted {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+/* The legend: one toggle chip per kind, coloured like its nodes. */
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.map-chip {
+  min-height: 32px;
+  padding: 0 10px;
+  gap: 6px;
+  border-color: var(--line2);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink2);
+}
+
+.map-chip[aria-pressed="false"] {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.map-chip__dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: var(--c, var(--accent));
+  box-shadow: 0 0 8px var(--c, var(--accent));
+}
+
+.map-chip__n {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--ink3);
+}
+
+/* The stage: the canvas fills it; the controls, tooltip and panel float. */
+.map-stage {
+  position: relative;
+  height: clamp(22rem, calc(100dvh - 22rem), 52rem);
+  min-height: 22rem;
+  overflow: hidden;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  background:
+    radial-gradient(ellipse at 50% 45%, var(--accent-soft), transparent 60%),
+    var(--bg);
+}
+
+.map-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+.map-canvas.is-dragging {
+  cursor: grabbing;
+}
+
+.map-canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-card);
+}
+
+.map-tip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  max-width: 15rem;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg2);
+  box-shadow: 0 8px 24px oklch(0 0 0 / 0.35);
+  font-size: 12px;
+  color: var(--ink2);
+  pointer-events: none;
+}
+
+.map-tip strong {
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.map-controls {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+}
+
+.map-controls .btn-sm {
+  min-width: 36px;
+  background: var(--bg2);
+}
+
+.map-controls [aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+/* The side panel: the picked node, read in place. */
+.map-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(24rem, calc(100% - 24px));
+  padding: 16px 18px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--bg2);
+  box-shadow: 0 16px 40px oklch(0 0 0 / 0.35);
+}
+
+.map-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.map-panel__head .eyebrow {
+  margin: 0;
+}
+
+.map-panel h2 {
+  margin: 0;
+  font-size: var(--step-1);
+  overflow-wrap: anywhere;
+}
+
+.map-panel__open {
+  align-self: flex-start;
+  min-height: 40px;
+  font-size: 14px;
+}
+
+.map-panel__body {
+  font-size: 14px;
+}
+
+.map-panel__body :where(h1) {
+  font-size: var(--step-1);
+}
+
+.map-panel__links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.linklike {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  justify-content: flex-start;
+  background: none;
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.linklike:hover:not(:disabled) {
+  background: none;
+  color: var(--ink);
+}
+
+.map-empty {
+  position: absolute;
+  inset: auto 16px 16px 16px;
+  max-width: 34rem;
+  margin-inline: auto;
+}
+
+/* The time slider under the stage. */
+.map-time {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.map-time .btn-sm {
+  flex: 0 0 auto;
+  min-width: 4.5rem;
+}
+
+.map-time input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.map-time .tiny {
+  flex: 0 0 auto;
+  min-width: 9rem;
+  text-align: end;
+}
+
+.map-list {
+  margin-top: 16px;
+}
+
+.map-list__body {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-inline-start: 1.4rem;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+/* Phones: the panel becomes a sheet over the lower part of the stage. */
+@media (max-width: 40rem) {
+  .map-stage {
+    height: clamp(20rem, 70dvh, 34rem);
+  }
+  .map-panel {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    max-height: 70%;
+  }
+  .map-time .tiny {
+    min-width: 0;
+  }
+  .map-status {
+    flex: 1 1 100%;
+    margin-inline-start: 0;
+  }
+}

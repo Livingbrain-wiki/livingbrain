@@ -119,8 +119,14 @@ One app shell on every signed-in page: a **top bar** and a **left sidebar**.
   * **Pages** (`wiki.html`): pinned and recent human pages, the filter, New
     page (`wiki.html?view=new`).
   * **Facts** (`wiki.html?view=facts`).
-  * **Brain map** (`brain.html`, the second PR): the 3D graph of the
-    asker's own pages, sources and facts.
+  * **Brain map** (`brain.html`): the 3D graph of the asker's own pages,
+    sources, projects and fact subjects (`GET /v1/graph`), in the website
+    brain's style — knowledge in the left hemisphere, sources in the right.
+    Orbit, zoom and pan; hover for a tooltip; pick a node to read it in a
+    side panel; filter by kind, project and agent; search to focus; a time
+    slider replays the brain growing; "Flat" shows it face-on; reduced
+    motion stops the spin and the pulses; a list holds the same nodes for
+    anyone the canvas does not serve.
 * **Sources** — where the knowledge came from.
   * **Agent sessions** (`wiki.html?view=sessions`, filters and transcript
     unchanged).
