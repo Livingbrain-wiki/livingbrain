@@ -116,8 +116,23 @@ One app shell on every signed-in page: a **top bar** and a **left sidebar**.
     matching pages (the old header search, same keys); pressing Enter without
     choosing a page asks the brain and shows the answer with its citations.
     `?q=` pre-fills and asks.
-  * **Pages** (`wiki.html`): pinned and recent human pages, the filter, New
-    page (`wiki.html?view=new`).
+  * **Pages** (`wiki.html`): **Projects first** — one card per project
+    (canonical key, the repository's spelling: `EarthOS.world`), with its
+    compiled sections (Overview, Decisions, Learnings, Architecture, Open
+    questions, topics) — then pinned and recent pages by title, then the
+    **Agents** section (each agent's own `patterns`/`index` pages), the
+    filter and New page (`wiki.html?view=new`). Coding-agent session logs
+    (`session` pages) are sources: the list asks the server to leave them out
+    (`GET /v1/pages?exclude_type=session`) unless **Show session logs** is on
+    (remembered per browser).
+  * **Project** (`wiki.html?view=project&project=<key>`): the project's wiki
+    by section, each with the agents that wrote it ("from Claude, Codex and
+    Colonizer", each linking to that agent's page), its topics, the
+    cross-agent rollup, recent sessions (by their note titles), GitHub items
+    and facts. `&section=<page>` reads that section from every agent in turn
+    (`EarthOS.world — Learnings`). Compiled pages are never shown by slug:
+    `EarthOS.world — Learnings`, `Codex — Patterns`. The per-agent split
+    stays at Sources → Coding agents.
   * **Facts** (`wiki.html?view=facts`).
   * **Brain map** (`brain.html`): the 3D graph of the asker's own pages,
     sources, projects and fact subjects (`GET /v1/graph`), in the website
@@ -175,9 +190,10 @@ anchors map onto the tab that holds them (`#connect`, `#soon` and `#stack`
   page" drawer.
 * **Consistent page headers:** breadcrumb (page and transcript views), a
   mono eyebrow naming the group, the H1, a lede.
-* **Breadcrumbs** on a page: `Pages / <title>`, or for compiled pages
-  `Coding agents / <agent> / <project> / <page>`; on a transcript:
-  `Agent sessions / <session>`.
+* **Breadcrumbs** on a page: `Pages / <title>`; for a compiled page
+  `Pages / <Project> / <Section> / <Agent>` (`Pages / Agents / <Agent>` for an
+  agent's own page); for a session log or a transcript `Agent sessions /
+  <session>`.
 * **Accessibility:** landmarks (`header`, `nav` "Main", `main`, `footer`), a
   skip link, `aria-current="page"` on the current item, the palette as a
   modal `dialog` with a combobox + listbox, the drawer with `aria-expanded`
@@ -190,7 +206,8 @@ anchors map onto the tab that holds them (`#connect`, `#soon` and `#stack`
 | :--- | :--- |
 | `index.html`, `/` | Home (same document) |
 | `wiki.html` | Pages |
-| `wiki.html?slug=<s>` / `/wiki?slug=<s>&scope=<x>` | The page (same) |
+| `wiki.html?slug=<s>` / `/wiki?slug=<s>&scope=<x>` | The page (same; a compiled page is under Pages, a session log under Agent sessions) |
+| — | `wiki.html?view=project&project=<key>[&section=<page>]` — a project (new) |
 | `wiki.html?slug=<s>&mode=edit` | The editor (same) |
 | `wiki.html?view=sessions[&agent=][&project=]` | Agent sessions (same) |
 | `wiki.html?view=sessions&source=<id>` | The transcript (same) |

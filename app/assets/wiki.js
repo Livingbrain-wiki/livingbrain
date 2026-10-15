@@ -32,7 +32,7 @@ import {
   isSafeHref,
 } from "./markdown.js";
 import { applyHeader, checkSession } from "./session.js";
-import { factsDescription, factsPath } from "./facts.js";
+import { displayValue, factsDescription, factsPath } from "./facts.js";
 import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
 import { icon } from "./shell.js";
 
@@ -843,6 +843,495 @@ export function codingAgentsLabel(slug) {
   return place ? place.path.join("/") : String(slug || "");
 }
 
+/* -------------------------------------------- the wiki, project by project */
+
+/** What a person calls each fixed page of a compiled folder. */
+export const PAGE_LABELS = Object.freeze({
+  index: "Overview",
+  decisions: "Decisions",
+  learnings: "Learnings",
+  architecture: "Architecture",
+  "open-questions": "Open questions",
+  patterns: "Patterns",
+  log: "Log",
+  schema: "Schema",
+  lint: "Lint",
+});
+
+/** The fixed pages of a project, in reading order — a project's sections. */
+export const PROJECT_SECTIONS = Object.freeze([
+  "index",
+  "decisions",
+  "learnings",
+  "architecture",
+  "open-questions",
+]);
+
+/** A slug segment as words: `auth-redirect-loop` is "Auth redirect loop". */
+export function humanize(segment) {
+  const words = String(segment || "").split("-").filter(Boolean).join(" ");
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
+}
+
+/** A compiled page's kind as a person reads it. */
+export function pageLabel(page) {
+  return PAGE_LABELS[page] || humanize(page);
+}
+
+/** What a person calls an agent's folder (`claude`, `codex`, …). */
+export function agentName(folder) {
+  const names = { claude: "Claude", codex: "Codex", colonizer: "Colonizer" };
+  return names[folder] || humanize(folder);
+}
+
+/** A project's key (the compiler's folder name) to the name a person knows
+ * it by, from `GET /v1/sources/projects` (`{project, key}`): `earthos-world`
+ * is "EarthOS.world". */
+export function projectLabels(projects) {
+  const labels = new Map();
+  for (const entry of Array.isArray(projects) ? projects : []) {
+    if (!entry || !entry.project) continue;
+    const key = entry.key ? String(entry.key) : projectSegment(entry.project);
+    const have = labels.get(key);
+    // The spelling that is not already folded is the repository's own.
+    if (!have || (have === projectSegment(have) && entry.project !== key)) {
+      labels.set(key, String(entry.project));
+    }
+  }
+  return labels;
+}
+
+/** The name of a project key, falling back to the key itself. */
+export function projectLabel(key, labels) {
+  return (labels && labels.get(key)) || String(key || "");
+}
+
+/** The address of a project's page, or one of its sections. */
+export function projectHref(key, section = "") {
+  const params = new URLSearchParams({ view: "project", project: String(key || "") });
+  if (section) params.set("section", section);
+  return `wiki.html?${params.toString()}`;
+}
+
+/** Whether a compiled page's stored title is the compiler's default (`codex
+ * / earthos-world: learnings`, `Project demo: all agents`) — a slug in
+ * disguise, which a person never reads. */
+function defaultCompiledTitle(title) {
+  const value = String(title || "").trim();
+  return (
+    !value ||
+    /^[a-z0-9-]+ \/ [a-z0-9-]+: /.test(value) ||
+    /^Project [a-z0-9-]+: all agents$/.test(value) ||
+    /^Coding agents: [a-z0-9-]+$/.test(value) ||
+    /^[a-z0-9-]+: [a-z0-9-]+$/.test(value) ||
+    validSlug(value)
+  );
+}
+
+/**
+ * A compiled page's human title, never its slug: "EarthOS.world — Learnings"
+ * for a project's fixed page, "EarthOS.world — <the model's title>" for a
+ * topic, "EarthOS.world — All agents" for the rollup, "Codex — Patterns" for
+ * an agent's page, "Coding agents — Overview" at the top.
+ */
+export function compiledTitle(place, title, labels) {
+  if (!place) return String(title || "");
+  if (place.kind === "rollup") return `${projectLabel(place.project, labels)} — All agents`;
+  if (place.kind === "top") return `Coding agents — ${pageLabel(place.page)}`;
+  if (place.kind === "agent") return `${agentName(place.agent)} — ${pageLabel(place.page)}`;
+  const project = projectLabel(place.project, labels);
+  if (PAGE_LABELS[place.page] || defaultCompiledTitle(title)) {
+    return `${project} — ${pageLabel(place.page)}`;
+  }
+  return `${project} — ${String(title).trim()}`;
+}
+
+/** Whether a page-list row is a coding-agent session's log (a source, not
+ * a page of the wiki). */
+export function isSessionRow(row) {
+  return Boolean(
+    row && (row.entity_type === "session" || String(row.slug || "").startsWith("agent-log-")),
+  );
+}
+
+/** A page-list row's title as a person reads it: a compiled page's human
+ * title, else the page's own title, else its slug. */
+export function displayTitle(row, labels) {
+  const place = codingAgentsPlace(row && row.slug);
+  if (place) return compiledTitle(place, row.title, labels);
+  return String((row && (row.title || row.slug)) || "(unnamed)");
+}
+
+/** The note slug `logs sync` files a session under, from its source path
+ * (`colonizer session a15fba01` → `agent-log-colonizer-a15fba01`) — the CLI's
+ * and Colonizer's own fold. */
+export function sessionNoteSlug(path) {
+  const value = String(path || "").trim();
+  const match = /^(\S+) session (\S+)$/.exec(value);
+  if (!match) return "";
+  const raw = `agent-log-${match[1]}-${match[2]}`.toLowerCase();
+  let slug = "";
+  for (const ch of raw) {
+    const keep = /[a-z0-9]/.test(ch) ? ch : "-";
+    if (keep === "-" && slug.endsWith("-")) continue;
+    slug += keep;
+  }
+  return slug.slice(0, 128).replace(/-+$/, "");
+}
+
+/**
+ * The projects, best first: every project a compiled page is filed under or
+ * a source names, one per key, each `{ key, label, pages, agents, sections,
+ * topics, sessions, sources, updatedAt }` — `pages` its compiled pages
+ * (`{row, place}`), `agents` the agent folders that wrote them, `sections`
+ * the fixed pages present, `topics` its topic pages. `tree` is
+ * `GET /v1/coding-agents/tree` when there is one (session counts).
+ */
+export function projectsModel(rows, projects, tree = null) {
+  const labels = projectLabels(projects);
+  const byKey = new Map();
+  const entry = (key) => {
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        key,
+        label: projectLabel(key, labels),
+        pages: [],
+        agents: [],
+        sections: [],
+        topics: [],
+        sessions: 0,
+        sources: 0,
+        updatedAt: "",
+      });
+    }
+    return byKey.get(key);
+  };
+  for (const row of rows || []) {
+    const place = codingAgentsPlace(row && row.slug);
+    if (!place || (place.kind !== "project" && place.kind !== "rollup")) continue;
+    const project = entry(place.project);
+    project.pages.push({ row, place });
+    if (place.kind === "project") {
+      if (!project.agents.includes(place.agent)) project.agents.push(place.agent);
+      if (PROJECT_SECTIONS.includes(place.page)) {
+        if (!project.sections.includes(place.page)) project.sections.push(place.page);
+      } else if (!project.topics.some((topic) => topic.place.page === place.page)) {
+        project.topics.push({ row, place });
+      }
+    }
+    if (String(row.updated_at || "") > project.updatedAt) project.updatedAt = String(row.updated_at);
+  }
+  for (const source of Array.isArray(projects) ? projects : []) {
+    if (!source || !source.project) continue;
+    const key = source.key ? String(source.key) : projectSegment(source.project);
+    entry(key).sources += Number(source.sources) || 0;
+  }
+  for (const agent of (tree && Array.isArray(tree.agents) ? tree.agents : [])) {
+    for (const project of Array.isArray(agent && agent.projects) ? agent.projects : []) {
+      if (!project || !project.project) continue;
+      const item = entry(projectSegment(project.project));
+      item.sessions += Number(project.sessions) || 0;
+      if (String(project.latest_at || "") > item.updatedAt) item.updatedAt = String(project.latest_at);
+    }
+  }
+  const out = [...byKey.values()].filter((project) => project.key !== "no-project");
+  for (const project of out) {
+    project.sections.sort((a, b) => PROJECT_SECTIONS.indexOf(a) - PROJECT_SECTIONS.indexOf(b));
+    project.agents.sort();
+    project.topics.sort((a, b) => a.place.page.localeCompare(b.place.page));
+  }
+  // Projects with compiled pages first, then by how recently anything moved.
+  out.sort(
+    (a, b) =>
+      Number(b.pages.length > 0) - Number(a.pages.length > 0) ||
+      b.updatedAt.localeCompare(a.updatedAt) ||
+      a.label.localeCompare(b.label),
+  );
+  return out;
+}
+
+/** The agents' own pages (`coding-agents/<agent>/index|patterns`), by agent:
+ * `[{ agent, label, pages: [{row, place}] }]`. */
+export function agentsModel(rows) {
+  const agents = new Map();
+  for (const row of rows || []) {
+    const place = codingAgentsPlace(row && row.slug);
+    if (!place || place.kind !== "agent") continue;
+    if (!agents.has(place.agent)) {
+      agents.set(place.agent, { agent: place.agent, label: agentName(place.agent), pages: [] });
+    }
+    agents.get(place.agent).pages.push({ row, place });
+  }
+  const out = [...agents.values()].sort((a, b) => a.label.localeCompare(b.label));
+  for (const agent of out) agent.pages.sort(byPage);
+  return out;
+}
+
+/** "Claude, Codex and Colonizer". */
+export function listWords(words) {
+  const list = (words || []).filter(Boolean);
+  if (list.length <= 1) return list.join("");
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+/** One project's card on the Pages home, as node descriptions: its name
+ * linking to its page, what it holds, and its sections as links. */
+export function projectCardNodes(project) {
+  const facts = [];
+  const compiled = project.pages.length;
+  facts.push(compiled ? `${compiled} compiled page${compiled === 1 ? "" : "s"}` : "No compiled pages yet");
+  if (project.sessions) facts.push(`${project.sessions} session${project.sessions === 1 ? "" : "s"}`);
+  const children = [
+    el("h3", [el("a", [tx(project.label)], { href: projectHref(project.key) })], {
+      class: "project-card__name",
+    }),
+    el("p", [tx(facts.join(" · "))], { class: "project-card__meta" }),
+  ];
+  if (project.agents.length) {
+    children.push(
+      el("p", [tx(`From ${listWords(project.agents.map(agentName))}`)], {
+        class: "project-card__agents",
+      }),
+    );
+  }
+  const links = project.sections.map((section) =>
+    el("li", [el("a", [tx(pageLabel(section))], { href: projectHref(project.key, section) })]),
+  );
+  if (project.topics.length) {
+    links.push(
+      el("li", [
+        el("a", [tx(`${project.topics.length} topic${project.topics.length === 1 ? "" : "s"}`)], {
+          href: `${projectHref(project.key)}#project-topics`,
+        }),
+      ]),
+    );
+  }
+  if (links.length) children.push(el("ul", links, { class: "project-card__sections" }));
+  return el("article", children, { class: "card project-card" });
+}
+
+/** A project's compiled pages by section: each fixed page present, with the
+ * agents that wrote one (`[{ page, label, entries: [{agent, row}] }]`), its
+ * topics the same way, and the cross-agent rollup when there is one. */
+export function projectSections(pages) {
+  const sections = new Map();
+  const topics = new Map();
+  let rollup = null;
+  for (const { row, place } of pages || []) {
+    if (place.kind === "rollup") {
+      rollup = row;
+      continue;
+    }
+    const into = PROJECT_SECTIONS.includes(place.page) ? sections : topics;
+    if (!into.has(place.page)) {
+      into.set(place.page, { page: place.page, label: pageLabel(place.page), title: "", entries: [] });
+    }
+    const item = into.get(place.page);
+    item.entries.push({ agent: place.agent, row });
+    if (!item.title && row.title && !defaultCompiledTitle(row.title)) item.title = String(row.title);
+  }
+  const order = (list) =>
+    [...list.values()].map((item) => ({
+      ...item,
+      entries: item.entries.sort((a, b) => a.agent.localeCompare(b.agent)),
+    }));
+  return {
+    sections: order(sections).sort(
+      (a, b) => PROJECT_SECTIONS.indexOf(a.page) - PROJECT_SECTIONS.indexOf(b.page),
+    ),
+    topics: order(topics).sort((a, b) => (a.title || a.label).localeCompare(b.title || b.label)),
+    rollup,
+  };
+}
+
+/** How many rows each list on a project's page shows. */
+const PROJECT_LIST = 8;
+
+/** A card on a project's page: a heading, its rows (or what to say when
+ * there are none), and an optional "see all" link. */
+function projectCard(id, heading, rows, empty, more = null) {
+  const children = [el("h2", [tx(heading)])];
+  children.push(
+    rows.length
+      ? el("ul", rows, { class: "project-list" })
+      : el("p", [tx(empty)], { class: "tiny" }),
+  );
+  if (more) children.push(el("p", [el("a", [tx(more.label)], { href: more.href })], { class: "tiny" }));
+  return el("section", children, { class: "card project-card-block", id });
+}
+
+/**
+ * A project's page, as node descriptions: its wiki by section (each with
+ * the agents that wrote it — the per-agent pages one click further), its
+ * topics, the cross-agent rollup, its recent sessions (by their note
+ * titles), its GitHub items and the facts about it.
+ */
+export function projectOverviewNodes({ key, name, model, sessions = [], github = [], facts = [], titles = new Map() }) {
+  const sectionRows = model.sections.map((item) =>
+    el(
+      "li",
+      [
+        el("a", [tx(`${name} — ${item.label}`)], { href: projectHref(key, item.page), class: "project-list__main" }),
+        el(
+          "span",
+          [
+            tx("from "),
+            ...item.entries.flatMap((entry, at) => [
+              ...(at ? [tx(at === item.entries.length - 1 ? " and " : ", ")] : []),
+              el("a", [tx(agentName(entry.agent))], {
+                href: `wiki.html?slug=${encodeURIComponent(entry.row.slug)}`,
+              }),
+            ]),
+          ],
+          { class: "project-list__meta" },
+        ),
+      ],
+      { class: "project-list__row" },
+    ),
+  );
+  if (model.rollup) {
+    sectionRows.push(
+      el(
+        "li",
+        [
+          el("a", [tx(`${name} — All agents`)], {
+            href: `wiki.html?slug=${encodeURIComponent(model.rollup.slug)}`,
+            class: "project-list__main",
+          }),
+          el("span", [tx("the cross-agent summary")], { class: "project-list__meta" }),
+        ],
+        { class: "project-list__row" },
+      ),
+    );
+  }
+  const topicRows = model.topics.map((item) =>
+    el(
+      "li",
+      [
+        el("a", [tx(item.title || item.label)], {
+          href:
+            item.entries.length === 1
+              ? `wiki.html?slug=${encodeURIComponent(item.entries[0].row.slug)}`
+              : projectHref(key, item.page),
+          class: "project-list__main",
+        }),
+        el("span", [tx(`from ${listWords(item.entries.map((entry) => agentName(entry.agent)))}`)], {
+          class: "project-list__meta",
+        }),
+      ],
+      { class: "project-list__row" },
+    ),
+  );
+  const sessionRows = sessions.slice(0, PROJECT_LIST).map((row) => {
+    const agent = String(row.path || "").split(" ")[0];
+    return el(
+      "li",
+      [
+        el("a", [tx(titles.get(sessionNoteSlug(row.path)) || row.path || row.id || "Session")], {
+          href: transcriptHref(row.id),
+          class: "project-list__main",
+        }),
+        el("span", [tx([AGENT_LABELS[agent] || agent, String(row.created_at || "").slice(0, 10)].filter(Boolean).join(" · "))], {
+          class: "project-list__meta",
+        }),
+      ],
+      { class: "project-list__row" },
+    );
+  });
+  const githubRows = github.slice(0, PROJECT_LIST).map((row) => {
+    const ref = githubRef(row.path);
+    const label = ref ? `${ref.repo} ${ref.label}` : String(row.path || row.id || "GitHub item");
+    return el(
+      "li",
+      [
+        ref
+          ? el("a", [tx(label)], { href: ref.url, rel: "noopener noreferrer", class: "project-list__main" })
+          : el("span", [tx(label)], { class: "project-list__main" }),
+        el("span", [tx([GITHUB_KIND_LABELS[row.kind] || "GitHub", String(row.created_at || "").slice(0, 10)].filter(Boolean).join(" · "))], {
+          class: "project-list__meta",
+        }),
+      ],
+      { class: "project-list__row" },
+    );
+  });
+  const factRows = facts.slice(0, PROJECT_LIST).map((entry) => {
+    const current = Array.isArray(entry.current) && entry.current[0];
+    return el(
+      "li",
+      [
+        el("span", [tx(`${entry.attribute}: ${current ? displayValue(current) : "—"}`)], {
+          class: "project-list__main",
+        }),
+        el("span", [tx(String(entry.subject || ""))], { class: "project-list__meta" }),
+      ],
+      { class: "project-list__row" },
+    );
+  });
+  return [
+    projectCard(
+      "project-wiki",
+      "Wiki",
+      sectionRows,
+      "No compiled pages yet. Sync this project's sessions and they are compiled here, one at a time.",
+      { label: "The same pages, by agent", href: "wiki.html?view=coding-agents" },
+    ),
+    ...(topicRows.length ? [projectCard("project-topics", "Topics", topicRows, "")] : []),
+    projectCard(
+      "project-sessions",
+      "Recent sessions",
+      sessionRows,
+      "No agent sessions filed under this project yet.",
+      sessions.length ? { label: "All its sessions", href: sessionsHref("", validProject(name) ? name : key) } : null,
+    ),
+    ...(githubRows.length
+      ? [
+        projectCard("project-github", "GitHub", githubRows, "", {
+          label: "All its GitHub items",
+          href: `wiki.html?view=github&project=${encodeURIComponent(validProject(name) ? name : key)}`,
+        }),
+      ]
+      : []),
+    ...(factRows.length
+      ? [projectCard("project-facts", "Facts", factRows, "", { label: "All facts", href: "wiki.html?view=facts" })]
+      : []),
+  ];
+}
+
+/** The breadcrumb trail of a compiled page: Pages › Project › Section ›
+ * agent for a project's page, Pages › Agents › agent for an agent's own,
+ * Pages › Coding agents for the collection's top pages. */
+export function compiledCrumbs(place, labels) {
+  const pages = { label: "Pages", href: "wiki.html" };
+  if (place.kind === "rollup") {
+    return [
+      pages,
+      { label: projectLabel(place.project, labels), href: projectHref(place.project) },
+      { label: "All agents" },
+    ];
+  }
+  if (place.kind === "project") {
+    const crumbs = [
+      pages,
+      { label: projectLabel(place.project, labels), href: projectHref(place.project) },
+    ];
+    if (PROJECT_SECTIONS.includes(place.page)) {
+      crumbs.push({ label: pageLabel(place.page), href: projectHref(place.project, place.page) });
+    } else {
+      crumbs.push({ label: "Topics", href: `${projectHref(place.project)}#project-topics` });
+    }
+    crumbs.push({ label: agentName(place.agent) });
+    return crumbs;
+  }
+  if (place.kind === "agent") {
+    return [
+      pages,
+      { label: "Agents", href: "wiki.html#agents-section" },
+      { label: agentName(place.agent) },
+    ];
+  }
+  return [pages, { label: "Coding agents", href: "wiki.html?view=coding-agents" }, { label: pageLabel(place.page) }];
+}
+
 /**
  * A page URL the server built to its two halves, or null when it does not
  * name both. The server cites the web app's own page address,
@@ -1036,6 +1525,34 @@ function firstHighlight(value, list) {
 
 /* ----------------------------------------------------------- the pins */
 
+/** Where the per-browser "Show session logs" choice lives. */
+const SHOW_SESSIONS_KEY = "lb-wiki-show-sessions";
+
+/** The Pages list's request: everything but the session logs, unless they
+ * are asked for. The filter runs on the server, before the limit — so 191
+ * session logs cannot crowd every page off the first 200 rows. */
+export function homePagesPath(showSessions = false) {
+  return showSessions ? "/v1/pages?limit=200" : "/v1/pages?limit=200&exclude_type=session";
+}
+
+/** Whether this browser asked to see the session logs on Pages. */
+function readShowSessions() {
+  try {
+    return localStorage.getItem(SHOW_SESSIONS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeShowSessions(on) {
+  try {
+    if (on) localStorage.setItem(SHOW_SESSIONS_KEY, "1");
+    else localStorage.removeItem(SHOW_SESSIONS_KEY);
+  } catch {
+    /* storage can be refused; the choice then lasts this page view */
+  }
+}
+
 /** The stored pin keys, or [] when storage is empty, corrupt or refused. */
 function readPins() {
   try {
@@ -1106,6 +1623,7 @@ export async function wikiPage(api) {
       "coding-agents": $("#coding-agents-view"),
       imports: $("#imports-view"),
       github: $("#github-view"),
+      project: $("#project-view"),
     },
     notice: $("#wiki-notice"),
     status: $("#wiki-status"),
@@ -1118,6 +1636,18 @@ export async function wikiPage(api) {
     homeNomatch: $("#home-nomatch"),
     homeEmpty: $("#home-empty"),
     homeCaHint: $("#home-ca-hint"),
+    showSessions: $("#show-sessions"),
+    showSessionsLabel: $("#show-sessions-label"),
+    recentHeading: $("#recent-h"),
+    projectsSection: $("#projects-section"),
+    projectsGrid: $("#projects-grid"),
+    agentsSection: $("#agents-section"),
+    agentsList: $("#agents-list"),
+    projectCrumbs: $("#project-crumbs"),
+    projectTitle: $("#project-title"),
+    projectLede: $("#project-lede"),
+    projectStatus: $("#project-status"),
+    projectBody: $("#project-body"),
     pageCrumbs: $("#page-crumbs"),
     transcriptCrumbs: $("#transcript-crumbs"),
     askGo: $("#ask-go"),
@@ -1240,14 +1770,22 @@ export async function wikiPage(api) {
     githubCursor: null,
     githubKind: validGithubKind(params.get("kind")) ? params.get("kind") : "",
     githubProject: startProject,
+    // Pages: whether the session logs are listed beside the pages (they are
+    // sources, so not by default). Remembered per browser.
+    showSessions: readShowSessions(),
+    // Agent sessions: each session's note title, by note slug.
+    sessionTitles: new Map(),
   };
+
+  /** The name a person knows each project key by. */
+  const labels = () => projectLabels(state.projects);
   let searchTimer = null;
 
   /* -- small shared pieces ------------------------------------------ */
 
   const VIEWS = [
     "home", "page", "editor", "new", "sessions", "transcript", "facts",
-    "ask", "coding-agents", "imports", "github",
+    "ask", "coding-agents", "imports", "github", "project",
   ];
 
   /** The tab title per view; a page's own title replaces it when it loads. */
@@ -1260,6 +1798,7 @@ export async function wikiPage(api) {
     ask: "Ask the brain",
     "coding-agents": "Coding agents",
     imports: "Imports",
+    project: "Project",
   };
 
   /** Shows one view, and tells the shell (the sidebar's current item) and
@@ -1359,11 +1898,14 @@ export async function wikiPage(api) {
     link.className = "wiki-row__link";
     link.href = `wiki.html?slug=${encodeURIComponent(row.slug || "")}`;
     const slug = document.createElement("span");
-    slug.className = "wiki-row__slug";
-    slug.textContent = row.slug || "(unnamed)";
+    const shown = displayTitle(row, labels());
+    // A real title reads in the body face; a bare slug stays monospaced.
+    slug.className = shown === row.slug ? "wiki-row__slug" : "wiki-row__slug wiki-row__title";
+    slug.textContent = shown;
     const pill = document.createElement("span");
     pill.className = "pill";
     pill.textContent = row.entity_type || "page";
+    if (row.entity_type) pill.setAttribute("data-type", row.entity_type);
     const meta = document.createElement("span");
     meta.className = "wiki-row__meta";
     meta.textContent = [formatDate(row.updated_at), row.version != null ? `v${row.version}` : ""]
@@ -1377,7 +1919,7 @@ export async function wikiPage(api) {
         renderHome();
       });
       unpin.className = "wiki-row__pin";
-      unpin.setAttribute("aria-label", `Unpin ${row.slug || "page"}`);
+      unpin.setAttribute("aria-label", `Unpin ${displayTitle(row, labels())}`);
       li.appendChild(unpin);
     }
     return li;
@@ -1390,27 +1932,105 @@ export async function wikiPage(api) {
 
   function renderHome() {
     const query = state.filter.trim().toLowerCase();
+    const names = labels();
     const matches = state.rows.filter(
       (row) =>
         !query ||
-        `${row.slug || ""} ${row.entity_type || ""}`.toLowerCase().includes(query),
+        `${displayTitle(row, names)} ${row.slug || ""} ${row.entity_type || ""}`
+          .toLowerCase()
+          .includes(query),
     );
     const pins = readPins();
     const pinned = matches.filter((row) => pins.includes(pinId(row)));
-    // The compiled coding-agents pages have their own place (Sources →
-    // Coding agents): unfiltered they would crowd everything else off the
-    // list, so they show here only when a filter asks for them.
+    // The compiled coding-agents pages are the wiki, and they are shown by
+    // project above: unfiltered they would only repeat the cards, so they
+    // show here when a filter asks for them. Session logs are sources: here
+    // only when "Show session logs" is on.
     const recent = matches.filter(
-      (row) => !pins.includes(pinId(row)) && (query !== "" || !codingAgentsPlace(row.slug)),
+      (row) =>
+        !pins.includes(pinId(row)) &&
+        (query !== "" || !codingAgentsPlace(row.slug)) &&
+        (state.showSessions || !isSessionRow(row)),
     );
     fillList(els.pinnedList, pinned, true);
     fillList(els.recentList, recent, false);
     els.pinnedSection.hidden = pinned.length === 0;
     els.recentSection.hidden = recent.length === 0;
-    paintCodingAgentsHint(query === "" ? state.rows.filter((row) => codingAgentsPlace(row.slug)).length : 0);
-    els.listFilter.hidden = state.rows.length === 0;
-    els.homeEmpty.hidden = state.rows.length !== 0;
-    els.homeNomatch.hidden = !(state.rows.length > 0 && matches.length === 0);
+    if (els.recentHeading) {
+      els.recentHeading.textContent = state.showSessions ? "Recent pages and session logs" : "Recent pages";
+    }
+    const projects = projectsModel(state.rows, state.projects, state.caSessions).filter(
+      (project) =>
+        !query || `${project.label} ${project.key}`.toLowerCase().includes(query),
+    );
+    renderProjects(projects);
+    const agents = query ? [] : agentsModel(state.rows);
+    renderAgents(agents);
+    paintSessionsHint(query === "" && !state.showSessions);
+    els.listFilter.hidden = state.rows.length === 0 && !projects.length;
+    if (els.showSessionsLabel) els.showSessionsLabel.hidden = false;
+    if (els.showSessions) els.showSessions.checked = state.showSessions;
+    const nothing = state.rows.length === 0 && projects.length === 0;
+    els.homeEmpty.hidden = !nothing || query !== "";
+    els.homeNomatch.hidden = !(
+      query !== "" &&
+      matches.length === 0 &&
+      projects.length === 0
+    );
+  }
+
+  /** The Projects grid: one card per project, compiled pages first. */
+  function renderProjects(projects) {
+    if (!els.projectsSection || !els.projectsGrid) return;
+    els.projectsSection.hidden = projects.length === 0;
+    renderInto(els.projectsGrid, projects.map(projectCardNodes));
+  }
+
+  /** The Agents list: each agent's own compiled pages (how it works for
+   * you), titled, under the projects. */
+  function renderAgents(agents) {
+    if (!els.agentsSection || !els.agentsList) return;
+    els.agentsSection.hidden = agents.length === 0;
+    renderInto(
+      els.agentsList,
+      agents.map((agent) =>
+        el(
+          "li",
+          [
+            el("span", [tx(agent.label)], { class: "wiki-row__slug wiki-row__title" }),
+            el(
+              "span",
+              agent.pages.flatMap((entry, at) => [
+                ...(at ? [tx(" · ")] : []),
+                el("a", [tx(pageLabel(entry.place.page))], {
+                  href: `wiki.html?slug=${encodeURIComponent(entry.row.slug)}`,
+                }),
+              ]),
+              { class: "wiki-row__meta" },
+            ),
+          ],
+          { class: "wiki-row" },
+        ),
+      ),
+    );
+  }
+
+  /** The line under the lists that says where the session logs went. */
+  function paintSessionsHint(show) {
+    if (!els.homeCaHint) return;
+    els.homeCaHint.replaceChildren();
+    els.homeCaHint.hidden = !show;
+    if (!show) return;
+    els.homeCaHint.appendChild(
+      document.createTextNode(
+        "Coding-agent session logs are the sources these pages are compiled from: they are under ",
+      ),
+    );
+    const link = document.createElement("a");
+    link.href = "wiki.html?view=sessions";
+    link.textContent = "Agent sessions";
+    els.homeCaHint.appendChild(link);
+    els.homeCaHint.appendChild(document.createTextNode(", and search and Ask still find them."));
   }
 
   /** A synced folder's line: its numbers, linking to its sessions. */
@@ -1432,7 +2052,12 @@ export async function wikiPage(api) {
     const li = document.createElement("li");
     const link = document.createElement("a");
     link.href = `wiki.html?slug=${encodeURIComponent(entry.row.slug || "")}`;
-    link.textContent = entry.place.kind === "rollup" ? entry.place.project : entry.place.page;
+    link.textContent =
+      entry.place.kind === "rollup"
+        ? `${projectLabel(entry.place.project, labels())} — All agents`
+        : PAGE_LABELS[entry.place.page] || (entry.row.title && !validSlug(entry.row.title)
+          ? displayTitle(entry.row, labels()).split(" — ").slice(1).join(" — ") || humanize(entry.place.page)
+          : humanize(entry.place.page));
     li.appendChild(link);
     return li;
   }
@@ -1466,25 +2091,6 @@ export async function wikiPage(api) {
     return details;
   }
 
-  /** The line under the Pages toolbar that says where the compiled pages
-   * went: "12 compiled coding-agent pages are under Coding agents". */
-  function paintCodingAgentsHint(count) {
-    if (!els.homeCaHint) return;
-    els.homeCaHint.replaceChildren();
-    els.homeCaHint.hidden = count === 0;
-    if (!count) return;
-    els.homeCaHint.appendChild(
-      document.createTextNode(
-        `${count} compiled coding-agent ${count === 1 ? "page is" : "pages are"} filed under `,
-      ),
-    );
-    const link = document.createElement("a");
-    link.href = "wiki.html?view=coding-agents";
-    link.textContent = "Coding agents";
-    els.homeCaHint.appendChild(link);
-    els.homeCaHint.appendChild(document.createTextNode("."));
-  }
-
   /** The `coding-agents/` folders: agent, then project. */
   function renderCodingAgents(rows, filtering) {
     if (!els.caSection || !els.caTree) return;
@@ -1512,6 +2118,9 @@ export async function wikiPage(api) {
 
   function renderHomeSignedOut() {
     if (els.caSection) els.caSection.hidden = true;
+    if (els.projectsSection) els.projectsSection.hidden = true;
+    if (els.agentsSection) els.agentsSection.hidden = true;
+    if (els.showSessionsLabel) els.showSessionsLabel.hidden = true;
     if (els.homeCaHint) els.homeCaHint.hidden = true;
     els.listFilter.hidden = true;
     els.pinnedSection.hidden = true;
@@ -1529,11 +2138,15 @@ export async function wikiPage(api) {
       return;
     }
     try {
-      const data = await api("/v1/pages?limit=200");
+      const [data, tree] = await Promise.all([
+        api(homePagesPath(state.showSessions)),
+        // Session counts per project: a nicety, never a reason to fail.
+        api(TREE_PATH).catch(() => null),
+      ]);
       state.rows = data && Array.isArray(data.pages) ? data.pages : [];
-      els.homeStatus.textContent = `${state.rows.length} ${
-        state.rows.length === 1 ? "page" : "pages"
-      }`;
+      state.caSessions = tree;
+      const count = state.rows.filter((row) => !isSessionRow(row)).length;
+      els.homeStatus.textContent = `${count} ${count === 1 ? "page" : "pages"}`;
       renderHome();
       clearNotice();
     } catch (error) {
@@ -1567,7 +2180,7 @@ export async function wikiPage(api) {
     if (els.caStatus) els.caStatus.textContent = "Loading…";
     try {
       const [data, sessions] = await Promise.all([
-        api("/v1/pages?limit=200"),
+        api(homePagesPath(false)),
         api(TREE_PATH).catch(() => null),
       ]);
       state.caSessions = sessions && Array.isArray(sessions.agents) ? sessions : null;
@@ -1589,6 +2202,131 @@ export async function wikiPage(api) {
       notice(els.notice, `Could not load the coding agents: ${error.message}`, "bad");
       els.notice.appendChild(mkButton("Retry", loadCodingAgents));
     }
+  }
+
+  /* -- one project (Pages › EarthOS.world) ---------------------------- */
+
+  /** A project's page: its compiled sections from every agent, its topics,
+   * the cross-agent rollup, recent sessions, GitHub items and facts — or,
+   * with `section`, that section from every agent in turn. */
+  async function loadProject(rawKey, section = "") {
+    showView("project");
+    const key = projectSegment(rawKey);
+    const names = labels();
+    const name = projectLabel(key, names);
+    els.projectTitle.textContent = section ? `${name} — ${pageLabel(section)}` : name;
+    document.title = `${els.projectTitle.textContent} — Living Brain`;
+    paintCrumbs(
+      els.projectCrumbs,
+      section
+        ? [
+          { label: "Pages", href: "wiki.html" },
+          { label: name, href: projectHref(key) },
+          { label: pageLabel(section) },
+        ]
+        : [{ label: "Pages", href: "wiki.html" }, { label: name }],
+    );
+    els.projectLede.textContent = "";
+    renderInto(els.projectBody, []);
+    if (!state.signedIn) {
+      els.projectStatus.textContent = "";
+      signInNotice("Sign in to see this project.");
+      return;
+    }
+    els.projectStatus.textContent = "Loading…";
+    const project = validProject(name) ? name : key;
+    try {
+      const [pagesData, sourcesData, titlesData, factsData] = await Promise.all([
+        api(`/v1/pages?project=${encodeURIComponent(key)}&limit=200`),
+        api(`/v1/sources?project=${encodeURIComponent(project)}&limit=50`).catch(() => null),
+        api("/v1/pages?type=session&limit=200").catch(() => null),
+        section ? null : api(factsPath({})).catch(() => null),
+      ]);
+      const rows = pagesData && Array.isArray(pagesData.pages) ? pagesData.pages : [];
+      const pages = rows
+        .map((row) => ({ row, place: codingAgentsPlace(row.slug) }))
+        .filter((entry) => entry.place && entry.place.project === key);
+      const model = projectSections(pages);
+      const sources = sourcesData && Array.isArray(sourcesData.sources) ? sourcesData.sources : [];
+      const titles = new Map();
+      for (const row of (titlesData && Array.isArray(titlesData.pages) ? titlesData.pages : [])) {
+        if (row && row.slug && row.title) titles.set(row.slug, String(row.title));
+      }
+      if (section) {
+        await paintProjectSection(key, name, section, model);
+      } else {
+        const sessions = latestSessions(sources.filter((row) => row.kind === "agent_log"));
+        const github = sources.filter((row) => String(row.kind || "").startsWith("github_"));
+        const facts = ((factsData && factsData.keys) || []).filter((entry) =>
+          String((entry && entry.subject) || "").includes(key),
+        );
+        const agents = [...new Set(pages.filter((p) => p.place.kind === "project").map((p) => p.place.agent))].sort();
+        els.projectLede.textContent = agents.length
+          ? `Compiled from ${listWords(agents.map(agentName))} sessions, every entry dated and cited.`
+          : "Nothing compiled for this project yet — its sessions are compiled one at a time.";
+        renderInto(
+          els.projectBody,
+          projectOverviewNodes({ key, name, model, sessions, github, facts, titles }),
+        );
+      }
+      els.projectStatus.textContent = "";
+      clearNotice();
+    } catch (error) {
+      els.projectStatus.textContent = "";
+      if (error instanceof ApiError && error.status === 401) {
+        state.signedIn = false;
+        paintSession();
+        signInNotice("Sign in to see this project.");
+        return;
+      }
+      notice(els.notice, `Could not load ${name}: ${error.message}`, "bad");
+      els.notice.appendChild(mkButton("Retry", () => loadProject(key, section)));
+    }
+  }
+
+  /** One section of a project from every agent that wrote it, one after
+   * another, each with a link to that agent's own page. */
+  async function paintProjectSection(key, name, section, model) {
+    const item = [...model.sections, ...model.topics].find((entry) => entry.page === section);
+    if (!item) {
+      els.projectLede.textContent = `No agent has written ${pageLabel(section).toLowerCase()} for ${name} yet.`;
+      renderInto(els.projectBody, [
+        el("p", [el("a", [tx(`Back to ${name}`)], { href: projectHref(key) })]),
+      ]);
+      return;
+    }
+    els.projectTitle.textContent = `${name} — ${item.title || item.label}`;
+    document.title = `${els.projectTitle.textContent} — Living Brain`;
+    els.projectLede.textContent = `From ${listWords(item.entries.map((entry) => agentName(entry.agent)))}.`;
+    const bodies = await Promise.all(
+      item.entries.map((entry) =>
+        api(`/v1/pages/${encodeURIComponent(entry.row.slug)}`).catch(() => null),
+      ),
+    );
+    const nodes = [];
+    item.entries.forEach((entry, at) => {
+      const page = bodies[at];
+      const href = `wiki.html?slug=${encodeURIComponent(entry.row.slug)}`;
+      nodes.push(
+        el(
+          "section",
+          [
+            el("h2", [tx(`From ${agentName(entry.agent)}`)], { class: "project-part__h" }),
+            el("p", [el("a", [tx(`Open ${agentName(entry.agent)}'s page`)], { href })], {
+              class: "tiny",
+            }),
+            el(
+              "div",
+              page ? renderMarkdown(stripFrontmatter(page.markdown || "")) : [tx("This page could not be read.")],
+              { class: "prose" },
+            ),
+          ],
+          { class: "card project-part" },
+        ),
+      );
+    });
+    renderInto(els.projectBody, nodes);
+    linkWikilinks(els.projectBody);
   }
 
   /* -- imports (Sources → Imports) ------------------------------------ */
@@ -1897,12 +2635,19 @@ export async function wikiPage(api) {
     line.href = transcriptHref(row.id || "");
     const name = document.createElement("span");
     name.className = "wiki-row__slug";
-    name.textContent = row.path || row.id || "(unnamed session)";
+    // The session's note names it (`EarthOS.world · Claude Code · …`); its
+    // source path (`claude_code session 3f2a…`) is the fallback.
+    const titled = state.sessionTitles.get(sessionNoteSlug(row.path));
+    name.textContent = titled || row.path || row.id || "(unnamed session)";
+    if (titled) name.className = "wiki-row__slug wiki-row__title";
     line.appendChild(name);
     if (row.project) {
       const pill = document.createElement("span");
       pill.className = "pill";
-      pill.textContent = row.project;
+      // One project, one name: a clone's `earthos-world` reads as the
+      // repository's `EarthOS.world`.
+      const key = projectSegment(row.project);
+      pill.textContent = labels().has(key) ? projectLabel(key, labels()) : row.project;
       line.appendChild(pill);
     }
     const job = state.jobs.get(row.id);
@@ -2087,6 +2832,21 @@ export async function wikiPage(api) {
     renderSessions();
   }
 
+  /** Every session note's title, by slug — what a session row is called.
+   * A failure costs the names, never the list. */
+  async function loadSessionTitles() {
+    try {
+      const data = await api("/v1/pages?type=session&limit=200");
+      const map = new Map();
+      for (const row of (data && Array.isArray(data.pages) ? data.pages : [])) {
+        if (row && row.slug && row.title) map.set(row.slug, String(row.title));
+      }
+      state.sessionTitles = map;
+    } catch {
+      /* the paths stand in */
+    }
+  }
+
   function renderSessions() {
     const rows = latestSessions(state.sessions);
     els.sessionsList.replaceChildren();
@@ -2124,7 +2884,7 @@ export async function wikiPage(api) {
       const rows = data && Array.isArray(data.sources) ? data.sources : [];
       state.sessions = more ? state.sessions.concat(rows) : rows;
       state.sessionsCursor = (data && data.next_cursor) || null;
-      if (!more) await loadQueue();
+      if (!more) await Promise.all([loadQueue(), loadSessionTitles()]);
       renderSessions();
       clearNotice();
     } catch (error) {
@@ -2340,9 +3100,18 @@ export async function wikiPage(api) {
     const page = state.page || {};
     els.pageBody.hidden = false;
     els.pageMeta.hidden = false;
-    els.pageTitle.textContent = page.title || page.slug || "Untitled";
-    document.title = `${page.title || page.slug || "Untitled"} — Living Brain`;
-    paintCrumbs(els.pageCrumbs, pageCrumbs(page.slug || state.slug, page.title));
+    // A compiled page is read by its human title and filed under its
+    // project (Pages › EarthOS.world › Learnings › Codex), never by slug.
+    const place = codingAgentsPlace(page.slug);
+    const title = place
+      ? compiledTitle(place, page.title, labels())
+      : page.title || page.slug || "Untitled";
+    els.pageTitle.textContent = title;
+    document.title = `${title} — Living Brain`;
+    paintCrumbs(
+      els.pageCrumbs,
+      place ? compiledCrumbs(place, labels()) : pageCrumbs(page.slug || state.slug, title),
+    );
     const pill = document.createElement("span");
     pill.className = "pill";
     pill.textContent = page.entity_type || "page";
@@ -2352,7 +3121,8 @@ export async function wikiPage(api) {
     const facts = [];
     if (page.version != null) facts.push(`v${page.version}`);
     if (where && where.scope) facts.push(where.scope);
-    if (codingAgentsPlace(page.slug)) facts.push(codingAgentsLabel(page.slug));
+    if (place && place.kind === "project") facts.push(`from ${agentName(place.agent)}`);
+    else if (place) facts.push(codingAgentsLabel(page.slug));
     if (facts.length) els.pageMeta.appendChild(document.createTextNode(facts.join(" · ")));
     renderInto(els.pageBody, renderMarkdown(stripFrontmatter(page.markdown || "")));
     linkWikilinks(els.pageBody);
@@ -2425,7 +3195,11 @@ export async function wikiPage(api) {
     state.page = null;
     state.version = null;
     showView("page");
-    paintCrumbs(els.pageCrumbs, pageCrumbs(targetSlug, targetSlug));
+    const place = codingAgentsPlace(targetSlug);
+    paintCrumbs(
+      els.pageCrumbs,
+      place ? compiledCrumbs(place, labels()) : pageCrumbs(targetSlug, targetSlug),
+    );
     if (!state.signedIn) {
       els.pageTitle.textContent = targetSlug;
       paintSignedOutPage();
@@ -2927,6 +3701,14 @@ export async function wikiPage(api) {
     });
   }
 
+  if (els.showSessions) {
+    els.showSessions.addEventListener("change", async () => {
+      state.showSessions = Boolean(els.showSessions.checked);
+      writeShowSessions(state.showSessions);
+      await loadHome();
+    });
+  }
+
   els.listFilter.addEventListener("input", () => {
     state.filter = els.listFilter.value;
     renderHome();
@@ -3050,6 +3832,7 @@ export async function wikiPage(api) {
   else if (startView === "coding-agents") await loadCodingAgents();
   else if (startView === "imports") await loadImports();
   else if (startView === "github") await loadGithub();
+  else if (startView === "project") await loadProject(String(params.get("project") || ""), String(params.get("section") || ""));
   else if (startView === "new" && state.signedIn) {
     await loadHome();
     openNewPage();

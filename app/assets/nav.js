@@ -18,7 +18,7 @@ export const NAV = Object.freeze([
     items: [
       { id: "home", label: "Home", href: "index.html", icon: "home", hint: "Your workspace at a glance" },
       { id: "ask", label: "Ask the brain", href: "wiki.html?view=ask", icon: "ask", hint: "Search pages, or ask a question" },
-      { id: "pages", label: "Pages", href: "wiki.html", icon: "pages", hint: "Pinned and recent pages" },
+      { id: "pages", label: "Pages", href: "wiki.html", icon: "pages", hint: "Your projects, then pinned and recent pages" },
       { id: "facts", label: "Facts", href: "wiki.html?view=facts", icon: "facts", hint: "What is true, and since when" },
       { id: "map", label: "Brain map", href: "brain.html", icon: "map", hint: "Your brain as a 3D graph" },
     ],
@@ -28,7 +28,7 @@ export const NAV = Object.freeze([
     label: "Sources",
     items: [
       { id: "sessions", label: "Agent sessions", href: "wiki.html?view=sessions", icon: "sessions", hint: "Synced coding-agent sessions" },
-      { id: "coding-agents", label: "Coding agents", href: "wiki.html?view=coding-agents", icon: "folder", hint: "Pages compiled from your sessions" },
+      { id: "coding-agents", label: "Coding agents", href: "wiki.html?view=coding-agents", icon: "folder", hint: "The compiled pages, split by agent" },
       { id: "github", label: "GitHub", href: "wiki.html?view=github", icon: "github", hint: "Commits, issues and pull requests from included repositories" },
       { id: "imports", label: "Imports", href: "wiki.html?view=imports", icon: "import", hint: "Files imported into the brain" },
     ],
@@ -98,6 +98,7 @@ const WIKI_VIEWS = Object.freeze({
   "": "pages",
   home: "pages",
   new: "pages",
+  project: "pages",
   ask: "ask",
   facts: "facts",
   sessions: "sessions",
@@ -130,12 +131,12 @@ export function activeId({ pathname = "", search = "", hash = "" } = {}, view = 
     const params = new URLSearchParams(search);
     let current = view;
     if (current == null) {
-      if (params.get("slug")) return pageIsCompiled(params.get("slug")) ? "coding-agents" : "pages";
+      if (params.get("slug")) return pageIsSession(params.get("slug")) ? "sessions" : "pages";
       current = params.get("view") || "";
       if (current === "sessions" && params.get("source")) current = "transcript";
     }
     if (current === "page" || current === "editor") {
-      return pageIsCompiled(params.get("slug") || "") ? "coding-agents" : "pages";
+      return pageIsSession(params.get("slug") || "") ? "sessions" : "pages";
     }
     return Object.prototype.hasOwnProperty.call(WIKI_VIEWS, current) ? WIKI_VIEWS[current] : "pages";
   }
@@ -143,22 +144,33 @@ export function activeId({ pathname = "", search = "", hash = "" } = {}, view = 
 }
 
 /** Whether a slug is one of the compiled coding-agents pages
- * (`coding-agents--…`), which live under Sources, not Pages. */
+ * (`coding-agents--…`). They are the wiki: shown under Pages, by project,
+ * with Sources → Coding agents as their per-agent view. */
 export function pageIsCompiled(slug) {
   return /^coding-agents--[a-z0-9-]/.test(String(slug || ""));
 }
 
+/** Whether a slug is a coding-agent session's log (`agent-log-…`): a
+ * source, filed under Sources → Agent sessions rather than Pages. */
+export function pageIsSession(slug) {
+  return /^agent-log-[a-z0-9]/.test(String(slug || ""));
+}
+
 /**
  * The breadcrumb trail for a wiki page: `[{label, href}]`, the last entry
- * the page itself (no `href`). A compiled page is filed under Coding agents
- * and its folders; any other page under Pages.
+ * the page itself (no `href`). A session log is filed under Agent sessions;
+ * a compiled page under its folders (the wiki page swaps in its project
+ * trail once it knows the project's name); any other page under Pages.
  */
 export function pageCrumbs(slug, title) {
   const name = String(title || slug || "Untitled");
   const value = String(slug || "");
+  if (pageIsSession(value)) {
+    return [{ label: "Agent sessions", href: "wiki.html?view=sessions" }, { label: name }];
+  }
   if (pageIsCompiled(value)) {
     const parts = value.split("--").slice(1);
-    const crumbs = [{ label: "Coding agents", href: "wiki.html?view=coding-agents" }];
+    const crumbs = [{ label: "Pages", href: "wiki.html" }];
     // The folders between the collection and the page (agent, project).
     for (const part of parts.slice(0, -1)) crumbs.push({ label: part });
     crumbs.push({ label: name });

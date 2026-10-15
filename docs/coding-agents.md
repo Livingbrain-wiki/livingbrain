@@ -41,6 +41,22 @@ page the model names. Compiled pages use the `topic` entity type. Their
 frontmatter has `collection: coding-agents`, `agent`, `project`, `page`,
 `updated` and `sources` (the source ids the page was compiled from).
 
+## How the web app shows them
+
+The compiled pages *are* the wiki. **Pages** opens on the projects: one
+card per project key, named the way the repository spells it, linking to
+the project's page (`wiki.html?view=project&project=<key>`), which gathers
+its pages from every agent by section (`EarthOS.world — Learnings`, from
+Claude, Codex and Colonizer), its topics, the rollup, its recent sessions,
+GitHub items and facts. A compiled page is titled for people, never by
+slug, and its breadcrumbs are `Pages / Project / Section / Agent`. The
+agents' own `patterns` pages are in an **Agents** section; Sources → Coding
+agents keeps the per-agent folder tree as the secondary view.
+
+The session notes themselves (`agent-log-…`, type `session`) are sources:
+they stay out of Pages (unless **Show session logs**) and the wiki tree,
+and live under Sources → Agent sessions, named by their titles.
+
 ## The queue
 
 There is one job per `agent_log` source body. Jobs are keyed like the

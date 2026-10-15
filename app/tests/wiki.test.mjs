@@ -293,7 +293,7 @@ const json = (body, status = 200) =>
 const calls = [];
 let respond = (method, url) => {
   if (url === "/v1/workspaces/me") return json(ME);
-  if (url === "/v1/pages?limit=200") return json(PAGES);
+  if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
   if (url === "/v1/pages/hello") return json(HELLO);
   return json({ title: "not found" }, 404);
 };
@@ -392,6 +392,18 @@ const {
   githubRef,
   githubCitation,
   validGithubKind,
+  projectLabels,
+  compiledTitle,
+  displayTitle,
+  isSessionRow,
+  sessionNoteSlug,
+  homePagesPath,
+  projectHref,
+  humanize,
+  listWords,
+  projectsModel,
+  projectSections,
+  agentsModel,
 } = await import("../assets/wiki.js");
 
 /* ------------------------------------------------------------------ tests */
@@ -506,7 +518,7 @@ test("signed-in home: recent and pinned from /v1/pages, pins from localStorage",
   await drain();
 
   assert.ok(
-    calls.some((call) => call.url === "/v1/pages?limit=200"),
+    calls.some((call) => call.url.startsWith("/v1/pages?limit=200")),
     "the list was fetched with the documented limit",
   );
   assert.equal(el("home-view").hidden, false);
@@ -579,7 +591,7 @@ test("home empty state: zero pages explains where pages come from", async () => 
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json({ pages: [] });
+    if (url.startsWith("/v1/pages?limit=200")) return json({ pages: [] });
     return json({ title: "not found" }, 404);
   };
   await wikiPage(globalThis.LB.api);
@@ -1011,7 +1023,7 @@ test("new page: inline slug validation, no fetch while invalid, create PUTs base
   };
   respond = (method, url, init) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
     if (method === "PUT" && url === "/v1/pages/api-notes") return json(created);
     return json({ title: "not found" }, 404);
   };
@@ -1162,7 +1174,7 @@ test("search: debounced, highlighted, keyboard-driven, and quiet below two chara
   };
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
     if (url.startsWith("/v1/search?")) return json(RESULTS);
     return json({ title: "not found" }, 404);
   };
@@ -1226,7 +1238,7 @@ test("search: the 401 signed-out state says sign in, and / focuses the box on th
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
     if (url.startsWith("/v1/search?")) return json({ status: 401, title: "Bearer token required" }, 401);
     return json({ title: "not found" }, 404);
   };
@@ -1369,7 +1381,7 @@ test("search project filter: filled from /v1/sources/projects, sent as &project=
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
     if (url === "/v1/sources/projects") return json(PROJECTS);
     if (url.startsWith("/v1/search?")) return json({ results: [] });
     return json({ title: "not found" }, 404);
@@ -1410,7 +1422,7 @@ test("search project filter: no projects, or a failed fetch, hides it", async ()
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
     if (url === "/v1/sources/projects") return json({ title: "boom" }, 500);
     return json({ title: "not found" }, 404);
   };
@@ -1739,27 +1751,324 @@ test("the queue card says what triage held back and what it saved", () => {
   assert.equal(triageSummary(undefined), "");
 });
 
-test("coding-agents: Pages leaves the compiled pages out and points at their folder", async () => {
-  reset({ search: "" });
-  seedTriggers();
-  respond = (method, url) => {
+/** Production's shape: compiled pages of one project from two agents, an
+ * agent's own page, one plain page, and a session log (left out of Pages
+ * by the server unless asked for). */
+const WIKI_PAGES = {
+  pages: [
+    { scope: "personal", slug: "coding-agents--codex--earthos-world--index", title: "codex / earthos-world: index", entity_type: "topic", version: 1, updated_at: "2026-10-15T12:00:00Z" },
+    { scope: "personal", slug: "coding-agents--codex--earthos-world--learnings", title: "codex / earthos-world: learnings", entity_type: "topic", version: 2, updated_at: "2026-10-15T12:00:00Z" },
+    { scope: "personal", slug: "coding-agents--claude--earthos-world--learnings", title: "Learnings", entity_type: "topic", version: 1, updated_at: "2026-10-15T11:00:00Z" },
+    { scope: "personal", slug: "coding-agents--codex--earthos-world--auth-redirect", title: "The auth redirect loop", entity_type: "topic", version: 1, updated_at: "2026-10-15T11:00:00Z" },
+    { scope: "personal", slug: "coding-agents--projects--earthos-world", title: "Project earthos-world: all agents", entity_type: "topic", version: 1, updated_at: "2026-10-15T11:00:00Z" },
+    { scope: "personal", slug: "coding-agents--codex--patterns", title: "codex: patterns", entity_type: "topic", version: 1, updated_at: "2026-10-15T11:00:00Z" },
+    { scope: "shared", slug: "kestrel-routes", title: "Kestrel routes", entity_type: "system", version: 4, updated_at: "2026-10-01T10:00:00Z" },
+  ],
+};
+const SESSION_PAGES = {
+  pages: [
+    { scope: "personal", slug: "agent-log-colonizer-a15fba01", title: "EarthOS.world · Colony a15fba01 · #123 Fix auth redirect", entity_type: "session", version: 2, updated_at: "2026-10-15T13:00:00Z" },
+  ],
+};
+const WIKI_PROJECTS = {
+  projects: [
+    { project: "EarthOS.world", key: "earthos-world", sources: 12 },
+    { project: "livingbrain", key: "livingbrain", sources: 3 },
+  ],
+};
+
+/** Nodes mounted from descriptions carry their class as an attribute:
+ * find them by it. */
+function byClass(root, cls) {
+  const out = [];
+  const visit = (node) => {
+    for (const child of node.children || []) {
+      const names = String((child && child.attrs && child.attrs.class) || (child && child.className) || "");
+      if (child && child.name && names.split(/\s+/).includes(cls)) out.push(child);
+      if (child) visit(child);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+function wikiRespond(extra = () => null) {
+  return (method, url) => {
+    const more = extra(method, url);
+    if (more) return more;
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(CA_PAGES);
+    if (url === "/v1/sources/projects") return json(WIKI_PROJECTS);
+    if (url === "/v1/pages?limit=200&exclude_type=session") return json(WIKI_PAGES);
+    if (url === "/v1/pages?limit=200") {
+      return json({ pages: [...SESSION_PAGES.pages, ...WIKI_PAGES.pages] });
+    }
+    if (url === "/v1/pages?type=session&limit=200") return json(SESSION_PAGES);
     return json({ title: "not found" }, 404);
   };
+}
+
+test("pages home: projects first, by their real names; session logs left out by the server", async () => {
+  reset({ search: "" });
+  seedTriggers();
+  respond = wikiRespond();
   await wikiPage(globalThis.LB.api);
   await drain();
+  assert.ok(
+    calls.some((call) => call.url === "/v1/pages?limit=200&exclude_type=session"),
+    "the server leaves the session logs out, before the limit",
+  );
+  assert.equal(el("projects-section").hidden, false);
+  const cards = byClass(el("projects-grid"), "project-card__name").map((n) => n.textContent);
+  // Compiled first, by the repository's own spelling, never the folder's.
+  assert.deepEqual(cards, ["EarthOS.world", "livingbrain"]);
+  const first = walk(el("projects-grid"), "article")[0];
+  assert.equal(walk(first, "a")[0].attrs.href, "wiki.html?view=project&project=earthos-world");
+  assert.match(first.textContent, /5 compiled pages/);
+  assert.match(first.textContent, /From Claude and Codex/);
+  const sections = byClass(first, "project-card__sections")[0];
+  assert.deepEqual(
+    walk(sections, "a").map((a) => a.textContent),
+    ["Overview", "Learnings", "1 topic"],
+  );
+  assert.equal(
+    walk(sections, "a")[1].attrs.href,
+    "wiki.html?view=project&project=earthos-world&section=learnings",
+  );
+  // Recent lists the pages that are not compiled, by title; no session log.
   const recent = walk(el("recent-list"), ".wiki-row__slug").map((n) => n.textContent);
-  assert.deepEqual(recent, ["kestrel-routes"]);
+  assert.deepEqual(recent, ["Kestrel routes"]);
+  // The agents' own pages sit in their own section.
+  assert.equal(el("agents-section").hidden, false);
+  assert.match(el("agents-list").textContent, /Codex/);
+  assert.match(el("agents-list").textContent, /Patterns/);
+  // Where the session logs went.
   assert.equal(el("home-ca-hint").hidden, false);
-  assert.match(el("home-ca-hint").textContent, /compiled coding-agent pages are filed under Coding agents/);
-  assert.equal(walk(el("home-ca-hint"), "a")[0].href, "wiki.html?view=coding-agents");
+  assert.match(el("home-ca-hint").textContent, /Agent sessions/);
+  assert.equal(walk(el("home-ca-hint"), "a")[0].href, "wiki.html?view=sessions");
+  assert.equal(el("show-sessions-label").hidden, false);
+  assert.equal(el("show-sessions").checked, false);
 
-  // A filter finds them again, as plain rows.
-  el("list-filter").value = "decisions";
+  // A filter finds a compiled page again, by its human title.
+  el("list-filter").value = "learnings";
   await el("list-filter").fire("input");
   const found = walk(el("recent-list"), ".wiki-row__slug").map((n) => n.textContent);
-  assert.ok(found.includes("coding-agents--claude--demo--decisions"), String(found));
+  assert.ok(found.includes("EarthOS.world — Learnings"), String(found));
+  assert.ok(!found.some((t) => t.includes("coding-agents--")), String(found));
+});
+
+test("pages home: Show session logs asks for them and lists them by title", async () => {
+  reset({ search: "" });
+  seedTriggers();
+  respond = wikiRespond();
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  el("show-sessions").checked = true;
+  await el("show-sessions").fire("change");
+  await drain();
+  assert.ok(calls.some((call) => call.url === "/v1/pages?limit=200"));
+  const recent = walk(el("recent-list"), ".wiki-row__slug").map((n) => n.textContent);
+  assert.deepEqual(recent, [
+    "EarthOS.world · Colony a15fba01 · #123 Fix auth redirect",
+    "Kestrel routes",
+  ]);
+  assert.equal(el("recent-h").textContent, "Recent pages and session logs");
+  assert.equal(el("home-ca-hint").hidden, true);
+  assert.equal(store.get("lb-wiki-show-sessions"), "1", "remembered per browser");
+});
+
+test("project view: one project's wiki from every agent, its sessions, GitHub and facts", async () => {
+  reset({ search: "?view=project&project=earthos-world" });
+  seedTriggers();
+  respond = wikiRespond((method, url) => {
+    if (url === "/v1/pages?project=earthos-world&limit=200") {
+      return json({ pages: WIKI_PAGES.pages.filter((p) => p.slug.includes("earthos-world")) });
+    }
+    if (url === "/v1/sources?project=EarthOS.world&limit=50") {
+      return json({
+        sources: [
+          { id: "01S1", kind: "agent_log", path: "colonizer session a15fba01", project: "EarthOS.world", created_at: "2026-10-15T13:00:00Z" },
+          { id: "01G1", kind: "github_issue", path: "github/World-360/EarthOS.world/issue/123", project: "EarthOS.world", created_at: "2026-10-14T13:00:00Z" },
+        ],
+        next_cursor: null,
+      });
+    }
+    if (url === "/v1/facts") {
+      return json({
+        keys: [
+          { subject: "project/earthos-world", attribute: "status", current: [{ value: "beta" }], history: [] },
+          { subject: "person/ada", attribute: "role", current: [{ value: "cto" }], history: [] },
+        ],
+      });
+    }
+    return null;
+  });
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("project-view").hidden, false);
+  assert.equal(el("home-view").hidden, true);
+  assert.equal(el("project-title").textContent, "EarthOS.world");
+  assert.deepEqual(
+    walk(el("project-crumbs"), "li").map((li) => li.textContent),
+    ["Pages", "EarthOS.world"],
+  );
+  assert.match(el("project-lede").textContent, /Claude and Codex/);
+  const body = el("project-body");
+  const wiki = walk(body, "section").find((s) => s.attrs.id === "project-wiki");
+  const mains = byClass(wiki, "project-list__main").map((n) => n.textContent);
+  assert.deepEqual(mains, [
+    "EarthOS.world — Overview",
+    "EarthOS.world — Learnings",
+    "EarthOS.world — All agents",
+  ]);
+  // Learnings: one section, from both agents, each agent's page one click on.
+  const learnings = walk(wiki, "li")[1];
+  assert.match(learnings.textContent, /from Claude and Codex/);
+  assert.deepEqual(
+    walk(learnings, "a").map((a) => a.attrs.href),
+    [
+      "wiki.html?view=project&project=earthos-world&section=learnings",
+      "wiki.html?slug=coding-agents--claude--earthos-world--learnings",
+      "wiki.html?slug=coding-agents--codex--earthos-world--learnings",
+    ],
+  );
+  const topics = walk(body, "section").find((s) => s.attrs.id === "project-topics");
+  assert.match(topics.textContent, /The auth redirect loop/);
+  const sessions = walk(body, "section").find((s) => s.attrs.id === "project-sessions");
+  assert.match(sessions.textContent, /EarthOS.world · Colony a15fba01 · #123 Fix auth redirect/);
+  assert.equal(walk(sessions, "a")[0].attrs.href, "wiki.html?view=sessions&source=01S1");
+  const github = walk(body, "section").find((s) => s.attrs.id === "project-github");
+  assert.equal(walk(github, "a")[0].attrs.href, "https://github.com/World-360/EarthOS.world/issues/123");
+  const facts = walk(body, "section").find((s) => s.attrs.id === "project-facts");
+  assert.match(facts.textContent, /status: beta/);
+  assert.doesNotMatch(facts.textContent, /cto/);
+});
+
+test("project view: a section reads every agent's page in turn", async () => {
+  reset({ search: "?view=project&project=earthos-world&section=learnings" });
+  seedTriggers();
+  respond = wikiRespond((method, url) => {
+    if (url === "/v1/pages?project=earthos-world&limit=200") {
+      return json({ pages: WIKI_PAGES.pages.filter((p) => p.slug.includes("earthos-world")) });
+    }
+    if (url === "/v1/pages/coding-agents--claude--earthos-world--learnings") {
+      return json({ slug: "x", markdown: "---\ntitle: Learnings\n---\n\nClaude learned **this**.", title: "Learnings" });
+    }
+    if (url === "/v1/pages/coding-agents--codex--earthos-world--learnings") {
+      return json({ slug: "y", markdown: "Codex learned [[kestrel-routes]].", title: "x" });
+    }
+    if (url.startsWith("/v1/sources?")) return json({ sources: [] });
+    return null;
+  });
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("project-title").textContent, "EarthOS.world — Learnings");
+  assert.equal(el("project-lede").textContent, "From Claude and Codex.");
+  assert.deepEqual(
+    walk(el("project-crumbs"), "li").map((li) => li.textContent),
+    ["Pages", "EarthOS.world", "Learnings"],
+  );
+  const parts = walk(el("project-body"), "section");
+  assert.deepEqual(walk(el("project-body"), "h2").map((h) => h.textContent), ["From Claude", "From Codex"]);
+  assert.match(parts[0].textContent, /Claude learned this/);
+  assert.doesNotMatch(parts[0].textContent, /title:/, "the frontmatter is not shown");
+  // Wiki-links inside a part are real links.
+  assert.ok(walk(parts[1], "a").some((a) => a.attrs.href === "wiki.html?slug=kestrel-routes"));
+});
+
+test("a compiled page reads by its human title, filed under its project", async () => {
+  reset({ search: "?slug=coding-agents--codex--earthos-world--learnings" });
+  seedTriggers();
+  respond = wikiRespond((method, url) => {
+    if (url === "/v1/pages/coding-agents--codex--earthos-world--learnings") {
+      return json({
+        slug: "coding-agents--codex--earthos-world--learnings",
+        title: "codex / earthos-world: learnings",
+        markdown: "Body.",
+        entity_type: "topic",
+        version: 2,
+        url: "https://app.test/wiki?slug=coding-agents--codex--earthos-world--learnings&scope=user-1",
+        backlinks: [],
+        citations: [],
+      });
+    }
+    return null;
+  });
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("page-title").textContent, "EarthOS.world — Learnings");
+  assert.deepEqual(
+    walk(el("page-crumbs"), "li").map((li) => li.textContent),
+    ["Pages", "EarthOS.world", "Learnings", "Codex"],
+  );
+  assert.match(el("page-meta").textContent, /from Codex/);
+});
+
+test("agent sessions: each session is named by its note's title", async () => {
+  reset({ search: "?view=sessions" });
+  seedTriggers();
+  respond = wikiRespond((method, url) => {
+    if (url.startsWith("/v1/sources?kind=agent_log")) {
+      return json({
+        sources: [{ id: "01S1", kind: "agent_log", path: "colonizer session a15fba01", project: "EarthOS.world", created_at: "2026-10-15T13:00:00Z" }],
+        next_cursor: null,
+      });
+    }
+    if (url.startsWith("/v1/coding-agents/queue")) return json({ counts: {}, jobs: [] });
+    return null;
+  });
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  const names = walk(el("sessions-list"), ".wiki-row__slug").map((n) => n.textContent);
+  assert.deepEqual(names, ["EarthOS.world · Colony a15fba01 · #123 Fix auth redirect"]);
+});
+
+test("wiki helpers: titles, the project key, the session note slug, the request", () => {
+  const labels = projectLabels(WIKI_PROJECTS.projects);
+  assert.equal(labels.get("earthos-world"), "EarthOS.world");
+  // A folded spelling never wins over the repository's own.
+  assert.equal(
+    projectLabels([{ project: "EarthOS.world" }, { project: "earthos-world" }]).get("earthos-world"),
+    "EarthOS.world",
+  );
+  const place = (slug) => codingAgentsPlace(slug);
+  assert.equal(compiledTitle(place("coding-agents--codex--earthos-world--learnings"), "codex / earthos-world: learnings", labels), "EarthOS.world — Learnings");
+  assert.equal(compiledTitle(place("coding-agents--codex--earthos-world--open-questions"), "", labels), "EarthOS.world — Open questions");
+  assert.equal(compiledTitle(place("coding-agents--codex--earthos-world--auth-redirect"), "The auth redirect loop", labels), "EarthOS.world — The auth redirect loop");
+  assert.equal(compiledTitle(place("coding-agents--codex--earthos-world--auth-redirect"), "codex / earthos-world: auth-redirect", labels), "EarthOS.world — Auth redirect");
+  assert.equal(compiledTitle(place("coding-agents--projects--earthos-world"), "", labels), "EarthOS.world — All agents");
+  assert.equal(compiledTitle(place("coding-agents--claude--patterns"), "claude: patterns", labels), "Claude — Patterns");
+  assert.equal(compiledTitle(place("coding-agents--index"), "", labels), "Coding agents — Overview");
+  // An unknown project falls back to its key, never to a slug.
+  assert.equal(compiledTitle(place("coding-agents--codex--side--index"), "", labels), "side — Overview");
+  assert.equal(displayTitle({ slug: "kestrel" }, labels), "kestrel");
+  assert.equal(displayTitle({ slug: "kestrel", title: "Kestrel" }, labels), "Kestrel");
+  assert.equal(isSessionRow({ slug: "agent-log-codex-1", entity_type: "decision" }), true);
+  assert.equal(isSessionRow({ slug: "kestrel", entity_type: "session" }), true);
+  assert.equal(isSessionRow({ slug: "kestrel", entity_type: "system" }), false);
+  assert.equal(sessionNoteSlug("colonizer session a15fba01"), "agent-log-colonizer-a15fba01");
+  assert.equal(sessionNoteSlug("claude_code session 3F2A_9c"), "agent-log-claude-code-3f2a-9c");
+  assert.equal(sessionNoteSlug("notes/one.md"), "");
+  assert.equal(homePagesPath(), "/v1/pages?limit=200&exclude_type=session");
+  assert.equal(homePagesPath(true), "/v1/pages?limit=200");
+  assert.equal(projectHref("earthos-world", "learnings"), "wiki.html?view=project&project=earthos-world&section=learnings");
+  assert.equal(humanize("open-questions"), "Open questions");
+  assert.equal(listWords(["Claude", "Codex", "Colonizer"]), "Claude, Codex and Colonizer");
+
+  const projects = projectsModel(WIKI_PAGES.pages, WIKI_PROJECTS.projects, {
+    agents: [{ agent: "colonizer", projects: [{ project: "EarthOS.world", sessions: 191, latest_at: "2026-10-15T13:00:00Z" }] }],
+  });
+  assert.deepEqual(projects.map((p) => p.key), ["earthos-world", "livingbrain"]);
+  assert.equal(projects[0].sessions, 191, "the tree's count, under the canonical key");
+  assert.deepEqual(projects[0].agents, ["claude", "codex"]);
+  assert.deepEqual(projects[0].sections, ["index", "learnings"]);
+  const model = projectSections(projects[0].pages);
+  assert.deepEqual(model.sections.map((s) => [s.page, s.entries.map((e) => e.agent)]), [
+    ["index", ["codex"]],
+    ["learnings", ["claude", "codex"]],
+  ]);
+  assert.equal(model.topics[0].title, "The auth redirect loop");
+  assert.equal(model.rollup.slug, "coding-agents--projects--earthos-world");
+  assert.deepEqual(agentsModel(WIKI_PAGES.pages).map((a) => a.label), ["Codex"]);
 });
 
 test("coding-agents: ?view=coding-agents shows the compiled pages as a folder tree", async () => {
@@ -1767,7 +2076,7 @@ test("coding-agents: ?view=coding-agents shows the compiled pages as a folder tr
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(CA_PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(CA_PAGES);
     return json({ title: "not found" }, 404);
   };
   await wikiPage(globalThis.LB.api);
@@ -2300,7 +2609,7 @@ test("coding-agents: the view shows colonizer/ from synced sessions, linking to 
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json({ pages: [] });
+    if (url.startsWith("/v1/pages?limit=200")) return json({ pages: [] });
     if (url === "/v1/coding-agents/tree") return json(CA_SESSIONS);
     return json({ title: "not found" }, 404);
   };
@@ -2486,7 +2795,7 @@ test("?view=new opens the new-page form; a page shows its breadcrumbs", async ()
   seedTriggers();
   respond = (method, url) => {
     if (url === "/v1/workspaces/me") return json(ME);
-    if (url === "/v1/pages?limit=200") return json(PAGES);
+    if (url.startsWith("/v1/pages?limit=200")) return json(PAGES);
     if (url === "/v1/pages/hello") return json(HELLO);
     return json({ title: "not found" }, 404);
   };

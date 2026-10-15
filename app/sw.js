@@ -11,7 +11,7 @@
  */
 
 
-const CACHE = "lb-app-v13";
+const CACHE = "lb-app-v14";
 
 const SHELL = [
   "./",

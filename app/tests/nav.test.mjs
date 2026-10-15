@@ -40,7 +40,13 @@ test("every address published before the shell still resolves to a destination",
     // The API's own citation URL, served by Workers' clean URLs.
     "/wiki?slug=q3-plan&scope=user-01HX": "pages",
     "/wiki.html?slug=kestrel&mode=edit": "pages",
-    "/wiki.html?slug=coding-agents--claude--demo--decisions": "coding-agents",
+    // The compiled wiki is Pages now, filed by project; a session log is
+    // a source, under Agent sessions.
+    "/wiki.html?slug=coding-agents--claude--demo--decisions": "pages",
+    "/wiki.html?slug=agent-log-colonizer-a15fba01": "sessions",
+    "/wiki.html?view=project&project=earthos-world": "pages",
+    "/wiki.html?view=project&project=earthos-world&section=learnings": "pages",
+    "/wiki.html?view=coding-agents": "coding-agents",
     "/wiki.html?view=sessions": "sessions",
     "/wiki.html?view=sessions&project=side": "sessions",
     "/wiki.html?view=sessions&agent=colonizer&project=x": "sessions",
@@ -121,8 +127,12 @@ test("breadcrumbs file a page where the sidebar does", () => {
     { label: "Pages", href: "wiki.html" },
     { label: "Kestrel routes" },
   ]);
+  assert.deepEqual(pageCrumbs("agent-log-colonizer-a15fba01", "EarthOS.world · Colony a15fba01"), [
+    { label: "Agent sessions", href: "wiki.html?view=sessions" },
+    { label: "EarthOS.world · Colony a15fba01" },
+  ]);
   assert.deepEqual(pageCrumbs("coding-agents--claude--demo--decisions", "Decisions"), [
-    { label: "Coding agents", href: "wiki.html?view=coding-agents" },
+    { label: "Pages", href: "wiki.html" },
     { label: "claude" },
     { label: "demo" },
     { label: "Decisions" },

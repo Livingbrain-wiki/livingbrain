@@ -101,12 +101,15 @@
     <main id="main" class="wrap shell__main">
       <div id="wiki-notice" class="notice" role="status" aria-live="polite"></div>
 
-      <!-- home (Pages): every page, pinned first -->
+      <!-- home (Pages): the projects the compiled wiki is about first, then
+           the agents' own pages, then every other page, pinned first. The
+           coding-agent session logs are sources, not pages: they are left
+           out unless "Show session logs" asks for them. -->
       <section id="home-view" hidden>
         <div class="page-head">
           <p class="eyebrow">Brain</p>
           <h1>Pages</h1>
-          <p class="lede">The company wiki: pinned pages first, then the most recently written.</p>
+          <p class="lede">Your projects first — the wiki your coding agents compile, one project at a time — then every page you keep.</p>
         </div>
         <div class="wiki-toolbar">
           <button id="new-page" type="button" data-new-page>New page</button>
@@ -115,23 +118,37 @@
             class="wiki-filter"
             type="search"
             placeholder="Filter pages…"
-            aria-label="Filter pages by slug or type"
+            aria-label="Filter pages by title, slug or type"
             autocomplete="off"
             hidden
           />
+          <label id="show-sessions-label" class="wiki-toggle" hidden
+            ><input id="show-sessions" type="checkbox" /> Show session logs</label
+          >
           <span class="status" id="home-status" role="status"></span>
         </div>
-        <p id="home-ca-hint" class="tiny" hidden></p>
 
-        <section id="pinned-section" hidden>
+        <section id="projects-section" class="home-section" aria-labelledby="projects-h" hidden>
+          <h2 id="projects-h">Projects</h2>
+          <div id="projects-grid" class="project-grid"></div>
+        </section>
+
+        <section id="pinned-section" class="home-section" hidden>
           <h2>Pinned</h2>
           <ul id="pinned-list" class="wiki-list"></ul>
         </section>
-        <section id="recent-section" hidden>
-          <h2>Recent</h2>
+        <section id="recent-section" class="home-section" hidden>
+          <h2 id="recent-h">Recent pages</h2>
           <ul id="recent-list" class="wiki-list"></ul>
         </section>
         <p id="home-nomatch" class="tiny" hidden>No pages match that filter.</p>
+
+        <section id="agents-section" class="home-section" aria-labelledby="agents-h" hidden>
+          <h2 id="agents-h">Agents</h2>
+          <p class="tiny">How each coding agent works for you, compiled from its sessions.</p>
+          <ul id="agents-list" class="wiki-list"></ul>
+        </section>
+        <p id="home-ca-hint" class="tiny" hidden></p>
 
         <div id="home-empty" class="card wiki-empty" hidden>
           <h2>Nothing here yet</h2>
@@ -144,13 +161,29 @@
         </div>
       </section>
 
+      <!-- project: one project's wiki — its compiled pages from every agent,
+           by section, then its topics, recent sessions, GitHub items and
+           facts. With `section=`, one section from every agent in turn. -->
+      <section id="project-view" hidden>
+        <nav id="project-crumbs" class="crumbs" aria-label="Breadcrumb"></nav>
+        <div class="page-head">
+          <p class="eyebrow">Project</p>
+          <h1 id="project-title">Project</h1>
+          <p id="project-lede" class="lede"></p>
+        </div>
+        <div class="wiki-toolbar">
+          <span class="status" id="project-status" role="status"></span>
+        </div>
+        <div id="project-body" class="project-body"></div>
+      </section>
+
       <!-- sessions: the coding-agent sessions `livingbrain logs sync` filed,
            newest first, filtered by project -->
       <section id="sessions-view" hidden>
         <div class="page-head">
           <p class="eyebrow">Sources</p>
           <h1>Agent sessions</h1>
-          <p class="lede">The coding-agent sessions you synced, newest first, and the pages compiled from them.</p>
+          <p class="lede">The coding-agent sessions you synced, newest first — the sources the wiki is compiled from — and the pages compiled from them.</p>
         </div>
         <div class="wiki-toolbar">
           <select
@@ -250,9 +283,9 @@
           <p class="eyebrow">Sources</p>
           <h1>Coding agents</h1>
           <p class="lede">
-            Your synced agent sessions, by agent and project, and the pages
-            compiled from them — one session at a time, every entry dated and
-            cited.
+            The compiled wiki split by agent: each agent's folder, its projects
+            and their sessions. The same pages, by project, are on
+            <a href="wiki.html">Pages</a>.
           </p>
         </div>
         <div class="wiki-toolbar">
