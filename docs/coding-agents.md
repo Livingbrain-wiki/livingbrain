@@ -336,7 +336,29 @@ Each call gets:
 4. One transcript chunk inside `<transcript>` fences.
 
 The answer must be one JSON object:
-`{"format": 1, "summary", "pages": [{"slug", "base_version", "title", "body"}], "facts": [...]}`.
+`{"format": 1, "summary", "pages": [{"slug", "base_version", "title", "body" | "edits"}], "facts": [...]}`.
+A page that exists is changed with `edits`, exact find/replace pairs
+(`{"find", "replace"}`, each `find` occurring once) against the body the
+model was shown; `body`, the whole page, is for a new page. So an answer
+grows with what the session adds, not with the size of the wiki: whole-page
+rewrites of large pages ran past the output limit and were cut off.
+
+**Getting the object back.** Where the provider's card says it serves one
+(`structured: "tool"` in `app/assets/model-cards.json`: Anthropic, OpenAI,
+Z.AI), the call forces one `apply_edits` tool call whose input is held to
+the edit list's JSON Schema, on either wire, streamed or not. Elsewhere it
+is text: a code fence, prose around the object and trailing commas are
+tolerated, and the schema is not. An answer that is still unusable — cut
+off at the output limit, not JSON, the wrong shape, or every page edit
+refused — gets **one repair round**: the same request with what was wrong
+appended (for a cut-off answer, twice the output limit within the job's
+budget and a request for `edits`). Both calls count toward the budget. A
+compile that still has nothing usable fails with the reason:
+`bad-output: cut off at the output limit (16000 tokens): JSON cut off at
+line 7 column 111`, or ``bad-output: schema: `pages` is not a list`` —
+fixed wording, positions and field paths only, never the model's text —
+in the queue and on the log page.
+
 The server checks each page edit and refuses it if:
 
 - the slug is outside this session's folder. The session may write its own
@@ -345,7 +367,9 @@ The server checks each page edit and refuses it if:
   conventions, or anything outside `coding-agents/`;
 - `base_version` is not the current head (optimistic concurrency). A stale
   edit fails the job with `conflict`, and the retry sees the fresh page;
-- the page was shown cut.
+- the page was shown cut;
+- an `edits` pair's `find` is not in the shown body, or occurs more than
+  once.
 
 A human edit to a compiled page is not overwritten. The brain writes over
 it only when the head the model was shown already contains that edit.
