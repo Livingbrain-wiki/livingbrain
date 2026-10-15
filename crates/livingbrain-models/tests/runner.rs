@@ -95,6 +95,7 @@ fn request<'a>(user: &'a str) -> ChatRequest<'a> {
         user,
         max_tokens: 100,
         json: true,
+        structured: None,
         timeout: StdDuration::from_secs(5),
     }
 }

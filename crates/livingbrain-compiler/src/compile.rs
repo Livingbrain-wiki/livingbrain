@@ -308,6 +308,9 @@ pub struct Reply {
     /// The owner's own runner answered, on their subscription: the tokens
     /// are theirs, not the workspace's compile budget.
     pub runner: bool,
+    /// The provider stopped at the completion ceiling (`max_tokens`): the
+    /// text is likely cut off mid-answer.
+    pub truncated: bool,
 }
 
 /// Whose call a completion is, and the compile's handle for it: a model
@@ -928,7 +931,7 @@ impl Compiler {
         // chunks it already applied; their tokens are on the row already.
         let resumed = usize::try_from(job.chunks_done).unwrap_or(0).min(parts);
         let spent_before = job.prompt_tokens.saturating_add(job.completion_tokens);
-        for (index, chunk) in chunks.iter().enumerate().skip(resumed) {
+        'chunks: for (index, chunk) in chunks.iter().enumerate().skip(resumed) {
             let shown = match self
                 .context(&job.scope, &allowed, plan.topics.as_deref())
                 .await
@@ -950,153 +953,232 @@ impl Compiler {
             let Ok((user, _)) = redact(&user, Policy::Redact) else {
                 return self.failed(job, now, "not-redactable", tally);
             };
-            let estimate = prompt::estimate_tokens(prompt::SYSTEM)
-                + prompt::estimate_tokens(&user)
-                + u64::from(settings.max_output_tokens);
-            if spent_before
-                .saturating_add(tally.tokens())
-                .saturating_add(estimate)
-                > settings.job_tokens
-            {
-                omitted = true;
-                break;
-            }
-            // Before each call: the pool is not waiting out a 429 and the
-            // invocation has time for it — else the job stops here and is
-            // queued again, carrying on from this chunk.
-            if let Some(halt) = tick.halt(&job.workspace, self.clock.now()) {
-                return Finish {
-                    chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
-                    refund_attempt: true,
-                    ..self.with_tally(JobStatus::Queued, Some(halt.reason()), tally)
-                };
-            }
-            let ref_key = format!("{}:{}:{index}", job.scope, job.body_sha256);
-            // The call's share of the budget is held before it is made, so
-            // parallel compiles cannot together spend past the budget.
-            let hold = format!("{ref_key}:{}", job.attempts);
-            let at = self.clock.now();
-            match self
-                .queue
-                .reserve(
-                    &hold,
-                    &job.workspace,
-                    at,
-                    estimate,
-                    settings.daily_tokens,
-                    settings.monthly_tokens,
-                    at + settings.lease,
-                )
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    let chunks_done = Some(u32::try_from(index).unwrap_or(u32::MAX));
-                    return match self.over_budget(&job.workspace, at, settings).await {
-                        Ok(Budget::Spent(until)) => Finish {
-                            retry_at: Some(until),
-                            chunks_done,
-                            refund_attempt: true,
-                            ..self.with_tally(JobStatus::OverBudget, Some("over-budget"), tally)
-                        },
-                        // Held by the calls in flight: queued again, to carry
-                        // on when they settled.
-                        Ok(_) => Finish {
-                            chunks_done,
-                            refund_attempt: true,
-                            ..self.with_tally(JobStatus::Queued, Some("budget-held"), tally)
-                        },
-                        Err(_) => self.failed(job, now, "store", tally),
-                    };
+            // One call, and when its answer cannot be used, at most one
+            // repair round: the same request with what was wrong appended
+            // (and, for an answer cut off at the output limit, a larger
+            // limit within the job's budget). Both count toward it.
+            let mut ask = user.clone();
+            let mut max_tokens = settings.max_output_tokens;
+            let mut round = 0u32;
+            let mut unusable: Option<(Unusable, bool, u32)> = None;
+            let output = loop {
+                let estimate = prompt::estimate_tokens(prompt::SYSTEM)
+                    + prompt::estimate_tokens(&ask)
+                    + u64::from(max_tokens);
+                if spent_before
+                    .saturating_add(tally.tokens())
+                    .saturating_add(estimate)
+                    > settings.job_tokens
+                {
+                    if round == 0 {
+                        omitted = true;
+                        break 'chunks;
+                    }
+                    // No budget left for the repair: the first answer's fault
+                    // stands (`unusable` below was set by the round before).
+                    break None;
                 }
-                Err(_) => return self.failed(job, now, "store", tally),
-            }
-            let call = Call {
-                workspace: &job.workspace,
-                owner: &job.owner,
-                ref_key: &ref_key,
-            };
-            let call_started = self.clock.now();
-            let answered = self
-                .model
-                .complete(&call, prompt::SYSTEM, &user, settings.max_output_tokens)
-                .await;
-            let at = self.clock.now();
-            // A runner's tokens were the owner's subscription, not the
-            // workspace's compile budget; a call that did not answer spent
-            // nothing.
-            let spent = answered
-                .as_ref()
-                .ok()
-                .filter(|reply| !reply.runner)
-                .map(|reply| reply.prompt_tokens + reply.completion_tokens);
-            let _ = self.queue.settle(&hold, at, &job.workspace, spent).await;
-            if spent.is_some() {
-                tick.timed(&job.workspace, at - call_started);
-            }
-            let reply = match answered {
-                Ok(reply) => reply,
-                Err(ModelFailure::NoModel) => {
+                // Before each call: the pool is not waiting out a 429 and the
+                // invocation has time for it — else the job stops here and is
+                // queued again, carrying on from this chunk.
+                if let Some(halt) = tick.halt(&job.workspace, self.clock.now()) {
                     return Finish {
-                        retry_at: Some(now + Duration::hours(1)),
-                        ..self.with_tally(JobStatus::SkippedNoModel, Some("no-model"), tally)
+                        chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                        refund_attempt: true,
+                        ..self.with_tally(JobStatus::Queued, Some(halt.reason()), tally)
                     };
                 }
-                Err(ModelFailure::Failed(reason)) => {
-                    let reason = format!("model-{reason}");
+                let ref_key = match round {
+                    0 => format!("{}:{}:{index}", job.scope, job.body_sha256),
+                    _ => format!("{}:{}:{index}:repair", job.scope, job.body_sha256),
+                };
+                // The call's share of the budget is held before it is made, so
+                // parallel compiles cannot together spend past the budget.
+                let hold = format!("{ref_key}:{}", job.attempts);
+                let at = self.clock.now();
+                match self
+                    .queue
+                    .reserve(
+                        &hold,
+                        &job.workspace,
+                        at,
+                        estimate,
+                        settings.daily_tokens,
+                        settings.monthly_tokens,
+                        at + settings.lease,
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let chunks_done = Some(u32::try_from(index).unwrap_or(u32::MAX));
+                        return match self.over_budget(&job.workspace, at, settings).await {
+                            Ok(Budget::Spent(until)) => Finish {
+                                retry_at: Some(until),
+                                chunks_done,
+                                refund_attempt: true,
+                                ..self.with_tally(JobStatus::OverBudget, Some("over-budget"), tally)
+                            },
+                            // Held by the calls in flight: queued again, to carry
+                            // on when they settled.
+                            Ok(_) => Finish {
+                                chunks_done,
+                                refund_attempt: true,
+                                ..self.with_tally(JobStatus::Queued, Some("budget-held"), tally)
+                            },
+                            Err(_) => self.failed(job, now, "store", tally),
+                        };
+                    }
+                    Err(_) => return self.failed(job, now, "store", tally),
+                }
+                let call = Call {
+                    workspace: &job.workspace,
+                    owner: &job.owner,
+                    ref_key: &ref_key,
+                };
+                let call_started = self.clock.now();
+                let answered = self
+                    .model
+                    .complete(&call, prompt::SYSTEM, &ask, max_tokens)
+                    .await;
+                let at = self.clock.now();
+                // A runner's tokens were the owner's subscription, not the
+                // workspace's compile budget; a call that did not answer spent
+                // nothing.
+                let spent = answered
+                    .as_ref()
+                    .ok()
+                    .filter(|reply| !reply.runner)
+                    .map(|reply| reply.prompt_tokens + reply.completion_tokens);
+                let _ = self.queue.settle(&hold, at, &job.workspace, spent).await;
+                if spent.is_some() {
+                    tick.timed(&job.workspace, at - call_started);
+                }
+                let reply = match answered {
+                    Ok(reply) => reply,
+                    Err(ModelFailure::NoModel) => {
+                        return Finish {
+                            retry_at: Some(now + Duration::hours(1)),
+                            ..self.with_tally(JobStatus::SkippedNoModel, Some("no-model"), tally)
+                        };
+                    }
+                    Err(ModelFailure::Failed(reason)) => {
+                        let reason = format!("model-{reason}");
+                        self.log_failure(job, &head, &reason, now, tick).await;
+                        return self.failed(job, now, &reason, tally);
+                    }
+                    // Rate-limited: retried soon, without spending an attempt —
+                    // a busy key is not this job's fault. What this run applied
+                    // stays; the retry carries on from this chunk. The whole
+                    // pool of the workspace waits with it.
+                    Err(ModelFailure::Busy {
+                        reason,
+                        retry_after_secs,
+                    }) => {
+                        let reason = format!("model-{reason}");
+                        let wait = retry_after_secs
+                            .unwrap_or(BUSY_RETRY_SECS)
+                            .clamp(60, MAX_BUSY_RETRY_SECS);
+                        let until = at + Duration::seconds(wait as i64);
+                        tick.rate_limited(&job.workspace, until);
+                        if let Some(row) = tick.row(&job.workspace, 0) {
+                            let _ = self.queue.save_pool(&job.workspace, &row, at).await;
+                        }
+                        self.log_failure(job, &head, &reason, now, tick).await;
+                        return Finish {
+                            retry_at: Some(until),
+                            chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                            refund_attempt: true,
+                            ..self.with_tally(JobStatus::Failed, Some(&reason), tally)
+                        };
+                    }
+                    // Out on the owner's runner: what this run applied stays, and
+                    // the job carries on from this chunk when the answer comes
+                    // back (at once, through the result route; an hour from now
+                    // at the latest, from the cron).
+                    Err(ModelFailure::Pending) => {
+                        return Finish {
+                            retry_at: Some(now + Duration::hours(1)),
+                            chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
+                            refund_attempt: true,
+                            ..self.with_tally(
+                                JobStatus::WaitingRunner,
+                                Some("waiting-runner"),
+                                tally,
+                            )
+                        };
+                    }
+                };
+                tally.prompt = tally.prompt.saturating_add(reply.prompt_tokens);
+                tally.completion = tally.completion.saturating_add(reply.completion_tokens);
+
+                let fault = match edits::parse(&reply.text) {
+                    // Usable: something to apply, or nothing refused.
+                    Ok(output) if !output.pages.is_empty() || output.problems.is_empty() => {
+                        break Some(output);
+                    }
+                    Ok(output) => Unusable::Refused(output.problems),
+                    Err(bad) => Unusable::Bad(bad),
+                };
+                unusable = Some((fault.clone(), reply.truncated, max_tokens));
+                // A runner's answer is checked before it is accepted; it is not
+                // repaired here.
+                if round > 0 || reply.runner {
+                    break None;
+                }
+                round += 1;
+                let (note, limit) = repair_note(&fault, reply.truncated, max_tokens);
+                ask = format!("{user}{note}");
+                max_tokens = limit;
+                // The larger limit only if the budget has room; else the same.
+                if spent_before.saturating_add(tally.tokens()).saturating_add(
+                    prompt::estimate_tokens(prompt::SYSTEM)
+                        + prompt::estimate_tokens(&ask)
+                        + u64::from(max_tokens),
+                ) > settings.job_tokens
+                {
+                    max_tokens = settings.max_output_tokens;
+                }
+            };
+            let Some(output) = output else {
+                tally.rejected += 1;
+                let reason = unusable.take().map_or_else(
+                    || "bad-output".to_owned(),
+                    |(fault, cut, limit)| bad_output_reason(&fault, cut, limit),
+                );
+                if tally.pages.is_empty() {
                     self.log_failure(job, &head, &reason, now, tick).await;
                     return self.failed(job, now, &reason, tally);
-                }
-                // Rate-limited: retried soon, without spending an attempt —
-                // a busy key is not this job's fault. What this run applied
-                // stays; the retry carries on from this chunk. The whole
-                // pool of the workspace waits with it.
-                Err(ModelFailure::Busy {
-                    reason,
-                    retry_after_secs,
-                }) => {
-                    let reason = format!("model-{reason}");
-                    let wait = retry_after_secs
-                        .unwrap_or(BUSY_RETRY_SECS)
-                        .clamp(60, MAX_BUSY_RETRY_SECS);
-                    let until = at + Duration::seconds(wait as i64);
-                    tick.rate_limited(&job.workspace, until);
-                    if let Some(row) = tick.row(&job.workspace, 0) {
-                        let _ = self.queue.save_pool(&job.workspace, &row, at).await;
-                    }
-                    self.log_failure(job, &head, &reason, now, tick).await;
-                    return Finish {
-                        retry_at: Some(until),
-                        chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
-                        refund_attempt: true,
-                        ..self.with_tally(JobStatus::Failed, Some(&reason), tally)
-                    };
-                }
-                // Out on the owner's runner: what this run applied stays, and
-                // the job carries on from this chunk when the answer comes
-                // back (at once, through the result route; an hour from now
-                // at the latest, from the cron).
-                Err(ModelFailure::Pending) => {
-                    return Finish {
-                        retry_at: Some(now + Duration::hours(1)),
-                        chunks_done: Some(u32::try_from(index).unwrap_or(u32::MAX)),
-                        refund_attempt: true,
-                        ..self.with_tally(JobStatus::WaitingRunner, Some("waiting-runner"), tally)
-                    };
-                }
-            };
-            tally.prompt = tally.prompt.saturating_add(reply.prompt_tokens);
-            tally.completion = tally.completion.saturating_add(reply.completion_tokens);
-
-            let Ok(output) = edits::parse(&reply.text) else {
-                tally.rejected += 1;
-                if tally.pages.is_empty() {
-                    return self.failed(job, now, "bad-output", tally);
                 }
                 break;
             };
             tally.rejected += output.refused;
             for edit in &output.pages {
+                // Find/replace edits become the whole body here, over the
+                // version the model was shown; one that does not apply is
+                // refused like any other bad edit.
+                let resolved;
+                let edit = if edit.replacements.is_empty() {
+                    edit
+                } else {
+                    let base = shown
+                        .iter()
+                        .find(|page| page.slug == edit.slug && page.version == edit.base_version);
+                    match base.map(|page| edits::resolve(edit, &page.body)) {
+                        Some(Ok(body)) => {
+                            resolved = PageEdit {
+                                body,
+                                replacements: Vec::new(),
+                                ..edit.clone()
+                            };
+                            &resolved
+                        }
+                        _ => {
+                            tally.rejected += 1;
+                            continue;
+                        }
+                    }
+                };
                 match self
                     .apply(&job.scope, &allowed, &shown, edit, &head, now, tick)
                     .await
@@ -1838,6 +1920,76 @@ fn next_lane(lanes: &[Lane], tick: &Tick, filter: &ClaimFilter) -> Option<usize>
         })
         .min_by_key(|(index, lane)| (lane.started, *index))
         .map(|(index, _)| index)
+}
+
+/// Why a model's answer could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unusable {
+    /// No answer of the edit list's shape at all.
+    Bad(edits::BadOutput),
+    /// An edit list, but every page edit in it was refused (by path).
+    Refused(Vec<String>),
+}
+
+/// The most refusal reasons a repair note or a status names.
+const MAX_PROBLEMS_SHOWN: usize = 6;
+
+impl Unusable {
+    fn describe(&self) -> String {
+        match self {
+            Self::Bad(bad) => bad.to_string(),
+            Self::Refused(problems) => {
+                let mut shown: Vec<&str> = problems
+                    .iter()
+                    .take(MAX_PROBLEMS_SHOWN)
+                    .map(String::as_str)
+                    .collect();
+                let more = problems.len().saturating_sub(MAX_PROBLEMS_SHOWN);
+                let tail = format!("{more} more");
+                if more > 0 {
+                    shown.push(&tail);
+                }
+                format!("every page edit refused: {}", shown.join("; "))
+            }
+        }
+    }
+}
+
+/// What a repair round appends to the request, and its completion limit:
+/// for an answer cut off at the limit, twice the limit (up to the ceiling)
+/// and a request for a much shorter answer; otherwise the same limit and
+/// what the validator found.
+fn repair_note(fault: &Unusable, truncated: bool, max_tokens: u32) -> (String, u32) {
+    let cut = truncated || matches!(fault, Unusable::Bad(bad) if bad.unterminated());
+    if cut {
+        let limit = max_tokens.saturating_mul(2).min(MAX_OUTPUT_TOKENS_CEILING);
+        return (
+            format!(
+                "\n\nREPAIR: your previous answer was cut off at the output limit ({max_tokens} tokens) before the JSON object closed, so none of it could be used. Answer again with the same JSON shape, much shorter: for every page that already exists use \"edits\" (exact find/replace pairs against the body shown above) instead of the whole \"body\"; include only the pages this session really changes; keep facts few. Reply with the JSON object only."
+            ),
+            limit,
+        );
+    }
+    (
+        format!(
+            "\n\nREPAIR: your previous answer could not be used ({}). Reply again with one JSON object in exactly the OUTPUT shape, and nothing else: no prose, no code fence.",
+            fault.describe()
+        ),
+        max_tokens,
+    )
+}
+
+/// The `bad-output` status a compile fails with: what was wrong, and
+/// whether the answer stopped at the output limit. Fixed wording plus
+/// positions and field paths only — never the model's text.
+fn bad_output_reason(fault: &Unusable, truncated: bool, max_tokens: u32) -> String {
+    let what = fault.describe();
+    let text = if truncated {
+        format!("bad-output: cut off at the output limit ({max_tokens} tokens): {what}")
+    } else {
+        format!("bad-output: {what}")
+    };
+    edits::one_line(&text, 400)
 }
 
 fn parked(job: &Job, status: JobStatus, reason: &str) -> Processed {

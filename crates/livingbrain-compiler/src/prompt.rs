@@ -38,13 +38,14 @@ OUTPUT — reply with one JSON object and nothing else:
   "format": 1,
   "summary": "one line: what this session did, for the append-only log",
   "pages": [
-    {"slug": "<an allowed slug>", "base_version": <the version shown for that page, or null if it is new>, "title": "<page title>", "body": "<the FULL new Markdown body of the page, without frontmatter>"}
+    {"slug": "<an allowed slug>", "base_version": <the version shown for that page, or null if it is new>, "title": "<page title>", "edits": [{"find": "<exact text from the shown body, occurring once in it>", "replace": "<what it becomes>"}]},
+    {"slug": "<a new allowed slug>", "base_version": null, "title": "<page title>", "body": "<the FULL Markdown body of the new page, without frontmatter>"}
   ],
   "facts": [
     {"subject": "project/<project>" | "system/<agent>" | "me", "attribute": "snake_case_key", "value": "text", "valid_from": "YYYY[-MM[-DD]], omitted when it is the session's day", "source": "source:<source id>", "quote": "the words it was read from", "confidence": 0.0-1.0}
   ]
 }
-Only include pages you actually change. A page body you return replaces the whole page, so keep everything in it that should stay. If the session teaches nothing worth keeping, return "pages": [] and say so in the summary."#;
+Only include pages you actually change. For a page that already exists, send "edits": exact find/replace pairs against the body shown under CURRENT PAGES, applied in order — to add a bullet, find the line it goes after (or the section heading) and replace it with that line plus the new bullet; to strike an entry through, find it and replace it with the struck-through version. Each "find" must be copied exactly and occur once in the page. Send "body" (the whole page) only for a new page; a "body" replaces the whole page, so it must keep everything that should stay. Never send both. Keep the answer short: it is cut off at a fixed output limit, and a cut-off answer is lost entirely. If the session teaches nothing worth keeping, return "pages": [] and say so in the summary."#;
 
 /// The conventions page every scope is seeded with. The person may edit it;
 /// the compiler reads it back before every session and the model follows

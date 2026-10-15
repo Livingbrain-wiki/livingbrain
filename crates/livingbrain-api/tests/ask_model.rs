@@ -112,6 +112,7 @@ impl AskModel for Scripted {
             provider: serving.provider,
             model: serving.model,
             runner: false,
+            truncated: false,
         })
     }
 }

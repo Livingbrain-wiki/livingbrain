@@ -408,6 +408,7 @@ impl Model for Scripted {
             prompt_tokens: 100,
             completion_tokens: 20,
             runner: false,
+            truncated: false,
         })
     }
 }

@@ -158,5 +158,9 @@
   "access/0003": {
     "file": "0040_access_0003_audit.sql",
     "sha256": "30a09580794d2f4445f360d5db1db90edd709ac65e6a29898b0c8ec7011d5e90"
+  },
+  "coding-agents/0005": {
+    "file": "0041_coding-agents_0005_requeue_bad_output.sql",
+    "sha256": "fe2c0ed5118d0fc9aebd3cc18c4dc66120e462ac0f1f87451c5462a5692fa192"
   }
 }
