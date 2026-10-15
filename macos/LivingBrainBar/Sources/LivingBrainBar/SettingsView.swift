@@ -78,13 +78,19 @@ struct SettingsView: View {
     private var workspaceSection: some View {
         Section("Workspace") {
             LabeledContent("Current") {
-                Text(workspace.workspaceId ?? "Shown once Usage loads (workspace admins)")
-                    .foregroundStyle(workspace.workspaceId == nil ? .secondary : .primary)
+                Text(workspace.me?.workspaceLabel ?? workspace.workspaceId ?? "Not signed in")
+                    .foregroundStyle(workspace.me == nil ? .secondary : .primary)
                     .textSelection(.enabled)
             }
-            Text("Switching workspaces is not available yet: the API names one workspace per session, and its workspace endpoint accepts the web sign-in only.")
+            LabeledContent("Connected as") {
+                Text(workspace.me?.principalLabel ?? "—")
+                    .foregroundStyle(workspace.me == nil ? .secondary : .primary)
+                    .textSelection(.enabled)
+            }
+            Text("A token belongs to one workspace. To use another, switch workspace in the web app's Settings → Members and sign in here again.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+        .task(id: workspace.signedIn) { await workspace.loadMe() }
     }
 
     private var modelsSection: some View {

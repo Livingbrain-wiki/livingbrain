@@ -21,6 +21,8 @@ final class WorkspaceModel: ObservableObject {
     /// workspace identity a bearer token can read (`/v1/workspaces/me` is
     /// cookie-only).
     @Published var workspaceId: String?
+    /// From `GET /v1/me`: who the saved token is, and in which workspace.
+    @Published private(set) var me: Me?
 
     let bar: BarModel
     private var token: String?
@@ -143,5 +145,19 @@ final class WorkspaceModel: ObservableObject {
         token = nil
         signedIn = false
         workspaceId = nil
+        me = nil
+    }
+
+    /// Reads who the token speaks for. A failure leaves the last answer (or
+    /// none): it is a label, never a decision.
+    func loadMe() async {
+        guard signedIn else {
+            me = nil
+            return
+        }
+        if let loaded = try? await call({ try await $0.me() }) {
+            me = loaded
+            workspaceId = loaded.workspace.id
+        }
     }
 }

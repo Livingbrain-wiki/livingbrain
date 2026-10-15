@@ -144,9 +144,10 @@ never logged or shown, and a 401 signs the app out.
 What the API does not offer a bearer token, so the app links to the web
 Settings instead: creating API tokens (`POST /v1/tokens` takes the web
 session only, so a token can never mint a token), Slack connection status
-(no endpoint reports it), and the workspace's name or switching workspaces
-(`/v1/workspaces/me` is cookie-only and names one workspace). The current
-workspace id is shown from the usage response when you are an admin.
+(no endpoint reports it), and switching workspaces (a token belongs to one
+workspace; switch in the web app and sign in here again). Settings →
+Workspace shows the workspace and who the token is connected as, from the
+bearer-readable `GET /v1/me`.
 
 Keyboard: ⌘K search, ⌘N new note, ⌘R sync, ⌘E edit, ⌘S save, ⌘1–⌘7 sections.
 

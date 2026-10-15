@@ -489,3 +489,59 @@ extension DevicePoll: CustomStringConvertible {
         }
     }
 }
+
+// MARK: Who the credential is (GET /v1/me, ADR 0004)
+
+/// `GET /v1/me`: the workspace, the principal and the credential a bearer
+/// token speaks for — the app's "connected as". Never carries a secret.
+public struct Me: Decodable, Equatable, Sendable {
+    public struct Workspace: Decodable, Equatable, Sendable {
+        public var id: String
+        public var name: String
+    }
+
+    public struct Principal: Decodable, Equatable, Sendable {
+        public struct Owner: Decodable, Equatable, Sendable {
+            public var id: String
+            public var name: String
+        }
+
+        /// `member` or `agent`.
+        public var kind: String
+        public var id: String
+        public var name: String
+        public var role: String?
+        public var onBehalfOf: Owner?
+
+        enum CodingKeys: String, CodingKey {
+            case kind, id, name, role
+            case onBehalfOf = "on_behalf_of"
+        }
+    }
+
+    public struct Credential: Decodable, Equatable, Sendable {
+        /// `session`, `personal_access_token` or `agent_key`.
+        public var kind: String
+        public var prefix: String?
+        public var scopes: [String]?
+    }
+
+    public var workspace: Workspace
+    public var principal: Principal
+    public var credential: Credential
+
+    /// "Ada · owner", or "CI bot (agent for Ada)".
+    public var principalLabel: String {
+        let name = principal.name.isEmpty ? principal.id : principal.name
+        if principal.kind == "agent" {
+            let owner = principal.onBehalfOf.map { $0.name.isEmpty ? $0.id : $0.name }
+            return owner.map { "\(name) (agent for \($0))" } ?? "\(name) (agent)"
+        }
+        return [name, principal.role].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// "Acme (ws_…)".
+    public var workspaceLabel: String {
+        workspace.name.isEmpty ? workspace.id : "\(workspace.name) (\(workspace.id))"
+    }
+}

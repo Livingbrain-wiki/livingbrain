@@ -255,6 +255,20 @@ final class APIClientTests: XCTestCase {
         XCTAssertNil(mock.last?.value(forHTTPHeaderField: "Authorization"), "the catalog is public")
     }
 
+    func testMe() async throws {
+        mock.on("GET", "/v1/me", Data(#"{"workspace":{"id":"ws_1","name":"Acme"},"principal":{"kind":"member","id":"usr_1","name":"Ada","role":"owner","is_admin":true},"credential":{"kind":"personal_access_token","prefix":"lbp_0123456789abcdef","scopes":null}}"#.utf8))
+        let me = try await client.me()
+        XCTAssertEqual(me.workspaceLabel, "Acme (ws_1)")
+        XCTAssertEqual(me.principalLabel, "Ada · owner")
+        XCTAssertEqual(me.credential.prefix, "lbp_0123456789abcdef")
+        XCTAssertNotNil(mock.last?.value(forHTTPHeaderField: "Authorization"))
+
+        mock.on("GET", "/v1/me", Data(#"{"workspace":{"id":"ws_1","name":""},"principal":{"kind":"agent","id":"agt_1","name":"CI bot","on_behalf_of":{"id":"usr_1","name":"Ada"}},"credential":{"kind":"agent_key","prefix":"lba_00","scopes":["read:shared"]}}"#.utf8))
+        let agent = try await client.me()
+        XCTAssertEqual(agent.principalLabel, "CI bot (agent for Ada)")
+        XCTAssertEqual(agent.workspaceLabel, "ws_1")
+    }
+
     func testTokens() async throws {
         mock.on("GET", "/v1/tokens", try apiFixture("tokens"))
         let tokens = try await client.tokens()
