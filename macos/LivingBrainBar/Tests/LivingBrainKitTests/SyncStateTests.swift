@@ -75,6 +75,17 @@ final class CLITests: XCTestCase {
                        "/opt/homebrew/bin/livingbrain")
     }
 
+    func testLocatorPrefersBundledOverDefaults() {
+        let bundled = "/Applications/Living Brain.app/Contents/Resources/livingbrain"
+        let exists: (String) -> Bool = { $0 == bundled || $0 == "/Users/alice/tools/lb" || $0 == "/opt/homebrew/bin/livingbrain" }
+        XCTAssertEqual(CLILocator.resolve(configured: nil, home: "/Users/alice", bundled: bundled, isExecutable: exists), bundled)
+        XCTAssertEqual(CLILocator.resolve(configured: "/gone", home: "/Users/alice", bundled: bundled, isExecutable: exists), bundled)
+        XCTAssertEqual(CLILocator.resolve(configured: "/Users/alice/tools/lb", home: "/Users/alice", bundled: bundled, isExecutable: exists),
+                       "/Users/alice/tools/lb")
+        XCTAssertEqual(CLILocator.resolve(configured: nil, home: "/Users/alice", bundled: nil, isExecutable: exists),
+                       "/opt/homebrew/bin/livingbrain")
+    }
+
     func testEnvironmentSetsAPIURLOnlyWhenUnset() {
         let env = CLIEnvironment.make(base: ["PATH": "/usr/bin"])
         XCTAssertEqual(env["LIVINGBRAIN_API_URL"], "https://app.livingbrain.wiki")

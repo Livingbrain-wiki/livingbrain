@@ -23,7 +23,9 @@ mod logs;
 mod mcp;
 mod telemetry;
 
-const DEFAULT_API_URL: &str = "https://api.livingbrain.wiki";
+/// Production: the API and the web app share one origin (MCP is on
+/// `mcp.livingbrain.wiki`). `api.livingbrain.wiki` is the waitlist Worker.
+const DEFAULT_API_URL: &str = "https://app.livingbrain.wiki";
 
 /// Every failure, phrased for a human. `NotLoggedIn` exits 2 with a login hint.
 #[derive(Debug)]

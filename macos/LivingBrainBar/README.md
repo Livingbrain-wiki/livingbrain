@@ -124,15 +124,64 @@ Keyboard: ⌘K search, ⌘N new note, ⌘R sync, ⌘E edit, ⌘S save, ⌘1–�
 
 ## Which CLI it runs
 
-The first of these that is executable, unless you pick one under **CLI**:
+The one you pick under **CLI**, if it is executable. Otherwise the first of
+these that is:
 
-1. `~/bin/livingbrain`
-2. `/opt/homebrew/bin/livingbrain`
-3. `/usr/local/bin/livingbrain`
+1. the copy inside the app, `Living Brain.app/Contents/Resources/livingbrain`
+   (release builds from `scripts/release.sh` ship one; a plain
+   `scripts/build-app.sh` build does not)
+2. `~/bin/livingbrain`
+3. `/opt/homebrew/bin/livingbrain`
+4. `/usr/local/bin/livingbrain`
 
 The child gets your environment plus `LIVINGBRAIN_API_URL=https://app.livingbrain.wiki`
 when that variable is not already set. To preview what a sync would send
 without sending anything, run `livingbrain logs sync --dry-run` in a terminal.
+
+## Install from the DMG
+
+Download `LivingBrain.dmg` from the
+[releases](https://github.com/Livingbrain-wiki/livingbrain/releases) (tags
+`macos-v*`), check it against the `.sha256` next to it
+(`shasum -a 256 LivingBrain.dmg`), open it and drag **Living Brain** to
+**Applications**. One universal build runs on Apple silicon and Intel, macOS 14
+or later, and carries its own `livingbrain` CLI.
+
+Until releases are notarized, macOS blocks the first open ("Apple could not
+verify…"). Either:
+
+- in Finder, right-click (or Control-click) **Living Brain** in Applications →
+  **Open** → **Open**; or
+- open it once, then **System Settings → Privacy & Security**, scroll to
+  *"Living Brain" was blocked…* → **Open Anyway**, and confirm.
+
+macOS remembers the choice; later opens are normal.
+
+## Build a release
+
+```sh
+cd macos/LivingBrainBar
+scripts/release.sh 0.1.0
+# → build/release/Living Brain.app, LivingBrain.dmg, LivingBrain.dmg.sha256
+```
+
+`release.sh` builds the CLI for `aarch64-apple-darwin` and
+`x86_64-apple-darwin` (adding the targets with rustup if needed), `lipo`s them
+into one binary at `Contents/Resources/livingbrain`, builds the app universal
+via `build-app.sh` with `CFBundleShortVersionString` = the version (and
+`CFBundleVersion` = `BUILD_NUMBER`, default 1), signs the CLI and then the
+bundle, and packs a DMG (volume "Living Brain", with an `/Applications` link)
+plus its SHA-256.
+
+- **Ad-hoc by default** — not notarized, so users see the first-open steps above.
+- **Signed and notarized** — set `CODESIGN_IDENTITY="Developer ID Application: …"`
+  (hardened runtime + timestamp, DMG signed too) and `NOTARY_PROFILE=<profile>`
+  (a `xcrun notarytool store-credentials` keychain profile): the DMG is
+  submitted with `notarytool --wait` and stapled.
+- `CARGO_TARGET_DIR` and `OUTPUT_DIR` are honoured.
+
+Publish under a `macos-v<version>` tag (`gh release create macos-v0.1.0 …`),
+never a bare `v*` tag: those trigger the production deploy workflow.
 
 ## Build, run, install
 
@@ -169,6 +218,7 @@ Sources/LivingBrainKit/    # testable: CLI JSON models, SyncState, CLI locator/r
 Sources/LivingBrainBar/    # the SwiftUI menu bar extra, the window, and AppKit glue
 Tests/LivingBrainKitTests/ # XCTest + recorded CLI JSON fixtures
 scripts/build-app.sh
+scripts/release.sh
 ```
 
 There is no macOS CI job: the repository's CI runs on Linux only. Run
