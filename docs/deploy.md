@@ -33,9 +33,28 @@ side uses, which is why the smoke test passes it explicitly.
 D1 `livingbrain-staging` (`f3a32632-ca97-4038-b094-2a9e1d7f413d`), R2
 `livingbrain-blobs-staging`, KV `KV-staging`
 (`333ff8d934b04e87a0c6cb85f9daa572`) and the rate-limit namespace `4002`. The
-staging Worker serves the static app from `app/` (minus `app/.assetsignore`)
-on the same custom domain as the API. Mail leaves from
+staging Worker serves the static app built from `app/` (see "The web app's
+build" below) on the same custom domain as the API. Mail leaves from
 `no-reply@send.livingbrain.wiki`, the domain verified in Owlpost.
+
+### The web app's build
+
+`wrangler deploy` (and `--dry-run`) runs `[build]` in
+`crates/livingbrain-venture/wrangler.toml`: `worker-build`, then
+`node ../../tools/stamp-assets.mjs`, which writes `build/app/` — the directory
+both environments' `[assets]` serve. It copies `app/` (minus `tests/` and the
+README) and adds a content-hashed copy of every file under `assets/` at
+`static/assets/<name>.<hash>.<ext>`; the pages' scripts and stylesheets, every
+module `import`, every stylesheet `url()`, the manifest's icons and the
+service worker's precache list point at those. `_headers` then caches
+`/static/*` for a year as immutable, revalidates the pages, `/assets/*`,
+`sw.js` and the manifest on every load, and `sw.js` carries the build's hash
+as its cache version — so a deploy reaches every open tab on its next load
+(or as a "Living Brain was updated — Reload" notice), with nothing to bump by
+hand. No extra deploy step: CI, `~/lb-deploy.sh` and a hand-run
+`wrangler deploy` all get it from `[build]`. `node tools/stamp-assets.mjs
+--check` builds into a temp dir and verifies without writing `build/`; CI runs
+it, and `app/tests/stamp.test.mjs` pins the result.
 
 Staging secrets: `HARNESS_SECRET`, `HARNESS_KEK_CURRENT` + `HARNESS_KEK_V1`
 (the page and Slack-token key ring; without it `/v1/pages/mcp` is not mounted

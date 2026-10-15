@@ -7,6 +7,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { plan } from "../../tools/stamp-assets.mjs";
 
 import {
   NAV,
@@ -245,16 +247,11 @@ test("the old header nav and the drawer's link mirror are gone; the views have t
 });
 
 test("the service worker caches the shell's modules", () => {
-  const sw = readFileSync(new URL("../sw.js", import.meta.url), "utf8");
-  for (const file of [
-    "./assets/shell.js",
-    "./assets/nav.js",
-    "./brain.html",
-    "./assets/brain.js",
-    "./assets/brain-render.js",
-    "./assets/graph.js",
-    "./assets/brain.css",
-  ]) {
-    assert.ok(sw.includes(`"${file}"`), file);
+  // The built worker's precache list is generated from the pages' module graph
+  // (tools/stamp-assets.mjs), so the shell's modules are in it by construction.
+  const { names, precache } = plan(fileURLToPath(new URL("..", import.meta.url)));
+  assert.ok(precache.includes("./brain.html"));
+  for (const file of ["shell.js", "nav.js", "brain.js", "brain-render.js", "graph.js", "brain.css"]) {
+    assert.ok(precache.includes(`./${names.get(`assets/${file}`)}`), file);
   }
 });

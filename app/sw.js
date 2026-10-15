@@ -1,75 +1,88 @@
 /* The app-shell cache.
  *
- * Deliberately minimal: it precaches the three pages and the two asset files,
- * serves same-origin GETs from the cache when the network fails, and does
- * nothing at all to anything it did not put there itself. A broken service
- * worker is worse than none, so every step is defensive — a failed install
- * leaves the app working from the network alone.
+ * Built, not hand-maintained: `tools/stamp-assets.mjs` replaces `VERSION` with
+ * a hash of the deployed build and `PRECACHE` with the pages plus every
+ * content-hashed file they load (`static/assets/app.<hash>.js` and so on).
+ * Each deploy therefore ships a byte-different worker, which is what makes the
+ * browser install it; nothing here is ever bumped by hand. Served unbuilt
+ * (straight from `app/`), it precaches nothing and only falls back to what it
+ * has seen.
  *
- * Nothing from `/v1/*` is ever cached: the session is an HttpOnly cookie and
- * the app's data must never be served from a stale cache.
+ * - Pages: network first, so a deploy shows on the next load; the cached copy
+ *   is only for when the network fails.
+ * - `static/*`: cache first. A hashed name never changes content, so a hit is
+ *   always right, and a new deploy simply asks for new names.
+ * - Anything else of ours: network first, cache as the offline fallback.
+ * - `/v1/*` is never cached and never intercepted: the session is an HttpOnly
+ *   cookie and the app's data must never come from a stale cache.
+ *
+ * A new worker takes over at once (`skipWaiting` + `clients.claim`) and drops
+ * every older `lb-app-*` cache; open tabs see `controllerchange` and offer a
+ * reload (`assets/update.js`). A broken service worker is worse than none, so
+ * every step is defensive — a failed install leaves the app on the network.
  */
 
+const VERSION = "dev";
+const PRECACHE = [];
 
-const CACHE = "lb-app-v15";
+const CACHE_PREFIX = "lb-app-";
+const CACHE = CACHE_PREFIX + VERSION;
 
-const SHELL = [
-  "./",
-  "./index.html",
-  "./settings.html",
-  "./wiki.html",
-  "./brain.html",
-  "./assets/app.css",
-  "./assets/app.js",
-  "./assets/markdown.js",
-  "./assets/settings.js",
-  "./assets/session.js",
-  "./assets/models.js",
-  // models.js imports the provider catalog statically, like stack.json.
-  "./assets/providers.json",
-  // ...and the provider cards' curated models, the same way.
-  "./assets/model-cards.json",
-  // app.js and models.js import the provider marks beside the names.
-  "./assets/marks.js",
-  "./assets/tokens.js",
-  // app.js imports the members section's helpers statically (ADR 0004).
-  "./assets/members.js",
-  // ...and the names-and-avatars helpers, which members.js and shell.js
-  // import too.
-  "./assets/profile.js",
-  // ...and the Usage & limits section's, the same way.
-  "./assets/budgets.js",
-  // wiki.js is app.js's import for the wiki page, and wiki.css its sheet;
-  // an ES module import fails atomically, so an offline wiki needs both.
-  "./assets/wiki.js",
-  "./assets/wiki.css",
-  // wiki.js imports facts.js statically (temporal facts on a page).
-  "./assets/facts.js",
-  // app.js imports the shell and the destinations it is built from.
-  "./assets/shell.js",
-  "./assets/nav.js",
-  // app.js imports the brain map's page, renderer and data shaping, and
-  // brain.html loads its own sheet.
-  "./assets/brain.js",
-  "./assets/brain-render.js",
-  "./assets/graph.js",
-  "./assets/brain.css",
-  // settings.js imports this statically, and an ES module import fails
-  // atomically, so an offline settings page would not render at all without it.
-  "./assets/stack.json",
-  "./manifest.webmanifest",
-  // The website's look: its self-hosted fonts and its mark.
-  "./assets/fonts/bricolage-grotesque.woff2",
-  "./assets/fonts/hanken-grotesk.woff2",
-  "./assets/fonts/jetbrains-mono.woff2",
-  "./assets/favicon.svg",
-];
+/** One cache key per page: `/wiki.html?view=x`, `/wiki.html` and `/wiki` are the same page. */
+function pageKey(url) {
+  const path = url.pathname.replace(/\/index(?:\.html)?$/, "/").replace(/\.html$/, "");
+  return new URL(path, url.origin).href;
+}
+
+function isPage(request, url) {
+  return (
+    request.mode === "navigate" ||
+    url.pathname.endsWith("/") ||
+    url.pathname.endsWith(".html")
+  );
+}
+
+/**
+ * A response safe to store: a redirected response (`/wiki.html` → `/wiki`)
+ * cannot answer a navigation, so it is stored as a plain copy.
+ */
+function storable(response) {
+  if (!response || !response.ok || response.type === "opaque") return null;
+  if (!response.redirected) return response.clone();
+  return response
+    .clone()
+    .blob()
+    .then(
+      (body) =>
+        new Response(body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        }),
+    );
+}
+
+function put(key, response) {
+  const copy = storable(response);
+  if (!copy) return Promise.resolve();
+  return Promise.resolve(copy)
+    .then((body) => caches.open(CACHE).then((cache) => cache.put(key, body)))
+    .catch(() => {});
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE)
-      .then((cache) => cache.addAll(SHELL))
+    Promise.all(
+      PRECACHE.map((path) => {
+        const url = new URL(path, self.location.href);
+        const key = url.pathname.startsWith("/static/") ? url.href : pageKey(url);
+        // `no-cache`: never precache what the HTTP cache still holds from an
+        // older deploy.
+        return fetch(url.href, { cache: "no-cache", credentials: "same-origin" })
+          .then((response) => put(key, response))
+          .catch(() => {});
+      }),
+    )
       .then(() => self.skipWaiting())
       .catch(() => self.skipWaiting()),
   );
@@ -80,11 +93,25 @@ self.addEventListener("activate", (event) => {
     caches
       .keys()
       .then((names) =>
-        Promise.all(names.filter((n) => n !== CACHE).map((n) => caches.delete(n))),
+        Promise.all(
+          names
+            .filter((n) => n.startsWith(CACHE_PREFIX) && n !== CACHE)
+            .map((n) => caches.delete(n)),
+        ),
       )
       .then(() => self.clients.claim())
       .catch(() => self.clients.claim()),
   );
+});
+
+// An open tab asks, after a hand-over, whether this build is the one it is
+// already running (`assets/update.js`): it compares its own hashed files with
+// this precache list, so a tab that loaded the new pages is not told to
+// reload into them again.
+self.addEventListener("message", (event) => {
+  const port = event.ports && event.ports[0];
+  if (!port || !event.data || event.data.type !== "lb-build") return;
+  port.postMessage({ type: "lb-build", version: VERSION, precache: PRECACHE });
 });
 
 self.addEventListener("fetch", (event) => {
@@ -96,17 +123,35 @@ self.addEventListener("fetch", (event) => {
   // The API is never cached and never intercepted.
   if (url.pathname.startsWith("/v1/")) return;
 
+  if (url.pathname.startsWith("/static/")) {
+    event.respondWith(
+      caches
+        .match(request)
+        .catch(() => null)
+        .then(
+          (hit) =>
+            hit ||
+            fetch(request).then((response) => {
+              event.waitUntil(put(request, response));
+              return response;
+            }),
+        ),
+    );
+    return;
+  }
+
+  const key = isPage(request, url) ? pageKey(url) : request;
   event.respondWith(
     fetch(request)
       .then((response) => {
-        if (response && response.ok) {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => {});
-        }
+        event.waitUntil(put(key, response));
         return response;
       })
       .catch(() =>
-        caches.match(request).then((hit) => hit || Response.error()),
+        caches
+          .match(key)
+          .catch(() => null)
+          .then((hit) => hit || Response.error()),
       ),
   );
 });

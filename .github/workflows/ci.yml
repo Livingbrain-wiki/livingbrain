@@ -110,13 +110,18 @@ jobs:
         with:
           node-version: "22"
       - run: node --test "app/tests/**/*.test.mjs"
+      - name: The deploy build stamps the app
+        # The same script wrangler's `[build]` runs before every deploy
+        # (tools/stamp-assets.mjs): it fails on an import or url() that
+        # resolves to nothing, so a broken reference fails here first.
+        run: node tools/stamp-assets.mjs --check
       - name: Every app script parses
         run: |
           # sw.js is a classic worker script.
           node --check app/sw.js
           # The three modules, each imported the way a page or a test loads
           # it, so an import-time error fails here and not only in a browser.
-          for file in app/assets/markdown.js app/assets/settings.js app/assets/session.js app/assets/models.js app/assets/marks.js app/assets/tokens.js app/assets/budgets.js app/assets/profile.js app/assets/nav.js app/assets/shell.js app/assets/graph.js app/assets/app.js; do
+          for file in app/assets/markdown.js app/assets/settings.js app/assets/session.js app/assets/models.js app/assets/marks.js app/assets/tokens.js app/assets/budgets.js app/assets/profile.js app/assets/nav.js app/assets/shell.js app/assets/graph.js app/assets/update.js app/assets/app.js; do
             node --input-type=module -e "import('./$file').then(() => process.exit(0))"
           done
       - name: No HTML is ever assigned from content

@@ -11,8 +11,14 @@ name = "livingbrain"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
+# `[build]` is inherited by every environment, so `wrangler deploy` (CI and
+# ~/lb-deploy.sh) and `wrangler deploy --dry-run` all run both steps: the
+# Worker, then the web app — `tools/stamp-assets.mjs` content-hashes `app/`
+# into `../../build/app`, which the environments' `[assets]` serve. Node is
+# already here (wrangler is run through npx), and the script needs nothing
+# but Node's standard library.
 [build]
-command = "cargo install -q --locked worker-build && worker-build --release"
+command = "cargo install -q --locked worker-build && worker-build --release && node ../../tools/stamp-assets.mjs"
 
 [observability]
 enabled = true
@@ -156,8 +162,8 @@ MAIL_FROM = "Living Brain <hello@livingbrain.wiki>"
 # Staging: every merge to `main`. A failed smoke test rolls this back.
 #
 # One host serves both halves: the Worker API (`/v1/*`, `/__health`) and the
-# static web app in `app/` as Workers static assets. A request that matches a
-# file in `app/` is answered from the assets; everything else reaches the
+# static web app built from `app/` as Workers static assets. A request that
+# matches a file there is answered from the assets; everything else reaches the
 # Worker. Same origin, so the app's empty `lb-api` meta, its CSP
 # `connect-src 'self'` and the session cookie all work without CORS.
 [env.staging]
@@ -165,8 +171,10 @@ name = "livingbrain-staging"
 compatibility_date = "2026-09-01"
 routes = [{ pattern = "staging-api.livingbrain.wiki", custom_domain = true }]
 
+# The built app (tools/stamp-assets.mjs, run by `[build]` above), not `app/`
+# itself: the pages there name each asset by a hash of its content.
 [env.staging.assets]
-directory = "../../app"
+directory = "../../build/app"
 
 # Not inherited from the top level, so repeated here. Its own namespace, so
 # staging traffic never spends production's budget.
@@ -236,7 +244,7 @@ routes = [
 ]
 
 [env.production.assets]
-directory = "../../app"
+directory = "../../build/app"
 
 # Not inherited from the top level, so repeated here. Its own namespace, as
 # staging has its own, so neither environment spends the other's budget.
