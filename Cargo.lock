@@ -1942,6 +1942,7 @@ name = "livingbrain-venture"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "cratefield-adapter-owlpost",
  "cratefield-adapter-turnstile",
  "cratefield-core",
@@ -1964,6 +1965,7 @@ dependencies = [
  "livingbrain-workspaces",
  "pollster",
  "serde_json",
+ "sha2 0.10.9",
  "time",
  "tower",
  "wasm-bindgen",

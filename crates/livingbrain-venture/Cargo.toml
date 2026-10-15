@@ -84,3 +84,8 @@ wasm-bindgen = "0.2.129"
 cratefield-testing = { workspace = true }
 insta = { workspace = true }
 pollster = { workspace = true }
+# The device pages' CSP test (`device_pages.rs`) hashes the theme bootstrap
+# the way a browser does, so the policy's `sha256-…` source is checked, not
+# trusted. Both are versions the tree already resolves.
+base64 = { workspace = true }
+sha2 = { workspace = true }
