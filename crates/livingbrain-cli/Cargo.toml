@@ -2,7 +2,7 @@
 name = "livingbrain-cli"
 description = "The `livingbrain` CLI: a native client of the Living Brain API. Not a module — it holds no memory and runs no agent loop; the server does."
 publish = false
-version.workspace = true
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
