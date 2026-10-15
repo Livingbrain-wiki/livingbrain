@@ -705,9 +705,16 @@ fn a_rate_limited_call_is_retried_without_spending_an_attempt() {
     world.sync(WORKSPACE, "u1", "s-2", "y");
     let reason =
         r#"http 429: {"error":{"code":"1302","message":"Rate limit reached for requests"}}"#;
-    let busy = Fake::answering(move |_, _| {
+    // Z.AI names a fresh request id in every refusal; the log still keeps
+    // one line per job for it.
+    let busy = Fake::answering(move |_, index| {
+        let reason = if index == 0 {
+            reason.to_owned()
+        } else {
+            format!("{reason} [request {index}]")
+        };
         Err(ModelFailure::Busy {
-            reason: reason.to_owned(),
+            reason,
             retry_after_secs: Some(120),
         })
     });

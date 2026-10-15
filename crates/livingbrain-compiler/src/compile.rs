@@ -813,10 +813,13 @@ impl Compiler {
     }
 
     /// Appends a failed compile to the scope's log page, so the reason is
-    /// in the wiki and not only in the queue — once per distinct reason, so
-    /// a job retried every quarter hour for the same 429 writes one line.
+    /// in the wiki and not only in the queue — once per kind of failure
+    /// (`model-http 429`, the part before the provider's body, which names
+    /// a fresh request id every time), so a job retried every few minutes
+    /// for the same 429 writes one line.
     async fn log_failure(&self, job: &Job, head: &SessionHead, reason: &str, now: OffsetDateTime) {
-        if job.last_error.as_deref() == Some(reason) {
+        let kind = |text: &str| text.split(':').next().unwrap_or_default().trim().to_owned();
+        if job.last_error.as_deref().map(kind) == Some(kind(reason)) {
             return;
         }
         let short: String = head.session_id.chars().take(8).collect();
