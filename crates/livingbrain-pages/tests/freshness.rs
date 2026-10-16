@@ -449,3 +449,41 @@ fn the_dream_cursor_is_kept_set_or_cleared_as_a_pass_ends() {
         );
     });
 }
+
+#[test]
+fn the_rule_scan_walks_current_facts_in_bounded_batches_and_wraps() {
+    pollster::block_on(async {
+        let kit = kit();
+        for n in 0..5 {
+            kit.facts
+                .record(
+                    "user-a",
+                    input(&format!("tool_{n}"), "yes", Some("2025")),
+                    "u-a",
+                )
+                .await
+                .unwrap();
+            kit.clock.set(2025, 3, 2 + n as u32 + 1);
+        }
+        let now = kit.facts.now();
+        let first = kit.facts.rule_batch(2, now).await.unwrap();
+        let second = kit.facts.rule_batch(2, now).await.unwrap();
+        let third = kit.facts.rule_batch(2, now).await.unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(third.len(), 1, "the batch that reaches the end is short");
+        let mut seen: Vec<String> = first
+            .iter()
+            .chain(&second)
+            .chain(&third)
+            .map(|f| f.id.clone())
+            .collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 5, "every current fact is read once");
+        assert_eq!(first[0].attribute, "tool_0", "oldest first");
+        // Past the end the scan starts over.
+        let again = kit.facts.rule_batch(2, now).await.unwrap();
+        assert_eq!(again[0].id, first[0].id);
+    });
+}

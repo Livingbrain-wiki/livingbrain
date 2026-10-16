@@ -30,17 +30,19 @@
 //! stops the moment that budget is spent. It runs only in the Worker's cron
 //! tick, after the compile drain, and at most a couple of passes a tick.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use cratefield_core::ScheduledBudget;
-use livingbrain_pages::{CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, SWEEP_END};
+use livingbrain_pages::{
+    CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, RuleFact, SWEEP_END,
+};
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
 use crate::compile::{Budget, Call, Compiler, ModelFailure};
-use crate::facts::{self, Fact, HeldFact, refusal};
+use crate::facts::{self, Fact, HeldFact, attribute_rule, refusal};
 use crate::prompt;
 
 /// A subject needs at least this many current facts before it is tidied: a
@@ -61,6 +63,10 @@ const CANDIDATE_LIMIT: usize = 200;
 pub const MAX_DECISIONS: usize = 30;
 /// The subrequest-shaped steps one pass is charged against the cron budget.
 const PASS_STEPS: u64 = 4;
+/// The most current facts the rule pass reads per tick.
+pub const RULE_BATCH: usize = 200;
+/// The `model` column of the decision log for a rule-pass retraction.
+pub const RULES_ROLE: &str = "rules";
 /// The `model` column of the decision log: the call's role, since a
 /// [`Reply`](crate::compile::Reply) does not name the model.
 pub const DREAM_ROLE: &str = "dreaming";
@@ -74,10 +80,10 @@ pub const SYSTEM: &str = r#"You tidy one subject's current facts in a personal m
 Decide only these changes, naming fact ids exactly as shown:
 - supersede: a newer fact states the same property as an older one (the same attribute), so the older is replaced. {"op":"supersede","id":"<older, in this window>","by":"<newer: any current fact of this subject with the same attribute>"}. This is the usual move when a property changed: prefer it to retract.
 - end: a fact stopped being true at a date and nothing replaces it. {"op":"end","id":"<id in this window>","valid_to":"YYYY[-MM[-DD]]"}.
-- retract: ONLY for a fact that is not state at all (a cost, an outage, an incident, a one-off error, a per-item status), or that exactly duplicates another current fact. Never retract a fact merely because a newer one exists: supersede it. {"op":"retract","id":"<id in this window>","reason":"event"|"duplicate"}
+- retract: a fact that is not state. Be decisive: a fact is KEPT only if it states a durable property of the subject that would still be worth knowing in three months (for example "auth provider is X", "deploys are gated on the staging SHA"). One-off investigations, bug reports, issue statuses, findings, plans and blockers are retracted with reason "not-state". An exact duplicate of another current fact is retracted with reason "duplicate". Never retract a fact merely because a newer one exists: supersede it. {"op":"retract","id":"<id in this window>","reason":"not-state"|"duplicate"}
 - rename: the fact is right but filed under a wordy or per-item attribute; move it to the subject's ordinary key. {"op":"rename","id":"<id in this window>","attribute":"<snake_case key>"}
 
-Prefer supersede or end whenever a newer or later-dated fact on the same property exists. When this window may end before the subject does, decide only what the window shows; a later window will reach the rest. Be conservative: when unsure, decide nothing. Never invent a fact or a value. Reply with one JSON object and nothing else: {"decisions":[...]}, or {"decisions":[]} when nothing needs changing."#;
+Keep the supersede and end preference for real state changes: prefer supersede or end whenever a newer or later-dated fact on the same property exists. When this window may end before the subject does, decide only what the window shows; a later window will reach the rest. Be conservative: when unsure, decide nothing. Never invent a fact or a value. Reply with one JSON object and nothing else: {"decisions":[...]}, or {"decisions":[]} when nothing needs changing."#;
 
 /// One window of a subject's current facts, as a dream pass reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +139,9 @@ pub trait Dreams: Send + Sync {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Window, String>;
+    /// The next batch of current facts for the rule pass (oldest first, after
+    /// the stored position, which this advances).
+    async fn rule_batch(&self, limit: usize, now: i64) -> Result<Vec<RuleFact>, String>;
     /// The subject's attribute vocabulary: `(attribute, current facts, latest
     /// fact id)`, by name.
     async fn vocabulary(
@@ -151,6 +160,8 @@ pub struct Sweep {
     pub passes: usize,
     /// Decisions the store applied.
     pub applied: usize,
+    /// Facts the rule pass retracted this tick (no model, no budget).
+    pub retracted: usize,
 }
 
 /// One decision the model proposed, validated only as far as its shape: the
@@ -272,16 +283,17 @@ fn decision(raw: RawDecision) -> Option<Decision> {
     }
 }
 
-/// A retraction's reason as the log keeps it: lowercase letters and `_`, at
-/// most 32 characters, else `unspecified`. Never free text.
+/// A retraction's reason as the log keeps it: lowercase letters, `-` and
+/// `_`, at most 32 characters (a space becomes `-`), else `unspecified`.
+/// Never free text.
 fn short_reason(raw: Option<&str>) -> String {
     let cleaned: String = raw
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
         .chars()
-        .map(|c| if c == ' ' || c == '-' { '_' } else { c })
-        .filter(|c| c.is_ascii_lowercase() || *c == '_')
+        .map(|c| if c == ' ' { '-' } else { c })
+        .filter(|c| c.is_ascii_lowercase() || *c == '_' || *c == '-')
         .take(32)
         .collect();
     if cleaned.is_empty() {
@@ -369,6 +381,13 @@ pub fn message(
     out
 }
 
+/// What one rule pass retracted, and in which subjects.
+#[derive(Debug, Default)]
+struct Cleaned {
+    retracted: usize,
+    subjects: BTreeSet<(String, String)>,
+}
+
 /// How one pass ended, before it is recorded.
 enum Pass {
     /// Read a window and applied what it could. `more` says whether the
@@ -403,8 +422,19 @@ impl Compiler {
         };
         let now = self.clock.now();
         let mut sweep = Sweep::default();
+        // The rule pass first: no model and no budget. It retracts what the
+        // shared attribute rules refuse, so the candidates and the model
+        // passes below see the cleaned subjects.
+        let cleaned = self.rule_pass(dreams.as_ref(), now).await?;
+        sweep.retracted = cleaned.retracted;
         for candidate in dreams.candidates(MIN_FACTS, CANDIDATE_LIMIT).await? {
-            if due(&candidate, now) {
+            let key = (candidate.scope.clone(), candidate.subject.clone());
+            // A finished subject the rule pass just cleaned is read again, once:
+            // the model re-reads the set without what was removed. Nothing is
+            // queued again unless the rule pass retracted something.
+            let rerun =
+                cleaned.subjects.contains(&key) && candidate.status.as_deref() == Some("done");
+            if due(&candidate, now) || rerun {
                 dreams
                     .enqueue(&candidate.scope, &candidate.subject, now.unix_timestamp())
                     .await?;
@@ -500,6 +530,49 @@ impl Compiler {
             }
         }
         Ok(sweep)
+    }
+
+    /// The rule pass: reads the next batch of current facts and retracts each
+    /// one the shared attribute rules refuse, logging every retraction. Its
+    /// position is kept by the store, so successive ticks cover the whole
+    /// fact set in bounded batches.
+    async fn rule_pass(&self, dreams: &dyn Dreams, now: OffsetDateTime) -> Result<Cleaned, String> {
+        let batch = dreams.rule_batch(RULE_BATCH, now.unix_timestamp()).await?;
+        let key = now.format(&Rfc3339).map_err(|_| "clock".to_owned())?;
+        let mut cleaned = Cleaned::default();
+        for (seq, fact) in batch.iter().enumerate() {
+            let Some(rule) = attribute_rule(&fact.attribute) else {
+                continue;
+            };
+            let applied = matches!(self.facts.retract(&fact.scope, &fact.id).await, Ok(true));
+            let input_ids = serde_json::to_string(&[&fact.id]).map_err(|e| e.to_string())?;
+            let reason = format!("rule:{rule}");
+            dreams
+                .log(DreamDecisionRow {
+                    scope: &fact.scope,
+                    dream_at: &key,
+                    seq,
+                    subject: &fact.subject,
+                    op: "retract",
+                    fact_id: &fact.id,
+                    by_fact_id: None,
+                    new_valid_to: None,
+                    new_attribute: None,
+                    reason: Some(&reason),
+                    applied,
+                    input_ids: &input_ids,
+                    model: RULES_ROLE,
+                    decided_at: &key,
+                })
+                .await?;
+            if applied {
+                cleaned.retracted += 1;
+                cleaned
+                    .subjects
+                    .insert((fact.scope.clone(), fact.subject.clone()));
+            }
+        }
+        Ok(cleaned)
     }
 
     /// One pass over one window of a subject: read the window, spend the
@@ -896,7 +969,7 @@ mod tests {
             answer.decisions[1],
             Decision::Retract {
                 id: "fact-c".to_owned(),
-                reason: "event_cost".to_owned()
+                reason: "event-cost".to_owned()
             }
         );
     }

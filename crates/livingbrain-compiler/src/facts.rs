@@ -34,11 +34,15 @@ pub const MAX_FACTS: usize = 50;
 /// had would crowd out the session it is about.
 pub const MAX_HELD: usize = 60;
 
-/// Words that make an attribute an event, not a state (`session_cost`,
-/// `model_router_outage`, `sandbox_limitation`). A fact is what is true
-/// now about a subject; what happened, what it cost and what went wrong
-/// are dated prose in the pages, never facts that a later one must end.
-const EVENT_WORDS: [&str; 17] = [
+/// Words that make an attribute an event, a one-off investigation or a
+/// report, not a state (`session_cost`, `model_router_outage`,
+/// `anon_client_rls_bug`, `session_adoption_blocker`). What is true now about
+/// a subject is state; what happened, what broke, what was found and what is
+/// being looked into are dated prose in the pages, never facts a later one
+/// must end. Each word is a whole `_`-separated token, so `outage` matches
+/// `model_outage` and `breaker` matches `build_breaker_world360_json`, but
+/// nothing durable is caught by a substring.
+const EVENT_WORDS: [&str; 38] = [
     "cost",
     "costs",
     "outage",
@@ -56,36 +60,69 @@ const EVENT_WORDS: [&str; 17] = [
     "crash",
     "crashes",
     "timeout",
+    "timeouts",
+    "bug",
+    "bugs",
+    "blocker",
+    "blockers",
+    "gap",
+    "gaps",
+    "probe",
+    "probes",
+    "finding",
+    "findings",
+    "audit",
+    "suspected",
+    "breaker",
+    "breakers",
+    "fix",
+    "fixes",
+    "resolved",
+    "flaky",
+    "investigation",
+    "investigations",
 ];
 
-/// Phrases (not single words) that make an attribute an event.
-const EVENT_PHRASES: [&str; 1] = ["rate_limit"];
+/// Phrases (not single words) that make an attribute an event. `rate_limit`
+/// is a rate limit that hit; `root_cause` is an investigation's conclusion.
+const EVENT_PHRASES: [&str; 2] = ["rate_limit", "root_cause"];
 
-/// Why a model-written fact is not state, or `None` when it may be stored.
+/// Why an attribute key is not state, or `None` when it may be stored. The
+/// one rule list the write-time refusal and the dreaming rule pass share:
+/// a fact is refused, or retracted by the rule pass, on exactly these terms.
 ///
-/// Two refusals, both about the key the model chose. An attribute with a
-/// number in it (`issue_335_status`, `pr_12_state`) is one issue or one
-/// incident: a timeline per number would never be ended, so it is refused
-/// rather than folded into a shared key (which would supersede every other
-/// issue's status). An attribute with an event word is refused the same
-/// way. The reason is the skip the coding-agents log names.
+/// `"per-item"`: a number token (`issue_335_status`, `pr_12_state`,
+/// `404_root_cause`) makes the key one issue or one incident. A timeline per
+/// number would never be ended, and folding them into one shared key would
+/// supersede every other issue's status, so the key is refused.
+///
+/// `"event"`: an event, report or investigation word (see [`EVENT_WORDS`] and
+/// [`EVENT_PHRASES`]).
 #[must_use]
-pub fn refusal(fact: &Fact) -> Option<&'static str> {
-    let per_item = fact
-        .attribute
+pub fn attribute_rule(attribute: &str) -> Option<&'static str> {
+    let per_item = attribute
         .split('_')
         .any(|token| !token.is_empty() && token.bytes().all(|b| b.is_ascii_digit()));
     if per_item {
-        return Some("per-item attribute: a fact is state, not one issue or incident");
+        return Some("per-item");
     }
-    let event = fact
-        .attribute
+    let event = attribute
         .split('_')
         .any(|token| EVENT_WORDS.contains(&token))
         || EVENT_PHRASES
             .iter()
-            .any(|phrase| fact.attribute.contains(phrase));
-    event.then_some("event, not state: a cost, outage, incident or error is not a fact")
+            .any(|phrase| attribute.contains(phrase));
+    event.then_some("event")
+}
+
+/// Why a model-written fact is not state, or `None` when it may be stored:
+/// [`attribute_rule`] on the fact's key, with the reason the skip log names.
+#[must_use]
+pub fn refusal(fact: &Fact) -> Option<&'static str> {
+    attribute_rule(&fact.attribute).map(|rule| match rule {
+        "per-item" => "per-item attribute: a fact is state, not one issue or incident",
+        _ => "event, not state: a cost, outage, incident, error or report is not a fact",
+    })
 }
 
 /// A current fact of one subject, as the compiler reads it back: enough to
@@ -357,29 +394,66 @@ mod tests {
     }
 
     #[test]
-    fn state_is_stored_and_events_and_per_item_keys_are_refused() {
-        let named = |attribute: &str| Fact {
-            attribute: attribute.to_owned(),
-            ..fact()
-        };
-        for state in ["database", "deploy_target", "package_manager", "node_major"] {
-            assert_eq!(refusal(&named(state)), None, "{state} is state");
+    fn durable_state_keys_are_kept() {
+        for state in [
+            "database",
+            "deploy_target",
+            "package_manager",
+            "node_major",
+            "auth_provider_production",
+            "db_migration_runner",
+            "vault_of_record",
+            "cf_worker_minify_enabled",
+        ] {
+            assert_eq!(attribute_rule(state), None, "{state} is state");
+            assert_eq!(
+                refusal(&Fact {
+                    attribute: state.to_owned(),
+                    ..fact()
+                }),
+                None,
+                "{state}"
+            );
         }
-        for event in [
+    }
+
+    #[test]
+    fn events_investigations_and_per_item_keys_are_dropped() {
+        for dropped in [
+            "issue_320_status",
+            "issue_364_status",
+            "issue_701_status",
+            "issue_136_resolved",
+            "issue_505_rls_fix",
+            "issue_784_scope",
+            "404_root_cause",
+            "flaky_test_root_cause",
+            "anonymous_401_probes",
+            "anon_client_rls_bug",
+            "suspected_earthcoin_mint_bug",
+            "session_adoption_blocker",
+            "upstream_gap",
+            "build_breaker_world360_json",
+            "migration_0008_messaging",
+            "chi_audit_findings",
             "session_cost",
             "model_router_outage",
             "sandbox_limitation",
             "last_error",
             "rate_limit_status",
         ] {
-            assert!(refusal(&named(event)).is_some(), "{event} is an event");
-        }
-        for per_item in ["issue_335_status", "pr_12_state", "incident_2026_10_15"] {
+            assert!(attribute_rule(dropped).is_some(), "{dropped} is dropped");
             assert!(
-                refusal(&named(per_item)).is_some(),
-                "{per_item} is per item"
+                refusal(&Fact {
+                    attribute: dropped.to_owned(),
+                    ..fact()
+                })
+                .is_some(),
+                "{dropped} is refused at write time"
             );
         }
+        assert_eq!(attribute_rule("issue_335_status"), Some("per-item"));
+        assert_eq!(attribute_rule("session_cost"), Some("event"));
     }
 
     #[test]

@@ -255,6 +255,16 @@ pub enum CursorUpdate<'a> {
     Set(&'a str),
 }
 
+/// One current fact the rule pass reads: the plaintext columns only, since
+/// the rules look at the key and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleFact {
+    pub scope: String,
+    pub subject: String,
+    pub id: String,
+    pub attribute: String,
+}
+
 /// One window of a subject's current facts, for a dream pass: the facts in
 /// order, whether more follow, and the cursor after the last of them.
 #[derive(Debug, Clone, PartialEq)]
@@ -1185,6 +1195,75 @@ impl FactStore {
             more,
             cursor,
         })
+    }
+
+    /// The next batch of current facts for the rule pass, oldest first, after
+    /// the stored position, and advances that position. The batch that reaches
+    /// the end clears it, so the next tick starts over. Bounded by `limit`.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn rule_batch(&self, limit: usize, now: i64) -> Result<Vec<RuleFact>, FactError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT cursor FROM fact_rule_scan WHERE name = 'facts'",
+                Vec::new(),
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let stored = rows
+            .rows
+            .first()
+            .and_then(|row| row.get::<String>("cursor"));
+        let mut values = Vec::new();
+        let mut sql = String::from(
+            "SELECT scope, subject, id, attribute, created_at FROM facts WHERE status = 'current'",
+        );
+        if let Some((created, id)) = stored.as_deref().and_then(|c| c.split_once('|')) {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            values.push(text(created));
+            values.push(text(created));
+            values.push(text(id));
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        values.push(SeaValue::BigInt(Some(limit as i64)));
+        let rows = self
+            .db
+            .query(&Statement::with_values(sql, values))
+            .await
+            .map_err(PageError::Store)?;
+        let next = if rows.rows.len() < limit {
+            None
+        } else {
+            rows.rows.last().map(|row| {
+                format!(
+                    "{}|{}",
+                    row.get::<String>("created_at").unwrap_or_default(),
+                    row.get::<String>("id").unwrap_or_default()
+                )
+            })
+        };
+        self.db
+            .execute(&Statement::with_values(
+                "INSERT INTO fact_rule_scan (name, cursor, updated_at) VALUES ('facts', ?, ?) \
+                 ON CONFLICT (name) DO UPDATE SET cursor = excluded.cursor, \
+                 updated_at = excluded.updated_at",
+                vec![opt_text(next.as_deref()), text(&timeline::rfc3339(now))],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .iter()
+            .map(|row| RuleFact {
+                scope: row.get::<String>("scope").unwrap_or_default(),
+                subject: row.get::<String>("subject").unwrap_or_default(),
+                id: row.get::<String>("id").unwrap_or_default(),
+                attribute: row.get::<String>("attribute").unwrap_or_default(),
+            })
+            .collect())
     }
 
     /// The attribute vocabulary of a subject's current facts: each distinct
