@@ -2806,3 +2806,65 @@ fn a_supersede_can_name_a_current_fact_from_a_later_window() {
         .expect("kept");
     assert_eq!(postgres.valid_to.as_ref().map(|to| to.text()), Some("2026"));
 }
+
+#[test]
+fn a_subject_left_part_way_by_an_old_pass_is_swept_to_the_end_on_the_next_ticks() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_tools(&world, &store, &scope, 65);
+    // The row an old pass left in production: done after one full window,
+    // with no cursor.
+    let at = world.clock.now().unix_timestamp();
+    pollster::block_on(store.0.dream_enqueue(&scope, "project/demo", at)).expect("enqueue");
+    assert!(
+        pollster::block_on(store.0.dream_claim(&scope, "project/demo", at, at + 600))
+            .expect("claim")
+    );
+    pollster::block_on(store.0.dream_finish(
+        &scope,
+        "project/demo",
+        &livingbrain_pages::DreamFinish {
+            status: "done",
+            dreamt: true,
+            facts_seen: 60,
+            decisions: 0,
+            applied: 0,
+            error: None,
+            cursor: livingbrain_pages::CursorUpdate::Keep,
+        },
+        at,
+    ))
+    .expect("finish");
+
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let unbounded = ScheduledBudget::unbounded();
+    // Due at once (no recheck wait): the first tick reads the first window,
+    // the next tick the rest, and then the subject rests until the recheck.
+    let first = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((first.enqueued, first.passes), (1, 1));
+    let second = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!(second.passes, 1);
+    assert_eq!(model.calls(), 2);
+    let inputs = model.inputs();
+    assert_eq!(fact_lines(&inputs[0]), 60);
+    assert_eq!(fact_lines(&inputs[1]), 5);
+    assert!(inputs[1].contains("reaches the end"));
+    let rested = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((rested.enqueued, rested.passes), (0, 0));
+    assert_eq!(
+        model.calls(),
+        2,
+        "a finished sweep is not swept again at once"
+    );
+}

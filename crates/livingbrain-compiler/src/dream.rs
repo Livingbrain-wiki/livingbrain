@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 
 use cratefield_core::ScheduledBudget;
-use livingbrain_pages::{CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish};
+use livingbrain_pages::{CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, SWEEP_END};
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
@@ -299,6 +299,12 @@ fn short_reason(raw: Option<&str>) -> String {
 /// part-way is queued with its cursor, and is due at the next tick, not at
 /// the recheck). A failed or skipped one waits a day before it is asked
 /// again, so a model that keeps failing is not called every tick.
+///
+/// A `done` subject with no cursor is a pass from before cursors: it read
+/// one window and may have stopped part-way. A full window (`facts_seen >=
+/// DREAM_WINDOW`) makes it due again, so the sweep continues at the next
+/// tick. A completed sweep stores [`SWEEP_END`] and is not due this way, so
+/// a subject of exactly one window does not loop.
 #[must_use]
 pub fn due(candidate: &DreamCandidate, now: OffsetDateTime) -> bool {
     let at = |raw: &Option<String>| {
@@ -307,6 +313,11 @@ pub fn due(candidate: &DreamCandidate, now: OffsetDateTime) -> bool {
     };
     match candidate.status.as_deref() {
         Some("queued" | "running") => return false,
+        Some("done")
+            if candidate.cursor.is_none() && candidate.facts_seen >= DREAM_WINDOW as i64 =>
+        {
+            return true;
+        }
         Some("failed" | "skipped") => {
             let waited = at(&candidate.updated_at)
                 .is_some_and(|since| now - since >= Duration::hours(RETRY_HOURS));
@@ -451,7 +462,7 @@ impl Compiler {
                     "done",
                     true,
                     None,
-                    CursorUpdate::Clear,
+                    CursorUpdate::End,
                     *seen,
                     *decisions,
                     *applied,
@@ -500,7 +511,11 @@ impl Compiler {
         scope: &str,
         subject: &str,
     ) -> Result<Pass, String> {
-        let after = dreams.cursor(scope, subject).await?;
+        // A finished sweep's marker starts a new sweep from the beginning.
+        let after = dreams
+            .cursor(scope, subject)
+            .await?
+            .filter(|cursor| cursor != SWEEP_END);
         let window = dreams
             .window(scope, subject, after.as_deref(), DREAM_WINDOW)
             .await?;
@@ -791,6 +806,8 @@ mod tests {
             dreamt_at: dreamt.map(str::to_owned),
             status: status.map(str::to_owned),
             updated_at: dreamt.map(str::to_owned),
+            cursor: None,
+            facts_seen: 0,
         }
     }
 
@@ -830,6 +847,32 @@ mod tests {
         assert!(!due(&failed, now), "a failure an hour ago waits");
         failed.updated_at = Some("2026-10-14T00:00:00Z".to_owned());
         assert!(due(&failed, now), "a failure a day old is asked again");
+    }
+
+    #[test]
+    fn a_pass_that_stopped_at_one_full_window_is_due_again_and_a_finished_sweep_is_not() {
+        let now = at("2026-10-16T00:00:00Z");
+        let recent = Some("2026-10-15T00:00:00Z");
+        // Production rows from before cursors: done, no cursor, one full window.
+        let mut legacy = candidate(Some("done"), recent, 0);
+        legacy.facts_seen = DREAM_WINDOW as i64;
+        assert!(due(&legacy, now), "a partial pass is due at once");
+        // A small subject's old pass read everything: nothing to continue.
+        let mut small = candidate(Some("done"), recent, 0);
+        small.facts_seen = 5;
+        assert!(!due(&small, now));
+        // A completed sweep of exactly one window stores the end marker: not due
+        // until the recheck, however many facts it read.
+        let mut finished = candidate(Some("done"), recent, 0);
+        finished.facts_seen = DREAM_WINDOW as i64;
+        finished.cursor = Some(SWEEP_END.to_owned());
+        assert!(
+            !due(&finished, now),
+            "a finished sweep waits for the recheck"
+        );
+        let mut stale = finished.clone();
+        stale.dreamt_at = Some("2026-10-01T00:00:00Z".to_owned());
+        assert!(due(&stale, now), "and is due again after 7 days");
     }
 
     #[test]

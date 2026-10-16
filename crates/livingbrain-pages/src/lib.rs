@@ -50,8 +50,8 @@ pub use entity::{
 pub use facts::{
     CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, DreamOutcomes, DreamPass,
     DreamWindow, FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
-    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
-    is_subject, person_subject, relevant, relevant_where,
+    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, SWEEP_END, Timeline, brief_lines, brief_section,
+    fact_json, is_subject, person_subject, relevant, relevant_where,
 };
 pub use graph::{
     GraphLink, GraphPage, GraphReach, GraphRows, GraphSource, GraphSubject, graph_rows,

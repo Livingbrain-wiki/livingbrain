@@ -229,7 +229,17 @@ pub struct DreamCandidate {
     pub status: Option<String>,
     /// When the subject's dream row last changed (its last pass or request).
     pub updated_at: Option<String>,
+    /// The window cursor: a position, [`SWEEP_END`], or `None` (never swept,
+    /// or a pass from before cursors).
+    pub cursor: Option<String>,
+    /// How many facts the last pass read.
+    pub facts_seen: i64,
 }
+
+/// The cursor a completed sweep leaves: a finished subject, not a position.
+/// A pass that stopped part-way leaves a `created_at|id` position instead,
+/// and a `done` row with no cursor is a pass from before cursors existed.
+pub const SWEEP_END: &str = "end";
 
 /// What a dream run does to a subject's window cursor when it ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,8 +247,10 @@ pub enum CursorUpdate<'a> {
     /// Leave it as it was (a run that could not start, or failed: the next
     /// run reviews the same window again).
     Keep,
-    /// The sweep reached the end: the next sweep starts from the beginning.
-    Clear,
+    /// The sweep reached the end: stored as [`SWEEP_END`], which says the
+    /// subject is finished (its recheck interval starts) and which the next
+    /// sweep reads as "from the beginning".
+    End,
     /// More of the subject is left: the next run starts after this window.
     Set(&'a str),
 }
@@ -929,10 +941,11 @@ impl FactStore {
             .query(&Statement::with_values(
                 "SELECT f.scope AS scope, f.subject AS subject, COUNT(*) AS current_count, \
                  SUM(CASE WHEN f.created_at > COALESCE(d.dreamt_at, '') THEN 1 ELSE 0 END) AS fresh, \
-                 d.dreamt_at AS dreamt_at, d.status AS status, d.updated_at AS updated_at \
+                 d.dreamt_at AS dreamt_at, d.status AS status, d.updated_at AS updated_at, \
+                 d.cursor AS cursor, d.facts_seen AS facts_seen \
                  FROM facts f LEFT JOIN fact_dreams d ON d.scope = f.scope AND d.subject = f.subject \
                  WHERE f.status = 'current' \
-                 GROUP BY f.scope, f.subject, d.dreamt_at, d.status, d.updated_at \
+                 GROUP BY f.scope, f.subject, d.dreamt_at, d.status, d.updated_at, d.cursor, d.facts_seen \
                  HAVING COUNT(*) >= ? ORDER BY f.scope ASC, f.subject ASC LIMIT ?",
                 vec![
                     SeaValue::BigInt(Some(min_facts as i64)),
@@ -952,6 +965,8 @@ impl FactStore {
                 dreamt_at: row.get::<String>("dreamt_at"),
                 status: row.get::<String>("status"),
                 updated_at: row.get::<String>("updated_at"),
+                cursor: row.get::<String>("cursor"),
+                facts_seen: row.get::<i64>("facts_seen").unwrap_or_default(),
             })
             .collect())
     }
@@ -1058,7 +1073,7 @@ impl FactStore {
         // The cursor is set, cleared or left alone; only the first two write it.
         let (cursor_sql, cursor_value) = match outcome.cursor {
             CursorUpdate::Keep => ("", None),
-            CursorUpdate::Clear => (", cursor = ?", None),
+            CursorUpdate::End => (", cursor = ?", Some(SWEEP_END)),
             CursorUpdate::Set(cursor) => (", cursor = ?", Some(cursor)),
         };
         let mut values = vec![
@@ -1134,6 +1149,9 @@ impl FactStore {
         let mut sql = String::from(
             "SELECT * FROM facts WHERE scope = ? AND subject = ? AND status = 'current'",
         );
+        // A finished sweep's marker is not a position: the next sweep starts
+        // from the beginning.
+        let cursor = cursor.filter(|c| *c != SWEEP_END);
         if let Some((created, id)) = cursor.and_then(|c| c.split_once('|')) {
             sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
             values.push(text(created));

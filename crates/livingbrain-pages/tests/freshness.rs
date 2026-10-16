@@ -263,7 +263,7 @@ fn the_dream_queue_finds_a_subject_claims_it_once_and_keeps_a_record() {
                     decisions: 1,
                     applied: 1,
                     error: None,
-                    cursor: CursorUpdate::Clear,
+                    cursor: CursorUpdate::End,
                 },
                 at,
             )
@@ -435,15 +435,17 @@ fn the_dream_cursor_is_kept_set_or_cleared_as_a_pass_ends() {
             "kept"
         );
         kit.facts
-            .dream_finish("user-a", "project/demo", &finish(CursorUpdate::Clear), now)
+            .dream_finish("user-a", "project/demo", &finish(CursorUpdate::End), now)
             .await
             .unwrap();
         assert_eq!(
             kit.facts
                 .dream_cursor("user-a", "project/demo")
                 .await
-                .unwrap(),
-            None
+                .unwrap()
+                .as_deref(),
+            Some(livingbrain_pages::SWEEP_END),
+            "a completed sweep is marked finished"
         );
     });
 }
