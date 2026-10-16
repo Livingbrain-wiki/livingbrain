@@ -21,7 +21,17 @@ import {
   createLayout,
 } from "./graph.js";
 import { mountBrain } from "./brain-render.js";
-import { bindFullscreen } from "./brain-fullscreen.js";
+import { bindFullscreen, isTypingTarget } from "./brain-fullscreen.js";
+import {
+  FEED_MAX,
+  activityPath,
+  bindLive,
+  createPoller,
+  feedEntry,
+  paintFeed,
+  pulseTargets,
+  readLivePref,
+} from "./brain-live.js";
 import { renderMarkdown } from "./markdown.js";
 import { linkWikilinks } from "./wiki.js";
 
@@ -76,6 +86,10 @@ export async function brainPage(deps) {
     flat: $("map-flat"),
     reset: $("map-reset"),
     fullscreen: $("map-fullscreen"),
+    live: $("map-live"),
+    bubble: $("map-bubble"),
+    feed: $("map-feed"),
+    feedList: $("map-feed-list"),
     zoomIn: $("map-zoom-in"),
     zoomOut: $("map-zoom-out"),
     time: $("map-time"),
@@ -455,6 +469,72 @@ export async function brainPage(deps) {
   // Full screen: the stage (canvas, controls, side panel) fills the screen;
   // the button is hidden where the browser has no Fullscreen API.
   bindFullscreen({ button: els.fullscreen, stage: els.stage, doc: document });
+
+  // Live mode: while on, the feed is polled (paused while the tab is hidden,
+  // backing off on errors) and the nodes just used are lit. The camera never
+  // moves by itself; a feed line focuses its node.
+  const liveFeed = [];
+  let bubbleTimer = 0;
+  const nodeNamed = (id) => (graph ? graph.nodes.find((node) => node.id === id) : undefined);
+  const showBubble = (index, text) => {
+    const at = view ? view.screenOf(index) : null;
+    if (!at || !els.bubble) return;
+    els.bubble.textContent = text;
+    els.bubble.style.left = `${at.x}px`;
+    els.bubble.style.top = `${at.y}px`;
+    els.bubble.hidden = false;
+    clearTimeout(bubbleTimer);
+    bubbleTimer = setTimeout(() => {
+      els.bubble.hidden = true;
+    }, 2500);
+  };
+  const showLive = (events) => {
+    const indexOf = (id) => {
+      const node = nodeNamed(id);
+      return node ? node.i : -1;
+    };
+    const { indices, unknown } = pulseTargets(events, indexOf);
+    if (view && indices.length) view.pulse(indices.map((hit) => hit.index));
+    for (const hit of indices.slice(-1)) {
+      const node = nodeNamed(hit.event.node);
+      showBubble(hit.index, `${node ? node.label : "a page"} — ${hit.event.label}`);
+    }
+    for (const event of events) {
+      const node = nodeNamed(event.node);
+      liveFeed.unshift(feedEntry(event, node ? node.label : "", Date.now()));
+    }
+    liveFeed.splice(FEED_MAX);
+    paintFeed(els.feedList, liveFeed, document, (id) => {
+      const node = nodeNamed(id);
+      if (node) openPanel(node);
+    });
+    if (unknown.length) {
+      notice(els.notice, "Something new was used that the map does not draw yet. Reload the map to see it.", "warn");
+    }
+  };
+  let storage = null;
+  try {
+    storage = window.localStorage;
+  } catch {
+    storage = null;
+  }
+  const poller = createPoller({
+    fetchActivity: (cursor) => api(activityPath(cursor)),
+    onEvents: showLive,
+    doc: document,
+  });
+  const live = bindLive({
+    button: els.live,
+    poller,
+    doc: document,
+    storage,
+    isTyping: isTypingTarget,
+    onChange: (on) => {
+      if (els.feed) els.feed.hidden = !on;
+      if (!on && els.bubble) els.bubble.hidden = true;
+    },
+  });
+  if (readLivePref(storage)) live.set(true, { remember: false });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !els.panel.hidden) closePanel();
   });

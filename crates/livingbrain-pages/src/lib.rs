@@ -72,8 +72,8 @@ pub use sources::{
     is_project,
 };
 pub use store::{
-    Author, AuthorKind, Page, PageError, PageFilter, PageStore, PageSummary, PageWrite,
-    ReencryptReport, SearchHit, TitleCandidate, VersionMeta,
+    ActivityRow, Author, AuthorKind, Page, PageError, PageFilter, PageStore, PageSummary,
+    PageWrite, ReencryptReport, SearchHit, TitleCandidate, VersionMeta, activity_rows,
 };
 pub use titles::{
     SESSION_SLUG_PREFIX, agent_label, frontmatter_title, is_placeholder_title, is_session_slug,
@@ -160,6 +160,13 @@ const MIGRATION_RULE_SCAN: SqlMigration = SqlMigration::new(
     "0010",
     "rule_scan",
     include_str!("../migrations/sqlite/0010_rule_scan.sql"),
+);
+
+/// The brain map's live feed: one row per page read, search or write.
+const MIGRATION_ACTIVITY: SqlMigration = SqlMigration::new(
+    "0011",
+    "activity",
+    include_str!("../migrations/sqlite/0011_activity.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -312,6 +319,7 @@ impl Module for Pages {
             "fact_dreams",
             "fact_dream_decisions",
             "fact_rule_scan",
+            "graph_activity",
         ]
     }
 
@@ -418,6 +426,13 @@ impl Module for Pages {
                 "the row is keyed by the scope and a subject slug and holds counts only; \
                  forgetting a scope deletes its rows",
             ),
+            PersonalDataSet::unreachable(
+                "graph_activity",
+                DataKind::Content,
+                "the row names a page by its scope and slug and says how it was used (read, \
+                 searched, written) and by which client; a day of rows, pruned on each write",
+                "the identifying content is the slug, not a column an erasure query can bind to",
+            ),
             PersonalDataSet::none(
                 "fact_rule_scan",
                 "The rule pass's position: a fact id and a timestamp, no fact text and no person.",
@@ -434,7 +449,7 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 10] = [
+        const MIGRATIONS: [SqlMigration; 11] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
@@ -445,6 +460,7 @@ impl Module for Pages {
             MIGRATION_DREAMING,
             MIGRATION_DREAM_CURSOR,
             MIGRATION_RULE_SCAN,
+            MIGRATION_ACTIVITY,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).
