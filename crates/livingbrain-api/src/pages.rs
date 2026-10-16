@@ -188,6 +188,16 @@ async fn read_one(
     let page = read_first(&store, &filters, &slug)
         .await?
         .ok_or_else(|| Problem::new(&PAGE_NOT_FOUND))?;
+    // The live feed: a session credential is the web app, a token is a CLI.
+    // Best effort; the read is never failed for want of its log line.
+    let actor = if asker.credential.is_some() {
+        "CLI"
+    } else {
+        "web"
+    };
+    store
+        .record_activity(&asker.workspace_id, &page.scope, &slug, "read", actor)
+        .await;
     Ok(Json(page_view(&state, &plan, &store, &page).await?))
 }
 

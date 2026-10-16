@@ -24,6 +24,8 @@ import {
   renderGrantRows,
   renderReaders,
   principalLabel,
+  roleCounts,
+  emptyRoleWarnings,
   grantPlan,
   grantPreview,
   grantBatchRequest,
@@ -137,7 +139,8 @@ test("painters write text, so a name full of markup stays text", () => {
     doc(),
   );
   assert.equal(list.children[0].children[0].textContent, "<b>Eve</b>");
-  assert.equal(principalLabel("role:member", [], []), "everyone with the member role");
+  assert.equal(principalLabel("role:member", [], []), "everyone with the member role · 0 people");
+  assert.equal(principalLabel("role:member", null, []), "everyone with the member role");
 });
 
 test("the module never touches markup or storage", () => {
@@ -240,11 +243,52 @@ test("who: people (not yourself), agent accounts and role groups", () => {
     [
       ["member:usr_b", "People"],
       ["agent:agt_1", "Agent accounts"],
-      ["role:member", "Role groups"],
+      ["role:owner", "Role groups"],
       ["role:admin", "Role groups"],
+      ["role:member", "Role groups"],
       ["role:viewer", "Role groups"],
     ],
   );
+});
+
+test("the owner role group is offered, with how many people have each role", () => {
+  const members = [
+    { user_id: "usr_a", name: "Ann", role: "owner" },
+    { user_id: "usr_b", name: "Bob", role: "owner" },
+    { user_id: "usr_c", name: "Cy", role: "member" },
+    { user_id: "usr_d", name: "Di", role: "weird" },
+  ];
+  assert.deepEqual(roleCounts(members), { owner: 2, admin: 0, member: 1, viewer: 0 });
+  assert.equal(roleCounts(null), null);
+  const options = principalOptions(members, [], "usr_a");
+  const byValue = Object.fromEntries(options.map((o) => [o.value, o.label]));
+  assert.equal(byValue["role:owner"], "Everyone with the owner role · 2 people");
+  assert.equal(byValue["role:admin"], "Everyone with the admin role · 0 people");
+  assert.equal(byValue["role:member"], "Everyone with the member role · 1 person");
+  // A roster that did not load: the groups still exist, with no counts.
+  const unknown = Object.fromEntries(principalOptions(null, [], "x").map((o) => [o.value, o.label]));
+  assert.equal(unknown["role:admin"], "Everyone with the admin role");
+});
+
+test("a role group with nobody in it gets a plain warning under Who", () => {
+  const members = [{ user_id: "usr_a", role: "owner" }, { user_id: "usr_b", role: "member" }];
+  assert.deepEqual(emptyRoleWarnings(["role:admin", "member:usr_b"], members), [
+    "Nobody has the admin role yet, so this grant reaches no one today.",
+  ]);
+  assert.deepEqual(emptyRoleWarnings(["role:owner", "role:member"], members), []);
+  assert.deepEqual(emptyRoleWarnings(["role:admin"], null), [], "no warning when the roster is unknown");
+});
+
+test("a role grant row shows the role with its count", () => {
+  const rows = box();
+  renderGrantRows(
+    rows,
+    grantViews({ grants: [{ id: "g9", principal: "role:admin", space: "shared", path: "", kind: "*", permission: "read" }] }),
+    [{ user_id: "usr_a", role: "owner" }, { user_id: "usr_b", role: "owner" }],
+    [],
+    doc(),
+  );
+  assert.equal(rows.children[0].children[1].textContent, "everyone with the admin role · 0 people");
 });
 
 test("where: folders from the coding-agents tree, page slugs and source projects", () => {

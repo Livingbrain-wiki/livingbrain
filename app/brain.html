@@ -131,12 +131,23 @@
             aria-label="Your brain as a 3D graph. Arrow keys turn it, plus and minus zoom, 0 resets. The list below holds the same nodes."
           ></canvas>
           <div id="map-tip" class="map-tip" hidden></div>
+          <p id="map-bubble" class="map-bubble" role="status" hidden></p>
+          <aside id="map-feed" class="map-feed" aria-labelledby="map-feed-title" hidden>
+            <h2 id="map-feed-title" class="map-feed__title">Live</h2>
+            <p class="tiny muted">The pages your brain just used, newest first. Pick one to go to it.</p>
+            <ol id="map-feed-list" class="map-feed__list"></ol>
+          </aside>
           <div class="map-controls" role="group" aria-label="View">
             <button type="button" id="map-zoom-in" class="btn-sm" aria-label="Zoom in">+</button>
             <button type="button" id="map-zoom-out" class="btn-sm" aria-label="Zoom out">−</button>
             <button type="button" id="map-spin" class="btn-sm" aria-pressed="true">Spin</button>
             <button type="button" id="map-flat" class="btn-sm" aria-pressed="false">Flat</button>
             <button type="button" id="map-reset" class="btn-sm">Reset</button>
+            <button type="button" id="map-fullscreen" class="btn-sm map-fs" aria-pressed="false" hidden>
+              <svg class="map-fs__icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span data-label>Full screen</span>
+            </button>
+            <button type="button" id="map-live" class="btn-sm map-live" aria-pressed="false">Live</button>
           </div>
           <aside id="map-panel" class="map-panel" aria-labelledby="map-panel-title" hidden>
             <div class="map-panel__head">

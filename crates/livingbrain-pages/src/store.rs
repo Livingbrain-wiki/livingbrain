@@ -1727,3 +1727,135 @@ fn version_meta_from(row: &Row) -> Result<VersionMeta, PageError> {
         created_at: row.get::<String>("created_at").unwrap_or_default(),
     })
 }
+
+/// One row of the brain map's live feed: a page read, searched or written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityRow {
+    /// Monotonic per table: the feed's cursor.
+    pub id: i64,
+    pub scope: String,
+    pub slug: String,
+    /// `read`, `search` or `write`.
+    pub kind: String,
+    /// Who did it, in words: `Claude`, `CLI` or `web`.
+    pub actor: String,
+    /// RFC 3339, as the store stamps it.
+    pub at: String,
+}
+
+/// How long the live feed keeps a row.
+const ACTIVITY_TTL_HOURS: i64 = 24;
+
+impl PageStore {
+    /// Records one read, search or write of a page for the live feed.
+    /// Best effort: a failure is dropped, because the read or write it
+    /// describes must never fail for want of its log line. Also prunes the
+    /// rows older than a day.
+    pub async fn record_activity(
+        &self,
+        workspace: &str,
+        scope: &str,
+        slug: &str,
+        kind: &str,
+        actor: &str,
+    ) {
+        let now = self.clock.now();
+        let at = now.format(&Rfc3339).unwrap_or_default();
+        let candidate = activity_id(now, &self.id_gen.ulid());
+        let _ = self
+            .db
+            .execute(&Statement::with_values(
+                // Never below the newest row: the cursor stays monotonic even
+                // when two writes share a microsecond (or a test's clock).
+                "INSERT INTO graph_activity (id, workspace_id, scope, slug, kind, actor, at) \
+                 SELECT CASE WHEN ? > COALESCE(MAX(id), 0) THEN ? ELSE COALESCE(MAX(id), 0) + 1 END, \
+                        ?, ?, ?, ?, ?, ? \
+                 FROM graph_activity",
+                vec![
+                    SeaValue::BigInt(Some(candidate)),
+                    SeaValue::BigInt(Some(candidate)),
+                    text(workspace),
+                    text(scope),
+                    text(slug),
+                    text(kind),
+                    text(actor),
+                    text(&at),
+                ],
+            ))
+            .await;
+        let cutoff = (now - time::Duration::hours(ACTIVITY_TTL_HOURS))
+            .format(&Rfc3339)
+            .unwrap_or_default();
+        let _ = self
+            .db
+            .execute(&Statement::with_values(
+                "DELETE FROM graph_activity WHERE at < ?",
+                vec![text(&cutoff)],
+            ))
+            .await;
+    }
+}
+
+/// A workspace's live-feed rows, oldest first. With `since`, the rows after
+/// that id (the first `cap` of them); without it, the newest `cap`.
+///
+/// # Errors
+///
+/// [`DbError`] when the query fails.
+/// A feed row id that grows with time: microseconds since the epoch times
+/// 4096, plus 12 bits taken from a fresh ULID so two writes in the same
+/// microsecond rarely collide (a collision only drops that one best-effort
+/// row). Fits an `i64` until the year 2040+ by a wide margin.
+fn activity_id(now: time::OffsetDateTime, ulid: &str) -> i64 {
+    let micros = i64::try_from(now.unix_timestamp_nanos() / 1_000).unwrap_or(0);
+    let low = ulid
+        .bytes()
+        .rev()
+        .take(3)
+        .fold(0_i64, |acc, b| (acc << 5) ^ i64::from(b))
+        & 0xFFF;
+    micros.saturating_mul(4096).saturating_add(low)
+}
+
+pub async fn activity_rows(
+    db: &dyn Database,
+    workspace: &str,
+    since: Option<i64>,
+    cap: usize,
+) -> Result<Vec<ActivityRow>, DbError> {
+    let cap = SeaValue::BigInt(Some(i64::try_from(cap).unwrap_or(i64::MAX)));
+    let columns =
+        "SELECT id, scope, slug, kind, actor, at FROM graph_activity WHERE workspace_id = ?";
+    let rows = match since {
+        Some(after) => {
+            db.query(&Statement::with_values(
+                format!("{columns} AND id > ? ORDER BY id ASC LIMIT ?"),
+                vec![text(workspace), SeaValue::BigInt(Some(after)), cap],
+            ))
+            .await?
+            .rows
+        }
+        None => {
+            let mut newest = db
+                .query(&Statement::with_values(
+                    format!("{columns} ORDER BY id DESC LIMIT ?"),
+                    vec![text(workspace), cap],
+                ))
+                .await?
+                .rows;
+            newest.reverse();
+            newest
+        }
+    };
+    Ok(rows
+        .iter()
+        .map(|row| ActivityRow {
+            id: row.get::<i64>("id").unwrap_or_default(),
+            scope: row.get::<String>("scope").unwrap_or_default(),
+            slug: row.get::<String>("slug").unwrap_or_default(),
+            kind: row.get::<String>("kind").unwrap_or_default(),
+            actor: row.get::<String>("actor").unwrap_or_default(),
+            at: row.get::<String>("at").unwrap_or_default(),
+        })
+        .collect())
+}

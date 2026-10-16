@@ -955,3 +955,53 @@ fn an_agent_account_reads_exactly_its_folder_through_the_tools() {
         "{theirs}"
     );
 }
+
+#[test]
+fn a_tool_read_lands_on_the_live_feed_of_its_own_workspace_only() {
+    let fixture = world();
+    seed(&fixture, "ws-one", &user("u-a"), "kestrel", KESTREL);
+    seed(&fixture, "ws-two", &user("u-a"), "atlas", ATLAS);
+
+    let read = post(
+        &fixture,
+        "token-a",
+        call("brain_page", json!({ "slug": "kestrel" })),
+    );
+    assert!(
+        text_of(&read).contains("Reykjavik"),
+        "the read itself still answers"
+    );
+    let search = post(
+        &fixture,
+        "token-a",
+        call("brain_search", json!({ "query": "reykjavik" })),
+    );
+    assert_eq!(search.status, StatusCode::OK);
+
+    let feed = |workspace: &str| {
+        pollster::block_on(livingbrain_pages::activity_rows(
+            fixture.db.as_ref(),
+            workspace,
+            None,
+            50,
+        ))
+        .expect("the feed reads")
+    };
+    let mine: Vec<(String, String, String)> = feed("ws-one")
+        .into_iter()
+        .map(|row| (row.kind, row.slug, row.actor))
+        .collect();
+    assert!(
+        mine.contains(&("read".to_owned(), "kestrel".to_owned(), "Claude".to_owned())),
+        "{mine:?}"
+    );
+    assert!(
+        mine.iter()
+            .any(|(kind, slug, _)| kind == "search" && slug == "kestrel"),
+        "a search that finds the page is on the feed: {mine:?}"
+    );
+    assert!(
+        feed("ws-two").is_empty(),
+        "another workspace's feed is its own"
+    );
+}

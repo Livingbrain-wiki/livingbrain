@@ -220,7 +220,15 @@ pub(crate) async fn run(
     // The pages the asker may read, each scope with its slug filter (ADR
     // 0004). Every read below goes through these and nothing else.
     let filters = plan.filters(KIND_PAGES, Permission::Read);
-    match call {
+    // What the live feed calls this read (`GET /v1/graph/activity`); facts
+    // are not pages, so they record nothing.
+    let feed = match &call {
+        Call::Search { .. } | Call::Recent { .. } | Call::ContextFor { .. } => "search",
+        Call::Page { .. } => "read",
+        Call::Note { .. } => "write",
+        Call::Facts { .. } => "",
+    };
+    let outcome = match call {
         Call::Search { query, limit } => search(store, base, &filters, &query, limit).await,
         Call::Recent { limit } => recent(store, base, &filters, limit).await,
         Call::Page { slug } => page(store, base, &filters, &slug).await,
@@ -253,6 +261,38 @@ pub(crate) async fn run(
                 as_of.as_deref(),
             )
             .await
+        }
+    };
+    if let Ok(value) = &outcome {
+        record_feed(store, &asker.workspace_id, feed, value).await;
+    }
+    outcome
+}
+
+/// Puts the pages an answer names on the live feed, at most five a call.
+/// Best effort by construction: `record_activity` never fails.
+async fn record_feed(store: &PageStore, workspace: &str, kind: &str, value: &Value) {
+    if kind.is_empty() {
+        return;
+    }
+    let structured = value.get("structuredContent").unwrap_or(value);
+    let mut refs: Vec<&str> = structured
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("ref").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(one) = structured.get("ref").and_then(Value::as_str) {
+        refs.push(one);
+    }
+    for reference in refs.into_iter().take(5) {
+        if let Some((scope, slug)) = reference.rsplit_once('/') {
+            store
+                .record_activity(workspace, scope, slug, kind, "Claude")
+                .await;
         }
     }
 }

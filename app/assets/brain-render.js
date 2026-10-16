@@ -492,6 +492,19 @@ export function mountBrain(canvas, graph, layout, options = {}) {
       dirty = true;
       schedule();
     },
+    /** Lights nodes as if they were just used: the glow fades, and linked nodes
+     * catch some of it. Out-of-range indices are ignored. */
+    pulse(indices) {
+      for (const i of indices) {
+        if (i >= 0 && i < n) glow[i] = 1;
+      }
+      dirty = true;
+      schedule();
+    },
+    /** Where node `i` is now, in CSS pixels of the canvas (or null). */
+    screenOf(i) {
+      return i >= 0 && i < n ? { x: sx[i], y: sy[i] } : null;
+    },
     /** Nodes to glow and label (search matches); an empty list clears. */
     setFocus(list) {
       focus = new Uint8Array(n);

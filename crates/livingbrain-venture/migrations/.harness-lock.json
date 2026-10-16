@@ -198,5 +198,9 @@
   "coding-agents/0007": {
     "file": "0050_coding-agents_0007_source_compile_jobs.sql",
     "sha256": "7cb342603c3517a407593e04902810dfaf0eff36271a37fc115e0702286d7858"
+  },
+  "pages/0011": {
+    "file": "0051_pages_0011_activity.sql",
+    "sha256": "961da0889149174c1a12b3a79d51eaf48b6e42f5a9247d45300d489538cdaa5b"
   }
 }

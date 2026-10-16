@@ -42,7 +42,9 @@ use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::layout::segment;
 use livingbrain_compiler::{JobStatus, Queue};
 use livingbrain_pages::access::{KIND_FACTS, KIND_PAGES, ScopeFilter, subject_path};
-use livingbrain_pages::{GraphReach, GraphRows, graph_rows_in, is_project};
+use livingbrain_pages::{
+    ActivityRow, GraphReach, GraphRows, activity_rows, graph_rows_in, is_project,
+};
 use serde_json::{Value, json};
 
 use crate::Wiki;
@@ -128,6 +130,7 @@ impl Module for Graph {
         let state = Arc::new(Service::from_wiki(ctx, &self.wiki));
         cratefield_core::axum::Router::new()
             .route("/", get(graph))
+            .route("/activity", get(activity))
             .with_state(state)
     }
 }
@@ -208,6 +211,102 @@ async fn graph(
         })
         .collect();
     Ok(Json(build(&rows, &compiled, &query, &state.base())))
+}
+
+/// The most events one live-feed answer carries; the newest are kept.
+pub const ACTIVITY_CAP: usize = 100;
+
+/// `GET /activity?since=` — the live feed: the pages the asker may read, that
+/// were read, searched or written, as `{cursor, events}`. Pass the answer's
+/// `cursor` back as `since` to get only what came after it.
+///
+/// **Who sees what.** The same page grants as the map: a row is answered only
+/// when the asker's page filters read its scope and slug. A row the asker may
+/// not read is dropped here and its existence is not said; the cursor still
+/// moves past it, so a filtered feed never re-reads what it skipped.
+///
+/// # Errors
+///
+/// 401 without a credential, 400 (`validation-failed`) for a `since` that is
+/// not a cursor, and [`Problem::internal`] when the database fails.
+async fn activity(
+    State(state): State<Arc<Service>>,
+    method: Method,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, Problem> {
+    let asker = state.asker(&method, &headers).await?;
+    let since = parse_since(&query)?;
+    let plan = state.access(&asker).await?;
+    let filters = plan.filters(KIND_PAGES, Permission::Read);
+    let db = port(state.ctx().ports.db.clone())?;
+    let rows = activity_rows(db.as_ref(), &asker.workspace_id, since, SCAN_CAP)
+        .await
+        .map_err(|_| Problem::internal())?;
+    Ok(Json(activity_view(&rows, &filters, since)))
+}
+
+/// Reads `since`, the cursor of an earlier live-feed answer.
+///
+/// # Errors
+///
+/// A `validation-failed` problem for a value that is not a cursor.
+pub fn parse_since(query: &HashMap<String, String>) -> Result<Option<i64>, Problem> {
+    match query.get("since").map(|raw| raw.trim()) {
+        None | Some("") => Ok(None),
+        Some(raw) => raw
+            .parse::<i64>()
+            .ok()
+            .filter(|cursor| *cursor >= 0)
+            .map(Some)
+            .ok_or_else(|| {
+                Problem::validation_failed(format!(
+                    "`since` must be a cursor from an earlier answer, got {raw:?}"
+                ))
+            }),
+    }
+}
+
+/// The feed's answer from the rows (oldest first): the rows the filters read,
+/// the newest [`ACTIVITY_CAP`] of them, and the cursor past every row seen.
+#[must_use]
+pub fn activity_view(rows: &[ActivityRow], filters: &[ScopeFilter], since: Option<i64>) -> Value {
+    let cursor = rows.iter().map(|row| row.id).max().or(since).unwrap_or(0);
+    let visible: Vec<Value> = rows
+        .iter()
+        .filter(|row| {
+            filters
+                .iter()
+                .any(|filter| filter.scope == row.scope && filter.matches(&row.slug))
+        })
+        .filter_map(|row| {
+            let kind = match row.kind.as_str() {
+                "read" | "search" | "write" => row.kind.as_str(),
+                _ => return None,
+            };
+            Some(json!({
+                "at": row.at,
+                "kind": kind,
+                "node": format!("page:{}:{}", row.scope, row.slug),
+                "actor": row.actor,
+                "label": activity_label(kind, &row.actor),
+            }))
+        })
+        .collect();
+    let newest = visible.len().saturating_sub(ACTIVITY_CAP);
+    json!({
+        "cursor": cursor.to_string(),
+        "events": visible[newest..],
+    })
+}
+
+/// A feed line in plain English.
+fn activity_label(kind: &str, actor: &str) -> String {
+    match kind {
+        "read" => format!("read by {actor}"),
+        "search" => format!("found by a search from {actor}"),
+        _ => format!("written by {actor}"),
+    }
 }
 
 /// Reads `project`, `kind` (comma-separated) and `limit`.
@@ -929,5 +1028,92 @@ mod tests {
             kinds,
             BTreeSet::from(["person".to_owned(), "session".to_owned()])
         );
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    fn row(id: i64, scope: &str, slug: &str, kind: &str) -> ActivityRow {
+        ActivityRow {
+            id,
+            scope: scope.to_owned(),
+            slug: slug.to_owned(),
+            kind: kind.to_owned(),
+            actor: "Claude".to_owned(),
+            at: "2026-10-17T10:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn only_the_pages_the_filters_read_are_answered() {
+        let rows = vec![
+            row(1, "mine", "plan", "read"),
+            row(2, "theirs", "private", "read"),
+            row(3, "mine", "notes", "search"),
+        ];
+        let filters = [ScopeFilter::whole("mine", "personal:me")];
+        let view = activity_view(&rows, &filters, None);
+        let nodes: Vec<&str> = view["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["node"].as_str().unwrap())
+            .collect();
+        assert_eq!(nodes, ["page:mine:plan", "page:mine:notes"]);
+        assert!(
+            !view.to_string().contains("private"),
+            "an unreadable slug is not said"
+        );
+        assert_eq!(
+            view["cursor"], "3",
+            "the cursor moves past the skipped row too"
+        );
+    }
+
+    #[test]
+    fn a_grant_on_another_scope_shows_its_events() {
+        let rows = vec![row(7, "theirs", "private", "write")];
+        assert_eq!(activity_view(&rows, &[], None)["events"], json!([]));
+        let granted = [ScopeFilter::whole("theirs", "shared")];
+        let view = activity_view(&rows, &granted, None);
+        assert_eq!(view["events"][0]["label"], "written by Claude");
+    }
+
+    #[test]
+    fn the_cursor_is_monotonic_and_empty_answers_keep_it() {
+        let rows = vec![row(4, "mine", "a", "read"), row(9, "mine", "b", "read")];
+        let filters = [ScopeFilter::whole("mine", "personal:me")];
+        assert_eq!(activity_view(&rows, &filters, None)["cursor"], "9");
+        assert_eq!(activity_view(&[], &filters, Some(12))["cursor"], "12");
+        assert_eq!(activity_view(&[], &filters, None)["cursor"], "0");
+    }
+
+    #[test]
+    fn the_feed_keeps_the_newest_hundred_in_order() {
+        let rows: Vec<ActivityRow> = (1..=150)
+            .map(|id| row(id, "mine", &format!("p{id}"), "read"))
+            .collect();
+        let filters = [ScopeFilter::whole("mine", "personal:me")];
+        let events = activity_view(&rows, &filters, None)["events"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(events.len(), ACTIVITY_CAP);
+        assert_eq!(events[0]["node"], "page:mine:p51");
+        assert_eq!(events[99]["node"], "page:mine:p150");
+    }
+
+    #[test]
+    fn since_must_be_a_cursor() {
+        let mut query = HashMap::new();
+        assert_eq!(parse_since(&query).unwrap(), None);
+        query.insert("since".to_owned(), "42".to_owned());
+        assert_eq!(parse_since(&query).unwrap(), Some(42));
+        query.insert("since".to_owned(), "-1".to_owned());
+        assert!(parse_since(&query).is_err());
+        query.insert("since".to_owned(), "yesterday".to_owned());
+        assert!(parse_since(&query).is_err());
     }
 }

@@ -282,3 +282,65 @@ fn a_bad_query_is_a_400_and_no_credential_is_a_401() {
     assert_eq!(status_of(&anon), 401, "{}", body_text(&anon));
     assert!(is_problem(&anon));
 }
+
+/// The feed's node ids in an answer, in order.
+fn feed_nodes(answer: &Value) -> Vec<String> {
+    answer["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|event| event["node"].as_str().expect("a node").to_owned())
+        .collect()
+}
+
+#[test]
+fn the_live_feed_records_reads_shows_only_what_the_asker_reads_and_moves_its_cursor() {
+    let fixture = world();
+    let a_scope = scope_of(WORKSPACE, "user-a");
+    let b_scope = scope_of(WORKSPACE, "user-b");
+    // Each member reads their own page through the API: the read is recorded.
+    assert_eq!(get(&fixture, TOKEN_A, "/v1/pages/a-secret").status, 200);
+    assert_eq!(get(&fixture, TOKEN_B, "/v1/pages/b-secret").status, 200);
+    // A's read of B's page is refused, so nothing of it is recorded either.
+    assert_eq!(get(&fixture, TOKEN_A, "/v1/pages/b-secret").status, 404);
+
+    let feed = |token: &str, query: &str| {
+        let response = get(&fixture, token, &format!("/v1/graph/activity{query}"));
+        assert_eq!(response.status, 200, "{}", body_text(&response));
+        response.json()
+    };
+    let a = feed(TOKEN_A, "");
+    assert_eq!(feed_nodes(&a), [format!("page:{a_scope}:a-secret")]);
+    assert_eq!(a["events"][0]["kind"], "read");
+    assert_eq!(a["events"][0]["actor"], "web");
+    assert_eq!(a["events"][0]["label"], "read by web");
+
+    let b = feed(TOKEN_B, "");
+    assert_eq!(feed_nodes(&b), [format!("page:{b_scope}:b-secret")]);
+    assert!(
+        !b.to_string().contains("a-secret"),
+        "A's page is not in B's feed"
+    );
+
+    // The cursor: A's next answer holds only what came after it.
+    let cursor = a["cursor"].as_str().expect("a cursor").to_owned();
+    assert!(
+        feed(TOKEN_A, &format!("?since={cursor}"))["events"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(get(&fixture, TOKEN_A, "/v1/pages/a-secret").status, 200);
+    let after = feed(TOKEN_A, &format!("?since={cursor}"));
+    assert_eq!(feed_nodes(&after), [format!("page:{a_scope}:a-secret")]);
+    assert!(
+        after["cursor"].as_str().unwrap().parse::<i64>().unwrap() > cursor.parse::<i64>().unwrap()
+    );
+
+    // A bad cursor is refused, and no credential is refused.
+    assert_eq!(
+        get(&fixture, TOKEN_A, "/v1/graph/activity?since=soon").status,
+        400
+    );
+    assert_eq!(get_anon(&fixture, "/v1/graph/activity").status, 401);
+}

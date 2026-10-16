@@ -139,6 +139,7 @@ import {
   renderAuditRows,
   revealAgentKey,
   clearAgentKey,
+  emptyRoleWarnings,
 } from "./access.js";
 import { isSafeHref } from "./markdown.js";
 import {
@@ -2560,6 +2561,7 @@ async function wireAccess() {
   const grantRows = $("#grant-rows");
   const grantForm = $("#grant-form");
   const grantPreviewLine = $("#grant-preview");
+  const grantWhoWarning = $("#warn-grantWho");
   const grantSubmit = $("#grant-submit");
   const grantFilterWho = $("#grant-filter-who");
   const grantFilterWhere = $("#grant-filter-where");
@@ -2575,7 +2577,8 @@ async function wireAccess() {
   const auditRows = $("#audit-rows");
   const auditMore = $("#audit-more");
   let me = null;
-  let members = [];
+  // null until the roster loads: role counts are then left out, not shown as 0.
+  let members = null;
   let agents = [];
   let openAgent = null;
   let auditCursor = "";
@@ -2634,6 +2637,7 @@ async function wireAccess() {
     grantPreviewLine.textContent = plan ? grantPreview(plan) : "";
     grantSubmit.textContent = plan && plan.count > 1 ? `Create ${plan.count} grants` : "Grant";
     grantSubmit.disabled = Boolean(plan && plan.count > MAX_BATCH);
+    grantWhoWarning.textContent = emptyRoleWarnings(whoPicker.values(), members).join(" ");
   }
 
   const fillPrincipals = () => {
@@ -3016,7 +3020,7 @@ async function wireAccess() {
     me = await api("/v1/workspaces/me");
     members = await send(membersRequest());
   } catch {
-    members = [];
+    members = null;
   }
   await loadAgents();
   fillPrincipals();

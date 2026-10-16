@@ -2153,6 +2153,18 @@ input[readonly] {
   flex-basis: 100%;
 }
 
+/* A plain warning under a field: the choice is allowed, but it may reach no one. */
+.field-warning {
+  margin: 4px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.field-warning:empty {
+  display: none;
+}
+
 /* "This creates 6 grants" */
 .preview {
   margin: 0;
