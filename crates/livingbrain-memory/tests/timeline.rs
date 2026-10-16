@@ -22,6 +22,7 @@ fn fact(id: &str, value: &str, from: &str, observed: i64) -> TimedFact {
         stated_valid_to: None,
         valid_to: None,
         observed_at: observed,
+        last_confirmed_at: observed,
         status: FactStatus::Current,
         supersedes: None,
         superseded_by: None,

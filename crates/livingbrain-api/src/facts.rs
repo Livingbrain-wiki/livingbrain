@@ -387,9 +387,51 @@ async fn read(
             )
         })
         .collect();
+    // What dreaming did to these timelines: each one's last pass, and the
+    // decisions it applied to a fact, so a timeline can say a fact was ended
+    // while dreaming. Read only for the scopes the asker may read.
+    let outcomes = store
+        .dream_outcomes(&names, subject.as_deref())
+        .await
+        .map_err(fact_error)?;
+    let mut last_pass: HashMap<(String, String), Value> = HashMap::new();
+    for pass in &outcomes.passes {
+        last_pass
+            .entry((pass.scope.clone(), pass.subject.clone()))
+            .or_insert_with(|| {
+                json!({
+                    "at": pass.at,
+                    "facts_seen": pass.facts_seen,
+                    "decisions": pass.decisions,
+                    "applied": pass.applied,
+                })
+            });
+    }
+    let mut edits: HashMap<(String, String), String> = HashMap::new();
+    for (scope, _subject, fact_id, op) in &outcomes.edits {
+        edits
+            .entry((scope.clone(), fact_id.clone()))
+            .or_insert_with(|| op.clone());
+    }
     let keys: Vec<Value> = timelines
         .iter()
-        .map(|timeline| timeline_json(timeline, at, &|fact| fact.source.clone()))
+        .map(|timeline| {
+            let mut key = timeline_json(timeline, at, &|fact| fact.source.clone());
+            if let Some(pass) = last_pass.get(&(timeline.scope.clone(), timeline.subject.clone())) {
+                key["dream"] = pass.clone();
+            }
+            for list in ["current", "history"] {
+                if let Some(facts) = key[list].as_array_mut() {
+                    for fact in facts {
+                        let id = fact["id"].as_str().unwrap_or_default().to_owned();
+                        if let Some(op) = edits.get(&(timeline.scope.clone(), id)) {
+                            fact["dreamed"] = json!(op);
+                        }
+                    }
+                }
+            }
+            key
+        })
         .collect();
     Ok(Json(json!({
         "as_of": as_of_text,

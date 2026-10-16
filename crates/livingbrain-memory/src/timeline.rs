@@ -389,6 +389,10 @@ pub struct TimedFact {
     pub valid_to: Option<PartialDate>,
     /// When the brain learned it, unix seconds.
     pub observed_at: i64,
+    /// When a write last said this again (the same value, for the same
+    /// timeline), unix seconds: set on insert, moved forward by a repeat
+    /// instead of a duplicate row. What "stale" is measured from.
+    pub last_confirmed_at: i64,
     pub status: FactStatus,
     pub supersedes: Option<String>,
     pub superseded_by: Option<String>,

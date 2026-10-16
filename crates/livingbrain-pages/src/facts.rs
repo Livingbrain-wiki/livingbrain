@@ -190,6 +190,7 @@ pub fn fact_json(fact: &TimedFact) -> Value {
         "valid_to": fact.valid_to.as_ref().map(PartialDate::text),
         "stated_valid_to": fact.stated_valid_to.as_ref().map(PartialDate::text),
         "observed_at": timeline::rfc3339(fact.observed_at),
+        "last_confirmed_at": timeline::rfc3339(fact.last_confirmed_at),
         "status": fact.status.as_str(),
         "supersedes": fact.supersedes,
         "superseded_by": fact.superseded_by,
@@ -213,6 +214,76 @@ struct Prepared {
     valid_from: PartialDate,
     stated_valid_to: Option<PartialDate>,
     asked: Option<Cardinality>,
+}
+
+/// One subject that dreaming may tidy: how
+/// many current facts it has, how many were stored since its last pass, and
+/// when that pass was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamCandidate {
+    pub scope: String,
+    pub subject: String,
+    pub current: usize,
+    pub fresh: usize,
+    pub dreamt_at: Option<String>,
+    pub status: Option<String>,
+    /// When the subject's dream row last changed (its last pass or request).
+    pub updated_at: Option<String>,
+}
+
+/// How one dream run ended, for [`FactStore::dream_finish`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DreamFinish<'a> {
+    /// `done`, `queued` (carries on later), `failed` or `skipped`.
+    pub status: &'a str,
+    /// Whether the pass read the subject: sets `dreamt_at`.
+    pub dreamt: bool,
+    pub facts_seen: usize,
+    pub decisions: usize,
+    pub applied: usize,
+    /// A fixed-vocabulary reason, never model text.
+    pub error: Option<&'a str>,
+}
+
+/// One decision of a dream pass, as the decision log keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DreamDecisionRow<'a> {
+    pub scope: &'a str,
+    /// RFC 3339 of the pass.
+    pub dream_at: &'a str,
+    pub seq: usize,
+    pub subject: &'a str,
+    pub op: &'a str,
+    pub fact_id: &'a str,
+    pub by_fact_id: Option<&'a str>,
+    pub new_valid_to: Option<&'a str>,
+    pub new_attribute: Option<&'a str>,
+    pub reason: Option<&'a str>,
+    pub applied: bool,
+    /// JSON array of the fact ids the model was shown.
+    pub input_ids: &'a str,
+    /// The call's role (the model itself is not recorded per call).
+    pub model: &'a str,
+    pub decided_at: &'a str,
+}
+
+/// One completed dream pass, as a timeline reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamPass {
+    pub scope: String,
+    pub subject: String,
+    pub at: String,
+    pub facts_seen: i64,
+    pub decisions: i64,
+    pub applied: i64,
+}
+
+/// What dreaming did in a set of scopes: the passes, and every applied
+/// decision as `(scope, subject, fact id, op)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DreamOutcomes {
+    pub passes: Vec<DreamPass>,
+    pub edits: Vec<(String, String, String, String)>,
 }
 
 /// The fact store.
@@ -410,10 +481,15 @@ impl FactStore {
             (None, None) => Cardinality::default_for(&attribute),
         };
         if let Some(found) = corroborated(&existing, &value, unit.as_deref(), &valid_from) {
+            // A repeat is a confirmation, not a second row: the existing fact's
+            // freshness moves forward to this write's observation, never back.
+            let mut fact = found.clone();
+            self.confirm(scope, &fact.id, observed_at).await?;
+            fact.last_confirmed_at = fact.last_confirmed_at.max(observed_at);
             return Ok(Recorded {
                 outcome: FactOutcome::Corroborated,
                 scope: scope.to_owned(),
-                fact: found.clone(),
+                fact,
             });
         }
 
@@ -428,6 +504,7 @@ impl FactStore {
             valid_to: stated_valid_to.clone(),
             stated_valid_to,
             observed_at,
+            last_confirmed_at: observed_at,
             status: FactStatus::Current,
             supersedes: None,
             superseded_by: None,
@@ -731,6 +808,356 @@ impl FactStore {
         Ok(after)
     }
 
+    /// Moves a fact's `last_confirmed_at` forward to `at`, never back.
+    async fn confirm(&self, scope: &str, id: &str, at: i64) -> Result<(), FactError> {
+        let at = timeline::rfc3339(at);
+        self.db
+            .execute(&Statement::with_values(
+                "UPDATE facts SET last_confirmed_at = ?, updated_at = ? \
+                 WHERE scope = ? AND id = ? AND (last_confirmed_at IS NULL OR last_confirmed_at < ?)",
+                vec![
+                    text(&at),
+                    text(&timeline::rfc3339(self.now())),
+                    text(scope),
+                    text(id),
+                    text(&at),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(())
+    }
+
+    /// Ends the fact `id` in `scope` at `valid_to` (exclusive), keeping it:
+    /// the stated end is written and the timeline settled, so the fact reads
+    /// as superseded by a successor that begins there, or as ended. `None`
+    /// for an id the scope does not hold.
+    ///
+    /// Dreaming uses this for "it stopped being true on …"; the same checks
+    /// as a write apply, so an end that is not after the fact's start is
+    /// refused, and a retracted fact has nothing to end.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Invalid`] for a date outside the format or an end that
+    /// does not follow the start, and [`FactError::Store`].
+    pub async fn end(
+        &self,
+        scope: &str,
+        id: &str,
+        valid_to: &str,
+    ) -> Result<Option<TimedFact>, FactError> {
+        if !entity::is_slug(scope) {
+            return Err(PageError::InvalidScope(scope.to_owned()).into());
+        }
+        let to = date("valid_to", Some(valid_to))?
+            .ok_or_else(|| FactError::Invalid("`valid_to` is required".to_owned()))?;
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT * FROM facts WHERE scope = ? AND id = ?",
+                vec![text(scope), text(id)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let Some((_, fact)) = self.decode(&rows.rows).await?.into_iter().next() else {
+            return Ok(None);
+        };
+        if fact.status == FactStatus::Retracted {
+            return Err(FactError::Invalid(
+                "a retracted fact has nothing to end".to_owned(),
+            ));
+        }
+        if to.start() <= fact.valid_from.start() {
+            return Err(FactError::Invalid(
+                "`valid_to` must start after `valid_from`".to_owned(),
+            ));
+        }
+        self.db
+            .execute(&Statement::with_values(
+                "UPDATE facts SET stated_valid_to = ?, updated_at = ? WHERE scope = ? AND id = ?",
+                vec![
+                    text(to.text()),
+                    text(&timeline::rfc3339(self.now())),
+                    text(scope),
+                    text(id),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let settled = self.settle(scope, &fact.subject, &fact.attribute).await?;
+        Ok(settled.into_iter().find(|f| f.id == id))
+    }
+
+    /// Subject+attribute keys that have at least `min_facts` current facts,
+    /// with how many of those were stored since the subject's last dream and
+    /// when it was last dreamt about. A plaintext read: nothing is opened.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_candidates(
+        &self,
+        min_facts: usize,
+        limit: usize,
+    ) -> Result<Vec<DreamCandidate>, FactError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT f.scope AS scope, f.subject AS subject, COUNT(*) AS current_count, \
+                 SUM(CASE WHEN f.created_at > COALESCE(d.dreamt_at, '') THEN 1 ELSE 0 END) AS fresh, \
+                 d.dreamt_at AS dreamt_at, d.status AS status, d.updated_at AS updated_at \
+                 FROM facts f LEFT JOIN fact_dreams d ON d.scope = f.scope AND d.subject = f.subject \
+                 WHERE f.status = 'current' \
+                 GROUP BY f.scope, f.subject, d.dreamt_at, d.status, d.updated_at \
+                 HAVING COUNT(*) >= ? ORDER BY f.scope ASC, f.subject ASC LIMIT ?",
+                vec![
+                    SeaValue::BigInt(Some(min_facts as i64)),
+                    SeaValue::BigInt(Some(limit as i64)),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .iter()
+            .map(|row| DreamCandidate {
+                scope: row.get::<String>("scope").unwrap_or_default(),
+                subject: row.get::<String>("subject").unwrap_or_default(),
+                current: row.get::<i64>("current_count").unwrap_or_default().max(0) as usize,
+                fresh: row.get::<i64>("fresh").unwrap_or_default().max(0) as usize,
+                dreamt_at: row.get::<String>("dreamt_at"),
+                status: row.get::<String>("status"),
+                updated_at: row.get::<String>("updated_at"),
+            })
+            .collect())
+    }
+
+    /// Asks for a dream of one subject: queued, unless one is running now.
+    /// A queued request that is asked again keeps its place.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_enqueue(
+        &self,
+        scope: &str,
+        subject: &str,
+        now: i64,
+    ) -> Result<(), FactError> {
+        let at = timeline::rfc3339(now);
+        self.db
+            .execute(&Statement::with_values(
+                "INSERT INTO fact_dreams (scope, subject, status, queued_at, attempts, facts_seen, \
+                 decisions, applied, updated_at) VALUES (?, ?, 'queued', ?, 0, 0, 0, 0, ?) \
+                 ON CONFLICT (scope, subject) DO UPDATE SET status = 'queued', queued_at = excluded.queued_at, \
+                 updated_at = excluded.updated_at WHERE fact_dreams.status <> 'running'",
+                vec![text(scope), text(subject), text(&at), text(&at)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(())
+    }
+
+    /// The oldest queued dreams, at most `limit`: `(scope, subject)`.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_queued(&self, limit: usize) -> Result<Vec<(String, String)>, FactError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT scope, subject FROM fact_dreams WHERE status = 'queued' \
+                 ORDER BY queued_at ASC, scope ASC, subject ASC LIMIT ?",
+                vec![SeaValue::BigInt(Some(limit as i64))],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String>("scope").unwrap_or_default(),
+                    row.get::<String>("subject").unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
+    /// Claims a queued dream for this run: `true` only for the caller whose
+    /// conditional update found it still queued (a second tick finds it
+    /// running and leaves it alone).
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_claim(
+        &self,
+        scope: &str,
+        subject: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<bool, FactError> {
+        let affected = self
+            .db
+            .execute(&Statement::with_values(
+                "UPDATE fact_dreams SET status = 'running', attempts = attempts + 1, \
+                 lease_until = ?, updated_at = ? WHERE scope = ? AND subject = ? AND status = 'queued'",
+                vec![
+                    text(&timeline::rfc3339(lease_until)),
+                    text(&timeline::rfc3339(now)),
+                    text(scope),
+                    text(subject),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(affected > 0)
+    }
+
+    /// Records how a dream ended. `dreamt` is set when a pass actually read
+    /// the subject (`done`); a queued-again or failed one keeps its last
+    /// completed pass time.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_finish(
+        &self,
+        scope: &str,
+        subject: &str,
+        outcome: &DreamFinish<'_>,
+        now: i64,
+    ) -> Result<(), FactError> {
+        let at = timeline::rfc3339(now);
+        self.db
+            .execute(&Statement::with_values(
+                "UPDATE fact_dreams SET status = ?, dreamt_at = COALESCE(?, dreamt_at), \
+                 facts_seen = ?, decisions = ?, applied = ?, last_error = ?, lease_until = NULL, \
+                 updated_at = ? WHERE scope = ? AND subject = ?",
+                vec![
+                    text(outcome.status),
+                    opt_text(outcome.dreamt.then_some(at.as_str())),
+                    SeaValue::BigInt(Some(outcome.facts_seen as i64)),
+                    SeaValue::BigInt(Some(outcome.decisions as i64)),
+                    SeaValue::BigInt(Some(outcome.applied as i64)),
+                    opt_text(outcome.error),
+                    text(&at),
+                    text(scope),
+                    text(subject),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(())
+    }
+
+    /// Writes one decision of a pass to the decision log, applied or not.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_log(&self, row: &DreamDecisionRow<'_>) -> Result<(), FactError> {
+        self.db
+            .execute(&Statement::with_values(
+                "INSERT INTO fact_dream_decisions (scope, dream_at, seq, subject, op, fact_id, \
+                 by_fact_id, new_valid_to, new_attribute, reason, applied, input_ids, model, \
+                 decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                vec![
+                    text(row.scope),
+                    text(row.dream_at),
+                    SeaValue::BigInt(Some(row.seq as i64)),
+                    text(row.subject),
+                    text(row.op),
+                    text(row.fact_id),
+                    opt_text(row.by_fact_id),
+                    opt_text(row.new_valid_to),
+                    opt_text(row.new_attribute),
+                    opt_text(row.reason),
+                    SeaValue::BigInt(Some(i64::from(row.applied))),
+                    text(row.input_ids),
+                    text(row.model),
+                    text(row.decided_at),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(())
+    }
+
+    /// What dreaming did in the asker's scopes: each completed pass per
+    /// subject, and every applied decision (`fact id`, `op`), so a timeline
+    /// can say a fact was ended while dreaming. Scope-filtered like every
+    /// read here.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_outcomes(
+        &self,
+        scopes: &[&str],
+        subject: Option<&str>,
+    ) -> Result<DreamOutcomes, FactError> {
+        if scopes.is_empty() {
+            return Ok(DreamOutcomes::default());
+        }
+        let mut values = Vec::new();
+        let placeholders = in_list(scopes, &mut values);
+        let mut passes_sql = format!(
+            "SELECT scope, subject, dreamt_at, facts_seen, decisions, applied FROM fact_dreams \
+             WHERE scope IN ({placeholders}) AND dreamt_at IS NOT NULL"
+        );
+        let mut edits_sql = format!(
+            "SELECT scope, subject, fact_id, op FROM fact_dream_decisions \
+             WHERE scope IN ({placeholders}) AND applied = 1"
+        );
+        if let Some(subject) = subject {
+            passes_sql.push_str(" AND subject = ?");
+            edits_sql.push_str(" AND subject = ?");
+            values.push(text(subject));
+        }
+        passes_sql.push_str(" ORDER BY dreamt_at DESC LIMIT 500");
+        edits_sql.push_str(" ORDER BY dream_at DESC, seq ASC LIMIT 2000");
+        let passes = self
+            .db
+            .query(&Statement::with_values(passes_sql, values.clone()))
+            .await
+            .map_err(PageError::Store)?;
+        let edits = self
+            .db
+            .query(&Statement::with_values(edits_sql, values))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(DreamOutcomes {
+            passes: passes
+                .rows
+                .iter()
+                .map(|row| DreamPass {
+                    scope: row.get::<String>("scope").unwrap_or_default(),
+                    subject: row.get::<String>("subject").unwrap_or_default(),
+                    at: row.get::<String>("dreamt_at").unwrap_or_default(),
+                    facts_seen: row.get::<i64>("facts_seen").unwrap_or_default(),
+                    decisions: row.get::<i64>("decisions").unwrap_or_default(),
+                    applied: row.get::<i64>("applied").unwrap_or_default(),
+                })
+                .collect(),
+            edits: edits
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get::<String>("scope").unwrap_or_default(),
+                        row.get::<String>("subject").unwrap_or_default(),
+                        row.get::<String>("fact_id").unwrap_or_default(),
+                        row.get::<String>("op").unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
     /// Seals a fact's payload under the scope's active key and inserts it.
     async fn insert(
         &self,
@@ -744,10 +1171,10 @@ impl FactStore {
         self.db
             .execute(&Statement::with_values(
                 "INSERT INTO facts (scope, id, subject, attribute, cardinality, valid_from, \
-                 valid_from_at, stated_valid_to, valid_to, valid_to_at, observed_at, status, \
-                 supersedes, superseded_by, confidence, sealed, key_version, written_by, \
-                 created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 valid_from_at, stated_valid_to, valid_to, valid_to_at, observed_at, \
+                 last_confirmed_at, status, supersedes, superseded_by, confidence, sealed, \
+                 key_version, written_by, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     text(scope),
                     text(&fact.id),
@@ -765,6 +1192,7 @@ impl FactStore {
                             .as_deref(),
                     ),
                     text(&timeline::rfc3339(fact.observed_at)),
+                    text(&timeline::rfc3339(fact.last_confirmed_at)),
                     text(fact.status.as_str()),
                     opt_text(fact.supersedes.as_deref()),
                     opt_text(fact.superseded_by.as_deref()),
@@ -902,6 +1330,16 @@ fn row_fact(row: &Row, dek: &Dek, scope: &str, version: u32) -> Result<TimedFact
         stated_valid_to: parse("stated_valid_to")?,
         valid_to: parse("valid_to")?,
         observed_at: parse("observed_at")?.map_or(0, |at| at.start()),
+        // A row from before the column has none: its observation stands in.
+        last_confirmed_at: parse("last_confirmed_at")?.map_or_else(
+            || {
+                parse("observed_at")
+                    .ok()
+                    .flatten()
+                    .map_or(0, |at| at.start())
+            },
+            |at| at.start(),
+        ),
         status: FactStatus::parse(&status).ok_or_else(|| corrupt("status"))?,
         supersedes: row.get::<String>("supersedes"),
         superseded_by: row.get::<String>("superseded_by"),

@@ -48,9 +48,10 @@ pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
 pub use facts::{
-    FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
-    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
-    is_subject, person_subject, relevant, relevant_where,
+    DreamCandidate, DreamDecisionRow, DreamFinish, DreamOutcomes, DreamPass, FactError, FactInput,
+    FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS, MAX_FACT_TEXT, MAX_INDEX_KEYS,
+    Recorded, Timeline, brief_lines, brief_section, fact_json, is_subject, person_subject,
+    relevant, relevant_where,
 };
 pub use graph::{
     GraphLink, GraphPage, GraphReach, GraphRows, GraphSource, GraphSubject, graph_rows,
@@ -136,6 +137,14 @@ const MIGRATION_PAGE_TITLES: SqlMigration = SqlMigration::new(
     "0007",
     "page_titles",
     include_str!("../migrations/sqlite/0007_page_titles.sql"),
+);
+
+/// Freshness (`last_confirmed_at`) and dreaming (the queue and the decision
+/// log), same portable subset.
+const MIGRATION_DREAMING: SqlMigration = SqlMigration::new(
+    "0008",
+    "dreaming",
+    include_str!("../migrations/sqlite/0008_dreaming.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -285,6 +294,8 @@ impl Module for Pages {
             "page_terms",
             "sources",
             "facts",
+            "fact_dreams",
+            "fact_dream_decisions",
         ]
     }
 
@@ -379,12 +390,31 @@ impl Module for Pages {
                 redacted: &[],
                 subject_via: None,
             },
+            // Dreaming's queue and decision log (docs/temporal-facts.md,
+            // "Dreaming"). Both are keyed by scope and a subject slug, and
+            // carry fact ids and fixed-vocabulary reasons, never fact text, so
+            // no row names a person by a column an erasure query can bind.
+            // `forget_scope` deletes them with the scope's facts.
+            PersonalDataSet::unreachable(
+                "fact_dreams",
+                DataKind::Identifier,
+                "Which subjects were tidied when, and how many facts a pass read and changed.",
+                "the row is keyed by the scope and a subject slug and holds counts only; \
+                 forgetting a scope deletes its rows",
+            ),
+            PersonalDataSet::unreachable(
+                "fact_dream_decisions",
+                DataKind::Identifier,
+                "Each change a tidy proposed to a subject's facts, by fact id, and whether it was applied.",
+                "the row holds fact ids, fixed-vocabulary reasons and the ids shown, never fact \
+                 text; forgetting a scope deletes its rows",
+            ),
         ];
         SETS
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 7] = [
+        const MIGRATIONS: [SqlMigration; 8] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
@@ -392,6 +422,7 @@ impl Module for Pages {
             MIGRATION_SOURCE_PROJECT,
             MIGRATION_FACTS,
             MIGRATION_PAGE_TITLES,
+            MIGRATION_DREAMING,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

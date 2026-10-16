@@ -727,6 +727,20 @@ html {
 .facts__retracted {
   opacity: 0.7;
 }
+.facts__dreamed {
+  color: var(--ink2);
+}
+
+.facts__dream {
+  margin: 0.4rem 0 0;
+}
+
+.facts__stale {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  min-height: 44px;
+}
 
 /*   Pages home: projects first
    ---------------------------------------------------------------- */
