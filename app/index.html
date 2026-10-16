@@ -198,8 +198,8 @@
               </li>
               <li>
                 In a terminal, <code>livingbrain login</code> signs the CLI in
-                with the OAuth device flow instead — no token to copy. Point
-                it here with
+                through your browser, with no token to copy. To point it at
+                this brain, set
                 <code>LIVINGBRAIN_API_URL=<span data-session="apiBase"></span></code>.
               </li>
             </ol>
@@ -228,9 +228,9 @@
           </form>
           <div id="email-status" class="notice" role="status" aria-live="polite"></div>
 
-          <div class="signin-divider" aria-hidden="true"><span>or</span></div>
+          <div id="signin-or" class="signin-divider" aria-hidden="true" hidden><span>or</span></div>
 
-          <a id="signin-slack" class="btn signin-card__alt" href="#">Continue with Slack</a>
+          <a id="signin-slack" class="btn signin-card__alt" href="#" hidden>Continue with Slack</a>
         </section>
 
         <p class="signin-foot">New here? Signing in creates your workspace.</p>

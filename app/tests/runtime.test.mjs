@@ -149,15 +149,12 @@ test("LB.setting is the only write path, and it sends the audit triple", async (
   );
 });
 
-test("LB.setting sends nothing for a section with no route", async () => {
+test("LB.setting sends nothing for a section the page does not know", async () => {
   await withFetch(
     () => json({}),
     async (calls) => {
-      const outcome = await LB.setting("skills", "shared-library", true);
-      assert.equal(outcome.ok, false);
-      assert.equal(outcome.sent, false);
-      assert.match(outcome.message, /no server route yet/);
-      assert.equal(calls.length, 0, "an unwired setting must not hit the API");
+      await assert.rejects(() => LB.setting("skills", "shared-library", true), /unknown settings section/);
+      assert.equal(calls.length, 0, "an unknown setting must not hit the API");
     },
   );
 });

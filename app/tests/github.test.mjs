@@ -311,7 +311,7 @@ test("scope and backfill read as sentences a person can act on", () => {
   assert.equal(scopeLabel("user:m1"), "Personal");
   assert.match(backfillText({ state: "done", items: 10, batches: 2 }, NOW), /done: 10 items in 2 batches/);
   assert.match(backfillText({ state: "running", items: 3, batches: 1 }, NOW), /Backfilling: 3 items/);
-  assert.match(backfillText({ state: "pending" }, NOW), /next cron tick/);
+  assert.match(backfillText({ state: "pending" }, NOW), /starts shortly/);
   const waiting = backfillText({ state: "running", items: 3, batches: 1, waiting_until: NOW + 600 }, NOW);
   assert.match(waiting, /Waiting for GitHub/);
 });
@@ -560,7 +560,7 @@ test("a configured-off server says so and paints no GitHub block", async () => {
   const doc = githubDocument();
   const { deps: d } = deps(doc, { answers: { "GET /v1/github": { configured: false, can_manage: true, queue: {} } } });
   await mountGithub(d);
-  assert.match(doc.registry.get("github-status").textContent, /isn't configured on this deployment/);
+  assert.match(doc.registry.get("github-status").textContent, /isn't available here yet/);
   assert.equal(doc.registry.get("github-setup").hidden, true);
   assert.equal(doc.registry.get("github-connected").hidden, true);
 });
@@ -654,7 +654,7 @@ test("without the shared secrets: the page says GitHub isn't configured, and Adv
   await mountGithub(d);
   assert.equal(doc.registry.get("github-shared").hidden, true);
   assert.equal(doc.registry.get("github-shared-off").hidden, false);
-  assert.match(doc.registry.get("github-shared-off").textContent, /isn't configured on this deployment/);
+  assert.match(doc.registry.get("github-shared-off").textContent, /isn't available here yet/);
   assert.equal(doc.registry.get("github-advanced").hidden, false);
   assert.equal(doc.registry.get("github-setup").hidden, false);
 });

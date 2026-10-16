@@ -794,7 +794,7 @@
                   repository is included.
                 </p>
               </div>
-              <p id="github-shared-off" class="hint" hidden>GitHub isn't configured on this deployment.</p>
+              <p id="github-shared-off" class="hint" hidden>GitHub isn't available here yet.</p>
 
               <div id="github-connected" hidden>
                 <h3>Accounts</h3>
@@ -802,7 +802,7 @@
                 <h3>Repositories</h3>
                 <p class="hint">
                   Shared repositories serve the whole workspace; personal ones
-                  only you. Backfill runs on the server's schedule, and the
+                  only you. Older history is added in the background, and the
                   progress shows here. To add or remove repositories, or to
                   disconnect, use Manage on GitHub.
                 </p>
@@ -870,35 +870,6 @@
               </details>
             </section>
 
-            <!-- not built yet: one compact group, nothing that looks clickable -->
-            <section class="card sect" id="soon" aria-labelledby="soon-h">
-              <header class="sect__head sect__head--row">
-                <h2 id="soon-h">Coming soon</h2>
-                <span class="pill" data-state="planned">Not available yet</span>
-              </header>
-              <ul class="soon">
-                <li id="proactivity">
-                  <strong>Proactivity</strong>
-                  <span>When the brain may speak up without being asked, such as a nightly tidy-up or briefs on new people.</span>
-                </li>
-                <li id="tools">
-                  <strong>Tools</strong>
-                  <span>Which tools the brain may call on each person's behalf.</span>
-                </li>
-                <li id="automations">
-                  <strong>Automations</strong>
-                  <span>Scheduled passes: a daily digest, a dream pass and a lint pass.</span>
-                </li>
-                <li id="skills">
-                  <strong>Skills</strong>
-                  <span>A shared library of prompts your whole team can use.</span>
-                </li>
-                <li id="colonizer">
-                  <strong>Colonizer</strong>
-                  <span>Hand bigger jobs to a colony that comes back with a pull request.</span>
-                </li>
-              </ul>
-            </section>
 
 
 
@@ -965,8 +936,8 @@
                   listed.
                 </p>
                 <p class="hint picker__source">
-                  The list Colonizer supports, from
-                  <a id="provider-source" rel="noopener noreferrer">its provider catalog</a>.
+                  The list comes from
+                  <a id="provider-source" rel="noopener noreferrer">a public provider catalog</a>.
                   Listing a service is not an endorsement.
                 </p>
               </div>
@@ -1096,8 +1067,7 @@
             <span>Use Jev for this workspace</span>
           </label>
           <p class="hint" id="jev-enabled-hint">
-            Off means no session is sent to TypeSafe, even when this deployment has a key. The
-            free triage rules still run.
+            Off means nothing is sent to TypeSafe. The free triage rules still run.
           </p>
           <div class="field">
             <label for="jev-key">Workspace TypeSafe API key</label>

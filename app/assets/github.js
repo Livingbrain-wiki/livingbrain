@@ -130,7 +130,7 @@ export function outcomeBanner(search = "") {
     }
     return {
       tone: "good",
-      text: "GitHub is connected. Included repositories are backfilled on the server's next cron tick; progress shows below.",
+      text: "GitHub is connected. Older history from included repositories is added in the background; progress shows below.",
     };
   }
   if (outcome === "requested") {
@@ -156,7 +156,7 @@ export function outcomeBanner(search = "") {
 export const ERROR_TEXT = Object.freeze({
   "bad-request": "GitHub sent back a request Living Brain could not read. Start again from here.",
   "signed-out": "Sign in to finish connecting GitHub.",
-  "not-configured": "GitHub is not set up on this server yet.",
+  "not-configured": "GitHub isn't available here yet.",
   state: "That GitHub step expired or was already used. Start it again.",
   conversion: "GitHub did not finish creating the app. Try again.",
   "app-exists": "This workspace already has a GitHub app.",
@@ -202,7 +202,7 @@ export function backfillText(backfill, now = Date.now() / 1000) {
   }
   if (state === "done") return `Backfill done: ${items} items in ${batches} batches`;
   if (state === "running") return `Backfilling: ${items} items in ${batches} batches`;
-  return "Pending: the next cron tick starts it";
+  return "Pending: it starts shortly";
 }
 
 /** One repository row, as the table paints it. */
@@ -339,7 +339,7 @@ export async function mountGithub(deps) {
 
   const paint = (view) => {
     if (!view.configured) {
-      notify(status, "GitHub isn't configured on this deployment.", "warn");
+      notify(status, "GitHub isn't available here yet.", "warn");
       setHidden([setup, connected, readonly, sharedBlock, sharedOff, advanced, own, retry], true);
       return;
     }
@@ -349,8 +349,8 @@ export async function mountGithub(deps) {
     setHidden([sharedOff], view.shared.configured);
     if (sharedOff && !view.shared.configured) {
       sharedOff.textContent = view.advanced
-        ? "GitHub isn't configured on this deployment. You can still use your own GitHub App under Advanced."
-        : "GitHub isn't configured on this deployment.";
+        ? "GitHub isn't available here yet. You can still use your own GitHub App under Advanced."
+        : "GitHub isn't available here yet.";
     }
     if (sharedInstall) sharedInstall.disabled = !view.canManage;
     setHidden([retry], !(retryId && view.shared.configured && view.canManage));

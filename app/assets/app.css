@@ -713,13 +713,6 @@ p.pill {
   border: 1px solid var(--warn);
 }
 
-/* the registry's two statuses. `live` is the only green; `planned` stays in
-   the muted ink, dashed, so nothing merely decided can read as running. */
-.pill[data-state="planned"] {
-  color: var(--ink3);
-  border-style: dashed;
-}
-
 /* a personal access token is one unbroken string: break it rather than let it
    widen the column or overflow the card. */
 #token-value {
@@ -2326,44 +2319,6 @@ input[readonly] {
   font-size: 16px;
 }
 
-/* coming soon: names and one line each, nothing that looks like a control */
-.soon {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 0;
-}
-
-.soon > li {
-  display: grid;
-  grid-template-columns: minmax(7rem, 9rem) 1fr;
-  gap: 4px 16px;
-  padding: 12px 0;
-  border-top: 1px solid var(--line2);
-}
-
-.soon > li:first-child {
-  border-top: 0;
-  padding-top: 0;
-}
-
-.soon strong {
-  font-weight: 600;
-  color: var(--ink2);
-}
-
-.soon span {
-  color: var(--ink3);
-  font-size: 15px;
-}
-
-@media (max-width: 30rem) {
-  .soon > li {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* "Built with": collapsed at the bottom */
 .disclosure {
   border: 1px solid var(--line2);
@@ -3652,24 +3607,12 @@ a.sidebar__link:hover {
   color: var(--accent);
 }
 
-.sidebar__link--soon,
-.sidebar__link--soon[aria-disabled="true"] {
-  color: var(--ink3);
-  border-style: none;
-  cursor: default;
-}
-
 .sidebar__text {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.sidebar__soon {
-  font-size: 10px;
-  padding: 1px 6px;
 }
 
 .ico {
@@ -3719,7 +3662,7 @@ body[data-nav-collapsed="true"] .sidebar__collapse {
 body[data-nav-collapsed="true"] .sidebar__collapse {
   margin-inline: 8px;
 }
-body[data-nav-collapsed="true"] :is(.sidebar__text, .sidebar__soon) {
+body[data-nav-collapsed="true"] .sidebar__text {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -3768,7 +3711,7 @@ body[data-nav-collapsed="true"] .sidebar__link[aria-current="page"]::before {
   .sidebar__collapse {
     display: none;
   }
-  body[data-nav-collapsed="true"] :is(.sidebar__text, .sidebar__soon) {
+  body[data-nav-collapsed="true"] .sidebar__text {
     position: static;
     width: auto;
     height: auto;

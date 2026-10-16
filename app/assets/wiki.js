@@ -539,7 +539,7 @@ export function transcriptNodes(record, subs = []) {
         : "",
     ],
     ["Cost", totals.cost_usd != null ? `$${Number(totals.cost_usd).toFixed(4)}` : ""],
-    ["Detail", record.detail || (record.schema_version === 1 ? "summary (version 1 record)" : "")],
+    ["Detail", record.detail || (record.schema_version === 1 ? "summary" : "")],
   ].filter(([, value]) => value);
   const nodes = [
     el(

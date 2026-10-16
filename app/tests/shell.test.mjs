@@ -200,7 +200,7 @@ const SIGNED_IN = {
 
 /* ------------------------------------------------------------- the tests */
 
-test("the sidebar: a link per destination, a Soon row per slot, the current item marked", () => {
+test("the sidebar: a link per destination, no placeholder rows, the current item marked", () => {
   world({ pathname: "/wiki.html", search: "?view=facts" });
   const { api } = fakeApi();
   mountShell({ api, toggleTheme() {}, signOut() {} });
@@ -211,17 +211,9 @@ test("the sidebar: a link per destination, a Soon row per slot, the current item
   );
   const current = links.filter((a) => a.getAttribute("aria-current") === "page");
   assert.deepEqual(current.map((a) => a.getAttribute("data-nav")), ["facts"]);
-  const soon = all(byId.get("app-nav"), "[aria-disabled]");
-  // Every slot is a non-link "Soon" row (none are left since ADR 0004
-  // shipped agent accounts and access, but the rule still holds).
-  assert.deepEqual(
-    soon.map((row) => row.getAttribute("data-nav")),
-    navItems().filter((item) => item.soon).map((item) => item.id),
-  );
-  for (const row of soon) {
-    assert.equal(row.tagName, "SPAN", "a slot is not a link");
-    assert.match(row.textContent, /Soon/);
-  }
+  // Nothing in the sidebar is a placeholder: no disabled rows, no "Soon" pills.
+  assert.equal(all(byId.get("app-nav"), "[aria-disabled]").length, 0);
+  assert.doesNotMatch(byId.get("app-nav").textContent, /Soon/);
   // Groups are labelled lists.
   const lists = all(byId.get("app-nav"), "ul");
   assert.deepEqual(lists.map((ul) => ul.getAttribute("aria-labelledby")), [
