@@ -189,6 +189,23 @@ async fn a_named_link_makes_a_second_workspace_and_the_first_keeps_the_connectio
         .await
         .json();
     assert_eq!(again["workspace"]["id"], first_id.as_str());
+
+    // A bare sign-in now lands in the oldest workspace she owns, although
+    // "Side Project" sorts first by name. The kit's clock is fixed, so the
+    // second workspace is dated later by hand.
+    kit.db
+        .execute(&cratefield_core::Statement::with_values(
+            "UPDATE workspaces SET created_at = '2099-01-01T00:00:00Z' WHERE id = ?",
+            vec![text(two["workspace"]["id"].as_str().expect("an id"))],
+        ))
+        .await
+        .expect("dates the second workspace");
+    let bare = verify(&kit, &mailed_after(&kit, ALICE).await).await;
+    let landed = get(&kit.router, ME, &[(SESSION_COOKIE, &bare)])
+        .await
+        .json();
+    assert_eq!(landed["workspace"]["id"], first_id.as_str());
+    assert_eq!(count_workspaces(&kit).await, 2, "no third workspace");
 }
 
 #[pollster::test]

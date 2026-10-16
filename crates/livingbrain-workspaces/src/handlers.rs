@@ -1733,14 +1733,19 @@ async fn email_verify(
                     .await
                     .map_err(database)?
             };
-            // Prefer a workspace this address owns, else the first by name.
-            // A `None` name and `None` invited role leave the member row and
-            // its role as they are: `upsert_member` writes nothing new.
-            if let Some(membership) = existing
-                .iter()
-                .find(|membership| membership.role == store::Role::Owner)
-                .or_else(|| existing.first())
-            {
+            // Prefer a workspace this address owns, and among those the
+            // oldest: a person who once got an accidental second workspace
+            // still lands in the one they built. With none owned, the oldest
+            // they belong to. A `None` name and `None` invited role leave the
+            // member row and its role as they are: `upsert_member` writes
+            // nothing new.
+            let oldest = |owned: bool| {
+                existing
+                    .iter()
+                    .filter(|membership| !owned || membership.role == store::Role::Owner)
+                    .min_by(|a, b| a.workspace_created_at.cmp(&b.workspace_created_at))
+            };
+            if let Some(membership) = oldest(true).or_else(|| oldest(false)) {
                 (
                     membership.workspace_id.clone(),
                     membership.user_id.clone(),
