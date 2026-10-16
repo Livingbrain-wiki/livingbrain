@@ -94,6 +94,51 @@ export function createWorkspaceRequest(name) {
   return { method: "POST", path: WORKSPACES_PATH, body: { name: String(name).trim() } };
 }
 
+/**
+ * `DELETE /v1/workspaces/current` (ADR 0004, "Deleting a workspace"): the
+ * owner deletes the workspace they are in. The body carries the name they
+ * typed, and the server refuses anything but the exact name.
+ */
+export function deleteWorkspaceRequest(confirm) {
+  return {
+    method: "DELETE",
+    path: `${WORKSPACES_PATH}/current`,
+    body: { confirm: String(confirm == null ? "" : confirm) },
+  };
+}
+
+/**
+ * Whether the typed name is the workspace's name, exactly: the only thing
+ * that enables the delete button. An empty name never matches.
+ */
+export function deleteConfirmMatches(typed, name) {
+  const expected = String(name == null ? "" : name);
+  return expected !== "" && String(typed == null ? "" : typed) === expected;
+}
+
+/**
+ * What the danger zone shows for this person. Only an owner sees it at all.
+ * `list` is `GET /v1/workspaces`, which includes the workspace they are in:
+ * with no other workspace to go to, the zone is replaced by a line saying so.
+ */
+export function deleteZone(me, list) {
+  const owner = Boolean(me && me.member && me.member.role === "owner");
+  if (!owner) return { owner: false, show: false, onlyWorkspace: false };
+  const count = Array.isArray(list) ? list.length : 0;
+  return { owner: true, show: count > 1, onlyWorkspace: count <= 1 };
+}
+
+/** The words for a failed deletion, by what the server said. */
+export function deleteErrorMessage(error) {
+  if (error && error.status === 400) {
+    return "The name does not match. Type the workspace name exactly as it is shown.";
+  }
+  if (error && error.status === 409) {
+    return "This is your only workspace. Join or create another workspace first, then delete this one.";
+  }
+  return memberErrorMessage(error, "delete the workspace");
+}
+
 /** Switch the session to another workspace. */
 export function switchRequest(workspaceId) {
   idPath("workspace", workspaceId);

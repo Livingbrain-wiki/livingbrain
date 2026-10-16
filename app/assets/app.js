@@ -76,6 +76,10 @@ import {
   withdrawRequest,
   switchRequest,
   createWorkspaceRequest,
+  deleteWorkspaceRequest,
+  deleteConfirmMatches,
+  deleteZone,
+  deleteErrorMessage,
   memberViews,
   inviteViews,
   canManage,
@@ -735,6 +739,7 @@ pages.settings = async function settings() {
     wireModels(),
     wireTokens(),
     wireMembers(),
+    wireDeleteWorkspace(),
     wireAccess(),
     wireProfile(),
     wireBudgets(),
@@ -2007,6 +2012,68 @@ async function wireMembers() {
   });
 
   return load();
+}
+
+/**
+ * Deleting the workspace (ADR 0004, "Deleting a workspace"): owners only, and
+ * only where the person has another workspace to land in. The button opens a
+ * panel that says what goes; the red button stays disabled until the typed
+ * name is the workspace's name exactly. Success lands on `/`, where the
+ * session already points at the next workspace.
+ */
+async function wireDeleteWorkspace() {
+  const zone = $("#workspace-danger");
+  const only = $("#workspace-danger-only");
+  const open = $("#workspace-delete-open");
+  const panel = $("#workspace-delete-panel");
+  const nameEl = $("#workspace-delete-name");
+  const input = $("#workspace-delete-confirm");
+  const submit = $("#workspace-delete-submit");
+  const status = $("#workspace-delete-status");
+  if (!zone || !open || !panel || !input || !submit) return;
+  let name = "";
+
+  const paint = async () => {
+    try {
+      const me = await api("/v1/workspaces/me");
+      const list = await api(workspacesRequest().path);
+      const state = deleteZone(me, list);
+      zone.hidden = !state.owner;
+      if (only) only.hidden = !state.onlyWorkspace;
+      open.hidden = !state.show;
+      if (!state.show) panel.hidden = true;
+      name = String((me.workspace && me.workspace.name) || "");
+      if (nameEl) nameEl.textContent = name;
+      input.value = "";
+      submit.disabled = true;
+    } catch (error) {
+      zone.hidden = true;
+    }
+  };
+  document.addEventListener("lb-profile", paint);
+
+  open.addEventListener("click", () => {
+    panel.hidden = false;
+    input.focus();
+  });
+  input.addEventListener("input", () => {
+    submit.disabled = !deleteConfirmMatches(input.value, name);
+  });
+  submit.addEventListener("click", async () => {
+    if (!deleteConfirmMatches(input.value, name)) return;
+    submit.disabled = true;
+    notice(status, "");
+    try {
+      const request = deleteWorkspaceRequest(input.value);
+      await api(request.path, { method: request.method, body: request.body });
+      location.assign("/");
+    } catch (error) {
+      notice(status, deleteErrorMessage(error), "bad");
+      submit.disabled = !deleteConfirmMatches(input.value, name);
+    }
+  });
+
+  return paint();
 }
 
 /* --- your profile and the workspace's -------------------------------- */

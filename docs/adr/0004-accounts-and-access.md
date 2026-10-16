@@ -265,6 +265,78 @@ rewrite is no trail.
   identity maps to there (refused unless that identity row exists — no
   workspace is reachable by naming it).
 
+## Deleting a workspace
+
+An **owner** may delete the workspace they are in: `DELETE
+/v1/workspaces/current` with the session cookie, body `{"confirm": "<the
+workspace's exact name>"}`. Admins and members get `403`; a name that does not
+match exactly gets `400`; a person with no other workspace to sign in to gets
+`409 This is your only workspace.` (their other workspaces are the ones
+`store::memberships_for` lists for their email identities). The answer is
+`{"deleted": id, "next": {id, name}}` and a session cookie for `next`: the
+oldest other workspace the person belongs to.
+
+**Which content is whose.** A page scope folds the workspace in (`page_scope`,
+above), so every scope a workspace owns is distinct from every other
+workspace's, even when the member id is the same:
+
+| Space | Scope | Erased |
+|---|---|---|
+| `shared` | `shared-…` for this workspace | yes |
+| `personal:<member id>` | one per member id the workspace ever had, removed members included | yes |
+| `channel:slack:<channel>` | one per private channel the agent's triage ledger names for this workspace | yes, from the ledger |
+
+A private channel the triage ledger never recorded has no entry to find it
+by, so its scope is **not** shredded. That is a known gap: the fix is a
+channel registry in the workspaces module, not a guess here.
+
+**Order and atomicity.** Everything that can be refused is checked first; the
+next session is sealed; then the erasure runs, then the workspace's own rows.
+The erasure is idempotent and **fails closed**: no page store in the request,
+or any shred failing, answers `500` and the workspace is untouched, so the
+owner can run the deletion again. Only after it succeeds are this module's
+rows removed, in one batch. Per scope, each shred is atomic; across scopes the
+store offers no transaction, which is why the erasure goes first and is
+retry-safe.
+
+**Hard or soft.** The workspace row is **tombstoned** (`workspaces.deleted_at`,
+migration `0007_delete_workspace`), its name and avatar cleared, so the id is
+never handed out again and every read of a workspace (`store::workspace`,
+`memberships_for`) refuses it. Everything else is deleted: members and their
+sign-in identities (they hold names and timezones), invitations and every
+sign-in link naming the workspace (they hold addresses), connections, the
+Slack bot install copy, turn policies and the triage ledger.
+
+| Table | How | Owner |
+|---|---|---|
+| `workspaces` | tombstone (`deleted_at`), name and avatar cleared | workspaces |
+| `workspace_members`, `member_identities`, `workspace_connections` | delete | workspaces |
+| `workspace_invites`, `sign_in_links` (for the workspace and its invitations) | delete | workspaces |
+| `slack_installs` (team bound to the workspace) | delete | workspaces |
+| `turn_policies`, `turn_triage` | delete | workspaces |
+| `personal_access_tokens` | revoke | tokens (via the composition) |
+| `org_service_accounts`, `org_service_account_keys` | disable, revoke keys | access (via the composition) |
+| `org_grants` | delete | access (via the composition) |
+| `model_connections` (provider keys) | delete | models (via the composition) |
+| `tool_connections`, `tool_workspace_settings`, `tool_pending_approvals` | delete | tools (via the composition) |
+| `github_app` (the workspace's app private key), `github_installations`, `github_repos`, `github_states` | delete | github-app (via the composition) |
+| `org_audit`, `settings_audit`, `usage_daily`, `model_jobs`, `model_runners`, `jev_settings` | **kept** (audit trail and counts; no content) | — |
+| page `pages`, `page_versions` | kept; bodies unreadable once their scope's key is gone (ADR 0003) | pages |
+
+The erasure runs in the composition (`WipeWorkspace` in
+`crates/livingbrain-venture`), because the workspaces module cannot name a page
+scope or a token table (the graph runs the other way). It is injected through
+`Workspaces::on_workspace_erasure`; a composition without it refuses every
+deletion.
+
+**What remains, stated plainly.** The shred is immediate in D1 and R2 and not
+in their history: D1 Time Travel and retained R2 versions keep the wrapped keys
+until they expire, as ADR 0003 says. The GitHub App installation stays
+installed on GitHub's side, and the Slack app stays installed in Slack, until
+their owners remove them; only this deployment's copies of their tokens and
+keys go. A member's avatar image, uploaded through the `me` module's own blob
+scope, is not reachable from this module and is left in R2.
+
 ## Threat model
 
 | Threat | Control |
@@ -280,6 +352,8 @@ rewrite is no trail.
 | CSRF on new cookie writes | Every new mutating route uses the shared `same_origin`. |
 | Privilege escalation via grants | Cannot grant above what you hold; personal-space grants only by their owner; last-owner guard. |
 | Audit tampering | Append-only API, no update/delete route. |
+| Owner deletes the wrong workspace | Typed exact name; owners only; refused as the person's last workspace. |
+| A deleted workspace comes back | Tombstoned id, never reissued; invitations and sign-in links deleted; reads refuse `deleted_at`; Slack connection removed so a team re-install makes a new workspace. |
 
 Known, accepted: session cookies are self-contained (ADR 0001) — a removed
 member's cookie stops working because the member row is checked on every

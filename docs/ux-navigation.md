@@ -153,6 +153,9 @@ One app shell on every signed-in page: a **top bar** and a **left sidebar**.
     (`GET /v1/sources?kind=import`), each readable in place.
 * **Workspace** — who is in it and what they may do.
   * **Members** (`settings.html#members`).
+  * **Delete workspace** — at the foot of the Workspace card on
+    `settings.html#workspace`, owners only; hidden with a line saying so when
+    the person has no other workspace.
   * **Agent accounts** and **Access & audit** — reserved slots, "Soon", for
     #180 (agent accounts, access grants, the audit log).
 * **Settings** — how it runs.

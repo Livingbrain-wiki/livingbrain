@@ -174,5 +174,9 @@
   "pages/0010": {
     "file": "0044_pages_0010_rule_scan.sql",
     "sha256": "209823941101ddd017f2f09acc6d7e7c8735a7dc2dba87537aa91d1c7899a678"
+  },
+  "workspaces/0007": {
+    "file": "0045_workspaces_0007_delete_workspace.sql",
+    "sha256": "3bb7dd52f91946bb6b07a4a892d81b0ec11e21b62a9f42ef8c3a04763b6443f7"
   }
 }

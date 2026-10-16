@@ -1,0 +1,12 @@
+-- Deleting a workspace (ADR 0004, "Deleting a workspace").
+--
+-- A deleted workspace keeps its row as a tombstone: `deleted_at` is set and
+-- the name and avatar are cleared. The row stays so that the workspace id is
+-- never handed to another workspace, and so that every read of a workspace
+-- (`store::workspace`) refuses it, which is what makes a session, a token or
+-- an agent key that still names it stop working.
+--
+-- The portable subset (harness ADR 0004): one nullable TEXT column, `ALTER
+-- TABLE ADD COLUMN`, no dialect type. The Postgres file is this one byte for
+-- byte.
+ALTER TABLE workspaces ADD COLUMN deleted_at TEXT;

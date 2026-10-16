@@ -141,7 +141,8 @@ pub(crate) async fn ensure_workspace(
 /// The workspace row, or `None` when there is no such workspace.
 pub(crate) async fn workspace(db: &dyn Database, id: &str) -> Result<Option<Workspace>, DbError> {
     let statement = Statement::with_values(
-        "SELECT id, name, owner_id, avatar FROM workspaces WHERE id = ?",
+        "SELECT id, name, owner_id, avatar FROM workspaces \
+          WHERE id = ? AND deleted_at IS NULL",
         vec![text(id)],
     );
     Ok(db.query(&statement).await?.first().map(workspace_from))
@@ -840,7 +841,7 @@ pub(crate) async fn memberships_for(
                  ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
                JOIN workspaces w ON w.id = i.workspace_id \
               WHERE i.platform = 'email' AND i.external_id IN ({marks}) \
-                AND m.removed_at IS NULL \
+                AND m.removed_at IS NULL AND w.deleted_at IS NULL \
               ORDER BY workspace_name, workspace_id"
         ),
         addresses.iter().map(|address| text(address)).collect(),
@@ -1078,4 +1079,118 @@ pub(crate) async fn set_initial_role(
         vec![text(role.as_str()), text(workspace_id), text(user_id)],
     );
     db.execute(&statement).await.map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// Deleting a workspace (ADR 0004, "Deleting a workspace")
+
+/// Every member id a workspace has ever had a row or a sign-in identity for,
+/// removed ones included: each one's personal space is this workspace's
+/// content, so the deletion must find all of them.
+pub(crate) async fn every_member_id(
+    db: &dyn Database,
+    workspace_id: &str,
+) -> Result<Vec<String>, DbError> {
+    let statement = Statement::with_values(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = ? \
+         UNION \
+         SELECT user_id FROM member_identities WHERE workspace_id = ? \
+         ORDER BY user_id",
+        vec![text(workspace_id), text(workspace_id)],
+    );
+    Ok(db
+        .query(&statement)
+        .await?
+        .rows
+        .iter()
+        .filter_map(|row| row.get::<String>("user_id"))
+        .collect())
+}
+
+/// The private-channel keys (`slack:<channel>`) this workspace's agent has
+/// seen a conversation in, from its triage ledger. A channel's scope is only
+/// ever written under one of these keys, so these are the scopes to shred.
+pub(crate) async fn channel_keys(
+    db: &dyn Database,
+    workspace_id: &str,
+) -> Result<Vec<String>, DbError> {
+    let statement = Statement::with_values(
+        "SELECT DISTINCT conversation_key FROM turn_triage WHERE workspace_id = ?",
+        vec![text(workspace_id)],
+    );
+    let mut keys: Vec<String> = db
+        .query(&statement)
+        .await?
+        .rows
+        .iter()
+        .filter_map(|row| row.get::<String>("conversation_key"))
+        .filter_map(|key| {
+            // `platform:team:channel:thread`, see `Message::conversation_key`.
+            let mut parts = key.split(':');
+            let platform = parts.next()?;
+            let _team = parts.next()?;
+            let channel = parts.next().filter(|channel| !channel.is_empty())?;
+            Some(format!("{platform}:{channel}"))
+        })
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
+}
+
+/// Removes everything this module holds for one workspace and tombstones the
+/// workspace row, in one batch.
+///
+/// The order is the point: the Slack team's bot install is looked up through
+/// the connection, so it goes before the connection does; the sign-in links
+/// and invitations go with their addresses. Members and identities are
+/// deleted rather than tombstoned: nothing needs their names once the
+/// workspace is gone, and a deleted workspace id is never reused, so no
+/// member row can come back.
+pub(crate) async fn delete_workspace_rows(
+    db: &dyn Database,
+    workspace_id: &str,
+    now: &str,
+) -> Result<(), DbError> {
+    let id = || text(workspace_id);
+    db.batch_atomic(&[
+        Statement::with_values(
+            "DELETE FROM sign_in_links WHERE workspace_id = ? \
+             OR token_hash IN (SELECT link_hash FROM workspace_invites WHERE workspace_id = ?)",
+            vec![id(), id()],
+        ),
+        Statement::with_values(
+            "DELETE FROM workspace_invites WHERE workspace_id = ?",
+            vec![id()],
+        ),
+        Statement::with_values(
+            "DELETE FROM member_identities WHERE workspace_id = ?",
+            vec![id()],
+        ),
+        Statement::with_values(
+            "DELETE FROM workspace_members WHERE workspace_id = ?",
+            vec![id()],
+        ),
+        Statement::with_values(
+            "DELETE FROM slack_installs WHERE team_id IN \
+               (SELECT external_id FROM workspace_connections \
+                 WHERE workspace_id = ? AND platform = 'slack')",
+            vec![id()],
+        ),
+        Statement::with_values(
+            "DELETE FROM workspace_connections WHERE workspace_id = ?",
+            vec![id()],
+        ),
+        Statement::with_values(
+            "DELETE FROM turn_policies WHERE workspace_id = ?",
+            vec![id()],
+        ),
+        Statement::with_values("DELETE FROM turn_triage WHERE workspace_id = ?", vec![id()]),
+        Statement::with_values(
+            "UPDATE workspaces SET deleted_at = ?, name = '', avatar = NULL \
+              WHERE id = ? AND deleted_at IS NULL",
+            vec![text(now), id()],
+        ),
+    ])
+    .await
 }

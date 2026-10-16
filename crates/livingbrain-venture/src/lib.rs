@@ -64,8 +64,8 @@ use livingbrain_tokens::{Authenticated, Avatars, DevicePorts, Me, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
-    Admit, AvatarRebind, EmailLedger, Exchange, LocalTurns, MemberRemoval, Pending, SignInMail,
-    SignInMailInput, Turn, TurnError, Turns, Workspaces,
+    Admit, AvatarRebind, EmailLedger, ErasureFailed, Exchange, LocalTurns, MemberRemoval, Pending,
+    SignInMail, SignInMailInput, Turn, TurnError, Turns, WorkspaceErasure, Workspaces,
 };
 use std::sync::{Arc, OnceLock};
 use time::OffsetDateTime;
@@ -399,6 +399,9 @@ fn build(
     // per request and answered through the per-isolate coordinator until
     // the first one lands. See [`TurnsCell`].
     let turns = TurnsCell::default();
+    // ADR 0004 "Deleting a workspace": the page store the deletion shreds
+    // through, published by the pages closure like `answers` above.
+    let erasure = PageStoreCell::default();
     // Issue #72: one handle shared by the device grant's hooks and the tokens
     // module, built before the harness because the grant takes its hooks at
     // composition time and the ports only exist per request.
@@ -419,7 +422,12 @@ fn build(
                     .sign_in_mail(sign_in_mail())
                     // ADR 0004: a removed member's tokens are revoked, not
                     // only refused, so re-admitting them revives nothing.
-                    .on_member_removed(Arc::new(RevokeOnRemoval)),
+                    .on_member_removed(Arc::new(RevokeOnRemoval))
+                    // An owner's deletion shreds the workspace's scopes and
+                    // revokes what it holds, through the same page store.
+                    .on_workspace_erasure(Arc::new(WipeWorkspace {
+                        pages: erasure.clone(),
+                    })),
             )
             .module(match &jev {
                 Some(jev) => Models::new().with_jev(jev.clone()),
@@ -440,7 +448,7 @@ fn build(
             .module(Access::new())
             .module(Agents::new())
             .module(Audit::new())
-            .module(pages_module(kms.clone(), &answers))
+            .module(pages_module(kms.clone(), &answers, &erasure))
             .module(waitlist_module())
             // The cost ledger (issue #12): `GET /v1/usage/daily`, backed by
             // the records the models and workspaces modules write through
@@ -650,7 +658,11 @@ impl RandomBytes for WorkersRandom {
 /// is filled here and read per event. With no key custodian this closure
 /// never runs and the cell stays empty for the isolate's life; the agent
 /// reports that rather than answering nobody in silence.
-fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
+fn pages_module(
+    kms: Option<Arc<dyn Kms>>,
+    answers: &AnswersCell,
+    erasure: &PageStoreCell,
+) -> Pages {
     let Some(kms) = kms else {
         return Pages::new();
     };
@@ -666,6 +678,7 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     // cookie too so the Imports page can upload (same origin only).
     let surface = wiki(Arc::clone(&kms));
     let cell = answers.clone();
+    let shred = erasure.clone();
     Pages::new()
         .surface(move |ctx| livingbrain_api::pages_routes(ctx, &surface))
         .nest("/mcp", move |ctx| {
@@ -676,6 +689,13 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
                 ctx.ports.clock.clone(),
                 ctx.ports.id_gen.clone(),
             ) {
+                shred.publish(Arc::new(PageStore::new(
+                    db.clone(),
+                    blob.clone(),
+                    Arc::clone(&mcp_kms),
+                    clock.clone(),
+                    id_gen.clone(),
+                )));
                 cell.publish(Arc::new(PageAnswers::new(
                     PageStore::new(db, blob, Arc::clone(&mcp_kms), clock, id_gen),
                     // Where a citation opens: this deployment's own web app
@@ -694,6 +714,138 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
                 Arc::new(WebSession),
             )
         })
+}
+
+/// The page store the workspace deletion shreds through (ADR 0004), in the
+/// same shape as [`AnswersCell`]: the pages module's own context builds it
+/// per request, because a module's blob is scoped to that module's name and
+/// only the pages surface can open the bodies its pages wrote.
+///
+/// Empty until a request runs the pages closure. Erasure reads an empty slot
+/// as a failure and refuses the deletion: nothing is deleted that cannot be
+/// shredded.
+#[derive(Clone, Default)]
+struct PageStoreCell(Arc<std::sync::RwLock<Option<Arc<PageStore>>>>);
+
+impl PageStoreCell {
+    fn publish(&self, store: Arc<PageStore>) {
+        if let Ok(mut slot) = self.0.write() {
+            *slot = Some(store);
+        }
+    }
+
+    fn get(&self) -> Option<Arc<PageStore>> {
+        self.0.read().ok().and_then(|slot| slot.clone())
+    }
+}
+
+/// What deleting a workspace does beyond the workspaces module's own rows
+/// (ADR 0004, "Deleting a workspace"): every content scope the workspace
+/// owns is crypto-shredded through [`PageStore::forget_scope`], and every
+/// credential other modules hold for it is revoked or deleted.
+///
+/// Every step is idempotent, so a retry after a failure reruns the lot. The
+/// credential statements are one batch; the shreds are one per scope, each
+/// atomic, which is as atomic as the store allows across scopes.
+struct WipeWorkspace {
+    pages: PageStoreCell,
+}
+
+#[async_trait::async_trait]
+impl WorkspaceErasure for WipeWorkspace {
+    async fn erase(
+        &self,
+        db: &dyn Database,
+        now: OffsetDateTime,
+        workspace_id: &str,
+        spaces: &[String],
+    ) -> Result<(), ErasureFailed> {
+        let store = self.pages.get().ok_or(ErasureFailed)?;
+        for space in spaces {
+            let scope =
+                livingbrain_pages::access::space_scope(workspace_id, space).ok_or(ErasureFailed)?;
+            store
+                .forget_scope(&scope)
+                .await
+                .map_err(|_| ErasureFailed)?;
+        }
+        let stamp = now
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        revoke_workspace_credentials(db, workspace_id, &stamp)
+            .await
+            .map_err(|_| ErasureFailed)
+    }
+}
+
+/// The credentials and access a workspace holds in the tables other modules
+/// own, in one batch (ADR 0004): personal access tokens and agent keys are
+/// revoked, agent accounts disabled, grants deleted; the workspace's provider
+/// keys, tool credentials, GitHub App key and installations are deleted, as
+/// is its Slack bot token copy (in the workspaces module's own batch).
+///
+/// Audit trails (`org_audit`, `settings_audit`) and usage counts are kept:
+/// they name no content, and ADR 0004 keeps the audit log on purpose.
+async fn revoke_workspace_credentials(
+    db: &dyn Database,
+    workspace_id: &str,
+    stamp: &str,
+) -> Result<(), cratefield_core::DbError> {
+    db.batch_atomic(&[
+        cratefield_core::Statement::with_values(
+            "UPDATE personal_access_tokens SET revoked_at = ? \
+              WHERE workspace_id = ? AND revoked_at IS NULL",
+            vec![stamp.into(), workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "UPDATE org_service_account_keys SET revoked_at = ? \
+              WHERE org_id = ? AND revoked_at IS NULL",
+            vec![stamp.into(), workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "UPDATE org_service_accounts SET disabled_at = ? \
+              WHERE org_id = ? AND disabled_at IS NULL",
+            vec![stamp.into(), workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM org_grants WHERE org_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM model_connections WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM tool_connections WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM tool_workspace_settings WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM tool_pending_approvals WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM github_repos WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM github_installations WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM github_states WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+        cratefield_core::Statement::with_values(
+            "DELETE FROM github_app WHERE workspace_id = ?",
+            vec![workspace_id.into()],
+        ),
+    ])
+    .await
+    .map(|_| ())
 }
 
 /// The [`Answers`] the composition could not build yet.
@@ -2204,5 +2356,247 @@ mod tests {
         assert_eq!(non_blank(Some(String::new())), None);
         assert_eq!(non_blank(Some(" \n".to_owned())), None);
         assert_eq!(non_blank(Some(" key\n".to_owned())), Some("key".to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod erasure_tests {
+    //! ADR 0004, "Deleting a workspace": the seam an owner's deletion runs
+    //! through shreds the workspace's own scopes and revokes its credentials,
+    //! and leaves another workspace's untouched. Run over the migrated tables
+    //! of every module whose rows the seam reaches.
+
+    use super::*;
+    use cratefield_core::{Blob, Clock, Database, Statement, UlidIdGen};
+    use cratefield_kms::{Dek, LocalFileKms};
+    use cratefield_testing::{MemoryBlob, TestHarness};
+    use livingbrain_pages::{Author, EntityType, PageError, PageWrite};
+    use sea_query::Value;
+
+    const WORKSPACE: &str = "ws_DOOMED";
+    const OTHER: &str = "ws_KEPT";
+    const MEMBER: &str = "usr_SHARED_ID";
+
+    fn kms() -> Arc<dyn Kms> {
+        Arc::new(
+            LocalFileKms::from_key(Dek::generate().expect("a key"), "test-kek", "test")
+                .expect("a well-formed key"),
+        )
+    }
+
+    fn harness() -> TestHarness {
+        let modules: Vec<Box<dyn cratefield_core::Module>> = vec![
+            Box::new(Pages::new()),
+            Box::new(Tokens::new()),
+            Box::new(Models::new()),
+            Box::new(Tools::new()),
+            Box::new(GithubApp::new()),
+            Box::new(Access::new()),
+        ];
+        TestHarness::new(modules)
+    }
+
+    fn text(value: &str) -> Value {
+        Value::String(Some(Box::new(value.to_owned())))
+    }
+
+    fn run(db: &Arc<dyn Database>, sql: &str, values: Vec<Value>) {
+        pollster::block_on(db.execute(&Statement::with_values(sql, values))).expect("a statement");
+    }
+
+    fn count(db: &Arc<dyn Database>, sql: &str, values: Vec<Value>) -> usize {
+        pollster::block_on(db.query(&Statement::with_values(sql, values)))
+            .expect("a query")
+            .rows
+            .len()
+    }
+
+    async fn write(store: &PageStore, scope: &str, body: &str) {
+        store
+            .write(
+                scope,
+                "alpha",
+                PageWrite {
+                    entity_type: EntityType::Person,
+                    markdown: format!("---\nname: Kestrel\n---\n{body}"),
+                    author: Author::Human {
+                        id: MEMBER.to_owned(),
+                    },
+                    base_version: None,
+                },
+            )
+            .await
+            .expect("a write");
+    }
+
+    #[test]
+    fn erasing_a_workspace_shreds_its_scopes_and_revokes_its_credentials() {
+        pollster::block_on(async {
+            let kit = harness();
+            let db = kit.db.clone();
+            let blob: Arc<dyn Blob> = Arc::new(MemoryBlob::new());
+            let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
+            let store = Arc::new(PageStore::new(
+                db.clone(),
+                blob,
+                kms(),
+                clock,
+                Arc::new(UlidIdGen),
+            ));
+
+            let doomed_personal =
+                livingbrain_pages::access::space_scope(WORKSPACE, "personal:usr_SHARED_ID")
+                    .expect("a space");
+            let kept_personal =
+                livingbrain_pages::access::space_scope(OTHER, "personal:usr_SHARED_ID")
+                    .expect("a space");
+            let doomed_shared =
+                livingbrain_pages::access::space_scope(WORKSPACE, "shared").expect("a space");
+            let kept_shared =
+                livingbrain_pages::access::space_scope(OTHER, "shared").expect("a space");
+            // The same member id in both workspaces is two scopes: the
+            // workspace is folded into the scope name.
+            assert_ne!(doomed_personal, kept_personal);
+            assert_ne!(doomed_shared, kept_shared);
+
+            write(&store, &doomed_personal, "Zephyrmoor met in Reykjavik.").await;
+            write(&store, &kept_personal, "Quicksilver ledger, Oslo.").await;
+            write(&store, &doomed_shared, "Harbour notes for the doomed team.").await;
+            write(&store, &kept_shared, "Harbour notes for the kept team.").await;
+
+            // The rows the deletion reaches outside pages: a source in the
+            // doomed scope, a PAT and a provider key in each workspace.
+            run(
+                &db,
+                "INSERT INTO sources (scope, body_sha256, id, kind, rel_path, wikilinks, \
+                 body_key, key_version, imported_by, created_at) \
+                 VALUES (?, 'sha', 'src1', 'import', 'a.md', '[]', 'k', 1, ?, 'now')",
+                vec![text(&doomed_personal), text(MEMBER)],
+            );
+            run(
+                &db,
+                "INSERT INTO sources (scope, body_sha256, id, kind, rel_path, wikilinks, \
+                 body_key, key_version, imported_by, created_at) \
+                 VALUES (?, 'sha', 'src2', 'import', 'b.md', '[]', 'k', 1, ?, 'now')",
+                vec![text(&kept_personal), text(MEMBER)],
+            );
+            for (prefix, workspace) in [("lbp_doomed", WORKSPACE), ("lbp_kept", OTHER)] {
+                run(
+                    &db,
+                    "INSERT INTO personal_access_tokens \
+                     (prefix, secret_hash, workspace_id, user_id, created_at) \
+                     VALUES (?, 'hash', ?, ?, 'now')",
+                    vec![text(prefix), text(workspace), text(MEMBER)],
+                );
+                run(
+                    &db,
+                    "INSERT INTO model_connections (workspace_id, role, provider, base_url, \
+                     model, key_ciphertext, key_last4, status, missing, checked_at, updated_by) \
+                     VALUES (?, 'answer', 'openai', 'https://x', 'm', ?, '1234', 'ok', '', \
+                     'now', ?)",
+                    vec![text(workspace), b"sealed".to_vec().into(), text(MEMBER)],
+                );
+            }
+
+            let erasure = WipeWorkspace {
+                pages: PageStoreCell::default(),
+            };
+            // Before the pages surface has run, there is no store to shred
+            // through, and the deletion must refuse rather than skip.
+            let now = kit.clock.0;
+            assert!(
+                erasure
+                    .erase(&*db, now, WORKSPACE, &["shared".to_owned()])
+                    .await
+                    .is_err(),
+                "no page store means no erasure"
+            );
+            erasure.pages.publish(store.clone());
+
+            let spaces = vec![
+                "shared".to_owned(),
+                format!("personal:{MEMBER}"),
+                "channel:slack:C0PRIVATE".to_owned(),
+            ];
+            erasure
+                .erase(&*db, now, WORKSPACE, &spaces)
+                .await
+                .expect("the erasure runs");
+
+            // The doomed workspace's content is unreadable, and says so.
+            for (scope, slug) in [(&doomed_personal, "alpha"), (&doomed_shared, "alpha")] {
+                let error = store
+                    .read(scope, slug)
+                    .await
+                    .expect_err("a shredded scope must not read");
+                assert!(matches!(error, PageError::Shredded(_)), "{error:?}");
+            }
+            // The other workspace, with the same member id, reads on.
+            assert!(store.read(&kept_personal, "alpha").await.is_ok());
+            assert!(store.read(&kept_shared, "alpha").await.is_ok());
+
+            // Its sources went with the scope; the other workspace's did not.
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT id FROM sources WHERE scope = ?",
+                    vec![text(&doomed_personal)]
+                ),
+                0
+            );
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT id FROM sources WHERE scope = ?",
+                    vec![text(&kept_personal)]
+                ),
+                1
+            );
+
+            // Its tokens are revoked, the other workspace's are not, and its
+            // provider key is gone.
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT prefix FROM personal_access_tokens \
+                     WHERE prefix = 'lbp_doomed' AND revoked_at IS NULL",
+                    vec![],
+                ),
+                0
+            );
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT prefix FROM personal_access_tokens \
+                     WHERE prefix = 'lbp_kept' AND revoked_at IS NULL",
+                    vec![],
+                ),
+                1
+            );
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT workspace_id FROM model_connections WHERE workspace_id = ?",
+                    vec![text(WORKSPACE)],
+                ),
+                0
+            );
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT workspace_id FROM model_connections WHERE workspace_id = ?",
+                    vec![text(OTHER)],
+                ),
+                1
+            );
+
+            // A space that is not a space is refused, not silently skipped.
+            assert!(
+                erasure
+                    .erase(&*db, now, WORKSPACE, &["nonsense".to_owned()])
+                    .await
+                    .is_err()
+            );
+        });
     }
 }
