@@ -223,7 +223,7 @@ pub(crate) async fn run(
     // What the live feed calls this read (`GET /v1/graph/activity`); facts
     // are not pages, so they record nothing.
     let feed = match &call {
-        Call::Search { .. } | Call::ContextFor { .. } => "search",
+        Call::Search { .. } | Call::Recent { .. } | Call::ContextFor { .. } => "search",
         Call::Page { .. } => "read",
         Call::Note { .. } => "write",
         Call::Facts { .. } => "",
