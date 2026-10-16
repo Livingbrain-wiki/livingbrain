@@ -4101,6 +4101,98 @@ body[data-page="signin"]:not([data-session="signed-in"]) .topbar .brand__word {
   width: 12rem;
   max-width: 100%;
 }
+/* ------------------------------------------------------------- dreaming
+ * The Dreaming page (dreaming.html): the settings card, the status strip and
+ * the log of what the brain changed. Plain rows, no table: a change reads as a
+ * sentence, with the names in bold and the refused ones muted. */
+
+.dream-page .dream-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.dream-row + .dream-row {
+  margin-top: 0.4rem;
+}
+
+.dream-row {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.dream-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.dream-switch input {
+  margin: 0;
+}
+
+.dream-strip {
+  margin: 0;
+  color: var(--ink2);
+  overflow-wrap: anywhere;
+}
+
+.dream-log {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.dream-log > li {
+  list-style: none;
+  margin: 0;
+}
+
+.dream-item {
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.6rem;
+  background: var(--bg2);
+  border: 1px solid color-mix(in oklch, var(--ink) 10%, transparent);
+  min-width: 0;
+}
+
+.dream-item > div {
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.dream-item__what strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.dream-item__detail,
+.dream-item__meta {
+  margin-top: 0.2rem;
+  font-size: 0.9rem;
+  color: var(--ink3);
+}
+
+.dream-item.is-muted {
+  background: transparent;
+  border-style: dashed;
+}
+
+.dream-item.is-muted .dream-item__what {
+  color: var(--ink3);
+}
+
+.dream-page select:disabled,
+.dream-page input:disabled {
+  opacity: 0.6;
+}
+
 .upload__progress {
   display: flex;
   align-items: center;

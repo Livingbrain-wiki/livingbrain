@@ -236,7 +236,7 @@ struct Refusing;
 
 #[async_trait::async_trait]
 impl Model for Refusing {
-    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
+    async fn available(&self, _workspace: &str, _owner: &str, _role: &str) -> Result<bool, String> {
         Ok(true)
     }
     async fn complete(
@@ -391,7 +391,7 @@ impl Scripted {
 
 #[async_trait::async_trait]
 impl Model for Scripted {
-    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
+    async fn available(&self, _workspace: &str, _owner: &str, _role: &str) -> Result<bool, String> {
         Ok(true)
     }
     async fn complete(

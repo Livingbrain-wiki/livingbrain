@@ -33,6 +33,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::compact::{self, CallRef, Keep};
 use crate::dream::Dreams;
+use crate::dream_settings::{DreamSettings, DreamTuning};
 use crate::edits::{self, PageEdit};
 use crate::facts::{self, Fact, FactSink, HeldFact, newest_first, refusal};
 use crate::layout::{self, Allowed, Place};
@@ -324,7 +325,14 @@ pub struct Call<'a> {
     pub owner: &'a str,
     /// The compile job and chunk (`<scope>:<body_sha256>:<chunk>`).
     pub ref_key: &'a str,
+    /// The job slot the call runs on (`main`, `triage`, `research`): a
+    /// compile's is [`COMPILE_ROLE`], a dream's is the workspace's choice.
+    pub role: &'a str,
 }
+
+/// The job slot a compile's model call runs on: Main, the workspace's main
+/// writing job.
+pub const COMPILE_ROLE: &str = "main";
 
 /// Why a model call did not answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,9 +360,9 @@ pub enum ModelFailure {
 /// it over `livingbrain_models::invoke`; the tests over a fake.
 #[async_trait::async_trait]
 pub trait Model: Send + Sync {
-    /// Whether a model would serve `owner`'s compile in `workspace` — their
-    /// own runner or the workspace's connection. No call made.
-    async fn available(&self, workspace: &str, owner: &str) -> Result<bool, String>;
+    /// Whether a model would serve `owner`'s call on `role` in `workspace` —
+    /// their own runner or the workspace's connection. No call made.
+    async fn available(&self, workspace: &str, owner: &str, role: &str) -> Result<bool, String>;
     /// One completion.
     async fn complete(
         &self,
@@ -411,6 +419,10 @@ pub struct Compiler {
     /// Dreaming's bookkeeping (the queue, the pass record and the decision
     /// log), when the composition has a facts store to dream over.
     pub(crate) dreams: Option<Arc<dyn Dreams>>,
+    /// Each workspace's dreaming settings (on/off, the rule pass, the model),
+    /// when the composition wires them. Without it every workspace dreams
+    /// with the defaults.
+    pub(crate) dream_tuning: Option<Arc<dyn DreamTuning>>,
 }
 
 /// What one job accumulated across its calls.
@@ -475,6 +487,7 @@ impl Compiler {
             tuning: Arc::new(NoTuning),
             classifiers: None,
             dreams: None,
+            dream_tuning: None,
         }
     }
 
@@ -514,6 +527,23 @@ impl Compiler {
     pub fn with_dreams(mut self, dreams: Option<Arc<dyn Dreams>>) -> Self {
         self.dreams = dreams;
         self
+    }
+
+    /// The same compiler, reading each workspace's dreaming settings from
+    /// `tuning` before a dream or a rule pass touches its facts.
+    #[must_use]
+    pub fn with_dream_tuning(mut self, tuning: Option<Arc<dyn DreamTuning>>) -> Self {
+        self.dream_tuning = tuning;
+        self
+    }
+
+    /// The dreaming settings `workspace` runs under (the defaults without a
+    /// wired tuning).
+    pub(crate) async fn dream_settings(&self, workspace: &str) -> DreamSettings {
+        match &self.dream_tuning {
+            Some(tuning) => tuning.settings(workspace).await,
+            None => DreamSettings::default(),
+        }
     }
 
     pub async fn settings_for(&self, workspace: &str) -> Settings {
@@ -721,7 +751,7 @@ impl Compiler {
             None => {
                 let known = self
                     .model
-                    .available(&job.workspace, &job.owner)
+                    .available(&job.workspace, &job.owner, COMPILE_ROLE)
                     .await
                     .unwrap_or(false);
                 models.insert(who, known);
@@ -1070,6 +1100,7 @@ impl Compiler {
                     workspace: &job.workspace,
                     owner: &job.owner,
                     ref_key: &ref_key,
+                    role: COMPILE_ROLE,
                 };
                 let call_started = self.clock.now();
                 let answered = self

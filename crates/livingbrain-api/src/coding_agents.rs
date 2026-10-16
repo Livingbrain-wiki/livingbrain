@@ -66,7 +66,7 @@ use cratefield_core::{
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::{
     Call, ClaimFilter, Classifiers, Compiler, Dreams, Emitted, Fact, FactSink, Gate, HeldFact, Job,
-    JobStatus, Model, ModelFailure, Queue, Reply, Settings, Window,
+    JobStatus, Model, ModelFailure, Queue, Reply, Settings, StoredDreamTuning, Window,
 };
 use livingbrain_memory::timeline::{self, FactStatus, TimedFact};
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError, Structured};
@@ -185,6 +185,12 @@ impl Module for CodingAgents {
                  in flight — a workspace id, a count and a time, nothing about a person",
             ),
             PersonalDataSet::none(
+                "dreaming_settings",
+                "the row is one workspace's dreaming choices (on or off, the quick rules, \
+                 the model's job slot) and a pending run request — nothing in it identifies \
+                 or describes a person",
+            ),
+            PersonalDataSet::none(
                 "coding_agent_pool",
                 "the row is one workspace's compile pool — how many compiles run at once, a \
                  rate-limit pause and an average call time; nothing about a person",
@@ -194,20 +200,22 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 5] = [
+        const SQLITE: [SqlMigration; 6] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
             livingbrain_compiler::MIGRATION_PARALLEL,
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
+            livingbrain_compiler::MIGRATION_DREAMING_SETTINGS,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 5] = [
+        const POSTGRES: [SqlMigration; 6] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
             livingbrain_compiler::MIGRATION_PARALLEL_POSTGRES,
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT_POSTGRES,
+            livingbrain_compiler::MIGRATION_DREAMING_SETTINGS_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -370,6 +378,7 @@ pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
         )
         .with_dreams(Some(dreams))
         .with_tuning(Arc::new(StoredTuning { db: db.clone() }))
+        .with_dream_tuning(Some(Arc::new(StoredDreamTuning { db: db.clone() })))
         .with_classifiers(wiki.jev.clone().map(|connector| {
             Arc::new(WorkspaceJev {
                 db,
@@ -649,8 +658,8 @@ struct WorkspaceModel {
 
 #[async_trait::async_trait]
 impl Model for WorkspaceModel {
-    async fn available(&self, workspace: &str, owner: &str) -> Result<bool, String> {
-        jobs::available(&*self.db, workspace, owner, MODEL_ROLE)
+    async fn available(&self, workspace: &str, owner: &str, role: &str) -> Result<bool, String> {
+        jobs::available(&*self.db, workspace, owner, role)
             .await
             .map_err(|error| error.variant().to_owned())
     }
@@ -689,7 +698,7 @@ impl Model for WorkspaceModel {
             kind: "compile",
             ref_key: call.ref_key,
         };
-        match jobs::dispatch(&ports, call.workspace, MODEL_ROLE, &job, &request).await {
+        match jobs::dispatch(&ports, call.workspace, call.role, &job, &request).await {
             Ok(Dispatch::Reply(reply)) => Ok(Reply {
                 text: reply.text,
                 prompt_tokens: reply.prompt_tokens,

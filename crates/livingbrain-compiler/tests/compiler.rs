@@ -96,6 +96,8 @@ struct Fake {
     limits: Arc<Mutex<Vec<u32>>>,
     script: Arc<Script>,
     available: bool,
+    /// The job slot (`role`) of every call, in order.
+    roles: Arc<Mutex<Vec<String>>>,
 }
 
 impl Fake {
@@ -107,6 +109,7 @@ impl Fake {
             limits: Arc::default(),
             script: Arc::new(Box::new(script)),
             available: true,
+            roles: Arc::default(),
         }
     }
 
@@ -124,20 +127,25 @@ impl Fake {
     fn inputs(&self) -> Vec<String> {
         self.inputs.lock().expect("inputs").clone()
     }
+
+    fn roles(&self) -> Vec<String> {
+        self.roles.lock().expect("roles").clone()
+    }
 }
 
 #[async_trait::async_trait]
 impl Model for Fake {
-    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
+    async fn available(&self, _workspace: &str, _owner: &str, _role: &str) -> Result<bool, String> {
         Ok(self.available)
     }
     async fn complete(
         &self,
-        _call: &Call<'_>,
+        call: &Call<'_>,
         system: &str,
         user: &str,
         max_tokens: u32,
     ) -> Result<Reply, ModelFailure> {
+        self.roles.lock().expect("roles").push(call.role.to_owned());
         self.limits.lock().expect("limits").push(max_tokens);
         let index = {
             let mut inputs = self.inputs.lock().expect("inputs");
@@ -1668,7 +1676,7 @@ impl Slow {
 
 #[async_trait::async_trait]
 impl Model for Slow {
-    async fn available(&self, _workspace: &str, _owner: &str) -> Result<bool, String> {
+    async fn available(&self, _workspace: &str, _owner: &str, _role: &str) -> Result<bool, String> {
         Ok(true)
     }
     async fn complete(
@@ -3347,5 +3355,140 @@ fn a_supersede_across_attribute_names_is_refused_when_the_older_starts_later() {
             .status
             .as_str(),
         "current"
+    );
+}
+
+/// Each workspace's dreaming choices, by workspace; the rest keep the defaults.
+struct Dials(Vec<(&'static str, livingbrain_compiler::DreamSettings)>);
+
+#[async_trait::async_trait]
+impl livingbrain_compiler::DreamTuning for Dials {
+    async fn settings(&self, workspace: &str) -> livingbrain_compiler::DreamSettings {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == workspace)
+            .map(|(_, settings)| settings.clone())
+            .unwrap_or_default()
+    }
+
+    async fn take_run_request(&self, _workspace: &str) -> bool {
+        false
+    }
+}
+
+/// The dreaming world: one synced session of `WORKSPACE` (so its scope has a
+/// compile job and a member), the facts the rule pass refuses, and a project
+/// long enough to be dreamt. Returns the store, the scope and the model.
+fn dreaming_world() -> (World, Arc<Store>, String) {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_project(&store, &scope);
+    seed_attributes(&world, &store, &scope, &["issue_320_status"]);
+    (world, store, scope)
+}
+
+fn dreaming_compiler(
+    world: &World,
+    store: &Arc<Store>,
+    model: &Fake,
+    tuning: Arc<dyn livingbrain_compiler::DreamTuning>,
+) -> Compiler {
+    dream_compiler(world, store, model, Settings::default()).with_dream_tuning(Some(tuning))
+}
+
+#[test]
+fn a_disabled_workspace_is_skipped_by_the_model_pass_and_the_rule_pass() {
+    let (world, store, scope) = dreaming_world();
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let off = livingbrain_compiler::DreamSettings {
+        enabled: false,
+        ..livingbrain_compiler::DreamSettings::default()
+    };
+    let compiler = dreaming_compiler(
+        &world,
+        &store,
+        &model,
+        Arc::new(Dials(vec![(WORKSPACE, off)])),
+    );
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep, livingbrain_compiler::Sweep::default(), "nothing ran");
+    assert_eq!(model.calls(), 0, "no model call for a disabled workspace");
+    assert!(
+        is_current(&store, &scope, "issue_320_status"),
+        "the rule pass leaves a disabled workspace's facts alone"
+    );
+    assert_eq!(world.count("fact_dreams"), 0, "nothing was queued");
+    assert_eq!(world.count("fact_dream_decisions"), 0, "nothing was logged");
+
+    // The same workspace switched on: the rule pass and the model pass both run.
+    let compiler = dreaming_compiler(&world, &store, &model, Arc::new(Dials(vec![])));
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert!(sweep.retracted >= 1, "the rule pass runs once it is on");
+    assert!(model.calls() >= 1, "the model pass runs once it is on");
+    assert!(!is_current(&store, &scope, "issue_320_status"));
+}
+
+#[test]
+fn the_rule_pass_can_be_switched_off_while_the_model_pass_still_runs() {
+    let (world, store, scope) = dreaming_world();
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let no_rules = livingbrain_compiler::DreamSettings {
+        rules_enabled: false,
+        ..livingbrain_compiler::DreamSettings::default()
+    };
+    let compiler = dreaming_compiler(
+        &world,
+        &store,
+        &model,
+        Arc::new(Dials(vec![(WORKSPACE, no_rules)])),
+    );
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep.retracted, 0, "no rule retractions");
+    assert!(is_current(&store, &scope, "issue_320_status"));
+    assert!(model.calls() >= 1, "the model pass still reads the subject");
+}
+
+#[test]
+fn the_chosen_model_slot_is_the_one_called() {
+    let (world, store, _scope) = dreaming_world();
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let triage = livingbrain_compiler::DreamSettings {
+        model_role: "triage".to_owned(),
+        ..livingbrain_compiler::DreamSettings::default()
+    };
+    let compiler = dreaming_compiler(
+        &world,
+        &store,
+        &model,
+        Arc::new(Dials(vec![(WORKSPACE, triage)])),
+    );
+    pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    let roles = model.roles();
+    assert!(!roles.is_empty(), "the model was called");
+    assert!(roles.iter().all(|role| role == "triage"), "{roles:?}");
+
+    // Without a wired tuning the dream calls Main, as it always has.
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let (world, store, _scope) = dreaming_world();
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert!(!model.roles().is_empty());
+    assert!(
+        model.roles().iter().all(|role| role == "main"),
+        "{:?}",
+        model.roles()
     );
 }

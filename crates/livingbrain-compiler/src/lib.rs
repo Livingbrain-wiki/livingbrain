@@ -40,6 +40,7 @@
 pub mod compact;
 pub mod compile;
 pub mod dream;
+pub mod dream_settings;
 pub mod edits;
 pub mod facts;
 pub mod layout;
@@ -56,6 +57,7 @@ pub use compile::{
     Overrides, Processed, Reply, Settings, Tuning,
 };
 pub use dream::{Dreams, Sweep, Window};
+pub use dream_settings::{DreamSettings, DreamStatus, DreamTuning, StoredDreamTuning};
 pub use facts::{COMPILER_WRITER, Emitted, Fact, FactSink, HeldFact, NoFacts};
 pub use pool::{CONCURRENCY_CEILING, MAX_CALL, MAX_IN_FLIGHT, WALL_AFTER_BUDGET};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, PoolRow, Queue, Savings};
@@ -135,10 +137,26 @@ pub const MIGRATION_REQUEUE_BAD_OUTPUT_POSTGRES: SqlMigration = SqlMigration::ne
     include_str!("../migrations/postgres/0005_requeue_bad_output.sql"),
 );
 
+/// The sixth migration: dreaming's per-workspace settings (`dreaming_settings`):
+/// on or off, the quick rules, the model's job slot and a pending "Run now".
+pub const MIGRATION_DREAMING_SETTINGS: SqlMigration = SqlMigration::new(
+    "0006",
+    "dreaming_settings",
+    include_str!("../migrations/sqlite/0006_dreaming_settings.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_DREAMING_SETTINGS`].
+pub const MIGRATION_DREAMING_SETTINGS_POSTGRES: SqlMigration = SqlMigration::new(
+    "0006",
+    "dreaming_settings",
+    include_str!("../migrations/postgres/0006_dreaming_settings.sql"),
+);
+
 /// The tables the module that mounts the compiler owns.
-pub const TABLES: [&str; 4] = [
+pub const TABLES: [&str; 5] = [
     "coding_agent_jobs",
     "coding_agent_spend",
     "coding_agent_reservations",
     "coding_agent_pool",
+    "dreaming_settings",
 ];

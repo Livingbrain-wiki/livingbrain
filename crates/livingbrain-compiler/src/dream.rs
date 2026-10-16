@@ -41,7 +41,8 @@ use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-use crate::compile::{Budget, Call, Compiler, ModelFailure};
+use crate::compile::{Budget, COMPILE_ROLE, Call, Compiler, ModelFailure};
+use crate::dream_settings::DreamSettings;
 use crate::facts::{self, Fact, HeldFact, attribute_rule, refusal};
 use crate::prompt;
 
@@ -67,9 +68,10 @@ const PASS_STEPS: u64 = 4;
 pub const RULE_BATCH: usize = 200;
 /// The `model` column of the decision log for a rule-pass retraction.
 pub const RULES_ROLE: &str = "rules";
-/// The `model` column of the decision log: the call's role, since a
-/// [`Reply`](crate::compile::Reply) does not name the model.
-pub const DREAM_ROLE: &str = "dreaming";
+/// The `model` column of the decision log is the call's job slot
+/// (`main`, `triage`, `research`), since a [`Reply`](crate::compile::Reply)
+/// does not name the model; a dream with no chosen slot records [`COMPILE_ROLE`].
+pub const DREAM_ROLE: &str = COMPILE_ROLE;
 /// How long a claimed pass may run before another tick may take it over.
 const LEASE_MINUTES: i64 = 10;
 
@@ -388,6 +390,64 @@ struct Cleaned {
     subjects: BTreeSet<(String, String)>,
 }
 
+/// What one tick knows about the workspaces it touches, read once each: the
+/// workspace of a scope (from its compile jobs), its dreaming settings and
+/// whether a "Run now" was taken for it.
+#[derive(Default)]
+struct WorkspacePlan {
+    workspaces: HashMap<String, Option<String>>,
+    settings: HashMap<String, DreamSettings>,
+    asked: HashMap<String, bool>,
+}
+
+impl WorkspacePlan {
+    /// The workspace a scope belongs to, `None` for a scope with no compile job.
+    async fn workspace(
+        &mut self,
+        compiler: &Compiler,
+        scope: &str,
+    ) -> Result<Option<String>, String> {
+        if let Some(known) = self.workspaces.get(scope) {
+            return Ok(known.clone());
+        }
+        let found = compiler
+            .queue
+            .scope_member(scope)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|(workspace, _)| workspace);
+        self.workspaces.insert(scope.to_owned(), found.clone());
+        Ok(found)
+    }
+
+    async fn settings(&mut self, compiler: &Compiler, workspace: &str) -> DreamSettings {
+        if let Some(known) = self.settings.get(workspace) {
+            return known.clone();
+        }
+        let read = compiler.dream_settings(workspace).await;
+        self.settings.insert(workspace.to_owned(), read.clone());
+        read
+    }
+
+    /// Whether a "Run now" was taken for `workspace` this tick. Asked of an
+    /// enabled workspace only, and taken once.
+    async fn run_requested(
+        &mut self,
+        compiler: &Compiler,
+        workspace: &str,
+    ) -> Result<bool, String> {
+        if let Some(known) = self.asked.get(workspace) {
+            return Ok(*known);
+        }
+        let taken = match &compiler.dream_tuning {
+            Some(tuning) => tuning.take_run_request(workspace).await,
+            None => false,
+        };
+        self.asked.insert(workspace.to_owned(), taken);
+        Ok(taken)
+    }
+}
+
 /// How one pass ended, before it is recorded.
 enum Pass {
     /// Read a window and applied what it could. `more` says whether the
@@ -422,30 +482,53 @@ impl Compiler {
         };
         let now = self.clock.now();
         let mut sweep = Sweep::default();
+        let mut plan = WorkspacePlan::default();
         // The rule pass first: no model and no budget. It retracts what the
         // shared attribute rules refuse, so the candidates and the model
         // passes below see the cleaned subjects.
-        let cleaned = self.rule_pass(dreams.as_ref(), now).await?;
+        let cleaned = self.rule_pass(dreams.as_ref(), now, &mut plan).await?;
         sweep.retracted = cleaned.retracted;
         for candidate in dreams.candidates(MIN_FACTS, CANDIDATE_LIMIT).await? {
             let key = (candidate.scope.clone(), candidate.subject.clone());
+            // A workspace that turned dreaming off is skipped whole: nothing is
+            // queued for it, and nothing it queued earlier is run.
+            let Some(workspace) = plan.workspace(self, &candidate.scope).await? else {
+                continue;
+            };
+            let settings = plan.settings(self, &workspace).await;
+            if !settings.enabled {
+                continue;
+            }
             // A finished subject the rule pass just cleaned is read again, once:
             // the model re-reads the set without what was removed. Nothing is
             // queued again unless the rule pass retracted something.
             let rerun =
                 cleaned.subjects.contains(&key) && candidate.status.as_deref() == Some("done");
-            if due(&candidate, now) || rerun {
+            // "Run now" asks every subject of the workspace to be read at this
+            // tick, except one already queued or running.
+            let requested = plan.run_requested(self, &workspace).await?;
+            let asked =
+                requested && !matches!(candidate.status.as_deref(), Some("queued" | "running"));
+            if due(&candidate, now) || rerun || asked {
                 dreams
                     .enqueue(&candidate.scope, &candidate.subject, now.unix_timestamp())
                     .await?;
                 sweep.enqueued += 1;
             }
         }
-        for (scope, subject) in dreams.queued(passes).await? {
-            if sweep.passes >= passes
-                || budget.exhausted(now)
-                || !budget.try_spend(PASS_STEPS as u32)
-            {
+        for (scope, subject) in dreams.queued(CANDIDATE_LIMIT).await? {
+            if sweep.passes >= passes {
+                break;
+            }
+            // A queued subject of a workspace that has turned dreaming off
+            // waits, unspent, until it is turned back on.
+            let Some(workspace) = plan.workspace(self, &scope).await? else {
+                continue;
+            };
+            if !plan.settings(self, &workspace).await.enabled {
+                continue;
+            }
+            if budget.exhausted(now) || !budget.try_spend(PASS_STEPS as u32) {
                 break;
             }
             let lease = now + Duration::minutes(LEASE_MINUTES);
@@ -541,7 +624,12 @@ impl Compiler {
     /// are candidates. A fact a person or the API wrote is never retracted
     /// here, whatever its key looks like: the rules judge what the compiler
     /// may store, not what someone chose to record.
-    async fn rule_pass(&self, dreams: &dyn Dreams, now: OffsetDateTime) -> Result<Cleaned, String> {
+    async fn rule_pass(
+        &self,
+        dreams: &dyn Dreams,
+        now: OffsetDateTime,
+        plan: &mut WorkspacePlan,
+    ) -> Result<Cleaned, String> {
         let batch = dreams.rule_batch(RULE_BATCH, now.unix_timestamp()).await?;
         let key = now.format(&Rfc3339).map_err(|_| "clock".to_owned())?;
         let mut cleaned = Cleaned::default();
@@ -552,6 +640,16 @@ impl Compiler {
             let Some(rule) = attribute_rule(&fact.attribute) else {
                 continue;
             };
+            // A workspace with the rules off keeps its facts; a scope with no
+            // compiler job is no workspace's, and nothing the compiler wrote.
+            let Some(workspace) = plan.workspace(self, &fact.scope).await? else {
+                continue;
+            };
+            // Dreaming off turns the rules off too: a disabled workspace is skipped whole.
+            let settings = plan.settings(self, &workspace).await;
+            if !settings.enabled || !settings.rules_enabled {
+                continue;
+            }
             let applied = matches!(self.facts.retract(&fact.scope, &fact.id).await, Ok(true));
             let input_ids = serde_json::to_string(&[&fact.id]).map_err(|e| e.to_string())?;
             let reason = format!("rule:{rule}");
@@ -623,13 +721,21 @@ impl Compiler {
         else {
             return Ok(Pass::Skipped("no-member"));
         };
+        // The workspace's dreaming choices: off is a skip (the sweep checks it
+        // first, so this is the same answer on any other path), and the model
+        // is the job slot it chose.
+        let dreaming = self.dream_settings(&workspace).await;
+        if !dreaming.enabled {
+            return Ok(Pass::Skipped("disabled"));
+        }
+        let role = dreaming.model_role.as_str();
         let settings = self.settings_for(&workspace).await;
         if settings.paused {
             return Ok(Pass::Later("paused"));
         }
         if !self
             .model
-            .available(&workspace, &owner)
+            .available(&workspace, &owner, role)
             .await
             .unwrap_or(false)
         {
@@ -678,6 +784,7 @@ impl Compiler {
             workspace: &workspace,
             owner: &owner,
             ref_key: &hold,
+            role,
         };
         let answered = self
             .model
@@ -761,7 +868,7 @@ impl Compiler {
                     reason: reason_text,
                     applied: ok,
                     input_ids: &input_ids,
-                    model: DREAM_ROLE,
+                    model: role,
                     decided_at: &decided_at,
                 })
                 .await?;

@@ -51,8 +51,8 @@ use cratefield_runtime_cloudflare::{
 };
 use livingbrain_accounts::{Access, Agents, Audit};
 use livingbrain_api::{
-    Ask, BudgetSettings, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind, Search,
-    SessionAuth, Sources, Wiki,
+    Ask, BudgetSettings, CodingAgents, Dreaming, Export, Facts, Graph, ModelJobs, Notes,
+    PagesRebind, Search, SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
 use livingbrain_discord::DiscordModule;
@@ -530,6 +530,11 @@ fn cli_modules(
         // The brain map's data (`GET /v1/graph`): the asker's own pages,
         // sources and facts as nodes and edges, read-only.
         Arc::new(Graph::new(wiki.clone())),
+        // Dreaming's settings and its decision log (`/v1/dreaming`): the
+        // workspace's switch, model and "Run now", over the same table the
+        // cron reads. Mounted before the compiler, which keeps the compiler's
+        // cron share where it was.
+        Arc::new(Dreaming::new(wiki.clone())),
         // The coding-agents compiler: its queue and status routes, and the
         // cron drain that compiles synced sessions into `coding-agents/`.
         Arc::new(CodingAgents::new(wiki.clone())),
@@ -1089,7 +1094,7 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
 /// The CLI paths `fetch` diverts to [`serve_cli`] — the routes the
 /// [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 9] = [
+const CLI_ROUTES: [&str; 10] = [
     "/v1/notes",
     "/v1/search",
     "/v1/graph",
@@ -1099,17 +1104,19 @@ const CLI_ROUTES: [&str; 9] = [
     "/v1/coding-agents",
     "/v1/facts",
     "/v1/model-jobs",
+    "/v1/dreaming",
 ];
 
 /// The diverted paths that have routes *under* them, so the divert matches
 /// the prefix: the sources listing, facet and citation route, the
 /// coding-agents queue and process routes, and a fact's retraction
 /// (`/v1/facts/{id}/retract`).
-const CLI_PREFIXES: [&str; 4] = [
+const CLI_PREFIXES: [&str; 5] = [
     "/v1/sources",
     "/v1/coding-agents",
     "/v1/facts",
     "/v1/model-jobs",
+    "/v1/dreaming",
 ];
 
 /// The avatar paths `fetch` diverts to [`serve_cli`]: the two uploads and

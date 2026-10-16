@@ -66,6 +66,7 @@
 mod ask;
 mod budgets;
 mod coding_agents;
+mod dreaming;
 mod export;
 mod facts;
 mod graph;
@@ -90,6 +91,7 @@ pub use budgets::{
     overrides,
 };
 pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, StoreFacts};
+pub use dreaming::{Dreaming, MODEL_ROLES};
 pub use export::Export;
 pub use facts::Facts;
 pub use graph::{
