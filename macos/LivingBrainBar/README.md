@@ -227,8 +227,11 @@ plus its SHA-256.
   submitted with `notarytool --wait` and stapled.
 - `CARGO_TARGET_DIR` and `OUTPUT_DIR` are honoured.
 
-Publish under a `macos-v<version>` tag (`gh release create macos-v0.1.0 …`),
-never a bare `v*` tag: those trigger the production deploy workflow.
+Publish under a `macos-v<version>` tag, never a bare `v*` tag: those trigger
+the production deploy workflow. `release.sh` prints the exact command, e.g.
+`gh release create macos-v0.1.0 … --target <full SHA>`; the target must be the
+full 40-character commit (`git rev-parse HEAD`), because the release API
+rejects a short SHA as `target_commitish`.
 
 ## Build, run, install
 

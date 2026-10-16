@@ -102,4 +102,8 @@ echo "app:    $app"
 echo "dmg:    $dmg ($(du -h "$dmg" | cut -f1 | tr -d ' '))"
 echo "sha256: $dmg.sha256 ($(cut -d' ' -f1 < "$dmg.sha256"))"
 [[ "$identity" == "-" ]] && echo "note:   ad-hoc signed, not notarized — Gatekeeper asks on first open"
+# The release API refuses a short SHA as --target, so the suggested command
+# names the full commit. Short ids are fine for display; this one is not.
+full_sha="$(git -C "$repo" rev-parse HEAD)"
+echo "publish: gh release create macos-v$version $(printf '%q' "$dmg") $(printf '%q' "$dmg.sha256") --target $full_sha --title \"Living Brain $version\" --generate-notes"
 exit 0
