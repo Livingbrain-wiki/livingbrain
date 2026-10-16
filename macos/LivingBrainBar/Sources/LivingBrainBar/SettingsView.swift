@@ -61,7 +61,7 @@ struct SettingsView: View {
                 if workspace.signedIn {
                     HStack {
                         Label("Signed in", systemImage: "checkmark.seal.fill").foregroundStyle(Theme.accent)
-                        Button("Sign Out") { workspace.signOut() }
+                        Button(workspace.activeName.map { "Sign Out of \($0)" } ?? "Sign Out") { workspace.signOut() }
                     }
                 } else {
                     Text("Not signed in").foregroundStyle(.secondary)
@@ -87,10 +87,24 @@ struct SettingsView: View {
                     .foregroundStyle(workspace.me == nil ? .secondary : .primary)
                     .textSelection(.enabled)
             }
-            Text("A token belongs to one workspace. To use another, switch workspace in the web app's Settings → Members and sign in here again.")
+            ForEach(workspace.workspaces) { item in
+                HStack {
+                    Image(systemName: item.id == workspace.activeId ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(item.id == workspace.activeId ? Theme.accent : .secondary)
+                    Text(item.name.isEmpty ? item.id : item.name)
+                    Spacer()
+                    if item.id != workspace.activeId {
+                        Button("Switch") { workspace.switchTo(item.id) }
+                    }
+                    Button("Sign Out", role: .destructive) { workspace.remove(item.id) }
+                }
+            }
+            LabeledContent("Add a workspace") {
+                SignInControls(workspace: workspace)
+            }
+            Text("Each workspace has its own sign-in. Add Workspace opens the browser: pick the workspace on the approval page, then approve. Sync and the job runner use the CLI's sign-in.")
                 .font(.caption).foregroundStyle(.secondary)
         }
-        .task(id: workspace.signedIn) { await workspace.loadMe() }
     }
 
     private var modelsSection: some View {

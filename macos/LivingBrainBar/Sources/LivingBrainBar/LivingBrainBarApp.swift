@@ -59,6 +59,9 @@ struct LivingBrainBarApp: App {
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
             }
+            CommandMenu("Workspace") {
+                WorkspaceMenuItems(workspace: app.workspace, router: app.router)
+            }
         }
     }
 }

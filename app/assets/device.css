@@ -96,3 +96,10 @@ main.device {
 .device__raw form {
   margin-block: var(--space-2);
 }
+
+/* The workspace the token is for: a picker when the person has more than
+   one (`device.js`). */
+#device-workspace-pick {
+  width: 100%;
+  max-width: 100%;
+}
