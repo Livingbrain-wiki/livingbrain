@@ -13,8 +13,8 @@ use cratefield_testing::{MemoryBlob, TestHarness};
 use livingbrain_memory::temporal::{DAY, days_from_civil};
 use livingbrain_memory::timeline::{FactStatus, PartialDate};
 use livingbrain_pages::{
-    DreamDecisionRow, DreamFinish, FactError, FactInput, FactOutcome, FactStore, PageStore, Pages,
-    fact_json,
+    CursorUpdate, DreamDecisionRow, DreamFinish, FactError, FactInput, FactOutcome, FactStore,
+    PageStore, Pages, fact_json,
 };
 use time::OffsetDateTime;
 
@@ -263,6 +263,7 @@ fn the_dream_queue_finds_a_subject_claims_it_once_and_keeps_a_record() {
                     decisions: 1,
                     applied: 1,
                     error: None,
+                    cursor: CursorUpdate::End,
                 },
                 at,
             )
@@ -295,6 +296,156 @@ fn the_dream_queue_finds_a_subject_claims_it_once_and_keeps_a_record() {
         assert_eq!(
             kit.facts.dream_candidates(20, 10).await.unwrap()[0].fresh,
             0
+        );
+    });
+}
+
+#[test]
+fn a_dream_window_reads_current_facts_in_order_and_its_cursor_advances() {
+    pollster::block_on(async {
+        let kit = kit();
+        let mut ids = Vec::new();
+        for n in 0..5 {
+            let recorded = kit
+                .facts
+                .record(
+                    "user-a",
+                    input(&format!("tool_{n}"), "yes", Some("2025")),
+                    "u-a",
+                )
+                .await
+                .unwrap();
+            ids.push(recorded.fact.id);
+            kit.clock.set(2025, 3, 2 + n as u32 + 1);
+        }
+        // One fact is retracted and one superseded: neither may be in a window.
+        kit.facts
+            .retract(&["user-a"], &ids[1])
+            .await
+            .unwrap()
+            .expect("retracted");
+        kit.facts
+            .record("user-a", input("tool_2", "no", Some("2026")), "u-a")
+            .await
+            .unwrap();
+
+        let first = kit
+            .facts
+            .dream_window("user-a", "project/demo", None, 2)
+            .await
+            .unwrap();
+        assert_eq!(first.facts.len(), 2);
+        assert!(first.more, "more current facts follow");
+        let shown: Vec<&str> = first.facts.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(shown[0], ids[0]);
+        assert!(
+            !shown.contains(&ids[1].as_str()),
+            "retracted is never shown"
+        );
+        assert!(
+            !shown.contains(&ids[2].as_str()),
+            "superseded is never shown"
+        );
+
+        let second = kit
+            .facts
+            .dream_window("user-a", "project/demo", first.cursor.as_deref(), 2)
+            .await
+            .unwrap();
+        assert!(
+            second.facts.iter().all(|f| f.id != first.facts[1].id),
+            "the cursor moved on"
+        );
+        assert_eq!(second.facts.len(), 2);
+        assert!(
+            !second.more,
+            "the second window reaches the end of the four"
+        );
+        let after_end = kit
+            .facts
+            .dream_window("user-a", "project/demo", second.cursor.as_deref(), 2)
+            .await
+            .unwrap();
+        assert!(after_end.facts.is_empty(), "nothing left after the end");
+        assert!(!after_end.more);
+
+        let vocabulary = kit
+            .facts
+            .dream_vocabulary("user-a", "project/demo")
+            .await
+            .unwrap();
+        let names: Vec<&str> = vocabulary
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["tool_0", "tool_2", "tool_3", "tool_4"]);
+        assert_eq!(vocabulary[1].1, 1, "tool_2 has its one current fact");
+    });
+}
+
+#[test]
+fn the_dream_cursor_is_kept_set_or_cleared_as_a_pass_ends() {
+    pollster::block_on(async {
+        let kit = kit();
+        kit.facts
+            .record("user-a", input("tool_0", "yes", Some("2025")), "u-a")
+            .await
+            .unwrap();
+        let now = kit.facts.now();
+        kit.facts
+            .dream_enqueue("user-a", "project/demo", now)
+            .await
+            .unwrap();
+        let finish = |cursor| DreamFinish {
+            status: "queued",
+            dreamt: false,
+            facts_seen: 1,
+            decisions: 0,
+            applied: 0,
+            error: None,
+            cursor,
+        };
+        kit.facts
+            .dream_finish(
+                "user-a",
+                "project/demo",
+                &finish(CursorUpdate::Set("2025-03-02T12:00:00Z|fact-x")),
+                now,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            kit.facts
+                .dream_cursor("user-a", "project/demo")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("2025-03-02T12:00:00Z|fact-x")
+        );
+        kit.facts
+            .dream_finish("user-a", "project/demo", &finish(CursorUpdate::Keep), now)
+            .await
+            .unwrap();
+        assert!(
+            kit.facts
+                .dream_cursor("user-a", "project/demo")
+                .await
+                .unwrap()
+                .is_some(),
+            "kept"
+        );
+        kit.facts
+            .dream_finish("user-a", "project/demo", &finish(CursorUpdate::End), now)
+            .await
+            .unwrap();
+        assert_eq!(
+            kit.facts
+                .dream_cursor("user-a", "project/demo")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(livingbrain_pages::SWEEP_END),
+            "a completed sweep is marked finished"
         );
     });
 }

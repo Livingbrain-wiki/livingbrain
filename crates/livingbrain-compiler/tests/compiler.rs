@@ -2326,6 +2326,126 @@ impl livingbrain_compiler::Dreams for Store {
     async fn log(&self, row: livingbrain_pages::DreamDecisionRow<'_>) -> Result<(), String> {
         self.0.dream_log(&row).await.map_err(|e| e.to_string())
     }
+    async fn cursor(&self, scope: &str, subject: &str) -> Result<Option<String>, String> {
+        self.0
+            .dream_cursor(scope, subject)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn window(
+        &self,
+        scope: &str,
+        subject: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<livingbrain_compiler::Window, String> {
+        let window = self
+            .0
+            .dream_window(scope, subject, after, limit)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(livingbrain_compiler::Window {
+            facts: window
+                .facts
+                .iter()
+                .map(|fact| held_from_json(&livingbrain_pages::fact_json(fact)))
+                .collect(),
+            more: window.more,
+            cursor: window.cursor,
+        })
+    }
+    async fn vocabulary(
+        &self,
+        scope: &str,
+        subject: &str,
+    ) -> Result<Vec<(String, i64, String)>, String> {
+        self.0
+            .dream_vocabulary(scope, subject)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// A fact as the compiler reads it, from its wire shape.
+fn held_from_json(fact: &serde_json::Value) -> livingbrain_compiler::HeldFact {
+    let text = |key: &str| fact[key].as_str().map(str::to_owned);
+    livingbrain_compiler::HeldFact {
+        id: text("id").unwrap_or_default(),
+        subject: text("subject").unwrap_or_default(),
+        attribute: text("attribute").unwrap_or_default(),
+        value: text("value").unwrap_or_default(),
+        unit: text("unit"),
+        valid_from: text("valid_from").unwrap_or_default(),
+        valid_to: text("valid_to"),
+        source: text("source"),
+        observed_at: text("observed_at").unwrap_or_default(),
+        last_confirmed_at: text("last_confirmed_at").unwrap_or_default(),
+    }
+}
+
+/// The current fact id of `attribute` holding `value` in `scope`.
+fn id_with_value(store: &Store, scope: &str, attribute: &str, value: &str) -> String {
+    pollster::block_on(
+        store
+            .0
+            .timelines(&[scope], Some("project/demo"), Some(attribute)),
+    )
+    .expect("the timelines")
+    .iter()
+    .flat_map(|t| t.facts.iter())
+    .find(|f| f.value == value)
+    .map(|f| f.id.clone())
+    .expect("the fact is stored")
+}
+
+/// A dream compiler over the facts store, as the composition wires it.
+fn dream_compiler(world: &World, store: &Arc<Store>, model: &Fake, settings: Settings) -> Compiler {
+    Compiler::new(
+        world.pages(),
+        world.sources(),
+        Queue::new(world.db.clone()),
+        Arc::new(model.clone()),
+        store.clone(),
+        Arc::new(NoGate),
+        Arc::new(world.clock.clone()),
+        settings,
+    )
+    .with_dreams(Some(store.clone()))
+}
+
+/// `count` `tool_<n>` facts in `scope`, a second apart, so the window order
+/// is the order they were stored in.
+fn seed_tools(world: &World, store: &Store, scope: &str, count: usize) {
+    for n in 0..count {
+        pollster::block_on(store.0.record(
+            scope,
+            livingbrain_pages::FactInput {
+                subject: "project/demo".to_owned(),
+                attribute: format!("tool_{n}"),
+                value: "yes".to_owned(),
+                valid_from: Some("2025".to_owned()),
+                source: Some("source:seed".to_owned()),
+                ..livingbrain_pages::FactInput::default()
+            },
+            "brain:test",
+        ))
+        .expect("a seeded fact");
+        world.clock.advance(Duration::seconds(1));
+    }
+}
+
+fn reply_text(text: &str) -> Reply {
+    Reply {
+        text: text.to_owned(),
+        prompt_tokens: 900,
+        completion_tokens: 100,
+        ..Reply::default()
+    }
+}
+
+/// How many fact lines a dream message shows.
+fn fact_lines(input: &str) -> usize {
+    input.matches("| project/demo |").count()
 }
 
 /// Twenty current facts about one project (and one event among them), in
@@ -2486,5 +2606,265 @@ fn a_dream_stops_when_the_compile_budget_is_spent_and_stays_queued() {
         status,
         vec![(scope.clone(), "project/demo".to_owned())],
         "the subject is still queued for a later tick"
+    );
+}
+
+#[test]
+fn a_subject_is_worked_through_in_windows_and_is_due_again_until_its_sweep_ends() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_tools(&world, &store, &scope, 65);
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let unbounded = ScheduledBudget::unbounded();
+
+    // The first window is 60 facts; the sweep is not finished, so the subject
+    // is queued again at once rather than at the recheck.
+    let first = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((first.enqueued, first.passes), (1, 1));
+    assert_eq!(
+        pollster::block_on(store.0.dream_queued(5)).expect("the queue"),
+        vec![(scope.clone(), "project/demo".to_owned())],
+        "due again on the next tick"
+    );
+    let second = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((second.enqueued, second.passes), (0, 1));
+    assert_eq!(model.calls(), 2);
+    let inputs = model.inputs();
+    assert_eq!(fact_lines(&inputs[0]), 60, "the first window shows 60");
+    assert!(inputs[0].contains("more follow in a later window"));
+    assert_eq!(
+        fact_lines(&inputs[1]),
+        5,
+        "the second window shows the rest"
+    );
+    assert!(inputs[1].contains("reaches the end"));
+    assert!(
+        inputs[0].contains("tool_0:") && inputs[0].contains("tool_64:"),
+        "the vocabulary covers the whole subject, not just the window"
+    );
+
+    // Swept to the end: nothing is due until the recheck or new facts.
+    let third = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((third.enqueued, third.passes), (0, 0));
+    assert_eq!(model.calls(), 2);
+}
+
+#[test]
+fn a_dream_acts_only_on_facts_that_are_current_when_it_acts() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    // Postgres, then D1 on the same attribute: one-valued, so storing D1
+    // supersedes Postgres. Postgres is history and must never be shown.
+    let db = |value: &str, from: &str| livingbrain_pages::FactInput {
+        subject: "project/demo".to_owned(),
+        attribute: "database".to_owned(),
+        value: value.to_owned(),
+        valid_from: Some(from.to_owned()),
+        source: Some("source:seed".to_owned()),
+        ..livingbrain_pages::FactInput::default()
+    };
+    pollster::block_on(store.0.record(&scope, db("Postgres", "2024"), "brain:test")).expect("seed");
+    world.clock.advance(Duration::seconds(1));
+    seed_tools(&world, &store, &scope, 20);
+    pollster::block_on(store.0.record(&scope, db("D1", "2026"), "brain:test")).expect("seed");
+    let old = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        Some("database"),
+    ))
+    .expect("timelines")
+    .iter()
+    .flat_map(|t| t.facts.iter())
+    .find(|f| f.value == "Postgres")
+    .map(|f| f.id.clone())
+    .expect("stored");
+    let tool0 = id_with_value(&store, &scope, "tool_0", "yes");
+
+    // The answer retracts the superseded Postgres (not shown: refused), ends
+    // tool_0, then retracts tool_0 again in the same pass (already acted on).
+    let model = Fake::answering(move |_, _| {
+        Ok(reply_text(
+            &serde_json::json!({"decisions": [
+                {"op": "retract", "id": old, "reason": "duplicate"},
+                {"op": "end", "id": tool0, "valid_to": "2026-01"},
+                {"op": "retract", "id": tool0, "reason": "event"},
+            ]})
+            .to_string(),
+        ))
+    });
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep.applied, 1, "only the end applied");
+    assert!(
+        !model.inputs()[0].contains("Postgres"),
+        "a superseded fact is never shown to the model"
+    );
+    assert_eq!(
+        world.count("fact_dream_decisions"),
+        3,
+        "every decision is logged"
+    );
+    let tool = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        Some("tool_0"),
+    ))
+    .expect("timelines");
+    let tool = tool
+        .iter()
+        .flat_map(|t| t.facts.iter())
+        .next()
+        .expect("kept");
+    assert_eq!(tool.valid_to.as_ref().map(|to| to.text()), Some("2026-01"));
+    assert_eq!(tool.status.as_str(), "current", "ended, not retracted");
+}
+
+#[test]
+fn a_supersede_can_name_a_current_fact_from_a_later_window() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    // Many-valued, so both stay current: the window split is what matters.
+    let db = |value: &str, from: &str| livingbrain_pages::FactInput {
+        subject: "project/demo".to_owned(),
+        attribute: "database".to_owned(),
+        value: value.to_owned(),
+        valid_from: Some(from.to_owned()),
+        cardinality: Some("many".to_owned()),
+        source: Some("source:seed".to_owned()),
+        ..livingbrain_pages::FactInput::default()
+    };
+    pollster::block_on(store.0.record(&scope, db("Postgres", "2024"), "brain:test")).expect("seed");
+    world.clock.advance(Duration::seconds(1));
+    seed_tools(&world, &store, &scope, 63);
+    pollster::block_on(store.0.record(&scope, db("D1", "2026"), "brain:test")).expect("seed");
+    let old = id_with_value(&store, &scope, "database", "Postgres");
+    let newer = id_with_value(&store, &scope, "database", "D1");
+
+    // Window one (60 facts) holds Postgres and not D1: the answer supersedes
+    // Postgres by D1, which only the later window shows.
+    let model = Fake::answering(move |_, index| {
+        if index == 0 {
+            Ok(reply_text(
+                &serde_json::json!({"decisions": [
+                    {"op": "supersede", "id": old, "by": newer},
+                ]})
+                .to_string(),
+            ))
+        } else {
+            Ok(reply_text(r#"{"decisions":[]}"#))
+        }
+    });
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let unbounded = ScheduledBudget::unbounded();
+    let first = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!(first.applied, 1, "the cross-window supersede applied");
+    let second = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!(second.passes, 1);
+    assert_eq!(model.calls(), 2);
+    let timelines = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        Some("database"),
+    ))
+    .expect("timelines");
+    let postgres = timelines
+        .iter()
+        .flat_map(|t| t.facts.iter())
+        .find(|f| f.value == "Postgres")
+        .expect("kept");
+    assert_eq!(postgres.valid_to.as_ref().map(|to| to.text()), Some("2026"));
+}
+
+#[test]
+fn a_subject_left_part_way_by_an_old_pass_is_swept_to_the_end_on_the_next_ticks() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_tools(&world, &store, &scope, 65);
+    // The row an old pass left in production: done after one full window,
+    // with no cursor.
+    let at = world.clock.now().unix_timestamp();
+    pollster::block_on(store.0.dream_enqueue(&scope, "project/demo", at)).expect("enqueue");
+    assert!(
+        pollster::block_on(store.0.dream_claim(&scope, "project/demo", at, at + 600))
+            .expect("claim")
+    );
+    pollster::block_on(store.0.dream_finish(
+        &scope,
+        "project/demo",
+        &livingbrain_pages::DreamFinish {
+            status: "done",
+            dreamt: true,
+            facts_seen: 60,
+            decisions: 0,
+            applied: 0,
+            error: None,
+            cursor: livingbrain_pages::CursorUpdate::Keep,
+        },
+        at,
+    ))
+    .expect("finish");
+
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let unbounded = ScheduledBudget::unbounded();
+    // Due at once (no recheck wait): the first tick reads the first window,
+    // the next tick the rest, and then the subject rests until the recheck.
+    let first = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((first.enqueued, first.passes), (1, 1));
+    let second = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!(second.passes, 1);
+    assert_eq!(model.calls(), 2);
+    let inputs = model.inputs();
+    assert_eq!(fact_lines(&inputs[0]), 60);
+    assert_eq!(fact_lines(&inputs[1]), 5);
+    assert!(inputs[1].contains("reaches the end"));
+    let rested = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((rested.enqueued, rested.passes), (0, 0));
+    assert_eq!(
+        model.calls(),
+        2,
+        "a finished sweep is not swept again at once"
     );
 }
