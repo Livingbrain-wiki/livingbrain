@@ -397,24 +397,49 @@
 
       <!-- facts: every temporal fact the reader may see, as of a date
            (docs/temporal-facts.md) — what holds, and what held before -->
-      <section id="facts-view" hidden>
+      <section id="facts-view" class="facts-view" hidden>
         <div class="page-head">
           <p class="eyebrow">Brain</p>
           <h1>Facts</h1>
-          <p class="lede">Everything the brain holds true, as of a date — and what held before.</p>
+          <p class="lede">What your brain knows, and since when.</p>
         </div>
-        <div class="wiki-toolbar">
-          <label class="facts__asof"
-            >As of
-            <input id="facts-as-of" type="date" aria-label="Show what was true on this date" />
+        <div class="facts-controls">
+          <label class="facts-search">
+            <span class="sr">Search facts</span>
+            <input id="facts-search" type="search" placeholder="Search facts or values" autocomplete="off" spellcheck="false" />
           </label>
-          <button id="facts-now" type="button">Now</button>
-          <label class="facts__stale"
-            ><input id="facts-show-stale" type="checkbox" /> Show stale</label
-          >
-          <span class="status" id="facts-status" role="status"></span>
+          <div class="facts-controls__row">
+            <label class="facts-asof">
+              <span>As of</span>
+              <input id="facts-as-of" type="date" aria-label="Show what was true on this date" />
+            </label>
+            <button id="facts-now" type="button" class="facts-today">Today</button>
+            <label class="facts-sort">
+              <span>Sort</span>
+              <select id="facts-sort" aria-label="Sort facts">
+                <option value="alpha">A to Z</option>
+                <option value="recent">Recently changed</option>
+              </select>
+            </label>
+            <label class="facts-switch">
+              <input id="facts-show-stale" type="checkbox" role="switch" />
+              <span>Show stale</span>
+            </label>
+          </div>
+          <p class="facts-status" id="facts-status" role="status" aria-live="polite"></p>
         </div>
-        <div id="facts-list" class="card facts"></div>
+        <div id="facts-layout" class="facts-layout">
+          <nav class="facts-rail" aria-label="Subjects">
+            <ul id="facts-rail" class="facts-rail__list"></ul>
+          </nav>
+          <div class="facts-main">
+            <div class="facts-jump">
+              <label for="facts-jump">Subject</label>
+              <select id="facts-jump"></select>
+            </div>
+            <div id="facts-list" class="facts-list"></div>
+          </div>
+        </div>
         <div id="facts-empty" class="card wiki-empty" hidden>
           <h2>No facts yet</h2>
           <p>

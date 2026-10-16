@@ -32,7 +32,18 @@ import {
   isSafeHref,
 } from "./markdown.js";
 import { applyHeader, checkSession } from "./session.js";
-import { displayValue, factsDescription, factsPath, staleCount } from "./facts.js";
+import {
+  buildFactsView,
+  displayValue,
+  factsDescription,
+  factsNoMatchDescription,
+  factsPath,
+  factsRailDescription,
+  factsSectionsDescription,
+  factsSelectDescription,
+  factsStatusText,
+  staleCount,
+} from "./facts.js";
 import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
 import { icon } from "./shell.js";
 import {
@@ -1717,6 +1728,12 @@ export async function wikiPage(api) {
     factsNow: $("#facts-now"),
     factsShowStale: $("#facts-show-stale"),
     factsStatus: $("#facts-status"),
+    factsView: $("#facts-view"),
+    factsSearch: $("#facts-search"),
+    factsSort: $("#facts-sort"),
+    factsLayout: $("#facts-layout"),
+    factsRail: $("#facts-rail"),
+    factsJump: $("#facts-jump"),
     factsList: $("#facts-list"),
     factsEmpty: $("#facts-empty"),
     tocDesktop: $("#toc-desktop"),
@@ -1783,6 +1800,11 @@ export async function wikiPage(api) {
     factsKeys: null,
     factsAsOf: "",
     factsShowStale: false,
+    // The search text, the sort, and the subjects the reader opened past
+    // their first fifty facts.
+    factsQuery: "",
+    factsSort: "alpha",
+    factsExpanded: new Set(),
     slug: startSlug,
     page: null,
     version: null,
@@ -3391,9 +3413,9 @@ export async function wikiPage(api) {
     }
   }
 
-  /** Paints the Facts view from the keys last read: the current facts the
-   * reader asked for (stale ones only with "Show stale"), and the note of
-   * how many stale ones that leaves out. */
+  /** Paints the Facts view from the keys last read: a section per subject,
+   * with the search, the sort and the stale filter applied, and a rail or
+   * select to jump between subjects. */
   function paintFacts() {
     const keys = state.factsKeys || [];
     // Staleness is measured from the date being viewed: a fact confirmed in
@@ -3402,19 +3424,52 @@ export async function wikiPage(api) {
     const reference = /^\d{4}-\d{2}-\d{2}$/.test(asOf)
       ? Date.parse(`${asOf}T00:00:00Z`)
       : Date.now();
-    const description = factsDescription(keys, {
-      showSubject: true,
+    const any = keys.some((key) => key && key.attribute);
+    els.factsEmpty.hidden = any;
+    if (els.factsLayout) els.factsLayout.hidden = !any;
+    if (els.factsNow) els.factsNow.disabled = !asOf;
+    if (!any) {
+      renderInto(els.factsList, []);
+      renderInto(els.factsRail, []);
+      renderInto(els.factsJump, []);
+      els.factsStatus.textContent = "";
+      return;
+    }
+    const view = buildFactsView(keys, {
       showStale: state.factsShowStale,
       now: reference,
+      query: state.factsQuery,
+      sort: state.factsSort,
     });
-    renderInto(els.factsList, description);
-    els.factsList.hidden = description.length === 0;
-    els.factsEmpty.hidden = description.length !== 0;
-    const hidden = state.factsShowStale ? 0 : staleCount(keys, reference);
-    const when = asOf ? `As of ${asOf}` : "Now";
-    els.factsStatus.textContent = hidden
-      ? `${when} · ${hidden} stale fact${hidden === 1 ? "" : "s"} hidden`
-      : when;
+    renderInto(els.factsRail, factsRailDescription(view));
+    renderInto(els.factsJump, factsSelectDescription(view));
+    renderInto(
+      els.factsList,
+      view.subjects.length
+        ? factsSectionsDescription(view, { expanded: state.factsExpanded, now: reference })
+        : factsNoMatchDescription(state.factsQuery.trim()),
+    );
+    const staleHidden = state.factsShowStale ? 0 : staleCount(keys, reference);
+    els.factsStatus.textContent = factsStatusText({
+      matched: view.matched,
+      asOf,
+      staleHidden,
+    });
+  }
+
+  /** The nearest node (itself included) carrying an attribute, or null. Works
+   * on a real DOM and on the test stubs. */
+  function closestWith(node, name) {
+    for (let at = node; at; at = at.parentNode) {
+      if (at.getAttribute && at.getAttribute(name) !== null) return at;
+    }
+    return null;
+  }
+
+  /** Scrolls the list to a subject's section (rail, select). */
+  function jumpToSubject(id) {
+    const target = id && els.factsList.querySelector(`#${id}`);
+    if (target && target.scrollIntoView) target.scrollIntoView({ block: "start" });
   }
 
   /** The Facts view: every timeline the reader may see, as of a date. */
@@ -3424,6 +3479,7 @@ export async function wikiPage(api) {
       renderInto(els.factsList, []);
       els.factsList.hidden = true;
       els.factsEmpty.hidden = true;
+      if (els.factsLayout) els.factsLayout.hidden = true;
       els.factsStatus.textContent = "";
       signInNotice("Sign in to see the facts you can read.");
       return;
@@ -3916,6 +3972,58 @@ export async function wikiPage(api) {
   }
   if (els.factsAsOf) {
     els.factsAsOf.addEventListener("change", () => loadFacts(els.factsAsOf.value || ""));
+  }
+  if (els.factsSearch) {
+    // Typing repaints after a short pause, not on every key.
+    let timer = 0;
+    els.factsSearch.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        state.factsQuery = els.factsSearch.value || "";
+        if (state.factsKeys) paintFacts();
+      }, 150);
+    });
+    els.factsSearch.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !els.factsSearch.value) return;
+      event.preventDefault();
+      els.factsSearch.value = "";
+      state.factsQuery = "";
+      if (state.factsKeys) paintFacts();
+    });
+  }
+  if (els.factsSort) {
+    els.factsSort.addEventListener("change", () => {
+      state.factsSort = els.factsSort.value === "recent" ? "recent" : "alpha";
+      if (state.factsKeys) paintFacts();
+    });
+  }
+  if (els.factsView) {
+    // One listener for the whole view: more-values, rail jumps, expand, clear.
+    els.factsView.addEventListener("click", (event) => {
+      const more = closestWith(event.target, "data-more");
+      if (more) {
+        const open = more.getAttribute("aria-expanded") !== "true";
+        more.setAttribute("aria-expanded", open ? "true" : "false");
+        more.textContent = open ? "Show less" : "Show more";
+        return;
+      }
+      const jump = closestWith(event.target, "data-jump");
+      if (jump) return jumpToSubject(jump.getAttribute("data-jump"));
+      const expand = closestWith(event.target, "data-expand");
+      if (expand) {
+        state.factsExpanded.add(expand.getAttribute("data-expand"));
+        paintFacts();
+        return;
+      }
+      if (closestWith(event.target, "data-clear") && els.factsSearch) {
+        els.factsSearch.value = "";
+        state.factsQuery = "";
+        paintFacts();
+      }
+    });
+    els.factsView.addEventListener("change", (event) => {
+      if (els.factsJump && event.target === els.factsJump) jumpToSubject(els.factsJump.value);
+    });
   }
   if (els.factsNow) {
     els.factsNow.addEventListener("click", () => {
