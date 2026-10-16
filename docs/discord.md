@@ -55,7 +55,7 @@ Integrations): a bot cannot leave a server by itself.
    section stays hidden and `/v1/discord/connect` answers 503. A placeholder
    (`replace-with-…`, `changeme`, `xxx`) counts as not set.
 7. **Migrations.** The table migration is
-   `crates/livingbrain-venture/migrations/0045_discord_0001_init.sql`, applied
+   `crates/livingbrain-venture/migrations/0046_discord_0001_init.sql`, applied
    with the other migrations (`wrangler d1 migrations apply`).
 8. **Optional tuning.** `DISCORD_TICK_BUDGET` (default 200) is the most Discord
    calls one cron tick may make.
