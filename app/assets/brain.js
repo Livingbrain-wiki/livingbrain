@@ -21,6 +21,7 @@ import {
   createLayout,
 } from "./graph.js";
 import { mountBrain } from "./brain-render.js";
+import { bindFullscreen } from "./brain-fullscreen.js";
 import { renderMarkdown } from "./markdown.js";
 import { linkWikilinks } from "./wiki.js";
 
@@ -74,6 +75,7 @@ export async function brainPage(deps) {
     spin: $("map-spin"),
     flat: $("map-flat"),
     reset: $("map-reset"),
+    fullscreen: $("map-fullscreen"),
     zoomIn: $("map-zoom-in"),
     zoomOut: $("map-zoom-out"),
     time: $("map-time"),
@@ -450,6 +452,9 @@ export async function brainPage(deps) {
     });
   }
   els.panelClose.addEventListener("click", closePanel);
+  // Full screen: the stage (canvas, controls, side panel) fills the screen;
+  // the button is hidden where the browser has no Fullscreen API.
+  bindFullscreen({ button: els.fullscreen, stage: els.stage, doc: document });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !els.panel.hidden) closePanel();
   });

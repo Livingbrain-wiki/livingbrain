@@ -221,6 +221,45 @@ export function agentBatchRequest(ids, disabled) {
   return { method: "POST", path: `${AGENTS_PATH}/batch`, body: { ids: list, disabled: Boolean(disabled) } };
 }
 
+/** The role groups a grant may name, in order of reach. */
+export const ROLE_GROUPS = ["owner", "admin", "member", "viewer"];
+
+/** How many current members have each role, or null when the roster is not
+ * known (then no count is shown). */
+export function roleCounts(members) {
+  if (!Array.isArray(members)) return null;
+  const counts = Object.fromEntries(ROLE_GROUPS.map((role) => [role, 0]));
+  for (const member of members) {
+    const role = member && member.role;
+    if (Object.hasOwn(counts, role)) counts[role] += 1;
+  }
+  return counts;
+}
+
+/** "everyone with the admin role · 0 people"; no count when the roster is unknown. */
+export function roleText(role, members) {
+  const base = `everyone with the ${role} role`;
+  const counts = roleCounts(members);
+  if (!counts) return base;
+  return `${base} · ${plural(counts[role] || 0, "person", "people")}`;
+}
+
+/** The warnings for the *who* choices: a role group with nobody in it reaches
+ * no one today. Empty when the roster is not known. */
+export function emptyRoleWarnings(principals, members) {
+  const counts = roleCounts(members);
+  if (!counts) return [];
+  const warnings = [];
+  for (const principal of distinct(principals)) {
+    if (!principal.startsWith("role:")) continue;
+    const role = principal.slice("role:".length);
+    if (Object.hasOwn(counts, role) && counts[role] === 0) {
+      warnings.push(`Nobody has the ${role} role yet, so this grant reaches no one today.`);
+    }
+  }
+  return warnings;
+}
+
 /** The *who* choices: agents, other members, role groups. */
 export function principalOptions(members, agents, selfId) {
   const options = [];
@@ -242,8 +281,14 @@ export function principalOptions(members, agents, selfId) {
       hint: agent.disabled ? "disabled" : "agent",
     });
   }
-  for (const role of ["member", "admin", "viewer"]) {
-    options.push({ value: `role:${role}`, label: `Everyone with the ${role} role`, group: "Role groups", hint: "" });
+  for (const role of ROLE_GROUPS) {
+    const text = roleText(role, members);
+    options.push({
+      value: `role:${role}`,
+      label: text.charAt(0).toUpperCase() + text.slice(1),
+      group: "Role groups",
+      hint: "",
+    });
   }
   return options;
 }
@@ -435,7 +480,7 @@ export function principalLabel(principal, members, agents) {
     const found = (agents || []).find((a) => a.id === id);
     return found ? `${found.name} (agent)` : `agent ${id}`;
   }
-  if (kind === "role") return `everyone with the ${id} role`;
+  if (kind === "role") return roleText(id, members);
   return text;
 }
 

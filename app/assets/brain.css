@@ -134,6 +134,22 @@ main.map-main {
     var(--bg);
 }
 
+/* Full screen: the stage itself fills the screen, its canvas with it. The
+   renderer re-measures through its ResizeObserver, so the camera follows. */
+.map-stage:fullscreen,
+.map-stage:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+}
+
+.map-fs__icon {
+  flex: none;
+}
+
 .map-canvas {
   position: absolute;
   inset: 0;
