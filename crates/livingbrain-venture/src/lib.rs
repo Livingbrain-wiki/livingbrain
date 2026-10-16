@@ -55,6 +55,7 @@ use livingbrain_api::{
     SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
+use livingbrain_discord::DiscordModule;
 use livingbrain_github_app::GithubApp;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
@@ -462,6 +463,14 @@ fn build(
             // module's `usage_budgets` row. No blob, so it is served like
             // `usage` rather than through the CLI divert.
             .module(BudgetSettings::new());
+        // The Discord connection (docs/discord.md): the bot install, its
+        // settings routes and the cron drain that imports channel history.
+        // Mounted ahead of the CLI modules, so the compiler keeps its place
+        // in the cron's split and GitHub stays the last module.
+        let builder = builder.module(match kms.clone() {
+            Some(kms) => DiscordModule::new().with_kms(kms),
+            None => DiscordModule::new(),
+        });
         // The CLI modules mount with the same key ring the pages surface gates
         // on, so they join the fold the same way pages does.
         let builder = cli_modules(kms.clone(), jev)

@@ -178,5 +178,9 @@
   "workspaces/0007": {
     "file": "0045_workspaces_0007_delete_workspace.sql",
     "sha256": "3bb7dd52f91946bb6b07a4a892d81b0ec11e21b62a9f42ef8c3a04763b6443f7"
+  },
+  "discord/0001": {
+    "file": "0046_discord_0001_init.sql",
+    "sha256": "49474a0585db89c5801f1281fdb67868b596043a22f54439fde34b59e821a162"
   }
 }

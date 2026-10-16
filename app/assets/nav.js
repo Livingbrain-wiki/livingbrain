@@ -76,7 +76,7 @@ export function navItem(id, nav = NAV) {
 export const SETTINGS_TABS = Object.freeze({
   models: ["models"],
   limits: ["limits"],
-  integrations: ["connect", "github"],
+  integrations: ["connect", "github", "discord"],
   tokens: ["tokens"],
   members: ["workspace", "members"],
   agents: ["agents"],

@@ -1955,6 +1955,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "livingbrain-discord"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "cratefield-core",
+ "cratefield-kms",
+ "cratefield-testing",
+ "getrandom 0.4.3",
+ "livingbrain-access",
+ "livingbrain-pages",
+ "livingbrain-tokens",
+ "livingbrain-workspaces",
+ "pollster",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "tower",
+]
+
+[[package]]
 name = "livingbrain-github"
 version = "0.1.0"
 dependencies = [
@@ -2213,6 +2236,7 @@ dependencies = [
  "livingbrain-api",
  "livingbrain-canary",
  "livingbrain-compiler",
+ "livingbrain-discord",
  "livingbrain-github-app",
  "livingbrain-mcp",
  "livingbrain-models",

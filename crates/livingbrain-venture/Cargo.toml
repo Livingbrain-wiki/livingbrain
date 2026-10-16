@@ -55,6 +55,9 @@ livingbrain-compiler = { path = "../livingbrain-compiler" }
 # The GitHub connection's storage (Part B): its tables, collected below as
 # `github/0001`, and the scheduled housekeeping. Routes arrive with Part C.
 livingbrain-github-app = { path = "../livingbrain-github-app" }
+# The Discord connection (docs/discord.md): a bot-installed server whose channels
+# are filed as sources. Mounted ahead of the CLI modules (see `build`).
+livingbrain-discord = { path = "../livingbrain-discord" }
 livingbrain-mcp = { path = "../livingbrain-mcp" }
 livingbrain-models = { path = "../livingbrain-models" }
 livingbrain-pages = { path = "../livingbrain-pages" }

@@ -892,6 +892,32 @@
               </details>
             </section>
 
+            <!-- Discord: a server the Living Brain bot was added to (docs/discord.md).
+                 Hidden until the server says Discord is configured here, so a
+                 deployment without the Discord app shows nothing at all. -->
+            <section class="card sect" id="discord" aria-labelledby="discord-h" hidden>
+              <header class="sect__head">
+                <h2 id="discord-h">Discord</h2>
+                <p class="muted">
+                  Living Brain reads the text channels and threads you include
+                  in a Discord server, its whole history and then new messages,
+                  and files each channel's messages day by day. Messages from
+                  other people in those channels are imported too. The bot only
+                  reads: it posts nothing.
+                </p>
+              </header>
+              <div id="discord-banner" class="notice" role="status" aria-live="polite"></div>
+              <div id="discord-status" class="notice" role="status" aria-live="polite"></div>
+              <div class="form-actions">
+                <button type="button" id="discord-connect" data-variant="primary">Connect Discord</button>
+              </div>
+              <p class="hint">
+                Discord asks which server to add the bot to. It asks for two
+                permissions only: view channels and read message history.
+              </p>
+              <div id="discord-servers"></div>
+            </section>
+
 
 
 

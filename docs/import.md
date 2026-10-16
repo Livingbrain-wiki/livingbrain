@@ -41,6 +41,11 @@ answering `n` leaves the machine exactly as it found it: a declined import
 exits non-zero, uploads nothing, and makes no request at all. A run that finds
 nothing to import is a successful no-op, not an error.
 
+Discord is the other import with no local step: a Discord server connected in
+Settings → Discord is read by the Worker's cron, not by this command, and it
+brings in the messages of everyone in the channels you include. See
+[docs/discord.md](discord.md), which says exactly what is imported.
+
 ## What is uploaded, and what is skipped
 
 The walk honours the vault's own `.gitignore` (whether or not it is a git
