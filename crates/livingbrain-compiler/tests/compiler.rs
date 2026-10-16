@@ -2326,6 +2326,16 @@ impl livingbrain_compiler::Dreams for Store {
     async fn log(&self, row: livingbrain_pages::DreamDecisionRow<'_>) -> Result<(), String> {
         self.0.dream_log(&row).await.map_err(|e| e.to_string())
     }
+    async fn rule_batch(
+        &self,
+        limit: usize,
+        now: i64,
+    ) -> Result<Vec<livingbrain_pages::RuleFact>, String> {
+        self.0
+            .rule_batch(limit, now)
+            .await
+            .map_err(|e| e.to_string())
+    }
     async fn cursor(&self, scope: &str, subject: &str) -> Result<Option<String>, String> {
         self.0
             .dream_cursor(scope, subject)
@@ -2421,7 +2431,7 @@ fn seed_tools(world: &World, store: &Store, scope: &str, count: usize) {
             scope,
             livingbrain_pages::FactInput {
                 subject: "project/demo".to_owned(),
-                attribute: format!("tool_{n}"),
+                attribute: format!("tool_x{n}"),
                 value: "yes".to_owned(),
                 valid_from: Some("2025".to_owned()),
                 source: Some("source:seed".to_owned()),
@@ -2451,7 +2461,7 @@ fn fact_lines(input: &str) -> usize {
 /// Twenty current facts about one project (and one event among them), in
 /// `scope`, stored the way a compile stores them.
 fn seed_project(store: &Store, scope: &str) {
-    let mut facts: Vec<(String, &str)> = (0..20).map(|n| (format!("tool_{n}"), "yes")).collect();
+    let mut facts: Vec<(String, &str)> = (0..20).map(|n| (format!("tool_x{n}"), "yes")).collect();
     facts.push(("session_cost".to_owned(), "4.20 USD"));
     for (attribute, value) in facts {
         pollster::block_on(store.0.record(
@@ -2500,10 +2510,8 @@ fn a_dream_applies_what_the_model_proposes_and_logs_every_decision() {
     seed_project(&store, &scope);
 
     let model = Fake::answering(|user, _| {
-        let event = shown_id(user, "session_cost");
-        let old = shown_id(user, "tool_0");
+        let old = shown_id(user, "tool_x0");
         let decisions = serde_json::json!({"decisions": [
-            {"op": "retract", "id": event, "reason": "Event Cost"},
             {"op": "end", "id": old, "valid_to": "2026-01"},
             {"op": "retract", "id": "fact-not-shown", "reason": "event"},
         ]});
@@ -2531,13 +2539,18 @@ fn a_dream_applies_what_the_model_proposes_and_logs_every_decision() {
     assert_eq!(sweep.enqueued, 1);
     assert_eq!(sweep.passes, 1);
     assert_eq!(
-        sweep.applied, 2,
-        "the unknown id is refused, the rest applied"
+        sweep.retracted, 1,
+        "the rule pass removes the event before the model"
+    );
+    assert_eq!(
+        sweep.applied, 1,
+        "the end applies; the unknown id is refused"
     );
     assert_eq!(model.calls(), 1);
     assert!(model.inputs()[0].contains("SUBJECT: project/demo"));
 
-    // History is kept: the event is retracted, the old tool is ended by date.
+    // History is kept: the event is retracted by the rule pass, the old tool
+    // is ended by date.
     let timelines = pollster::block_on(store.0.timelines(&[&scope], Some("project/demo"), None))
         .expect("the timelines");
     let all: Vec<_> = timelines.iter().flat_map(|t| t.facts.iter()).collect();
@@ -2546,7 +2559,7 @@ fn a_dream_applies_what_the_model_proposes_and_logs_every_decision() {
         .find(|f| f.attribute == "session_cost")
         .expect("kept");
     assert_eq!(event.status.as_str(), "retracted");
-    let tool = all.iter().find(|f| f.attribute == "tool_0").expect("kept");
+    let tool = all.iter().find(|f| f.attribute == "tool_x0").expect("kept");
     assert_eq!(tool.valid_to.as_ref().map(|to| to.text()), Some("2026-01"));
 
     // Every decision is in the log, applied or refused, with the ids shown.
@@ -2650,7 +2663,7 @@ fn a_subject_is_worked_through_in_windows_and_is_due_again_until_its_sweep_ends(
     );
     assert!(inputs[1].contains("reaches the end"));
     assert!(
-        inputs[0].contains("tool_0:") && inputs[0].contains("tool_64:"),
+        inputs[0].contains("tool_x0:") && inputs[0].contains("tool_x64:"),
         "the vocabulary covers the whole subject, not just the window"
     );
 
@@ -2699,10 +2712,10 @@ fn a_dream_acts_only_on_facts_that_are_current_when_it_acts() {
     .find(|f| f.value == "Postgres")
     .map(|f| f.id.clone())
     .expect("stored");
-    let tool0 = id_with_value(&store, &scope, "tool_0", "yes");
+    let tool0 = id_with_value(&store, &scope, "tool_x0", "yes");
 
     // The answer retracts the superseded Postgres (not shown: refused), ends
-    // tool_0, then retracts tool_0 again in the same pass (already acted on).
+    // tool_x0, then retracts tool_x0 again in the same pass (already acted on).
     let model = Fake::answering(move |_, _| {
         Ok(reply_text(
             &serde_json::json!({"decisions": [
@@ -2729,7 +2742,7 @@ fn a_dream_acts_only_on_facts_that_are_current_when_it_acts() {
     let tool = pollster::block_on(store.0.timelines(
         &[scope.as_str()],
         Some("project/demo"),
-        Some("tool_0"),
+        Some("tool_x0"),
     ))
     .expect("timelines");
     let tool = tool
@@ -2867,4 +2880,130 @@ fn a_subject_left_part_way_by_an_old_pass_is_swept_to_the_end_on_the_next_ticks(
         2,
         "a finished sweep is not swept again at once"
     );
+}
+
+/// One current fact per attribute, in `scope`, a second apart.
+fn seed_attributes(world: &World, store: &Store, scope: &str, attributes: &[&str]) {
+    for attribute in attributes {
+        pollster::block_on(store.0.record(
+            scope,
+            livingbrain_pages::FactInput {
+                subject: "project/demo".to_owned(),
+                attribute: (*attribute).to_owned(),
+                value: "v".to_owned(),
+                valid_from: Some("2025".to_owned()),
+                source: Some("source:seed".to_owned()),
+                ..livingbrain_pages::FactInput::default()
+            },
+            "brain:test",
+        ))
+        .expect("a seeded fact");
+        world.clock.advance(Duration::seconds(1));
+    }
+}
+
+/// Whether the current fact of `attribute` in `scope` is still current.
+fn is_current(store: &Store, scope: &str, attribute: &str) -> bool {
+    pollster::block_on(
+        store
+            .0
+            .timelines(&[scope], Some("project/demo"), Some(attribute)),
+    )
+    .expect("the timelines")
+    .iter()
+    .flat_map(|t| t.facts.iter())
+    .any(|f| f.status.as_str() == "current")
+}
+
+#[test]
+fn the_rule_pass_retracts_what_the_rules_refuse_and_keeps_state_without_a_model_call() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    let keep = [
+        "auth_provider_production",
+        "db_migration_runner",
+        "vault_of_record",
+        "cf_worker_minify_enabled",
+    ];
+    let drop = [
+        "issue_320_status",
+        "anon_client_rls_bug",
+        "session_adoption_blocker",
+        "chi_audit_findings",
+        "404_root_cause",
+    ];
+    let all: Vec<&str> = keep.iter().chain(drop.iter()).copied().collect();
+    seed_attributes(&world, &store, &scope, &all);
+
+    // The model is asked nothing it needs to answer: the rule pass alone.
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 0)).expect("a sweep");
+    assert_eq!(sweep.retracted, drop.len());
+    assert_eq!(model.calls(), 0, "no model call for the rule pass");
+    for attribute in keep {
+        assert!(
+            is_current(&store, &scope, attribute),
+            "{attribute} is state and stays"
+        );
+    }
+    for attribute in drop {
+        assert!(
+            !is_current(&store, &scope, attribute),
+            "{attribute} is retracted"
+        );
+    }
+    // Every retraction is logged with its rule, under the rules role.
+    assert_eq!(world.count("fact_dream_decisions"), drop.len() as i64);
+}
+
+#[test]
+fn a_finished_subject_the_rule_pass_cleaned_is_read_again_once_and_then_rests() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_tools(&world, &store, &scope, 25);
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let unbounded = ScheduledBudget::unbounded();
+
+    // The first sweep covers the subject and finishes it.
+    let first = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((first.passes, model.calls()), (1, 1));
+    let rested = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((rested.enqueued, rested.passes), (0, 0));
+
+    // A bad fact lands after the sweep: the rule pass retracts it, and the
+    // finished subject is read again, once.
+    world.clock.advance(Duration::seconds(1));
+    seed_attributes(&world, &store, &scope, &["issue_9_status"]);
+    let cleaned = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!(cleaned.retracted, 1);
+    assert_eq!((cleaned.enqueued, cleaned.passes), (1, 1));
+    assert_eq!(model.calls(), 2);
+
+    // Nothing else to clean: the subject rests until the recheck.
+    let after = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!((after.retracted, after.enqueued, after.passes), (0, 0, 0));
+    assert_eq!(model.calls(), 2, "read again once, not in a loop");
 }

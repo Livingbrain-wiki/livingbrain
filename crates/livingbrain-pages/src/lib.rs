@@ -50,8 +50,8 @@ pub use entity::{
 pub use facts::{
     CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, DreamOutcomes, DreamPass,
     DreamWindow, FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
-    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, SWEEP_END, Timeline, brief_lines, brief_section,
-    fact_json, is_subject, person_subject, relevant, relevant_where,
+    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, RuleFact, SWEEP_END, Timeline, brief_lines,
+    brief_section, fact_json, is_subject, person_subject, relevant, relevant_where,
 };
 pub use graph::{
     GraphLink, GraphPage, GraphReach, GraphRows, GraphSource, GraphSubject, graph_rows,
@@ -152,6 +152,13 @@ const MIGRATION_DREAM_CURSOR: SqlMigration = SqlMigration::new(
     "0009",
     "dream_cursor",
     include_str!("../migrations/sqlite/0009_dream_cursor.sql"),
+);
+
+/// The dreaming rule pass's position, same portable subset.
+const MIGRATION_RULE_SCAN: SqlMigration = SqlMigration::new(
+    "0010",
+    "rule_scan",
+    include_str!("../migrations/sqlite/0010_rule_scan.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -303,6 +310,7 @@ impl Module for Pages {
             "facts",
             "fact_dreams",
             "fact_dream_decisions",
+            "fact_rule_scan",
         ]
     }
 
@@ -409,6 +417,10 @@ impl Module for Pages {
                 "the row is keyed by the scope and a subject slug and holds counts only; \
                  forgetting a scope deletes its rows",
             ),
+            PersonalDataSet::none(
+                "fact_rule_scan",
+                "The rule pass's position: a fact id and a timestamp, no fact text and no person.",
+            ),
             PersonalDataSet::unreachable(
                 "fact_dream_decisions",
                 DataKind::Identifier,
@@ -421,7 +433,7 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 9] = [
+        const MIGRATIONS: [SqlMigration; 10] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
@@ -431,6 +443,7 @@ impl Module for Pages {
             MIGRATION_PAGE_TITLES,
             MIGRATION_DREAMING,
             MIGRATION_DREAM_CURSOR,
+            MIGRATION_RULE_SCAN,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

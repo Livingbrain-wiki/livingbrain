@@ -170,5 +170,9 @@
   "pages/0009": {
     "file": "0043_pages_0009_dream_cursor.sql",
     "sha256": "382c8cc35ffe998fc93f7fd783c4d44b62141590a048de8911836d2c216fffe7"
+  },
+  "pages/0010": {
+    "file": "0044_pages_0010_rule_scan.sql",
+    "sha256": "209823941101ddd017f2f09acc6d7e7c8735a7dc2dba87537aa91d1c7899a678"
   }
 }

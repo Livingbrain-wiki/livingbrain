@@ -279,10 +279,12 @@ impl Module for CodingAgents {
             // Dreaming: tidy the subjects that are due, from what budget the
             // drain left. A failure is logged, never a failed tick.
             match compiler.dream(&ctx.scheduled, DREAM_PASSES_PER_TICK).await {
-                Ok(sweep) if sweep.passes > 0 || sweep.enqueued > 0 => eprintln!(
-                    "dreaming: {} queued, {} passes, {} facts updated",
-                    sweep.enqueued, sweep.passes, sweep.applied
-                ),
+                Ok(sweep) if sweep.passes > 0 || sweep.enqueued > 0 || sweep.retracted > 0 => {
+                    eprintln!(
+                        "dreaming: {} queued, {} passes, {} facts updated, {} rule retractions",
+                        sweep.enqueued, sweep.passes, sweep.applied, sweep.retracted
+                    )
+                }
                 Ok(_) => {}
                 Err(reason) => eprintln!("dreaming: sweep failed: {reason}"),
             }
@@ -558,6 +560,17 @@ impl Dreams for StoreFacts {
     async fn log(&self, row: DreamDecisionRow<'_>) -> Result<(), String> {
         self.store
             .dream_log(&row)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn rule_batch(
+        &self,
+        limit: usize,
+        now: i64,
+    ) -> Result<Vec<livingbrain_pages::RuleFact>, String> {
+        self.store
+            .rule_batch(limit, now)
             .await
             .map_err(|_| "store error".to_owned())
     }
