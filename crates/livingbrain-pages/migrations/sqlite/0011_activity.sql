@@ -5,9 +5,11 @@
 -- that could fail the request it describes; pruned to a day of rows on each
 -- write. `scope` and `slug` name the page (the node is `page:<scope>:<slug>`),
 -- so a viewer only ever sees rows for pages their grants read. Nothing else
--- is kept: no body, no query text, no credential.
+-- is kept: no body, no query text, no credential. `id` is set by the writer:
+-- microseconds since the epoch times 4096 plus 12 random bits, so it grows
+-- with time and the feed's cursor is a plain `id > ?`, on either dialect.
 CREATE TABLE IF NOT EXISTS graph_activity (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           BIGINT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
     scope        TEXT NOT NULL,
     slug         TEXT NOT NULL,

@@ -1761,12 +1761,19 @@ impl PageStore {
     ) {
         let now = self.clock.now();
         let at = now.format(&Rfc3339).unwrap_or_default();
+        let candidate = activity_id(now, &self.id_gen.ulid());
         let _ = self
             .db
             .execute(&Statement::with_values(
-                "INSERT INTO graph_activity (workspace_id, scope, slug, kind, actor, at) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                // Never below the newest row: the cursor stays monotonic even
+                // when two writes share a microsecond (or a test's clock).
+                "INSERT INTO graph_activity (id, workspace_id, scope, slug, kind, actor, at) \
+                 SELECT CASE WHEN ? > COALESCE(MAX(id), 0) THEN ? ELSE COALESCE(MAX(id), 0) + 1 END, \
+                        ?, ?, ?, ?, ?, ? \
+                 FROM graph_activity",
                 vec![
+                    SeaValue::BigInt(Some(candidate)),
+                    SeaValue::BigInt(Some(candidate)),
                     text(workspace),
                     text(scope),
                     text(slug),
@@ -1795,6 +1802,21 @@ impl PageStore {
 /// # Errors
 ///
 /// [`DbError`] when the query fails.
+/// A feed row id that grows with time: microseconds since the epoch times
+/// 4096, plus 12 bits taken from a fresh ULID so two writes in the same
+/// microsecond rarely collide (a collision only drops that one best-effort
+/// row). Fits an `i64` until the year 2040+ by a wide margin.
+fn activity_id(now: time::OffsetDateTime, ulid: &str) -> i64 {
+    let micros = i64::try_from(now.unix_timestamp_nanos() / 1_000).unwrap_or(0);
+    let low = ulid
+        .bytes()
+        .rev()
+        .take(3)
+        .fold(0_i64, |acc, b| (acc << 5) ^ i64::from(b))
+        & 0xFFF;
+    micros.saturating_mul(4096).saturating_add(low)
+}
+
 pub async fn activity_rows(
     db: &dyn Database,
     workspace: &str,
