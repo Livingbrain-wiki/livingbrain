@@ -148,3 +148,14 @@ test("the module never touches markup or storage", () => {
     assert.ok(!code.includes(forbidden), `members.js uses ${forbidden}`);
   }
 });
+
+test("a new workspace is a POST with a clean name, and a bad name never leaves", async () => {
+  const { createWorkspaceRequest } = await import("../assets/members.js");
+  assert.deepEqual(createWorkspaceRequest("  Side project "), {
+    method: "POST",
+    path: "/v1/workspaces",
+    body: { name: "Side project" },
+  });
+  assert.throws(() => createWorkspaceRequest("   "), /visible character/);
+  assert.throws(() => createWorkspaceRequest("x".repeat(65)), /64/);
+});

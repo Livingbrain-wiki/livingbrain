@@ -18,7 +18,7 @@ import {
   paletteSearchPath,
 } from "./nav.js";
 import { sessionView } from "./session.js";
-import { workspacesRequest, switchRequest } from "./members.js";
+import { workspacesRequest, switchRequest, createWorkspaceRequest } from "./members.js";
 import { avatarNode, paintAvatar } from "./profile.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -279,6 +279,52 @@ export function mountShell(deps) {
       wsMenu.appendChild(item);
     }
     if (!list.length) wsMenu.appendChild(textEl(doc, "p", "Could not list your workspaces.", "menu__note"));
+    // New workspace: the item opens a one-field form in place.
+    const create = doc.createElement("button");
+    create.type = "button";
+    create.className = "menu__item menu__item--new";
+    create.appendChild(textEl(doc, "span", "+", "menu__plus"));
+    create.appendChild(textEl(doc, "span", "New workspace", "menu__text"));
+    create.addEventListener("click", (event) => {
+      if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+      const form = doc.createElement("form");
+      form.className = "menu__form";
+      const input = doc.createElement("input");
+      input.type = "text";
+      input.maxLength = 64;
+      input.placeholder = "Workspace name";
+      input.setAttribute("aria-label", "New workspace name");
+      input.autocomplete = "off";
+      const go = doc.createElement("button");
+      go.type = "submit";
+      go.setAttribute("data-variant", "primary");
+      go.textContent = "Create";
+      const note = textEl(doc, "p", "", "menu__note");
+      form.append(input, go, note);
+      form.addEventListener("submit", async (submitted) => {
+        submitted.preventDefault();
+        let request;
+        try {
+          request = createWorkspaceRequest(input.value);
+        } catch (error) {
+          note.textContent = error.message;
+          return;
+        }
+        go.disabled = true;
+        note.textContent = "Creating…";
+        try {
+          await send(request);
+          location.assign("/");
+        } catch (error) {
+          go.disabled = false;
+          const detail = error && error.body && (error.body.detail || error.body.title);
+          note.textContent = `Could not create it: ${detail || (error && error.message) || "try again"}`;
+        }
+      });
+      create.replaceWith(form);
+      input.focus();
+    });
+    wsMenu.appendChild(create);
     const manage = doc.createElement("a");
     manage.className = "menu__item";
     manage.setAttribute("href", "settings.html#members");

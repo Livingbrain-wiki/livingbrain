@@ -75,6 +75,7 @@ import {
   removeRequest,
   withdrawRequest,
   switchRequest,
+  createWorkspaceRequest,
   memberViews,
   inviteViews,
   canManage,
@@ -1963,6 +1964,31 @@ async function wireMembers() {
       toast(memberErrorMessage(error, "withdraw the invitation"), "bad");
     }
   });
+
+  const createForm = $("#workspace-create");
+  const createName = $("#workspace-create-name");
+  if (createForm && createName) {
+    createForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      let request;
+      try {
+        request = createWorkspaceRequest(createName.value);
+      } catch (error) {
+        fieldError("workspaceCreate", error.message, createName);
+        return;
+      }
+      fieldError("workspaceCreate", "", createName);
+      const submit = $("#workspace-create-submit");
+      if (submit) submit.disabled = true;
+      try {
+        await send(request);
+        location.assign("/");
+      } catch (error) {
+        fieldError("workspaceCreate", memberErrorMessage(error, "create the workspace"), createName);
+        if (submit) submit.disabled = false;
+      }
+    });
+  }
 
   spaces.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-switch]");

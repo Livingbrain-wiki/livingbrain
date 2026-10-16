@@ -581,6 +581,11 @@ async fn every_new_cookie_write_refuses_another_site() {
             "/v1/workspaces/switch".to_owned(),
             Some(json!({"workspace_id": "ws_x"})),
         ),
+        (
+            Method::POST,
+            "/v1/workspaces".to_owned(),
+            Some(json!({"name": "Elsewhere"})),
+        ),
     ] {
         for extra in [
             [("sec-fetch-site", "cross-site"), ("host", "brain.example")],
@@ -711,4 +716,84 @@ async fn a_removed_slack_member_is_not_brought_back_by_slack() {
     assert_eq!(me.status, StatusCode::UNAUTHORIZED);
     let members = get(&kit.router, MEMBERS, &alice.cookies()).await.json();
     assert_eq!(role_of(&members, "U0BOB"), None);
+}
+
+#[pollster::test]
+async fn a_signed_in_person_creates_more_workspaces_and_lands_in_each() {
+    let kit = kit_with(&Removed::default());
+    let (alice, home) = create_workspace(&kit, ALICE, "Home").await;
+
+    let refused = call(
+        &kit,
+        Method::POST,
+        "/v1/workspaces",
+        &alice,
+        Some(&json!({"name": "  "})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a name is required"
+    );
+
+    let created = call(
+        &kit,
+        Method::POST,
+        "/v1/workspaces",
+        &alice,
+        Some(&json!({"name": "Side project"})),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        created.status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let new_id = created.json()["id"].as_str().expect("an id").to_owned();
+    assert_ne!(new_id, home);
+    let session = created.cookie(SESSION_COOKIE).expect("moved into it");
+    let me = get(&kit.router, ME, &[(SESSION_COOKIE, &session)])
+        .await
+        .json();
+    assert_eq!(me["workspace"]["id"], new_id);
+    assert_eq!(me["workspace"]["name"], "Side project");
+    assert_eq!(me["member"]["role"], "owner");
+
+    // Both sessions list both, and the first can switch back and forth.
+    for cookie in [&alice, &session] {
+        let listed = call(&kit, Method::GET, "/v1/workspaces", cookie, None, &[])
+            .await
+            .json();
+        let ids: Vec<&str> = listed
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&home.as_str()) && ids.contains(&new_id.as_str()),
+            "{listed}"
+        );
+    }
+    let back = call(
+        &kit,
+        Method::POST,
+        "/v1/workspaces/switch",
+        &session,
+        Some(&json!({"workspace_id": home})),
+        &[],
+    )
+    .await;
+    assert_eq!(back.status, StatusCode::OK);
+
+    // Nobody else sees it.
+    let (bob, _) = create_workspace(&kit, BOB, "Bob's").await;
+    let theirs = call(&kit, Method::GET, "/v1/workspaces", &bob, None, &[])
+        .await
+        .json();
+    assert!(!theirs.to_string().contains(&new_id), "{theirs}");
 }

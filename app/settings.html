@@ -465,6 +465,22 @@
               <h3>Your workspaces</h3>
               <p class="hint">Switching moves this browser's session to the workspace you pick.</p>
               <ul id="workspace-list" class="plain-list"></ul>
+              <form id="workspace-create" class="inline-create" novalidate>
+                <label for="workspace-create-name">New workspace</label>
+                <div class="inline-create__row">
+                  <input
+                    id="workspace-create-name"
+                    type="text"
+                    maxlength="64"
+                    placeholder="Name it"
+                    autocomplete="off"
+                    aria-describedby="err-workspaceCreate"
+                  />
+                  <button type="submit" id="workspace-create-submit">Create workspace</button>
+                </div>
+                <p class="field-error" id="err-workspaceCreate"></p>
+                <p class="hint">You own it and move into it. Your sign-in reaches every workspace you belong to.</p>
+              </form>
               <h3>Sign out</h3>
               <p class="hint">Signs this browser out. Your API tokens keep working until you revoke them.</p>
               <div class="form-actions">

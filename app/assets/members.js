@@ -1,4 +1,4 @@
-import { avatarNode } from "./profile.js";
+import { avatarNode, nameError } from "./profile.js";
 
 // Members, invitations and the workspace switcher — the pure half, next to
 // `tokens.js` (ADR 0004). Requests are described here and sent by `app.js`;
@@ -84,6 +84,14 @@ export function removeRequest(userId) {
 /** Withdraw an invitation. */
 export function withdrawRequest(id) {
   return { method: "DELETE", path: `${WORKSPACES_PATH}/invites/${idPath("invitation", id)}` };
+}
+
+/** `POST /v1/workspaces`: a new workspace you own, which the session moves
+ * into. Throws on a name the server would refuse. */
+export function createWorkspaceRequest(name) {
+  const problem = nameError(name);
+  if (problem) throw new Error(problem);
+  return { method: "POST", path: WORKSPACES_PATH, body: { name: String(name).trim() } };
 }
 
 /** Switch the session to another workspace. */
