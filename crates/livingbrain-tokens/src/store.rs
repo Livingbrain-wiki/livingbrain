@@ -4,9 +4,9 @@
 //! token, re-derived on every request and compared in constant time. The
 //! public `prefix` is the lookup key, so a revoke is one indexed read.
 //!
-//! SHA-256 rather than argon2id, for the reason `cratefield_core::ApiKeys`
-//! gives: 256 random bits leave a slow search nothing to find, and a
-//! stretched KDF per request would burn the Workers CPU budget.
+//! A token may carry an expiry and an audience (issue #72). An audience of
+//! `mcp` marks a connector token, which only the MCP endpoint accepts; the
+//! refusal lives in `lib.rs`, where each surface picks what it takes.
 
 use std::sync::Arc;
 
@@ -18,6 +18,9 @@ use time::format_description::well_known::Rfc3339;
 
 pub(crate) const TABLE: &str = "personal_access_tokens";
 
+/// The audience a connector token carries: accepted by the MCP endpoint only.
+pub(crate) const MCP_AUDIENCE: &str = "mcp";
+
 /// The public half of a token: `lbp_<16 hex>`.
 const PREFIX_TAG: &str = "lbp";
 /// Random bytes in the public id — short enough for a person to recognise a
@@ -28,9 +31,7 @@ const ID_BYTES: usize = 8;
 const SECRET_BYTES: usize = 32;
 
 /// The entropy source core does not carry (ADR 0002) — the same `getrandom`
-/// call the page store makes for its nonce. Not the `RandomBytes` port: a
-/// store that cannot mint wants to say so, and `RandomError` has a private
-/// field, so nothing outside core can construct one to return.
+/// call the page store makes for its nonce.
 fn draw(dest: &mut [u8]) -> Result<(), DbError> {
     getrandom::fill(dest).map_err(|err| DbError::Execute(format!("entropy source failed: {err}")))
 }
@@ -60,7 +61,8 @@ fn text(value: &str) -> Value {
 }
 
 fn stamp(at: OffsetDateTime) -> String {
-    at.replace_nanosecond(0)
+    at.to_offset(time::UtcOffset::UTC)
+        .replace_nanosecond(0)
         .expect("truncation to whole seconds stays in range")
         .format(&Rfc3339)
         .unwrap_or_default()
@@ -76,6 +78,9 @@ pub(crate) struct Summary {
     pub(crate) name: String,
     pub(crate) scopes: Option<Vec<String>>,
     pub(crate) created_at: String,
+    /// `true` for a connector token (the Claude connector sign-in), so the
+    /// settings list can label it as a connected app.
+    pub(crate) connector: bool,
 }
 
 /// A verified token's answer to "who is calling?", and the subset it was cut
@@ -86,6 +91,8 @@ pub(crate) struct Principal {
     pub(crate) workspace_id: String,
     pub(crate) user_id: String,
     pub(crate) scopes: Option<Vec<String>>,
+    /// `Some("mcp")` for a connector token, `None` for an ordinary one.
+    pub(crate) audience: Option<String>,
 }
 
 /// A freshly minted token. [`Minted::token`] is the only time the plaintext
@@ -117,7 +124,7 @@ impl Store {
 
     /// Mints a token for one member and stores its hash. An empty `scopes`
     /// stores the empty string, which reads back as "no subset". The token
-    /// never expires.
+    /// never expires and carries no audience.
     pub(crate) async fn mint(
         &self,
         workspace_id: &str,
@@ -125,34 +132,53 @@ impl Store {
         name: &str,
         scopes: &[String],
     ) -> Result<Minted, DbError> {
-        self.mint_expiring(workspace_id, user_id, name, scopes, None)
+        self.insert(workspace_id, user_id, name, scopes, None, None)
             .await
     }
 
-    /// [`Store::mint`], with an optional expiry. `expires_at` is the instant
-    /// after which [`Store::verify`] refuses the token; `None` never refuses
-    /// it on time.
-    pub(crate) async fn mint_expiring(
+    /// A connector token (issue #72): expiring, and accepted by the MCP
+    /// endpoint only. Its `scopes` must name a subset, so it is never an admin.
+    pub(crate) async fn mint_connector(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        name: &str,
+        scopes: &[String],
+        expires_at: OffsetDateTime,
+    ) -> Result<Minted, DbError> {
+        self.insert(
+            workspace_id,
+            user_id,
+            name,
+            scopes,
+            Some(expires_at),
+            Some(MCP_AUDIENCE),
+        )
+        .await
+    }
+
+    async fn insert(
         &self,
         workspace_id: &str,
         user_id: &str,
         name: &str,
         scopes: &[String],
         expires_at: Option<OffsetDateTime>,
+        audience: Option<&str>,
     ) -> Result<Minted, DbError> {
         let (id, secret) = self.generate()?;
         let prefix = format!("{PREFIX_TAG}_{id}");
         let token = format!("{prefix}_{secret}");
         let created_at = stamp(self.clock.now());
-        let expires_at = match expires_at {
-            Some(at) => text(&stamp(at)),
+        let optional = |value: Option<String>| match value {
+            Some(value) => text(&value),
             None => Value::String(None),
         };
         let statement = Statement::with_values(
             "INSERT INTO personal_access_tokens \
                  (prefix, secret_hash, workspace_id, user_id, name, scopes, created_at, \
-                  expires_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                  expires_at, audience) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 text(&prefix),
                 text(&sha256_hex(&token)),
@@ -161,7 +187,8 @@ impl Store {
                 text(name),
                 text(&scopes.join(" ")),
                 text(&created_at),
-                expires_at,
+                optional(expires_at.map(stamp)),
+                optional(audience.map(str::to_owned)),
             ],
         );
         self.db.execute(&statement).await?;
@@ -174,8 +201,7 @@ impl Store {
 
     /// Parse, look the prefix up, re-derive the hash, compare in constant
     /// time. `Ok(None)` is every failure there is — malformed, unknown,
-    /// revoked, wrong secret — deliberately indistinguishable, so probing an
-    /// endpoint built on this learns nothing.
+    /// revoked, expired, wrong secret — deliberately indistinguishable.
     pub(crate) async fn verify(&self, token: &str) -> Result<Option<Principal>, DbError> {
         let Some(prefix) = split(token) else {
             return Ok(None);
@@ -183,7 +209,8 @@ impl Store {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT secret_hash, workspace_id, user_id, scopes, revoked_at, expires_at \
+                "SELECT secret_hash, workspace_id, user_id, scopes, revoked_at, expires_at, \
+                        audience \
                  FROM personal_access_tokens WHERE prefix = ?",
                 vec![text(prefix)],
             ))
@@ -216,46 +243,70 @@ impl Store {
             workspace_id,
             user_id,
             scopes: split_list(&field("scopes").unwrap_or_default()),
+            audience: field("audience"),
         }))
     }
 
-    /// One member's own tokens, newest first, revoked ones excluded: a
-    /// revoked token is gone from the list because it is gone from use.
+    /// One member's own tokens, newest first. Revoked tokens are gone. An
+    /// expired token is hidden too, except a connector whose renewal token is
+    /// still live: that connection is idle, not gone, and Settings must still
+    /// show it so the person can revoke it.
     pub(crate) async fn list(
         &self,
         workspace_id: &str,
         user_id: &str,
     ) -> Result<Vec<Summary>, DbError> {
+        let now = self.clock.now();
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT prefix, name, scopes, created_at, expires_at FROM personal_access_tokens \
+                "SELECT prefix, name, scopes, created_at, expires_at, audience \
+                   FROM personal_access_tokens \
                  WHERE workspace_id = ? AND user_id = ? AND revoked_at IS NULL \
                  ORDER BY created_at DESC, prefix ASC",
                 vec![text(workspace_id), text(user_id)],
             ))
             .await?;
-        let now = self.clock.now();
+        // The member's live renewal tokens, by the access token each keeps
+        // alive. Best effort: a deployment without the connector tables lists
+        // its ordinary tokens exactly as before.
+        let renewable: Vec<String> = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT prefix, expires_at FROM oauth_refresh_tokens \
+                 WHERE workspace_id = ? AND user_id = ? AND used_at IS NULL",
+                vec![text(workspace_id), text(user_id)],
+            ))
+            .await
+            .map(|found| {
+                found
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        row.get::<Option<String>>("expires_at")
+                            .flatten()
+                            .is_some_and(|expiry| live_at(&expiry, now))
+                    })
+                    .filter_map(|row| row.get::<Option<String>>("prefix").flatten())
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(rows
             .rows
             .iter()
-            .filter(|row| {
-                row.get::<Option<String>>("expires_at")
-                    .flatten()
-                    .is_none_or(|expiry| live_at(&expiry, now))
-            })
-            .map(|row| {
-                let field = |name: &str| {
-                    row.get::<Option<String>>(name)
-                        .flatten()
-                        .unwrap_or_default()
-                };
-                Summary {
-                    scopes: split_list(&field("scopes")),
-                    prefix: field("prefix"),
-                    name: field("name"),
-                    created_at: field("created_at"),
-                }
+            .filter_map(|row| {
+                let field = |name: &str| row.get::<Option<String>>(name).flatten();
+                let prefix = field("prefix").unwrap_or_default();
+                let connector = field("audience").as_deref() == Some(MCP_AUDIENCE);
+                let live = field("expires_at").is_none_or(|expiry| live_at(&expiry, now));
+                let renewing = connector && renewable.contains(&prefix);
+                (live || renewing).then(|| Summary {
+                    scopes: split_list(&field("scopes").unwrap_or_default()),
+                    prefix,
+                    name: field("name").unwrap_or_default(),
+                    created_at: field("created_at").unwrap_or_default(),
+                    connector,
+                })
             })
             .collect())
     }
@@ -280,24 +331,35 @@ impl Store {
     /// Revokes one of a member's own tokens. `Ok(false)` when the prefix
     /// names no token of theirs — deliberately the same answer as a token
     /// that does not exist, so the route cannot probe another member's
-    /// prefixes.
+    /// prefixes. A connector token takes its renewal chain with it: every
+    /// refresh token of the same connection is spent, so nothing renews it.
     pub(crate) async fn revoke(
         &self,
         workspace_id: &str,
         user_id: &str,
         prefix: &str,
     ) -> Result<bool, DbError> {
-        let statement = Statement::with_values(
-            "UPDATE personal_access_tokens SET revoked_at = ? \
-             WHERE prefix = ? AND workspace_id = ? AND user_id = ?",
-            vec![
-                text(&stamp(self.clock.now())),
-                text(prefix),
-                text(workspace_id),
-                text(user_id),
-            ],
-        );
-        Ok(self.db.execute(&statement).await? > 0)
+        let now = stamp(self.clock.now());
+        let revoked = self
+            .db
+            .execute(&Statement::with_values(
+                "UPDATE personal_access_tokens SET revoked_at = ? \
+                 WHERE prefix = ? AND workspace_id = ? AND user_id = ?",
+                vec![text(&now), text(prefix), text(workspace_id), text(user_id)],
+            ))
+            .await?;
+        // Best effort, as above: the refresh is refused anyway once its access
+        // token is revoked, so this only keeps the table honest.
+        let _ = self
+            .db
+            .execute(&Statement::with_values(
+                "UPDATE oauth_refresh_tokens SET used_at = ? \
+                 WHERE used_at IS NULL \
+                   AND family IN (SELECT family FROM oauth_refresh_tokens WHERE prefix = ?)",
+                vec![text(&now), text(prefix)],
+            ))
+            .await;
+        Ok(revoked > 0)
     }
 }
 
@@ -308,8 +370,7 @@ fn live_at(expiry: &str, now: OffsetDateTime) -> bool {
 }
 
 /// `{prefix}_{secret}` into its public half, refusing a malformed token
-/// before it costs a query. The secret half is checked for shape too, though
-/// it is never read back: the constant-time compare runs on the whole token.
+/// before it costs a query.
 fn split(token: &str) -> Option<&str> {
     let (prefix, secret) = token.rsplit_once('_')?;
     let id = prefix.strip_prefix(PREFIX_TAG)?.strip_prefix('_')?;

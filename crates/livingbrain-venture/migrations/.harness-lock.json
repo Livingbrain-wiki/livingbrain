@@ -188,8 +188,8 @@
     "sha256": "cf5077af3b7ce774bb533bb766a4700273003cc91a63dcabcbf1212d8fce174e"
   },
   "tokens/0002": {
-    "file": "0048_tokens_0002_expiry.sql",
-    "sha256": "4ade36a010e2605fc98b6bef2de1599fe07a3000f7282472926ca57135e7c689"
+    "file": "0048_tokens_0002_expiry_audience.sql",
+    "sha256": "f30abbc7cd219893851e75a86db43dfdf2336b1f892312b01f3f616ce596faa1"
   },
   "oauth/0001": {
     "file": "0049_oauth_0001_init.sql",

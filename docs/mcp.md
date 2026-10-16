@@ -30,8 +30,13 @@ custom connector, with no token to copy:
    the one you want from the menu first.
 4. Claude returns to the conversation with the connector connected.
 
+An app whose address Living Brain does not recognise as Claude is shown on the
+Approve page as **unverified**, with its address in full, and it can only reach
+the MCP tools. A connected app can never change settings, manage tokens or
+reach the write routes.
+
 The connection is listed in **Settings → API tokens** as
-`Claude connector · <name>`. Revoking it there disconnects Claude at once: its
+`Claude connector · <name>` (or `Connected app · <name>` when unverified). Revoking it there disconnects Claude at once: its
 access and its renewal both stop. It also renews itself while Claude uses it,
 and ends after 30 days without use.
 

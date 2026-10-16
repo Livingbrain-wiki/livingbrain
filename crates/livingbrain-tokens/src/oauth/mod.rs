@@ -1,19 +1,19 @@
 //! The OAuth 2.1 authorization server a browser-based MCP client signs in
 //! through (issue #72): dynamic client registration (RFC 7591), the
-//! authorization-code grant with PKCE S256 (RFC 7636), and rotating refresh
-//! tokens (RFC 6749 §6).
+//! authorization-code grant with PKCE S256 (RFC 7636), rotating refresh tokens
+//! (RFC 6749 §6), and the issuer identifier on every authorization response
+//! (RFC 9207).
 //!
-//! The access token it mints is an ordinary personal access token, scoped to
-//! the workspace and member the person approved, so the MCP endpoint, the
-//! `/v1/me` route and every other PAT route accept it with no change, and it
-//! appears in Settings → API tokens where it can be revoked like any other.
+//! The access token it mints is a **connector** personal access token: scoped
+//! to the workspace, the member, and a non-admin subset of their scopes, and
+//! accepted by the MCP endpoint alone. It appears in Settings → API tokens
+//! where it can be revoked, and revoking it ends its renewal too.
 //!
 //! The consent page sets and reads the session cookie, which is host-only
 //! (`__Host-`). Authorization therefore completes on the app's own origin: a
 //! request that reaches this module on another host (the MCP host) is sent on
-//! there with the same path and query, after the client and redirect URI have
-//! been checked, so the cookie the person signed in with is the one the
-//! consent sees.
+//! there with the same path and query, plus a signed token naming the host it
+//! came in on, so the response's `iss` is the issuer the client was given.
 
 mod consent;
 mod store;
@@ -27,9 +27,10 @@ use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::{get, post};
 use cratefield_core::axum::{self, Form, Json};
 use cratefield_core::{
-    Clock, Config, ConfigError, DataKind, Database, DbError, Disposition, Kid, Migrations, Module,
-    ModuleContext, PersonalDataSet, Port, Problem, ProblemDef, RateLimit, RateLimitFailure,
-    RateLimiter, Signer, SqlMigration, check_rate_limit, client_ip, origin_of, rate_limit_keys,
+    AnyError, BoxFuture, Clock, Config, ConfigError, DataKind, Database, DbError, Disposition, Kid,
+    Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem, ProblemDef, RateLimit,
+    RateLimitFailure, RateLimiter, Signer, SqlMigration, check_rate_limit, client_ip, origin_of,
+    rate_limit_keys,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,8 +40,9 @@ use time::{Duration, OffsetDateTime};
 use crate::store::Store as TokenStore;
 use crate::{MCP_PATH, OAUTH_PATH, origin_of_request, same_origin};
 use consent::{
-    Choice, Consent, S256, base64url, consent_csp, consent_page, html, origin_of_uri,
-    valid_challenge, valid_redirect_uri, verifier_matches, with_params,
+    Choice, Consent, S256, base64url, clean_name, consent_csp, consent_page, html, origin_of_uri,
+    redirect_host, valid_challenge, valid_redirect_uri, verified_host, verifier_matches,
+    with_params,
 };
 use store::{CLIENTS, CODES, Client, CodeRow, OAuthStore, REFRESH, RefreshRow, hash};
 
@@ -73,11 +75,21 @@ const CONSENT_TTL_SECS: i64 = 600;
 /// The purpose the consent token is sealed under, so no other signed value in
 /// this deployment can be presented as one.
 const CONSENT_PURPOSE: &str = "livingbrain-oauth-consent";
-/// The name a connector's token carries when the client registered without one.
+/// The purpose of the signed token that carries the host an authorization
+/// request arrived on across the sign-in hop (RFC 9207's `iss`).
+const ISSUER_PURPOSE: &str = "livingbrain-oauth-issuer";
+/// The query parameter that carries that token.
+const ISSUER_REF: &str = "issuer_ref";
+/// The name an unverified client's token carries when it registered without one.
 const DEFAULT_CLIENT_NAME: &str = "An app";
 /// Registrations a single request may name, and the longest name kept.
 const MAX_REDIRECT_URIS: usize = 8;
 const MAX_CLIENT_NAME_CHARS: usize = 128;
+/// The most clients registered in one UTC day, across every caller. The per-IP
+/// limit stops one machine; this stops a rotating crowd from filling the table.
+const MAX_REGISTRATIONS_PER_DAY: usize = 200;
+/// How long a registered client with no live code or renewal token is kept.
+const CLIENT_RETENTION: Duration = Duration::days(30);
 
 const NOT_SIGNED_IN: ProblemDef = ProblemDef {
     slug: "oauth/consent-expired",
@@ -125,7 +137,9 @@ impl Module for OAuth {
 
     /// `Db` holds the grant's rows and the member rows a code names, `Signer`
     /// seals the consent form and reads the session cookie, `Clock` stamps
-    /// every expiry.
+    /// every expiry. The registration limiter is optional at composition and
+    /// required at request time: without one, registration refuses (see
+    /// [`register`]), so a deployment that forgets it fails closed.
     fn requires(&self) -> &'static [Port] {
         &[Port::Db, Port::Signer, Port::Clock]
     }
@@ -206,6 +220,30 @@ impl Module for OAuth {
             .route("/token", post(token))
             .with_state(state)
     }
+
+    /// The purge of finished grant rows (see [`OAuthStore::purge`]). Runs on
+    /// every scheduled firing, under the same budget the device grant's purge
+    /// spends, so a cron pass cannot starve the rest of the Worker.
+    fn scheduled<'a>(
+        &'a self,
+        ctx: &'a ModuleContext,
+        _cron: &'a str,
+    ) -> BoxFuture<'a, Result<(), AnyError>> {
+        Box::pin(async move {
+            if !ctx.scheduled.try_spend(1) {
+                return Ok(());
+            }
+            let (Some(db), Some(clock)) = (ctx.ports.db.clone(), ctx.ports.clock.clone()) else {
+                return Ok(());
+            };
+            let now = clock.now();
+            OAuthStore::new(db)
+                .purge(&stamp(now), &stamp(now - CLIENT_RETENTION))
+                .await
+                .map(|_| ())
+                .map_err(|err| Box::new(err) as AnyError)
+        })
+    }
 }
 
 /// What every handler needs: the grant's tables, the personal access token
@@ -223,8 +261,11 @@ pub(crate) struct OAuthState {
 // ---------------------------------------------------------------------------
 // Small helpers
 
+/// A UTC RFC 3339 stamp with whole seconds. Every stamp this module writes or
+/// compares is UTC, so the strings order chronologically.
 fn stamp(at: OffsetDateTime) -> String {
-    at.replace_nanosecond(0)
+    at.to_offset(time::UtcOffset::UTC)
+        .replace_nanosecond(0)
         .expect("truncation to whole seconds stays in range")
         .format(&Rfc3339)
         .unwrap_or_default()
@@ -263,14 +304,22 @@ fn path_and_query(uri: &Uri) -> String {
     )
 }
 
+/// Appends one query parameter to a path-and-query.
+fn append_query(path: &str, name: &str, value: &str) -> String {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{separator}{name}={}", consent::encode(value))
+}
+
+/// A redirect that never leaks the page it came from: `Referrer-Policy` says
+/// so for every hop this module sends.
 fn redirect(status: StatusCode, location: &str) -> Response {
     let mut response = status.into_response();
     if let Ok(value) = HeaderValue::from_str(location) {
         response.headers_mut().insert(header::LOCATION, value);
     }
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     response
 }
 
@@ -311,17 +360,23 @@ fn error_page(status: u16, title: &str, detail: &str) -> Response {
     html(status, body, &consent_csp(""))
 }
 
-/// The `error` answer an authorization request is sent back with, once its
-/// client and redirect URI are known to be genuine. A GET answers `302`; the
-/// approval form, a POST, answers `303` so the browser follows with a GET.
+/// The error an authorization request is sent back with, once its client and
+/// redirect URI are known to be genuine. Carries `iss` (RFC 9207) so the
+/// client can tell which authorization server answered. A GET answers `302`;
+/// the approval form, a POST, answers `303` so the browser follows with a GET.
 fn authorize_error(
     status: StatusCode,
     redirect_uri: &str,
     state: Option<&str>,
+    issuer: &str,
     error: &str,
     detail: &str,
 ) -> Response {
-    let mut params = vec![("error", error), ("error_description", detail)];
+    let mut params = vec![
+        ("error", error),
+        ("error_description", detail),
+        ("iss", issuer),
+    ];
     if let Some(state) = state {
         params.push(("state", state));
     }
@@ -332,17 +387,35 @@ fn problem(def: &'static ProblemDef) -> Response {
     Problem::new(def).into_response()
 }
 
-/// The name a connector's token carries in Settings → API tokens.
-fn connector_name(client_name: &str) -> String {
-    let name = if client_name.trim().is_empty() {
-        DEFAULT_CLIENT_NAME
+/// The scopes a connector token is granted: everything a person can read as
+/// shared, and their own private memory to add notes to. A subset, so the
+/// token is never an admin, whatever the member is (see `member_for`).
+fn granted_scopes(user_id: &str) -> Vec<String> {
+    vec!["shared".to_owned(), format!("user:{user_id}")]
+}
+
+/// The name a connector's token carries in Settings → API tokens. A client
+/// whose redirect host Living Brain recognises is labelled as a Claude
+/// connector; any other client keeps only the name it registered (cleaned),
+/// so nothing invents a provenance it does not have.
+fn connector_name(client: &Client) -> String {
+    let registered = clean_name(&client.client_name);
+    let name = if registered.is_empty() {
+        DEFAULT_CLIENT_NAME.to_owned()
     } else {
-        client_name.trim()
+        registered
     };
-    format!("Claude connector · {name}")
-        .chars()
-        .take(64)
-        .collect()
+    let verified = client
+        .redirect_uris
+        .iter()
+        .filter_map(|uri| redirect_host(uri))
+        .any(|host| verified_host(&host));
+    let label = if verified {
+        format!("Claude connector · {name}")
+    } else {
+        name
+    };
+    label.chars().take(64).collect()
 }
 
 fn token_response(access: &str, refresh: &str, scope: &str) -> Response {
@@ -351,9 +424,10 @@ fn token_response(access: &str, refresh: &str, scope: &str) -> Response {
         "token_type": "Bearer",
         "expires_in": ACCESS_TTL.whole_seconds(),
         "refresh_token": refresh,
+        "scope": scope,
     });
-    if !scope.is_empty() {
-        body["scope"] = json!(scope);
+    if scope.is_empty() {
+        body.as_object_mut().map(|object| object.remove("scope"));
     }
     (
         StatusCode::OK,
@@ -377,18 +451,19 @@ fn valid_resource(resource: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The sealed consent
+// The sealed consent and the issuer token
 
-/// What the consent page binds: the request as it was validated, and the
-/// member it was shown to. The form posts this back sealed, so nothing the
-/// approval acts on is read from the post itself but the chosen workspace.
+/// What the consent page binds: the request as it was validated, the issuer
+/// it came in on, and the member it was shown to. The form posts this back
+/// sealed, so nothing the approval acts on is read from the post itself but
+/// the chosen workspace.
 #[derive(Debug, Serialize, Deserialize)]
 struct Sealed {
     client_id: String,
     redirect_uri: String,
     code_challenge: String,
     state: Option<String>,
-    scope: Option<String>,
+    issuer: String,
     workspace_id: String,
     user_id: String,
     exp: i64,
@@ -410,6 +485,25 @@ fn open(st: &OAuthState, token: &str) -> Option<Sealed> {
     (sealed.exp > st.clock.now().unix_timestamp()).then_some(sealed)
 }
 
+/// The signed token naming the origin an authorization request arrived on.
+fn seal_issuer(st: &OAuthState, origin: &str) -> String {
+    st.signer.sign(&cratefield_core::Payload {
+        purpose: ISSUER_PURPOSE.to_owned(),
+        subject: origin.to_owned(),
+        exp: None,
+        kid: Kid::Cur,
+    })
+}
+
+/// The origin a signed issuer token names, or `None` for a forged or
+/// unrecognised one (the caller then keeps its own origin).
+fn open_issuer(st: &OAuthState, token: &str) -> Option<String> {
+    st.signer
+        .verify(token, ISSUER_PURPOSE)
+        .map(|payload| payload.subject)
+        .filter(|origin| origin.starts_with("https://") || origin.starts_with("http://"))
+}
+
 // ---------------------------------------------------------------------------
 // GET /v1/oauth/authorize
 
@@ -421,8 +515,13 @@ struct AuthorizeQuery {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     state: Option<String>,
+    /// Accepted and ignored: the grant issues the scopes it defines
+    /// ([`granted_scopes`]), and a requested scope is never echoed or stored.
+    #[allow(dead_code)]
     scope: Option<String>,
     resource: Option<String>,
+    /// Set by this module when it sends a request on to the app origin.
+    issuer_ref: Option<String>,
 }
 
 /// The authorization request. The client and redirect URI are checked first
@@ -465,18 +564,31 @@ async fn authorize_get(
     };
     let state = query.state.as_deref();
 
-    // The consent lives on the app's origin, where the session cookie does.
-    if let Some(app) = app_origin(&*st.config)
-        && origin_of_request(&headers, &uri).as_deref() != Some(app.as_str())
+    // The host this request arrived on is the issuer the client was told
+    // about (its protected-resource document names it). The consent lives on
+    // the app's origin, where the session cookie is, so a request that came in
+    // elsewhere is sent on there, carrying that host in a signed token.
+    let here = origin_of_request(&headers, &uri);
+    let app = app_origin(&*st.config);
+    if let (Some(app), Some(here)) = (app.as_deref(), here.as_deref())
+        && here != app
     {
-        return redirect(StatusCode::FOUND, &format!("{app}{}", path_and_query(&uri)));
+        let carried = append_query(&path_and_query(&uri), ISSUER_REF, &seal_issuer(&st, here));
+        return redirect(StatusCode::FOUND, &format!("{app}{carried}"));
     }
+    let issuer = query
+        .issuer_ref
+        .as_deref()
+        .and_then(|token| open_issuer(&st, token))
+        .or(here)
+        .unwrap_or_default();
 
     if query.response_type.as_deref() != Some("code") {
         return authorize_error(
             StatusCode::FOUND,
             redirect_uri,
             state,
+            &issuer,
             "unsupported_response_type",
             "only the code response is supported",
         );
@@ -490,6 +602,7 @@ async fn authorize_get(
             StatusCode::FOUND,
             redirect_uri,
             state,
+            &issuer,
             "invalid_request",
             "a code_challenge is required",
         );
@@ -499,6 +612,7 @@ async fn authorize_get(
             StatusCode::FOUND,
             redirect_uri,
             state,
+            &issuer,
             "invalid_request",
             "code_challenge_method must be S256",
         );
@@ -512,6 +626,7 @@ async fn authorize_get(
             StatusCode::FOUND,
             redirect_uri,
             state,
+            &issuer,
             "invalid_target",
             "resource must name the MCP endpoint",
         );
@@ -549,7 +664,7 @@ async fn authorize_get(
         redirect_uri: redirect_uri.to_owned(),
         code_challenge: challenge.to_owned(),
         state: query.state.clone(),
-        scope: query.scope.clone(),
+        issuer: issuer.clone(),
         workspace_id: caller.workspace_id.clone(),
         user_id: caller.user_id.clone(),
         exp: st.clock.now().unix_timestamp() + CONSENT_TTL_SECS,
@@ -557,19 +672,29 @@ async fn authorize_get(
     let Some(request) = seal(&st, &sealed) else {
         return server_error_page();
     };
-    let origin = origin_of_uri(redirect_uri).unwrap_or_default();
-    let name = if client.client_name.trim().is_empty() {
-        DEFAULT_CLIENT_NAME.to_owned()
-    } else {
-        client.client_name.clone()
+    let Some(host) = redirect_host(redirect_uri) else {
+        return server_error_page();
     };
+    let origin = origin_of_uri(redirect_uri).unwrap_or_default();
+    let name = connector_display_name(&client);
     let page = consent_page(&Consent {
         client_name: &name,
-        redirect_origin: &origin,
+        host: &host,
+        verified: verified_host(&host),
         request: &request,
         choices: &choice_views,
     });
     html(200, page, &consent_csp(&origin))
+}
+
+/// The client's name as the consent page shows it.
+fn connector_display_name(client: &Client) -> String {
+    let name = clean_name(&client.client_name);
+    if name.is_empty() {
+        DEFAULT_CLIENT_NAME.to_owned()
+    } else {
+        name
+    }
 }
 
 fn server_error_page() -> Response {
@@ -639,6 +764,7 @@ async fn authorize_post(
             StatusCode::SEE_OTHER,
             &sealed.redirect_uri,
             state,
+            &sealed.issuer,
             "access_denied",
             "the person did not approve the connection",
         ),
@@ -660,12 +786,13 @@ async fn authorize_post(
             else {
                 return problem(&WORKSPACE_NOT_HELD);
             };
-            issue_code(&st, &sealed, &client, &choice).await
+            issue_code(&st, &sealed, &choice).await
         }
         _ => authorize_error(
             StatusCode::SEE_OTHER,
             &sealed.redirect_uri,
             state,
+            &sealed.issuer,
             "invalid_request",
             "the decision is not recognised",
         ),
@@ -675,22 +802,26 @@ async fn authorize_post(
 async fn issue_code(
     st: &OAuthState,
     sealed: &Sealed,
-    client: &Client,
     choice: &livingbrain_workspaces::WorkspaceChoice,
 ) -> Response {
     let code = match random_token(32) {
         Ok(code) => code,
         Err(_) => return server_error_page(),
     };
+    let family = match random_token(16) {
+        Ok(family) => family,
+        Err(_) => return server_error_page(),
+    };
     let now = st.clock.now();
+    let granted = granted_scopes(&choice.user_id).join(" ");
     let row = CodeRow {
-        client_id: client.client_id.clone(),
+        client_id: sealed.client_id.clone(),
         redirect_uri: sealed.redirect_uri.clone(),
         code_challenge: sealed.code_challenge.clone(),
         workspace_id: choice.workspace_id.clone(),
         user_id: choice.user_id.clone(),
-        scope: sealed.scope.clone().unwrap_or_default(),
-        family: random_token(16).unwrap_or_default(),
+        scope: granted,
+        family,
         expires_at: stamp(now + CODE_TTL),
         used: false,
     };
@@ -702,7 +833,7 @@ async fn issue_code(
     {
         return server_error_page();
     }
-    let mut params = vec![("code", code.as_str())];
+    let mut params = vec![("code", code.as_str()), ("iss", sealed.issuer.as_str())];
     if let Some(state) = sealed.state.as_deref() {
         params.push(("state", state));
     }
@@ -718,15 +849,39 @@ async fn issue_code(
 /// Registers a public client. Only `none` is accepted as the client
 /// authentication method: a connector cannot keep a secret, so PKCE binds its
 /// codes instead.
+///
+/// Fails closed when no rate limiter is bound, and refuses once the day's cap
+/// is reached: an open registration endpoint with neither would let anyone fill
+/// the table, and the per-IP limit alone does not stop a crowd of addresses.
 async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(limiter) = st.limiter.as_ref() else {
+        return token_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "client registration is not available on this deployment",
+        );
+    };
     let keys: Vec<String> = rate_limit_keys(client_ip(&headers).as_deref(), None)
         .into_iter()
         .map(|key| format!("oauth-register:{key}"))
         .collect();
     if let RateLimit::Denied { decision } =
-        check_rate_limit(st.limiter.as_ref(), &keys, RateLimitFailure::FailClosed).await
+        check_rate_limit(Some(limiter), &keys, RateLimitFailure::FailClosed).await
     {
         return cratefield_core::rate_limited(&decision);
+    }
+    let now = st.clock.now();
+    let day_start = now.replace_time(time::Time::MIDNIGHT);
+    match st.store.clients_since(&stamp(day_start)).await {
+        Ok(count) if count < MAX_REGISTRATIONS_PER_DAY => {}
+        Ok(_) => {
+            return token_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "temporarily_unavailable",
+                "too many apps have registered today; try again tomorrow",
+            );
+        }
+        Err(_) => return server_error(),
     }
     let invalid = |error: &str, detail: &str| {
         (
@@ -760,7 +915,7 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
     if uris.iter().any(|uri| !valid_redirect_uri(uri)) {
         return invalid(
             "invalid_redirect_uri",
-            "a redirect URI must be https, or http to localhost, 127.0.0.1 or [::1], with no fragment",
+            "a redirect URI must be https, or http to localhost, 127.0.0.1 or [::1], with a plain host, no fragment and ASCII only",
         );
     }
     if metadata
@@ -793,20 +948,21 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
     if !responses_ok {
         return invalid("invalid_client_metadata", "response_types may be code");
     }
-    let client_name: String = metadata
-        .get("client_name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(DEFAULT_CLIENT_NAME)
-        .chars()
-        .take(MAX_CLIENT_NAME_CHARS)
-        .collect();
+    // Control and format characters are stripped before the name is kept, so
+    // a right-to-left override cannot make it read as something else.
+    let client_name: String = clean_name(
+        metadata
+            .get("client_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
+    .chars()
+    .take(MAX_CLIENT_NAME_CHARS)
+    .collect();
 
     let Ok(id) = random_token(16) else {
         return server_error();
     };
-    let now = st.clock.now();
     let client = Client {
         client_id: format!("lbc_{id}"),
         client_name: client_name.clone(),
@@ -844,6 +1000,11 @@ struct TokenForm {
     refresh_token: Option<String>,
 }
 
+/// The one token endpoint. The device grant's poll is answered by the device
+/// handler at `/v1/device-auth/token`; the venture routes a device poll there
+/// before it reaches this module, so one advertised `token_endpoint` serves
+/// every grant a client may use. A device poll that does arrive here is named
+/// as unsupported rather than mis-answered.
 async fn token(State(st): State<Arc<OAuthState>>, Form(form): Form<TokenForm>) -> Response {
     match form.grant_type.as_deref() {
         Some("authorization_code") => exchange_code(&st, &form).await,
@@ -884,9 +1045,8 @@ async fn named_client(st: &OAuthState, client_id: Option<&str>) -> Result<Client
 
 /// Ends a connection: every access token its family was given is revoked.
 /// Run when a spent code or a spent refresh token is presented again, the
-/// signal that a copy of the credential is loose. Each revoked token takes its
-/// refresh chain with it, because a refresh is refused once its access token
-/// is gone.
+/// signal that a copy of the credential is loose. Revoking a token also spends
+/// its renewal token (see `TokenStore::revoke`), so the chain ends with it.
 async fn revoke_family(st: &OAuthState, family: &str) {
     let Ok(rows) = st.store.family(family).await else {
         return;
@@ -923,8 +1083,8 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
         }
         Err(_) => return server_error(),
     };
-    // A code that was already spent is a replay: the connection it made is
-    // revoked, and the caller is refused like any other bad code.
+    // A code that was already spent is a replay: the connection it opened is
+    // ended, and the caller is refused like any other bad code.
     if row.used {
         revoke_family(st, &row.family).await;
         return token_error(
@@ -972,14 +1132,15 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
         }
         Err(_) => return server_error(),
     }
+    let granted = granted_scopes(&row.user_id);
     let access = match st
         .tokens
-        .mint_expiring(
+        .mint_connector(
             &row.workspace_id,
             &row.user_id,
-            &connector_name(&client.client_name),
-            &[],
-            Some(now + ACCESS_TTL),
+            &connector_name(&client),
+            &granted,
+            now + ACCESS_TTL,
         )
         .await
     {
@@ -1115,14 +1276,15 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
         .tokens
         .revoke(&row.workspace_id, &row.user_id, &row.prefix)
         .await;
+    let granted = granted_scopes(&row.user_id);
     let access = match st
         .tokens
-        .mint_expiring(
+        .mint_connector(
             &row.workspace_id,
             &row.user_id,
-            &connector_name(&client.client_name),
-            &[],
-            Some(now + ACCESS_TTL),
+            &connector_name(&client),
+            &granted,
+            now + ACCESS_TTL,
         )
         .await
     {
@@ -1142,5 +1304,5 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
     else {
         return server_error();
     };
-    token_response(&access.token, &refresh, "")
+    token_response(&access.token, &refresh, &granted.join(" "))
 }

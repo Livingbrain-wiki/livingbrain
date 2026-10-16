@@ -134,7 +134,21 @@ export function tokenView(entry) {
     scopes,
     scopeSummary: scopeSummary(scopes),
     created: formatCreated(entry && entry.created_at),
+    // A connector token is a connected app (the Claude sign-in). It is
+    // revocable like any token, and revoking it ends its renewal too.
+    connector: Boolean(entry && entry.connector === true),
   };
+}
+
+/**
+ * The name a row shows. A connector row says so: "Claude connector" when the
+ * server already labelled it (a recognised Claude host), otherwise "Connected
+ * app", so an unverified app is never shown as a Claude connector.
+ */
+export function rowName(view) {
+  if (!view.connector) return view.name;
+  if (view.name.startsWith("Claude connector")) return view.name;
+  return `Connected app · ${view.name}`;
 }
 
 /** The list, as view models. A missing or non-array `tokens` is an empty list. */
@@ -176,7 +190,7 @@ export function renderTokenRows(container, views, doc = typeof document === "und
   for (const view of row) {
     const tr = doc.createElement("tr");
     const values = view
-      ? [view.name, view.prefix, view.scopeSummary, view.created]
+      ? [rowName(view), view.prefix, view.scopeSummary, view.created]
       : ["No API tokens yet. Create one below to connect a coding agent or the CLI."];
     values.forEach((value, index) => {
       const td = doc.createElement("td");
@@ -193,7 +207,7 @@ export function renderTokenRows(container, views, doc = typeof document === "und
       revoke.textContent = "Revoke";
       revoke.setAttribute("data-prefix", view.prefix);
       revoke.setAttribute("data-name", view.name);
-      revoke.setAttribute("aria-label", `Revoke the token ${view.name}`);
+      revoke.setAttribute("aria-label", `Revoke the token ${rowName(view)}`);
       actions.appendChild(revoke);
       tr.appendChild(actions);
     } else {

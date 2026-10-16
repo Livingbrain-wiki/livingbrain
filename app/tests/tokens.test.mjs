@@ -17,6 +17,7 @@ import {
   revealToken,
   clearToken,
   renderTokenRows,
+  rowName,
   safeReturnTo,
 } from "../assets/tokens.js";
 
@@ -125,6 +126,7 @@ test("the list view model cannot carry a token value, whatever the server sent",
   const views = tokenViews(leakyList);
   assert.equal("token" in views[0], false);
   assert.deepEqual(Object.keys(views[0]).sort(), [
+    "connector",
     "created",
     "name",
     "prefix",
@@ -217,4 +219,25 @@ test("return_to is judged after the query decodes it, as the page receives it", 
     safeReturnTo(approval.get("return_to")),
     "/v1/device-auth/approve?user_code=ABCD-EFGH",
   );
+});
+/**
+ * A connector row is labelled as one, and a non-Claude connector is never
+ * shown as a Claude connector. The flag comes from the server's list.
+ */
+test("a connector token is labelled as a connected app, never as an unverified Claude", () => {
+  const [plain] = tokenViews({ tokens: [{ prefix: "lbp_a", name: "Laptop" }] });
+  assert.equal(plain.connector, false);
+  assert.equal(rowName(plain), "Laptop");
+
+  const [verified] = tokenViews({
+    tokens: [{ prefix: "lbp_b", name: "Claude connector · Claude", connector: true }],
+  });
+  assert.equal(verified.connector, true);
+  assert.equal(rowName(verified), "Claude connector · Claude");
+
+  const [unverified] = tokenViews({
+    tokens: [{ prefix: "lbp_c", name: "Helpful Tool", connector: true }],
+  });
+  assert.equal(rowName(unverified), "Connected app · Helpful Tool");
+  assert.ok(!rowName(unverified).includes("Claude"));
 });

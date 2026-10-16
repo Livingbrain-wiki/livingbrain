@@ -55,15 +55,15 @@ const MIGRATION_INIT_POSTGRES: SqlMigration = SqlMigration::new(
 /// NULL for every token minted before it, so those never expire, as before.
 const MIGRATION_EXPIRY: SqlMigration = SqlMigration::new(
     "0002",
-    "expiry",
-    include_str!("../migrations/sqlite/0002_expiry.sql"),
+    "expiry_audience",
+    include_str!("../migrations/sqlite/0002_expiry_audience.sql"),
 );
 
 /// The same column for Postgres.
 const MIGRATION_EXPIRY_POSTGRES: SqlMigration = SqlMigration::new(
     "0002",
-    "expiry",
-    include_str!("../migrations/postgres/0002_expiry.sql"),
+    "expiry_audience",
+    include_str!("../migrations/postgres/0002_expiry_audience.sql"),
 );
 
 /// RFC 8628 §3.4. The one grant this venture's authorization server
@@ -177,7 +177,19 @@ fn database(_error: DbError) -> AuthError {
 /// Resolves the caller from `Authorization: Bearer <token>`, falling back to
 /// the session cookie. The bearer is checked first: a request that presents
 /// one has said what it wants to be.
+///
+/// A connector token (issue #72, audience `mcp`) is refused here: every
+/// surface except the MCP endpoint answers it as an unknown token, so an app
+/// connected through Claude reaches nothing but the MCP tools.
 pub async fn authenticate(ports: &Ports, headers: &HeaderMap) -> Result<Member, AuthError> {
+    authenticate_member(ports, headers, false).await
+}
+
+async fn authenticate_member(
+    ports: &Ports,
+    headers: &HeaderMap,
+    connectors: bool,
+) -> Result<Member, AuthError> {
     let db = port(ports.db.clone())?;
     if let Some(token) = cratefield_core::bearer_token(headers) {
         let clock = port(ports.clock.clone())?;
@@ -188,6 +200,9 @@ pub async fn authenticate(ports: &Ports, headers: &HeaderMap) -> Result<Member, 
         else {
             return Err(AuthError);
         };
+        if principal.audience.is_some() && !connectors {
+            return Err(AuthError);
+        }
         return member_for(db, principal).await;
     }
     session(ports, headers).await
@@ -248,6 +263,24 @@ pub async fn authenticate_any(
     ports: &Ports,
     headers: &HeaderMap,
 ) -> Result<Authenticated, AuthError> {
+    authenticate_any_for(ports, headers, false).await
+}
+
+/// [`authenticate_any`] for the MCP endpoint, which also accepts a connector
+/// token (issue #72). Nothing else calls it, so a connector token reaches the
+/// MCP tools and no other route.
+pub async fn authenticate_mcp(
+    ports: &Ports,
+    headers: &HeaderMap,
+) -> Result<Authenticated, AuthError> {
+    authenticate_any_for(ports, headers, true).await
+}
+
+async fn authenticate_any_for(
+    ports: &Ports,
+    headers: &HeaderMap,
+    connectors: bool,
+) -> Result<Authenticated, AuthError> {
     if let Some(token) = cratefield_core::bearer_token(headers)
         && token.starts_with(&format!("{AGENT_KEY_BRAND}_"))
     {
@@ -275,7 +308,7 @@ pub async fn authenticate_any(
             credential: key.prefix,
         }));
     }
-    authenticate(ports, headers)
+    authenticate_member(ports, headers, connectors)
         .await
         .map(Authenticated::Member)
 }

@@ -93,6 +93,52 @@ impl OAuthStore {
         Self { db }
     }
 
+    /// How many clients were registered at or after `since`, for the daily
+    /// registration cap.
+    pub(crate) async fn clients_since(&self, since: &str) -> Result<usize, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT client_id FROM oauth_clients WHERE created_at >= ?",
+                vec![text(since)],
+            ))
+            .await?;
+        Ok(rows.rows.len())
+    }
+
+    /// Deletes what can no longer do anything: codes past their expiry (a used
+    /// code lives exactly as long as an unused one, so replay detection holds
+    /// for its whole window), refresh tokens past their expiry, and clients
+    /// with no code or refresh token left that were registered before
+    /// `client_cutoff`. Answers the rows removed.
+    pub(crate) async fn purge(&self, now: &str, client_cutoff: &str) -> Result<u64, DbError> {
+        let mut removed = 0;
+        removed += self
+            .db
+            .execute(&Statement::with_values(
+                "DELETE FROM oauth_codes WHERE expires_at < ?",
+                vec![text(now)],
+            ))
+            .await?;
+        removed += self
+            .db
+            .execute(&Statement::with_values(
+                "DELETE FROM oauth_refresh_tokens WHERE expires_at < ?",
+                vec![text(now)],
+            ))
+            .await?;
+        removed += self
+            .db
+            .execute(&Statement::with_values(
+                "DELETE FROM oauth_clients WHERE created_at < ? \
+                   AND client_id NOT IN (SELECT client_id FROM oauth_codes) \
+                   AND client_id NOT IN (SELECT client_id FROM oauth_refresh_tokens)",
+                vec![text(client_cutoff)],
+            ))
+            .await?;
+        Ok(removed)
+    }
+
     pub(crate) async fn insert_client(
         &self,
         client: &Client,
@@ -264,5 +310,114 @@ impl OAuthStore {
             ))
             .await?;
         Ok(changed == 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cratefield_core::Statement;
+    use cratefield_testing::TestHarness;
+    use sea_query::Value;
+
+    use super::OAuthStore;
+
+    fn text(value: &str) -> Value {
+        Value::String(Some(Box::new(value.to_owned())))
+    }
+
+    async fn exec(harness: &TestHarness, sql: &str, values: Vec<Value>) {
+        harness
+            .db
+            .execute(&Statement::with_values(sql, values))
+            .await
+            .expect("the seed row writes");
+    }
+
+    async fn count(harness: &TestHarness, table: &str) -> usize {
+        harness
+            .db
+            .query(&Statement::with_values(
+                format!("SELECT 1 FROM {table}"),
+                Vec::new(),
+            ))
+            .await
+            .expect("the rows read")
+            .rows
+            .len()
+    }
+
+    /// M2: the purge removes what is finished and keeps what is live. Codes and
+    /// renewals past expiry go; a client goes only when it is old and has nothing
+    /// live left, so a client with a live renewal survives its retention window.
+    #[pollster::test]
+    async fn the_purge_removes_finished_rows_and_keeps_live_ones() {
+        let harness = TestHarness::with_ports(vec![Box::new(super::super::OAuth::new())], |_| {});
+        let old = "2020-01-01T00:00:00Z";
+        let now = "2026-06-01T00:00:00Z";
+        let cutoff = "2026-05-01T00:00:00Z";
+        for client in ["lbc_idle", "lbc_renewing"] {
+            exec(
+                &harness,
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at) \
+                 VALUES (?, '', '[]', ?)",
+                vec![text(client), text(old)],
+            )
+            .await;
+        }
+        // Codes: one expired, one live. Renewals: one expired, one live for the
+        // renewing client only.
+        for (hash, client, expiry) in [
+            ("c-old", "lbc_idle", old),
+            ("c-live", "lbc_renewing", "2099-01-01T00:00:00Z"),
+        ] {
+            exec(
+                &harness,
+                "INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, code_challenge, \
+                     workspace_id, user_id, scope, family, expires_at, created_at) \
+                 VALUES (?, ?, 'https://x.example/cb', 'c', 'w', 'u', '', 'f', ?, ?)",
+                vec![text(hash), text(client), text(expiry), text(old)],
+            )
+            .await;
+        }
+        for (hash, client, expiry) in [
+            ("r-old", "lbc_idle", old),
+            ("r-live", "lbc_renewing", "2099-01-01T00:00:00Z"),
+        ] {
+            exec(
+                &harness,
+                "INSERT INTO oauth_refresh_tokens (token_hash, family, prefix, client_id, \
+                     workspace_id, user_id, expires_at, created_at) \
+                 VALUES (?, 'f', 'p', ?, 'w', 'u', ?, ?)",
+                vec![text(hash), text(client), text(expiry), text(old)],
+            )
+            .await;
+        }
+
+        let store = OAuthStore::new(harness.db.clone());
+        store.purge(now, cutoff).await.expect("the purge runs");
+
+        assert_eq!(
+            count(&harness, "oauth_codes").await,
+            1,
+            "the live code stays"
+        );
+        assert_eq!(
+            count(&harness, "oauth_refresh_tokens").await,
+            1,
+            "the live renewal stays"
+        );
+        let clients = harness
+            .db
+            .query(&Statement::with_values(
+                "SELECT client_id FROM oauth_clients",
+                Vec::new(),
+            ))
+            .await
+            .expect("the clients read");
+        assert_eq!(
+            clients.rows.len(),
+            1,
+            "only the client with a live renewal survives"
+        );
     }
 }

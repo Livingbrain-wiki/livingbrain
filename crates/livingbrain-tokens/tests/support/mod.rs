@@ -13,7 +13,7 @@ use cratefield_core::axum::body::Body;
 use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use cratefield_core::{Kid, Payload, Ports, RandomBytes, RandomError, Signer, Statement};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
-use cratefield_testing::{MemoryBlob, TestHarness};
+use cratefield_testing::{FakeRateLimiter, MemoryBlob, TestHarness};
 use livingbrain_tokens::{Avatars, DevicePorts, Me, OAuth, Tokens};
 use livingbrain_workspaces::{AvatarRebind, Workspaces};
 use serde_json::{Value, json};
@@ -60,7 +60,16 @@ pub struct Kit {
 
 /// The kit, with [`OWNER`] and [`OTHER`] seeded.
 pub async fn signed_in() -> Kit {
-    let kit = kit();
+    seeded(kit(true)).await
+}
+
+/// The kit with no rate limiter bound: the composition a deployment without
+/// one gets, in which client registration must refuse (issue #72).
+pub async fn signed_in_without_limiter() -> Kit {
+    seeded(kit(false)).await
+}
+
+async fn seeded(kit: Kit) -> Kit {
     let workspace = Statement::with_values(
         "INSERT INTO workspaces (id, name, owner_id, created_at) VALUES (?, ?, ?, ?)",
         vec![
@@ -95,7 +104,7 @@ pub async fn signed_in() -> Kit {
     kit
 }
 
-fn kit() -> Kit {
+fn kit(limiter: bool) -> Kit {
     let device = DevicePorts::new();
     let grant = device.clone();
     let captured: Arc<Mutex<Option<Ports>>> = Arc::new(Mutex::new(None));
@@ -128,6 +137,10 @@ fn kit() -> Kit {
         // The deployment's app origin, where the connector sign-in consent
         // lives (issue #72). Set to this kit's own host, so requests here are
         // already on it and nothing is sent elsewhere.
+        // The harness binds a limiter by default; the no-limiter kit clears it.
+        ports.rate_limiter = limiter.then(|| {
+            Arc::new(FakeRateLimiter::always_allow()) as Arc<dyn cratefield_core::RateLimiter>
+        });
         ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
             "WORKSPACES_REDIRECT_BASE",
             API_BASE,

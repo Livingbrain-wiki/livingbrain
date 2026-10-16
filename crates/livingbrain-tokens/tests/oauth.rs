@@ -9,6 +9,7 @@ mod support;
 
 use cratefield_core::Statement;
 use cratefield_core::axum::http::StatusCode;
+use livingbrain_tokens::{Authenticated, authenticate, authenticate_mcp};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use support::{
@@ -16,6 +17,8 @@ use support::{
 };
 
 const REDIRECT: &str = "https://claude.example/api/mcp/auth_callback";
+/// A redirect on a host Living Brain recognises as Claude.
+const VERIFIED_REDIRECT: &str = "https://claude.ai/api/mcp/auth_callback";
 const CLIENT_NAME: &str = "Claude test";
 /// RFC 7636 Appendix B: the one published verifier and its S256 challenge.
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -194,11 +197,18 @@ async fn registration_accepts_https_and_loopback_and_refuses_the_rest() {
     .await;
     assert_eq!(loopback.status, StatusCode::CREATED, "{}", loopback.text());
 
+    // L1: the authority is a plain host, ASCII, and nothing that could read
+    // as a second host, a port that is not a port, or a userinfo.
     for uri in [
         "http://claude.example/cb",
         "https://claude.example/cb#fragment",
         "javascript:alert(1)",
         "myapp://callback",
+        "https://claude.ai;evil.example/cb",
+        "https://claüde.ai/cb",
+        "https://claude.ai:99999999/cb",
+        "https://user@claude.ai/cb",
+        "https://claude.ai\u{0}/cb",
     ] {
         let refused = post_json(
             &kit,
@@ -233,6 +243,76 @@ async fn registration_accepts_https_and_loopback_and_refuses_the_rest() {
     )
     .await;
     assert_eq!(error_of(&grant), "invalid_client_metadata");
+}
+
+/// M2: without a rate limiter bound, registration refuses rather than running
+/// open. Everything else in the grant still works without one.
+#[pollster::test]
+async fn registration_fails_closed_without_a_rate_limiter() {
+    let kit = support::signed_in_without_limiter().await;
+    let refused = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "redirect_uris": [REDIRECT] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        refused.text()
+    );
+    assert_eq!(error_of(&refused), "temporarily_unavailable");
+}
+
+/// M2: a day's registrations are capped across every caller.
+#[pollster::test]
+async fn registration_stops_at_the_daily_cap() {
+    let kit = support::signed_in().await;
+    for n in 0..200 {
+        let made = post_json(
+            &kit,
+            "/v1/oauth/register",
+            &json!({ "client_name": format!("app {n}"), "redirect_uris": [REDIRECT] }),
+            &Caller::Anonymous,
+        )
+        .await;
+        assert_eq!(
+            made.status,
+            StatusCode::CREATED,
+            "registration {n}: {}",
+            made.text()
+        );
+    }
+    let over = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "redirect_uris": [REDIRECT] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(
+        over.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        over.text()
+    );
+}
+
+/// M1: control and bidirectional-override characters never reach a stored name.
+#[pollster::test]
+async fn a_client_name_is_cleaned_of_control_and_override_characters() {
+    let kit = support::signed_in().await;
+    let made = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": "\u{202E}enilnoM\u{202C}\u{200B}Claude\u{0007}", "redirect_uris": [REDIRECT] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(made.status, StatusCode::CREATED, "{}", made.text());
+    assert_eq!(made.json()["client_name"], json!("enilnoMClaude"));
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +355,12 @@ async fn authorize_shows_the_consent_to_a_signed_in_person() {
     assert!(page.contains(CLIENT_NAME), "the client is named");
     assert!(page.contains("Approve") && page.contains("Deny"));
     assert!(page.contains("action=\"/v1/oauth/authorize\""));
+    // The grant as it really is: reads, and notes to one's own memory.
+    assert!(
+        page.contains("add notes to your own private memory"),
+        "{page}"
+    );
+    assert!(page.contains("cannot change settings"), "{page}");
     let csp = shown
         .headers
         .get("content-security-policy")
@@ -290,6 +376,42 @@ async fn authorize_shows_the_consent_to_a_signed_in_person() {
         "{csp}"
     );
     assert!(!csp.contains("script-src"), "the consent runs no script");
+    // L5: the consent is never sent a referrer.
+    assert_eq!(
+        shown
+            .headers
+            .get("referrer-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-referrer")
+    );
+    // M1: an unverified host is shown in full, under a warning.
+    assert!(page.contains("claude.example"), "the return host is shown");
+    assert!(page.contains("Unverified app"), "{page}");
+}
+
+#[pollster::test]
+async fn a_verified_claude_host_shows_no_unverified_warning() {
+    let kit = support::signed_in().await;
+    let made = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": "Claude", "redirect_uris": [VERIFIED_REDIRECT] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    let client_id = made.json()["client_id"].as_str().unwrap().to_owned();
+    let shown = get(
+        &kit,
+        &format!(
+            "/v1/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}\
+             &code_challenge={CHALLENGE}&code_challenge_method=S256&state=s1",
+            enc(VERIFIED_REDIRECT)
+        ),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
+    assert!(!shown.text().contains("Unverified app"), "{}", shown.text());
 }
 
 #[pollster::test]
@@ -333,7 +455,7 @@ async fn an_unregistered_client_or_redirect_gets_a_page_never_a_redirect() {
 }
 
 #[pollster::test]
-async fn a_bad_request_is_sent_back_to_the_registered_redirect_with_an_error() {
+async fn a_bad_request_is_sent_back_with_an_error_and_its_issuer() {
     let kit = support::signed_in().await;
     let client_id = register(&kit).await;
     let base = format!(
@@ -384,20 +506,46 @@ async fn a_bad_request_is_sent_back_to_the_registered_redirect_with_an_error() {
             Some("s1"),
             "{location}"
         );
+        assert_eq!(
+            param(&location, "iss").as_deref(),
+            Some(API_BASE),
+            "RFC 9207: {location}"
+        );
     }
 }
 
+/// L3 across the host hop: a request that arrives on the MCP host is carried to
+/// the app origin with a signed issuer, and the response names the MCP host, the
+/// issuer that host's metadata advertised, not the app's.
 #[pollster::test]
-async fn authorize_on_another_host_moves_to_the_app_origin_with_the_same_request() {
+async fn the_issuer_is_the_host_the_request_arrived_on_across_the_sign_in_hop() {
     let kit = support::signed_in().await;
     let client_id = register(&kit).await;
     let path = authorize_path(&client_id, CHALLENGE, "s1");
     let moved = get_at(&kit, &path, "mcp.livingbrain.wiki", None).await;
     assert_eq!(moved.status, StatusCode::FOUND, "{}", moved.text());
+    let carried = moved.location().expect("a hop to the app origin");
+    assert!(
+        carried.starts_with(&format!("{API_BASE}{path}&issuer_ref=")),
+        "{carried}"
+    );
+    let on_app = carried.trim_start_matches(API_BASE);
+
+    let shown = get(&kit, on_app, &kit.owner()).await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
+    let request = enc(&consent_request(&shown.text()));
+    let approved = post_form(
+        &kit,
+        "/v1/oauth/authorize",
+        &format!("request={request}&decision=approve&workspace_id={WORKSPACE}"),
+        &kit.owner(),
+    )
+    .await;
+    let location = approved.location().expect("a redirect");
     assert_eq!(
-        moved.location().as_deref(),
-        Some(format!("{API_BASE}{path}").as_str()),
-        "the session cookie lives on the app origin, so the consent does too"
+        param(&location, "iss").as_deref(),
+        Some("https://mcp.livingbrain.wiki"),
+        "{location}"
     );
 }
 
@@ -449,8 +597,7 @@ async fn an_approval_must_be_genuine_same_origin_and_for_the_person_shown() {
         cross.text()
     );
 
-    // Somebody else's signed-in browser holding the form: refused, the consent
-    // was shown to the owner.
+    // Somebody else's signed-in browser holding the form: refused.
     let other = post_form(&kit, "/v1/oauth/authorize", &form(&request), &kit.other()).await;
     assert_eq!(other.status, StatusCode::FORBIDDEN, "{}", other.text());
 
@@ -471,8 +618,11 @@ async fn an_approval_must_be_genuine_same_origin_and_for_the_person_shown() {
     assert!(not_held.text().contains("oauth/workspace-not-held"));
 
     // Nothing was approved by any of that: no code was minted.
-    let codes = rows(&kit, "oauth_codes").await;
-    assert_eq!(codes, 0, "a refused approval mints no code");
+    assert_eq!(
+        rows(&kit, "oauth_codes").await,
+        0,
+        "a refused approval mints no code"
+    );
 }
 
 #[pollster::test]
@@ -501,14 +651,26 @@ async fn deny_redirects_with_access_denied_and_no_code() {
         "{location}"
     );
     assert_eq!(param(&location, "state").as_deref(), Some("s1"));
+    assert_eq!(
+        param(&location, "iss").as_deref(),
+        Some(API_BASE),
+        "{location}"
+    );
     assert!(param(&location, "code").is_none(), "{location}");
+    assert_eq!(
+        denied
+            .headers
+            .get("referrer-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-referrer")
+    );
 }
 
 // ---------------------------------------------------------------------------
 // The token endpoint
 
 #[pollster::test]
-async fn a_code_redeems_once_for_a_personal_access_token_and_a_refresh_token() {
+async fn a_code_redeems_once_for_a_connector_token_and_a_refresh_token() {
     let kit = support::signed_in().await;
     let (access, refresh, _) = connected(&kit).await;
     assert!(
@@ -517,26 +679,75 @@ async fn a_code_redeems_once_for_a_personal_access_token_and_a_refresh_token() {
     );
     assert!(refresh.starts_with("lbr_"), "{refresh}");
 
-    // The access token is an ordinary PAT: it resolves to the member the person
-    // approved, in the workspace they chose.
-    let me = get(&kit, "/v1/me", &Caller::Token(access.clone())).await;
-    assert_eq!(me.status, StatusCode::OK, "{}", me.text());
-    assert_eq!(me.json()["principal"]["id"], OWNER);
-    assert_eq!(me.json()["credential"]["prefix"], json!(prefix_of(&access)));
+    // The MCP endpoint's resolver takes it, as the approved member, and it is
+    // not an admin: its scope subset is what it reaches.
+    let headers = Caller::Token(access.clone()).headers();
+    let Ok(Authenticated::Member(member)) = authenticate_mcp(&kit.ports, &headers).await else {
+        panic!("the MCP endpoint accepts a connector token");
+    };
+    assert_eq!(member.user_id, OWNER);
+    assert_eq!(member.workspace_id, WORKSPACE);
+    assert!(!member.is_admin, "a connector token is never an admin");
+    assert_eq!(
+        member.scopes,
+        Some(vec!["shared".to_owned(), format!("user:{OWNER}")])
+    );
 
-    // It is listed under the person's API tokens, named for the connector.
+    // It is listed under the person's API tokens, labelled as a connector.
     let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
-    let names: Vec<String> = listed.json()["tokens"]
-        .as_array()
-        .unwrap()
+    let tokens = listed.json()["tokens"].as_array().unwrap().clone();
+    let ours = tokens
         .iter()
-        .map(|token| token["name"].as_str().unwrap_or_default().to_owned())
-        .collect();
+        .find(|token| token["prefix"] == json!(prefix_of(&access)))
+        .expect("the connection is listed");
+    assert_eq!(ours["connector"], json!(true));
+    assert_eq!(
+        ours["name"],
+        json!(CLIENT_NAME),
+        "an unverified app keeps only its own name"
+    );
+}
+
+/// H1: a connector token is accepted by the MCP endpoint's resolver alone. Every
+/// other surface answers it as an unknown token.
+#[pollster::test]
+async fn a_connector_token_reaches_nothing_but_the_mcp_endpoint() {
+    let kit = support::signed_in().await;
+    let (access, _, _) = connected(&kit).await;
+    let headers = Caller::Token(access.clone()).headers();
+
     assert!(
-        names
-            .iter()
-            .any(|name| name == "Claude connector · Claude test"),
-        "{names:?}"
+        authenticate(&kit.ports, &headers).await.is_err(),
+        "the general resolver refuses it"
+    );
+    assert_eq!(
+        get(&kit, "/v1/me", &Caller::Token(access.clone()))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post_json(
+            &kit,
+            "/v1/tokens",
+            &json!({ "name": "escalate" }),
+            &Caller::Token(access.clone())
+        )
+        .await
+        .status,
+        StatusCode::UNAUTHORIZED,
+        "a connector cannot mint a token"
+    );
+    assert_eq!(
+        support::delete(
+            &kit,
+            &format!("/v1/tokens/{}", prefix_of(&access)),
+            &Caller::Token(access.clone())
+        )
+        .await
+        .status,
+        StatusCode::UNAUTHORIZED,
+        "a connector cannot revoke a token"
     );
 }
 
@@ -557,6 +768,36 @@ async fn the_token_response_has_the_rfc_6749_fields_and_is_never_cached() {
     let body = granted.json();
     assert_eq!(body["token_type"], json!("Bearer"));
     assert_eq!(body["expires_in"], json!(3600));
+}
+
+/// L2: a requested scope is never echoed or stored; the response names the
+/// scopes the grant actually issued.
+#[pollster::test]
+async fn the_scope_in_the_response_is_the_one_granted_not_the_one_requested() {
+    let kit = support::signed_in().await;
+    let client_id = register(&kit).await;
+    let path = format!(
+        "{}&scope=admin%3Aeverything",
+        authorize_path(&client_id, CHALLENGE, "s1")
+    );
+    let shown = get(&kit, &path, &kit.owner()).await;
+    let request = enc(&consent_request(&shown.text()));
+    let approved = post_form(
+        &kit,
+        "/v1/oauth/authorize",
+        &format!("request={request}&decision=approve&workspace_id={WORKSPACE}"),
+        &kit.owner(),
+    )
+    .await;
+    let code = param(&approved.location().unwrap(), "code").unwrap();
+    let granted = redeem(&kit, &code, &client_id, VERIFIER).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+    assert_eq!(
+        granted.json()["scope"],
+        json!(format!("shared user:{OWNER}")),
+        "{}",
+        granted.text()
+    );
 }
 
 #[pollster::test]
@@ -609,7 +850,7 @@ async fn a_wrong_verifier_a_mismatched_redirect_and_an_unknown_client_all_fail()
 }
 
 #[pollster::test]
-async fn a_replayed_code_is_refused_and_revokes_the_token_it_made() {
+async fn a_replayed_code_is_refused_and_ends_the_connection_it_opened() {
     let kit = support::signed_in().await;
     let client_id = register(&kit).await;
     let code = approve(&kit, &client_id, &kit.owner()).await;
@@ -619,11 +860,17 @@ async fn a_replayed_code_is_refused_and_revokes_the_token_it_made() {
 
     let replay = redeem(&kit, &code, &client_id, VERIFIER).await;
     assert_eq!(error_of(&replay), "invalid_grant");
-    let dead = get(&kit, "/v1/me", &Caller::Token(access)).await;
+    let dead = get(&kit, "/v1/me", &Caller::Token(access.clone())).await;
     assert_eq!(
         dead.status,
         StatusCode::UNAUTHORIZED,
         "the replayed code's token is revoked"
+    );
+    assert!(
+        authenticate_mcp(&kit.ports, &Caller::Token(access).headers())
+            .await
+            .is_err(),
+        "and the MCP endpoint refuses it too"
     );
 }
 
@@ -661,10 +908,10 @@ async fn seed_code(kit: &Kit, code: &str, client_id: &str, expires_at: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Refresh, rotation and revocation
+// Refresh, rotation, idle connections and revocation
 
 #[pollster::test]
-async fn a_refresh_rotates_and_the_spent_token_is_refused() {
+async fn a_refresh_rotates_and_a_replayed_spent_token_ends_the_connection() {
     let kit = support::signed_in().await;
     let (access, refresh, client_id) = connected(&kit).await;
 
@@ -676,13 +923,20 @@ async fn a_refresh_rotates_and_the_spent_token_is_refused() {
     let next_refresh = body["refresh_token"].as_str().unwrap().to_owned();
     assert_ne!(next_access, access);
     assert_ne!(next_refresh, refresh);
+    assert_eq!(body["scope"], json!(format!("shared user:{OWNER}")));
 
     // The new access token works; the one it replaced does not.
     assert_eq!(
         get(&kit, "/v1/me", &Caller::Token(next_access.clone()))
             .await
             .status,
-        StatusCode::OK
+        StatusCode::UNAUTHORIZED,
+        "connectors are not /v1/me"
+    );
+    assert!(
+        authenticate_mcp(&kit.ports, &Caller::Token(next_access.clone()).headers())
+            .await
+            .is_ok()
     );
     assert_eq!(
         get(&kit, "/v1/me", &Caller::Token(access)).await.status,
@@ -697,12 +951,117 @@ async fn a_refresh_rotates_and_the_spent_token_is_refused() {
         format!("grant_type=refresh_token&refresh_token={next_refresh}&client_id={client_id}");
     let ended = post_form(&kit, "/v1/oauth/token", &replay_form, &Caller::Anonymous).await;
     assert_eq!(error_of(&ended), "invalid_grant", "the connection ended");
-    assert_eq!(
-        get(&kit, "/v1/me", &Caller::Token(next_access))
+    assert!(
+        authenticate_mcp(&kit.ports, &Caller::Token(next_access).headers())
             .await
-            .status,
-        StatusCode::UNAUTHORIZED,
+            .is_err(),
         "the rotated access token ended with its connection"
+    );
+}
+
+/// H2: an idle connection (its access token past expiry, its renewal live) is
+/// still listed, so it can be seen and revoked; revoking it ends the renewal.
+#[pollster::test]
+async fn an_idle_connection_stays_listed_until_revoked_and_revoking_ends_renewal() {
+    let kit = support::signed_in().await;
+    let (access, refresh, client_id) = connected(&kit).await;
+
+    // An hour and more later: the access token is past its expiry.
+    let expire = Statement::with_values(
+        "UPDATE personal_access_tokens SET expires_at = ? WHERE prefix = ?",
+        vec![
+            support::text("2026-01-01T00:00:00Z"),
+            support::text(prefix_of(&access)),
+        ],
+    );
+    kit.harness
+        .db
+        .execute(&expire)
+        .await
+        .expect("the expiry seeds");
+
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    let listed_prefixes: Vec<String> = listed.json()["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["prefix"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        listed_prefixes.contains(&prefix_of(&access).to_owned()),
+        "an idle connection with a live renewal is still listed: {listed_prefixes:?}"
+    );
+
+    // Renewing it still works, which is why it must be shown.
+    let renewed = post_form(
+        &kit,
+        "/v1/oauth/token",
+        &format!("grant_type=refresh_token&refresh_token={refresh}&client_id={client_id}"),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.text());
+    let renewed_access = renewed.json()["access_token"].as_str().unwrap().to_owned();
+
+    // Revoke it from Settings: the whole connection goes.
+    let revoked = support::delete(
+        &kit,
+        &format!("/v1/tokens/{}", prefix_of(&renewed_access)),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT, "{}", revoked.text());
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={client_id}",
+        renewed.json()["refresh_token"].as_str().unwrap()
+    );
+    let refused = post_form(&kit, "/v1/oauth/token", &form, &Caller::Anonymous).await;
+    assert_eq!(
+        error_of(&refused),
+        "invalid_grant",
+        "a revoked connection cannot be renewed"
+    );
+    let after = get(&kit, "/v1/tokens", &kit.owner()).await;
+    assert!(
+        !after.text().contains(prefix_of(&renewed_access)),
+        "and it is gone from the list"
+    );
+}
+
+/// H2: a connection whose renewal has run out is hidden, as an expired token is.
+#[pollster::test]
+async fn a_connection_past_its_renewal_is_no_longer_listed() {
+    let kit = support::signed_in().await;
+    let (access, refresh, _) = connected(&kit).await;
+    let expire = Statement::with_values(
+        "UPDATE personal_access_tokens SET expires_at = ? WHERE prefix = ?",
+        vec![
+            support::text("2026-01-01T00:00:00Z"),
+            support::text(prefix_of(&access)),
+        ],
+    );
+    kit.harness
+        .db
+        .execute(&expire)
+        .await
+        .expect("the expiry seeds");
+    let stale = Statement::with_values(
+        "UPDATE oauth_refresh_tokens SET expires_at = ? WHERE token_hash = ?",
+        vec![
+            support::text("2026-01-01T00:00:00Z"),
+            support::text(&sha256_hex(&refresh)),
+        ],
+    );
+    kit.harness
+        .db
+        .execute(&stale)
+        .await
+        .expect("the renewal expiry seeds");
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    assert!(
+        !listed.text().contains(prefix_of(&access)),
+        "{}",
+        listed.text()
     );
 }
 
@@ -720,8 +1079,15 @@ async fn revoking_the_connection_in_settings_ends_its_access_and_its_refresh() {
     assert_eq!(revoked.status, StatusCode::NO_CONTENT, "{}", revoked.text());
 
     assert_eq!(
-        get(&kit, "/v1/me", &Caller::Token(access)).await.status,
+        get(&kit, "/v1/me", &Caller::Token(access.clone()))
+            .await
+            .status,
         StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        authenticate_mcp(&kit.ports, &Caller::Token(access).headers())
+            .await
+            .is_err()
     );
     let form = format!("grant_type=refresh_token&refresh_token={refresh}&client_id={client_id}");
     let refused = post_form(&kit, "/v1/oauth/token", &form, &Caller::Anonymous).await;
@@ -765,7 +1131,16 @@ async fn an_unsupported_grant_is_named_as_one() {
     .await;
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_of(&refused), "unsupported_grant_type");
-    let _: Value = refused.json();
+    // A device poll reaching this endpoint is named too, with where it belongs.
+    let device = post_form(
+        &kit,
+        "/v1/oauth/token",
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=x",
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(error_of(&device), "unsupported_grant_type");
+    let _: Value = device.json();
 }
 
 async fn rows(kit: &Kit, table: &str) -> usize {

@@ -61,37 +61,108 @@ pub(crate) fn base64url(bytes: &[u8]) -> String {
     out
 }
 
-/// A redirect URI the client may return to: absolute, without a fragment,
-/// and either `https`, or `http` to this machine (`localhost`, `127.0.0.1`,
-/// `[::1]`) for a client running locally. Anything else — a plain `http` URL
-/// on another host, a `javascript:` or custom scheme, a fragment — is refused
-/// at registration, so a code can only ever be sent to an address the client
-/// registered as its own.
+/// A redirect URI the client may return to: ASCII, absolute, without a
+/// fragment, a plain authority (see [`redirect_host`]), and either `https`, or
+/// `http` to this machine (`localhost`, `127.0.0.1`, `[::1]`). Anything else
+/// is refused at registration, so a code can only ever be sent to an address
+/// the client registered as its own.
 pub(crate) fn valid_redirect_uri(uri: &str) -> bool {
-    if uri.len() > 512
+    if !uri.is_ascii()
+        || uri.len() > 512
         || uri.contains('#')
         || uri.bytes().any(|b| b.is_ascii_control() || b == b' ')
     {
         return false;
     }
-    let Some((scheme, rest)) = uri.split_once("://") else {
+    let Some((scheme, _)) = uri.split_once("://") else {
         return false;
     };
-    let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    if authority.is_empty() || authority.contains('@') {
+    let Some(host) = redirect_host(uri) else {
         return false;
-    }
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed.split(']').next().map(|h| format!("[{h}]"))
-    } else {
-        authority.split(':').next().map(str::to_owned)
-    }
-    .unwrap_or_default();
+    };
     match scheme {
-        "https" => !host.is_empty(),
+        "https" => true,
         "http" => matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]"),
         _ => false,
     }
+}
+
+/// The host of a redirect URI, without its port, lower-cased. `None` when the
+/// URI has no acceptable authority: a userinfo, a host outside the plain DNS
+/// shape or `[::1]`, or anything after the host that is not `:` and a port of
+/// one to five digits.
+pub(crate) fn redirect_host(uri: &str) -> Option<String> {
+    let rest = uri.split_once("://")?.1;
+    let authority = rest.split(['/', '?']).next()?;
+    if authority.contains('@') {
+        return None;
+    }
+    let (host, tail) = if let Some(after) = authority.strip_prefix('[') {
+        let (inside, tail) = after.split_once(']')?;
+        (format!("[{inside}]"), tail.to_owned())
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host.to_owned(), format!(":{port}")),
+            None => (authority.to_owned(), String::new()),
+        }
+    };
+    if !tail.is_empty() {
+        let port = tail.strip_prefix(':')?;
+        if port.is_empty() || port.len() > 5 || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let ok = if host.starts_with('[') {
+        host == "[::1]"
+    } else {
+        !host.is_empty()
+            && !host.starts_with(['.', '-'])
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    };
+    ok.then(|| host.to_ascii_lowercase())
+}
+
+/// Whether a redirect host is one Living Brain recognises as a Claude app:
+/// `claude.ai` and `claude.com`, and their subdomains. Only these get the
+/// "Claude connector" label; every other app is shown as unverified.
+pub(crate) fn verified_host(host: &str) -> bool {
+    ["claude.ai", "claude.com"]
+        .iter()
+        .any(|base| host == *base || host.ends_with(&format!(".{base}")))
+}
+
+/// Strips the characters a name must never carry into a settings row or a
+/// consent page: control characters (Unicode `Cc`) and the format characters
+/// (`Cf`) that reorder or hide text — the bidirectional embeddings and
+/// isolates U+202A–U+202E and U+2066–U+2069 most of all, which let a
+/// registered name display as something else.
+pub(crate) fn clean_name(raw: &str) -> String {
+    raw.chars()
+        .filter(|&c| !c.is_control() && !is_format(c))
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 /// The origin of a redirect URI, for the consent page's `form-action`
@@ -152,11 +223,14 @@ pub(crate) struct Choice<'a> {
 }
 
 /// The consent page's inputs, all of them already trusted: the client name is
-/// the registered one, the redirect origin is validated, and `request` is the
-/// sealed consent token the form posts back.
+/// the cleaned, registered one, the redirect host is validated, and `request`
+/// is the sealed consent token the form posts back.
 pub(crate) struct Consent<'a> {
     pub(crate) client_name: &'a str,
-    pub(crate) redirect_origin: &'a str,
+    /// The host the approval sends the person back to, shown in full.
+    pub(crate) host: &'a str,
+    /// Whether that host is one Living Brain recognises (see [`verified_host`]).
+    pub(crate) verified: bool,
     pub(crate) request: &'a str,
     pub(crate) choices: &'a [Choice<'a>],
 }
@@ -172,11 +246,12 @@ pub(crate) fn consent_csp(redirect_origin: &str) -> String {
     )
 }
 
-/// The consent page. Plain English, in the device page's own vocabulary, so
-/// it reads as the same product as the CLI approval it sits beside.
+/// The consent page. Plain English, in the device page's own vocabulary, and
+/// it says exactly what the grant does. The return host is shown in full, and
+/// an app whose host is not one Living Brain recognises is marked unverified.
 pub(crate) fn consent_page(consent: &Consent<'_>) -> String {
     let client = escape(consent.client_name);
-    let origin = escape(consent.redirect_origin);
+    let host = escape(consent.host);
     let request = escape(consent.request);
     let picker = if consent.choices.len() == 1 {
         let only = &consent.choices[0];
@@ -203,24 +278,34 @@ pub(crate) fn consent_page(consent: &Consent<'_>) -> String {
              <dd><select id=\"oauth-workspace\" name=\"workspace_id\">{options}</select></dd>"
         )
     };
+    let warning = if consent.verified {
+        String::new()
+    } else {
+        format!(
+            "<p class=\"notice\" role=\"alert\"><strong>Unverified app — check this \
+             address.</strong> Living Brain does not recognise {client} as an app it has \
+             checked. Approve only if you are connecting {host} yourself.</p>"
+        )
+    };
     format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <meta name=\"referrer\" content=\"strict-origin-when-cross-origin\">\n\
+         <meta name=\"referrer\" content=\"no-referrer\">\n\
          <title>Connect {client} to Living Brain</title>\n\
          <link rel=\"stylesheet\" href=\"/assets/app.css\">\n\
          <link rel=\"stylesheet\" href=\"/assets/device.css\">\n</head>\n\
          <body>\n<main class=\"device\">\n\
          <p class=\"eyebrow\">Connect an app</p>\n\
          <h1 id=\"oauth-title\">Let {client} use your Living Brain?</h1>\n\
-         <p class=\"lede\">{client} wants to read and add notes to your Living Brain.</p>\n\
+         <p class=\"lede\">{client} will be able to search and read the pages you can read \
+         in this workspace, read facts and sources, and add notes to your own private memory. \
+         It cannot change settings, manage tokens, or see other members.</p>\n\
+         {warning}\
          <dl class=\"facts device__facts\">\
          <div>{picker}</div>\
-         <div><dt>Returns to</dt><dd><code>{origin}</code></dd></div>\
-         <div><dt>Grants</dt><dd>Access to the pages you can read in this workspace, and \
-         the ability to add notes.</dd></div></dl>\n\
-         <p class=\"muted\">You can revoke this connection at any time in Settings → API \
-         tokens. If you did not start this from {client}, deny it.</p>\n\
+         <div><dt>Returns to</dt><dd><strong id=\"oauth-host\"><code>{host}</code></strong></dd></div></dl>\n\
+         <p class=\"muted\">You can disconnect at any time in Settings → API tokens. If you \
+         did not start this from {client}, deny it.</p>\n\
          <div class=\"device__actions\">\n\
          <form method=\"post\" action=\"/v1/oauth/authorize\">\
          <input type=\"hidden\" name=\"request\" value=\"{request}\">\
@@ -245,6 +330,7 @@ pub(crate) fn html(status: u16, body: String, csp: &str) -> Response {
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     if let Ok(value) = HeaderValue::from_str(csp) {
         headers.insert(header::CONTENT_SECURITY_POLICY, value);
@@ -331,5 +417,53 @@ mod tests {
             escape("<a href='x'>&\"</a>"),
             "&lt;a href=&#39;x&#39;&gt;&amp;&quot;&lt;/a&gt;"
         );
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    /// L1: the authority is a plain host, ASCII, no userinfo, no stray port.
+    #[test]
+    fn the_authority_is_a_plain_host_and_nothing_that_could_read_as_another() {
+        for bad in [
+            "https://claude.ai;evil.example/cb",
+            "https://claude.ai,evil.example/cb",
+            "https://claüde.ai/cb",
+            "https://claude.ai:99999999/cb",
+            "https://claude.ai:port/cb",
+            "https://claude.ai:/cb",
+            "https://-claude.ai/cb",
+            "https://claude..ai/x y",
+            "https://[::1]evil/cb",
+        ] {
+            assert!(!valid_redirect_uri(bad), "{bad} is accepted");
+        }
+        assert!(valid_redirect_uri("https://claude.ai:8443/cb"));
+        assert_eq!(
+            redirect_host("https://Claude.AI:443/cb").as_deref(),
+            Some("claude.ai")
+        );
+    }
+
+    #[test]
+    fn only_claude_hosts_are_verified_and_their_subdomains() {
+        assert!(verified_host("claude.ai"));
+        assert!(verified_host("claude.com"));
+        assert!(verified_host("app.claude.ai"));
+        assert!(!verified_host("claude.ai.evil.example"));
+        assert!(!verified_host("evilclaude.ai"));
+        assert!(!verified_host("example.test"));
+    }
+
+    /// M1: control and format characters, including the bidi overrides, are
+    /// removed; ordinary text is untouched.
+    #[test]
+    fn a_name_loses_its_control_and_override_characters() {
+        assert_eq!(clean_name("\u{202E}enilnoM\u{202C}"), "enilnoM");
+        assert_eq!(clean_name("Cl\u{2066}au\u{2069}de\u{200B}"), "Claude");
+        assert_eq!(clean_name("tab\there\u{0007}"), "tabhere");
+        assert_eq!(clean_name("  Ünïcode ok  "), "Ünïcode ok");
     }
 }
