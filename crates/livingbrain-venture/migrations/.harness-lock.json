@@ -193,6 +193,6 @@
   },
   "oauth/0001": {
     "file": "0049_oauth_0001_init.sql",
-    "sha256": "0874b704218bbee32dcc2539ba5fada150397ff3c3746f4de3c28881850310fa"
+    "sha256": "006c64b0d37111553f2d91a7dc0635b620d7b5a7a85c05c6e5dbc58f9f432621"
   }
 }

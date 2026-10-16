@@ -299,6 +299,14 @@ pub async fn post_form(kit: &Kit, path: &str, form: &str, who: &Caller) -> Res {
     send(kit, Method::POST, path, Some(body), &who.headers()).await
 }
 
+/// A JSON post from one address, as the registration limit reads it.
+pub async fn post_json_from(kit: &Kit, path: &str, body: &Value, ip: &str) -> Res {
+    let mut headers = Caller::Anonymous.headers();
+    headers.insert("cf-connecting-ip", value(ip));
+    let body = ("application/json", body.to_string());
+    send(kit, Method::POST, path, Some(body), &headers).await
+}
+
 pub async fn post_json(kit: &Kit, path: &str, body: &Value, who: &Caller) -> Res {
     let body = ("application/json", body.to_string());
     send(kit, Method::POST, path, Some(body), &who.headers()).await

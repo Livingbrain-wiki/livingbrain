@@ -85,9 +85,11 @@ const DEFAULT_CLIENT_NAME: &str = "An app";
 /// Registrations a single request may name, and the longest name kept.
 const MAX_REDIRECT_URIS: usize = 8;
 const MAX_CLIENT_NAME_CHARS: usize = 128;
-/// The most clients registered in one UTC day, across every caller. The per-IP
-/// limit stops one machine; this stops a rotating crowd from filling the table.
-const MAX_REGISTRATIONS_PER_DAY: usize = 200;
+/// The most apps with an unverified redirect host registered in one UTC day,
+/// across every caller. Verified (Claude) registrations do not count toward it.
+const MAX_UNVERIFIED_REGISTRATIONS_PER_DAY: usize = 200;
+/// The most apps one registering address may create in an hour.
+const MAX_REGISTRATIONS_PER_IP_HOUR: usize = 10;
 /// How long a registered client with no live code or renewal token is kept.
 const CLIENT_RETENTION: Duration = Duration::days(30);
 
@@ -394,22 +396,19 @@ fn granted_scopes(user_id: &str) -> Vec<String> {
     vec!["shared".to_owned(), format!("user:{user_id}")]
 }
 
-/// The name a connector's token carries in Settings → API tokens. A client
-/// whose redirect host Living Brain recognises is labelled as a Claude
-/// connector; any other client keeps only the name it registered (cleaned),
-/// so nothing invents a provenance it does not have.
-fn connector_name(client: &Client) -> String {
-    let registered = clean_name(&client.client_name);
+/// The name a connector's token carries in Settings → API tokens, decided by
+/// the redirect URI the code is being issued for: a Claude host gets the
+/// "Claude connector" label, any other host keeps only the name the app
+/// registered. Stored with the code, so the token and any renewal carry the
+/// label of the redirect that was actually approved.
+fn connector_label(client_name: &str, redirect_uri: &str) -> String {
+    let registered = clean_name(client_name);
     let name = if registered.is_empty() {
         DEFAULT_CLIENT_NAME.to_owned()
     } else {
         registered
     };
-    let verified = client
-        .redirect_uris
-        .iter()
-        .filter_map(|uri| redirect_host(uri))
-        .any(|host| verified_host(&host));
+    let verified = redirect_host(redirect_uri).is_some_and(|host| verified_host(&host));
     let label = if verified {
         format!("Claude connector · {name}")
     } else {
@@ -485,23 +484,28 @@ fn open(st: &OAuthState, token: &str) -> Option<Sealed> {
     (sealed.exp > st.clock.now().unix_timestamp()).then_some(sealed)
 }
 
-/// The signed token naming the origin an authorization request arrived on.
+/// The signed token naming the origin an authorization request arrived on. It
+/// expires with the consent seal's window, so an old hop cannot be replayed.
 fn seal_issuer(st: &OAuthState, origin: &str) -> String {
+    let exp = st.clock.now().unix_timestamp() + CONSENT_TTL_SECS;
+    let subject = json!({ "origin": origin, "exp": exp }).to_string();
     st.signer.sign(&cratefield_core::Payload {
         purpose: ISSUER_PURPOSE.to_owned(),
-        subject: origin.to_owned(),
+        subject,
         exp: None,
         kid: Kid::Cur,
     })
 }
 
-/// The origin a signed issuer token names, or `None` for a forged or
-/// unrecognised one (the caller then keeps its own origin).
+/// The origin a signed, unexpired issuer token names, or `None` for a forged,
+/// stale or unrecognised one (the caller then keeps its own origin).
 fn open_issuer(st: &OAuthState, token: &str) -> Option<String> {
-    st.signer
-        .verify(token, ISSUER_PURPOSE)
-        .map(|payload| payload.subject)
-        .filter(|origin| origin.starts_with("https://") || origin.starts_with("http://"))
+    let payload = st.signer.verify(token, ISSUER_PURPOSE)?;
+    let value: Value = serde_json::from_str(&payload.subject).ok()?;
+    let origin = value.get("origin")?.as_str()?.to_owned();
+    let exp = value.get("exp")?.as_i64()?;
+    let fresh = exp > st.clock.now().unix_timestamp();
+    (fresh && (origin.starts_with("https://") || origin.starts_with("http://"))).then_some(origin)
 }
 
 // ---------------------------------------------------------------------------
@@ -786,7 +790,7 @@ async fn authorize_post(
             else {
                 return problem(&WORKSPACE_NOT_HELD);
             };
-            issue_code(&st, &sealed, &choice).await
+            issue_code(&st, &sealed, &client.client_name, &choice).await
         }
         _ => authorize_error(
             StatusCode::SEE_OTHER,
@@ -802,6 +806,7 @@ async fn authorize_post(
 async fn issue_code(
     st: &OAuthState,
     sealed: &Sealed,
+    client_name: &str,
     choice: &livingbrain_workspaces::WorkspaceChoice,
 ) -> Response {
     let code = match random_token(32) {
@@ -821,6 +826,7 @@ async fn issue_code(
         workspace_id: choice.workspace_id.clone(),
         user_id: choice.user_id.clone(),
         scope: granted,
+        name: connector_label(client_name, &sealed.redirect_uri),
         family,
         expires_at: stamp(now + CODE_TTL),
         used: false,
@@ -850,9 +856,14 @@ async fn issue_code(
 /// authentication method: a connector cannot keep a secret, so PKCE binds its
 /// codes instead.
 ///
-/// Fails closed when no rate limiter is bound, and refuses once the day's cap
-/// is reached: an open registration endpoint with neither would let anyone fill
-/// the table, and the per-IP limit alone does not stop a crowd of addresses.
+/// Three limits keep the table from being filled, and each has a reason:
+/// re-registering an app with the same name and redirect set returns its
+/// existing identity (no row, no allowance spent); one registering address may
+/// create [`MAX_REGISTRATIONS_PER_IP_HOUR`] clients an hour, so one machine
+/// cannot exhaust the rest; and the day's cap of
+/// [`MAX_UNVERIFIED_REGISTRATIONS_PER_DAY`] counts only apps whose redirect is
+/// not a Claude host, so a crowd of unverified apps cannot close registration
+/// for everyone. Refuses outright when no rate limiter is bound.
 async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: Bytes) -> Response {
     let Some(limiter) = st.limiter.as_ref() else {
         return token_error(
@@ -870,19 +881,6 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
     {
         return cratefield_core::rate_limited(&decision);
     }
-    let now = st.clock.now();
-    let day_start = now.replace_time(time::Time::MIDNIGHT);
-    match st.store.clients_since(&stamp(day_start)).await {
-        Ok(count) if count < MAX_REGISTRATIONS_PER_DAY => {}
-        Ok(_) => {
-            return token_error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "temporarily_unavailable",
-                "too many apps have registered today; try again tomorrow",
-            );
-        }
-        Err(_) => return server_error(),
-    }
     let invalid = |error: &str, detail: &str| {
         (
             StatusCode::BAD_REQUEST,
@@ -894,7 +892,7 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
     let Ok(Value::Object(metadata)) = serde_json::from_slice::<Value>(&body) else {
         return invalid("invalid_client_metadata", "the body must be a JSON object");
     };
-    let uris: Vec<String> = match metadata.get("redirect_uris") {
+    let mut uris: Vec<String> = match metadata.get("redirect_uris") {
         Some(Value::Array(items)) if !items.is_empty() && items.len() <= MAX_REDIRECT_URIS => {
             let Some(uris) = items
                 .iter()
@@ -959,26 +957,88 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
     .chars()
     .take(MAX_CLIENT_NAME_CHARS)
     .collect();
+    // The redirect set is compared as a set: sorted, so order does not matter.
+    uris.sort();
+    uris.dedup();
+    let uris_json = serde_json::to_string(&uris).unwrap_or_default();
+    let now = st.clock.now();
+
+    // The same app again: its existing identity, no new row.
+    match st
+        .store
+        .client_with_registration(&client_name, &uris_json)
+        .await
+    {
+        Ok(Some(existing)) => return registered(&existing, now),
+        Ok(None) => {}
+        Err(_) => return server_error(),
+    }
+
+    let unverified = uris
+        .iter()
+        .filter_map(|uri| redirect_host(uri))
+        .any(|host| !verified_host(&host));
+    let address = hash(client_ip(&headers).as_deref().unwrap_or("unknown"));
+    let hour_ago = now - Duration::hours(1);
+    match st
+        .store
+        .registrations_from(&address, &stamp(hour_ago))
+        .await
+    {
+        Ok(count) if count < MAX_REGISTRATIONS_PER_IP_HOUR => {}
+        Ok(_) => {
+            return token_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "temporarily_unavailable",
+                "this address has registered too many apps this hour; try again later",
+            );
+        }
+        Err(_) => return server_error(),
+    }
+    if unverified {
+        let day_start = now.replace_time(time::Time::MIDNIGHT);
+        match st.store.clients_since(&stamp(day_start), true).await {
+            Ok(count) if count < MAX_UNVERIFIED_REGISTRATIONS_PER_DAY => {}
+            Ok(_) => {
+                return token_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "temporarily_unavailable",
+                    "too many apps have registered today; try again tomorrow",
+                );
+            }
+            Err(_) => return server_error(),
+        }
+    }
 
     let Ok(id) = random_token(16) else {
         return server_error();
     };
     let client = Client {
         client_id: format!("lbc_{id}"),
-        client_name: client_name.clone(),
-        redirect_uris: uris.clone(),
+        client_name,
+        redirect_uris: uris,
     };
-    if st.store.insert_client(&client, &stamp(now)).await.is_err() {
+    if st
+        .store
+        .insert_client(&client, &stamp(now), &address, unverified)
+        .await
+        .is_err()
+    {
         return server_error();
     }
+    registered(&client, now)
+}
+
+/// The RFC 7591 answer for a client, new or re-registered.
+fn registered(client: &Client, now: OffsetDateTime) -> Response {
     (
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
         Json(json!({
             "client_id": client.client_id,
             "client_id_issued_at": now.unix_timestamp(),
-            "client_name": client_name,
-            "redirect_uris": uris,
+            "client_name": client.client_name,
+            "redirect_uris": client.redirect_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
@@ -1138,7 +1198,7 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
         .mint_connector(
             &row.workspace_id,
             &row.user_id,
-            &connector_name(&client),
+            &row.name,
             &granted,
             now + ACCESS_TTL,
         )
@@ -1149,11 +1209,14 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
     };
     let Ok(refresh) = issue_refresh(
         st,
-        &row.family,
-        &access.prefix,
-        &client.client_id,
-        &row.workspace_id,
-        &row.user_id,
+        &Issued {
+            name: &row.name,
+            family: &row.family,
+            prefix: &access.prefix,
+            client_id: &client.client_id,
+            workspace_id: &row.workspace_id,
+            user_id: &row.user_id,
+        },
         now,
     )
     .await
@@ -1163,22 +1226,30 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
     token_response(&access.token, &refresh, &row.scope)
 }
 
+/// What a renewal token is issued for: the connection it opens and the access
+/// token it sits beside.
+struct Issued<'a> {
+    name: &'a str,
+    family: &'a str,
+    prefix: &'a str,
+    client_id: &'a str,
+    workspace_id: &'a str,
+    user_id: &'a str,
+}
+
 async fn issue_refresh(
     st: &OAuthState,
-    family: &str,
-    prefix: &str,
-    client_id: &str,
-    workspace_id: &str,
-    user_id: &str,
+    issued: &Issued<'_>,
     now: OffsetDateTime,
 ) -> Result<String, DbError> {
     let token = format!("lbr_{}", random_token(32)?);
     let row = RefreshRow {
-        family: family.to_owned(),
-        prefix: prefix.to_owned(),
-        client_id: client_id.to_owned(),
-        workspace_id: workspace_id.to_owned(),
-        user_id: user_id.to_owned(),
+        name: issued.name.to_owned(),
+        family: issued.family.to_owned(),
+        prefix: issued.prefix.to_owned(),
+        client_id: issued.client_id.to_owned(),
+        workspace_id: issued.workspace_id.to_owned(),
+        user_id: issued.user_id.to_owned(),
         expires_at: stamp(now + REFRESH_TTL),
         used: false,
     };
@@ -1282,7 +1353,7 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
         .mint_connector(
             &row.workspace_id,
             &row.user_id,
-            &connector_name(&client),
+            &row.name,
             &granted,
             now + ACCESS_TTL,
         )
@@ -1293,11 +1364,14 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
     };
     let Ok(refresh) = issue_refresh(
         st,
-        &row.family,
-        &access.prefix,
-        &client.client_id,
-        &row.workspace_id,
-        &row.user_id,
+        &Issued {
+            name: &row.name,
+            family: &row.family,
+            prefix: &access.prefix,
+            client_id: &client.client_id,
+            workspace_id: &row.workspace_id,
+            user_id: &row.user_id,
+        },
         now,
     )
     .await

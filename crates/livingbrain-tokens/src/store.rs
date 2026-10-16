@@ -348,17 +348,30 @@ impl Store {
                 vec![text(&now), text(prefix), text(workspace_id), text(user_id)],
             ))
             .await?;
-        // Best effort, as above: the refresh is refused anyway once its access
-        // token is revoked, so this only keeps the table honest.
-        let _ = self
-            .db
-            .execute(&Statement::with_values(
-                "UPDATE oauth_refresh_tokens SET used_at = ? \
-                 WHERE used_at IS NULL \
-                   AND family IN (SELECT family FROM oauth_refresh_tokens WHERE prefix = ?)",
-                vec![text(&now), text(prefix)],
-            ))
-            .await;
+        // Only the caller's own token can end its connection: the family is
+        // spent for this member in this workspace, and only when the token
+        // above was theirs. Otherwise another member's prefix would spend
+        // that member's renewal while answering 404. Best effort: the refresh
+        // is refused anyway once its access token is revoked.
+        if revoked > 0 {
+            let _ = self
+                .db
+                .execute(&Statement::with_values(
+                    "UPDATE oauth_refresh_tokens SET used_at = ? \
+                     WHERE used_at IS NULL AND workspace_id = ? AND user_id = ? \
+                       AND family IN (SELECT family FROM oauth_refresh_tokens \
+                                       WHERE prefix = ? AND workspace_id = ? AND user_id = ?)",
+                    vec![
+                        text(&now),
+                        text(workspace_id),
+                        text(user_id),
+                        text(prefix),
+                        text(workspace_id),
+                        text(user_id),
+                    ],
+                ))
+                .await;
+        }
         Ok(revoked > 0)
     }
 }

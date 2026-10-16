@@ -49,6 +49,8 @@ pub(crate) struct CodeRow {
     pub(crate) workspace_id: String,
     pub(crate) user_id: String,
     pub(crate) scope: String,
+    /// The connector label the token will carry (see `connector_label`).
+    pub(crate) name: String,
     pub(crate) family: String,
     pub(crate) expires_at: String,
     pub(crate) used: bool,
@@ -58,6 +60,7 @@ pub(crate) struct CodeRow {
 /// (`family`) it belongs to, and who it is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefreshRow {
+    pub(crate) name: String,
     pub(crate) family: String,
     pub(crate) prefix: String,
     pub(crate) client_id: String,
@@ -78,6 +81,7 @@ fn field(row: &cratefield_core::Row, name: &str) -> Option<String> {
 
 fn refresh_row(row: &cratefield_core::Row) -> RefreshRow {
     RefreshRow {
+        name: field(row, "name").unwrap_or_default(),
         family: field(row, "family").unwrap_or_default(),
         prefix: field(row, "prefix").unwrap_or_default(),
         client_id: field(row, "client_id").unwrap_or_default(),
@@ -93,17 +97,70 @@ impl OAuthStore {
         Self { db }
     }
 
-    /// How many clients were registered at or after `since`, for the daily
-    /// registration cap.
-    pub(crate) async fn clients_since(&self, since: &str) -> Result<usize, DbError> {
+    /// How many clients were registered at or after `since`. With
+    /// `unverified_only`, only those with a redirect host Living Brain does not
+    /// recognise as Claude: the ones the daily cap is for.
+    pub(crate) async fn clients_since(
+        &self,
+        since: &str,
+        unverified_only: bool,
+    ) -> Result<usize, DbError> {
+        let sql = if unverified_only {
+            "SELECT client_id FROM oauth_clients WHERE created_at >= ? AND unverified = 1"
+        } else {
+            "SELECT client_id FROM oauth_clients WHERE created_at >= ?"
+        };
+        let rows = self
+            .db
+            .query(&Statement::with_values(sql, vec![text(since)]))
+            .await?;
+        Ok(rows.rows.len())
+    }
+
+    /// How many clients one registering address created since `since`, for the
+    /// per-address registration limit. Only the address's hash is ever stored.
+    pub(crate) async fn registrations_from(
+        &self,
+        ip_hash: &str,
+        since: &str,
+    ) -> Result<usize, DbError> {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT client_id FROM oauth_clients WHERE created_at >= ?",
-                vec![text(since)],
+                "SELECT client_id FROM oauth_clients WHERE ip_hash = ? AND created_at >= ?",
+                vec![text(ip_hash), text(since)],
             ))
             .await?;
         Ok(rows.rows.len())
+    }
+
+    /// A client already registered with this exact name and redirect set, if
+    /// any. Re-registering the same app returns its existing identity instead
+    /// of a new row, so an app that registers again (or a retry) does not use
+    /// the day's allowance. `redirect_uris` is the sorted JSON array.
+    pub(crate) async fn client_with_registration(
+        &self,
+        client_name: &str,
+        redirect_uris: &str,
+    ) -> Result<Option<Client>, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT client_id, client_name, redirect_uris FROM oauth_clients \
+                 WHERE client_name = ? AND redirect_uris = ?",
+                vec![text(client_name), text(redirect_uris)],
+            ))
+            .await?;
+        let Some(row) = rows.rows.first() else {
+            return Ok(None);
+        };
+        Ok(Some(Client {
+            client_id: field(row, "client_id").unwrap_or_default(),
+            client_name: field(row, "client_name").unwrap_or_default(),
+            redirect_uris: field(row, "redirect_uris")
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                .unwrap_or_default(),
+        }))
     }
 
     /// Deletes what can no longer do anything: codes past their expiry (a used
@@ -143,18 +200,23 @@ impl OAuthStore {
         &self,
         client: &Client,
         created_at: &str,
+        ip_hash: &str,
+        unverified: bool,
     ) -> Result<(), DbError> {
         let uris = serde_json::to_string(&client.redirect_uris)
             .map_err(|err| DbError::Execute(err.to_string()))?;
         self.db
             .execute(&Statement::with_values(
-                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at) \
-                 VALUES (?, ?, ?, ?)",
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at, \
+                     ip_hash, unverified) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
                 vec![
                     text(&client.client_id),
                     text(&client.client_name),
                     text(&uris),
                     text(created_at),
+                    text(ip_hash),
+                    Value::BigInt(Some(i64::from(unverified))),
                 ],
             ))
             .await
@@ -192,8 +254,8 @@ impl OAuthStore {
         self.db
             .execute(&Statement::with_values(
                 "INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, code_challenge, \
-                     workspace_id, user_id, scope, family, expires_at, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     workspace_id, user_id, scope, name, family, expires_at, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     text(code_hash),
                     text(&code.client_id),
@@ -202,6 +264,7 @@ impl OAuthStore {
                     text(&code.workspace_id),
                     text(&code.user_id),
                     text(&code.scope),
+                    text(&code.name),
                     text(&code.family),
                     text(&code.expires_at),
                     text(created_at),
@@ -216,7 +279,7 @@ impl OAuthStore {
             .db
             .query(&Statement::with_values(
                 "SELECT client_id, redirect_uri, code_challenge, workspace_id, user_id, scope, \
-                        family, expires_at, used_at \
+                        name, family, expires_at, used_at \
                    FROM oauth_codes WHERE code_hash = ?",
                 vec![text(code_hash)],
             ))
@@ -228,6 +291,7 @@ impl OAuthStore {
             workspace_id: field(row, "workspace_id").unwrap_or_default(),
             user_id: field(row, "user_id").unwrap_or_default(),
             scope: field(row, "scope").unwrap_or_default(),
+            name: field(row, "name").unwrap_or_default(),
             family: field(row, "family").unwrap_or_default(),
             expires_at: field(row, "expires_at").unwrap_or_default(),
             used: field(row, "used_at").is_some(),
@@ -256,8 +320,8 @@ impl OAuthStore {
         self.db
             .execute(&Statement::with_values(
                 "INSERT INTO oauth_refresh_tokens (token_hash, family, prefix, client_id, \
-                     workspace_id, user_id, expires_at, created_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     workspace_id, user_id, expires_at, name, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 vec![
                     text(token_hash),
                     text(&row.family),
@@ -266,6 +330,7 @@ impl OAuthStore {
                     text(&row.workspace_id),
                     text(&row.user_id),
                     text(&row.expires_at),
+                    text(&row.name),
                     text(created_at),
                 ],
             ))
@@ -279,7 +344,7 @@ impl OAuthStore {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT family, prefix, client_id, workspace_id, user_id, expires_at, used_at \
+                "SELECT family, prefix, client_id, workspace_id, user_id, expires_at, used_at, name \
                    FROM oauth_refresh_tokens WHERE family = ?",
                 vec![text(family)],
             ))
@@ -291,7 +356,7 @@ impl OAuthStore {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT family, prefix, client_id, workspace_id, user_id, expires_at, used_at \
+                "SELECT family, prefix, client_id, workspace_id, user_id, expires_at, used_at, name \
                    FROM oauth_refresh_tokens WHERE token_hash = ?",
                 vec![text(token_hash)],
             ))

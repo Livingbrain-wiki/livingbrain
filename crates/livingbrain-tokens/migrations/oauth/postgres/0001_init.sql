@@ -15,7 +15,12 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     client_id     TEXT PRIMARY KEY,
     client_name   TEXT NOT NULL DEFAULT '',
     redirect_uris TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    -- SHA-256 of the registering address (never the address), for the per-hour
+    -- registration limit; 1 when a redirect host is not one Living Brain
+    -- recognises as Claude, for the daily cap that counts only those.
+    ip_hash       TEXT NOT NULL DEFAULT '',
+    unverified    INTEGER NOT NULL DEFAULT 0
 );
 
 -- One authorization code: single use (`used_at` is set by the consuming
@@ -32,6 +37,9 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
     workspace_id   TEXT NOT NULL,
     user_id        TEXT NOT NULL,
     scope          TEXT NOT NULL DEFAULT '',
+    -- The connector label the token will carry, decided by the redirect URI
+    -- this code is being issued for, not by the client's other URIs.
+    name           TEXT NOT NULL DEFAULT '',
     family         TEXT NOT NULL,
     expires_at     TEXT NOT NULL,
     used_at        TEXT,
@@ -53,6 +61,7 @@ CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
     user_id      TEXT NOT NULL,
     expires_at   TEXT NOT NULL,
     used_at      TEXT,
+    name         TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL
 );
 

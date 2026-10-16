@@ -23,6 +23,7 @@ const CLIENT_NAME: &str = "Claude test";
 /// RFC 7636 Appendix B: the one published verifier and its S256 challenge.
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+const VERIFIED_VERIFIER: &str = VERIFIER;
 const OTHER_VERIFIER: &str = "xBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
 /// RFC 3986 unreserved-only encoding, for the values a test puts in a form.
@@ -96,7 +97,17 @@ fn authorize_path(client_id: &str, challenge: &str, state: &str) -> String {
 /// The consent: the page a signed-in person is shown, approved with a chosen
 /// workspace. Returns the code the redirect carries.
 async fn approve(kit: &Kit, client_id: &str, who: &Caller) -> String {
-    let shown = get(kit, &authorize_path(client_id, CHALLENGE, "s1"), who).await;
+    approve_to(kit, client_id, REDIRECT, who).await
+}
+
+/// The same approval, sent back to a chosen redirect URI.
+async fn approve_to(kit: &Kit, client_id: &str, redirect: &str, who: &Caller) -> String {
+    let path = format!(
+        "/v1/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}\
+         &code_challenge={CHALLENGE}&code_challenge_method=S256&state=s1",
+        enc(redirect)
+    );
+    let shown = get(kit, &path, who).await;
     assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
     let request = consent_request(&shown.text());
     let form = format!(
@@ -111,7 +122,7 @@ async fn approve(kit: &Kit, client_id: &str, who: &Caller) -> String {
         approved.text()
     );
     let location = approved.location().expect("the approval redirects");
-    assert!(location.starts_with(REDIRECT), "{location}");
+    assert!(location.starts_with(redirect), "{location}");
     assert_eq!(
         param(&location, "state").as_deref(),
         Some("s1"),
@@ -133,6 +144,20 @@ async fn redeem(kit: &Kit, code: &str, client_id: &str, verifier: &str) -> suppo
         kit,
         "/v1/oauth/token",
         &token_form(code, client_id, verifier),
+        &Caller::Anonymous,
+    )
+    .await
+}
+
+/// Minimal N1/minor-a helper: a token exchange with a chosen redirect.
+async fn redeem_at(kit: &Kit, code: &str, client_id: &str, redirect: &str) -> support::Res {
+    post_form(
+        kit,
+        "/v1/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}&code_verifier={VERIFIED_VERIFIER}",
+            enc(redirect)
+        ),
         &Caller::Anonymous,
     )
     .await
@@ -266,16 +291,23 @@ async fn registration_fails_closed_without_a_rate_limiter() {
     assert_eq!(error_of(&refused), "temporarily_unavailable");
 }
 
-/// M2: a day's registrations are capped across every caller.
+/// Distinct addresses for a crowd of registrations, so the per-address limit
+/// does not stand in the way of the daily cap under test.
+fn address(n: usize) -> String {
+    format!("10.1.{}.{}", n / 256, n % 256)
+}
+
+/// M2 (cap): the day's allowance counts unverified apps. Once it is spent, a
+/// further unverified app is refused, whoever asks.
 #[pollster::test]
-async fn registration_stops_at_the_daily_cap() {
+async fn registration_stops_at_the_daily_cap_for_unverified_apps() {
     let kit = support::signed_in().await;
     for n in 0..200 {
-        let made = post_json(
+        let made = support::post_json_from(
             &kit,
             "/v1/oauth/register",
             &json!({ "client_name": format!("app {n}"), "redirect_uris": [REDIRECT] }),
-            &Caller::Anonymous,
+            &address(n),
         )
         .await;
         assert_eq!(
@@ -285,11 +317,11 @@ async fn registration_stops_at_the_daily_cap() {
             made.text()
         );
     }
-    let over = post_json(
+    let over = support::post_json_from(
         &kit,
         "/v1/oauth/register",
-        &json!({ "redirect_uris": [REDIRECT] }),
-        &Caller::Anonymous,
+        &json!({ "client_name": "one more", "redirect_uris": [REDIRECT] }),
+        &address(999),
     )
     .await;
     assert_eq!(
@@ -298,6 +330,114 @@ async fn registration_stops_at_the_daily_cap() {
         "{}",
         over.text()
     );
+}
+
+/// M2 (cap): a Claude host does not consume the unverified allowance, so a
+/// crowd of Claude registrations cannot close registration for everyone else.
+#[pollster::test]
+async fn verified_registrations_do_not_use_the_unverified_allowance() {
+    let kit = support::signed_in().await;
+    for n in 0..200 {
+        let made = support::post_json_from(
+            &kit,
+            "/v1/oauth/register",
+            &json!({ "client_name": format!("claude {n}"), "redirect_uris": [VERIFIED_REDIRECT] }),
+            &address(n),
+        )
+        .await;
+        assert_eq!(
+            made.status,
+            StatusCode::CREATED,
+            "verified {n}: {}",
+            made.text()
+        );
+    }
+    let other = support::post_json_from(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": "someone else", "redirect_uris": [REDIRECT] }),
+        &address(999),
+    )
+    .await;
+    assert_eq!(other.status, StatusCode::CREATED, "{}", other.text());
+}
+
+/// M2 (per address): one address may create ten apps an hour. Its eleventh is
+/// refused, while another address is unaffected.
+#[pollster::test]
+async fn one_address_cannot_block_the_others() {
+    let kit = support::signed_in().await;
+    for n in 0..10 {
+        let made = support::post_json_from(
+            &kit,
+            "/v1/oauth/register",
+            &json!({ "client_name": format!("mine {n}"), "redirect_uris": [REDIRECT] }),
+            "203.0.113.7",
+        )
+        .await;
+        assert_eq!(made.status, StatusCode::CREATED, "{}", made.text());
+    }
+    let eleventh = support::post_json_from(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": "mine 10", "redirect_uris": [REDIRECT] }),
+        "203.0.113.7",
+    )
+    .await;
+    assert_eq!(
+        eleventh.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        eleventh.text()
+    );
+
+    let elsewhere = support::post_json_from(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": "theirs", "redirect_uris": [REDIRECT] }),
+        "198.51.100.9",
+    )
+    .await;
+    assert_eq!(
+        elsewhere.status,
+        StatusCode::CREATED,
+        "{}",
+        elsewhere.text()
+    );
+}
+
+/// Re-registering the same app returns its existing identity: the same
+/// client_id, no new row, and the redirect set compared as a set.
+#[pollster::test]
+async fn the_same_app_registered_again_keeps_its_identity() {
+    let kit = support::signed_in().await;
+    let first = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": CLIENT_NAME, "redirect_uris": [REDIRECT, "http://localhost:4000/cb"] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    let again = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": CLIENT_NAME, "redirect_uris": ["http://localhost:4000/cb", REDIRECT] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::CREATED, "{}", again.text());
+    assert_eq!(first.json()["client_id"], again.json()["client_id"]);
+    assert_eq!(rows(&kit, "oauth_clients").await, 1, "no second row");
+
+    // A different redirect set is a different app.
+    let other = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": CLIENT_NAME, "redirect_uris": [REDIRECT] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_ne!(first.json()["client_id"], other.json()["client_id"]);
 }
 
 /// M1: control and bidirectional-override characters never reach a stored name.
@@ -1147,11 +1287,95 @@ async fn rows(kit: &Kit, table: &str) -> usize {
     kit.harness
         .db
         .query(&Statement::with_values(
-            format!("SELECT code_hash FROM {table}"),
+            format!("SELECT 1 FROM {table}"),
             Vec::new(),
         ))
         .await
         .expect("the rows read")
         .rows
         .len()
+}
+
+/// N1: another member cannot end this member's connection. The attempt answers
+/// 404, and the connection's renewal is untouched.
+#[pollster::test]
+async fn a_member_cannot_end_another_members_connection() {
+    let kit = support::signed_in().await;
+    let (access, refresh, client_id) = connected(&kit).await;
+
+    let attempt = support::delete(
+        &kit,
+        &format!("/v1/tokens/{}", prefix_of(&access)),
+        &kit.other(),
+    )
+    .await;
+    assert_eq!(attempt.status, StatusCode::NOT_FOUND, "{}", attempt.text());
+
+    let renewed = post_form(
+        &kit,
+        "/v1/oauth/token",
+        &format!("grant_type=refresh_token&refresh_token={refresh}&client_id={client_id}"),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(
+        renewed.status,
+        StatusCode::OK,
+        "A's renewal still works: {}",
+        renewed.text()
+    );
+    assert_eq!(
+        get(&kit, "/v1/me", &Caller::Token(access)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// Minor (a): the label follows the redirect the code was issued for, not the
+/// client's other registered redirects.
+#[pollster::test]
+async fn the_connector_label_follows_the_redirect_the_code_was_issued_for() {
+    let kit = support::signed_in().await;
+    let made = post_json(
+        &kit,
+        "/v1/oauth/register",
+        &json!({ "client_name": CLIENT_NAME, "redirect_uris": [VERIFIED_REDIRECT, "https://evil.example/cb"] }),
+        &Caller::Anonymous,
+    )
+    .await;
+    let client_id = made.json()["client_id"].as_str().unwrap().to_owned();
+
+    let via_evil = approve_to(&kit, &client_id, "https://evil.example/cb", &kit.owner()).await;
+    let redeemed = redeem_at(&kit, &via_evil, &client_id, "https://evil.example/cb").await;
+    assert_eq!(redeemed.status, StatusCode::OK, "{}", redeemed.text());
+    let evil_access = redeemed.json()["access_token"].as_str().unwrap().to_owned();
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    let evil_row = listed.json()["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["prefix"] == json!(prefix_of(&evil_access)))
+        .expect("listed")
+        .clone();
+    assert_eq!(
+        evil_row["name"],
+        json!(CLIENT_NAME),
+        "not labelled a Claude connector"
+    );
+    assert_eq!(evil_row["connector"], json!(true));
+
+    let via_claude = approve_to(&kit, &client_id, VERIFIED_REDIRECT, &kit.owner()).await;
+    let claude = redeem_at(&kit, &via_claude, &client_id, VERIFIED_REDIRECT).await;
+    let claude_access = claude.json()["access_token"].as_str().unwrap().to_owned();
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    let claude_row = listed.json()["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["prefix"] == json!(prefix_of(&claude_access)))
+        .expect("listed")
+        .clone();
+    assert_eq!(
+        claude_row["name"],
+        json!(format!("Claude connector · {CLIENT_NAME}"))
+    );
 }
