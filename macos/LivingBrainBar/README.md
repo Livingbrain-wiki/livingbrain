@@ -119,8 +119,17 @@ The window's **Workspace** section talks to the API directly over HTTPS
 device flow `livingbrain login` uses, client `livingbrain-cli`) or **Use the
 CLI's Sign-in**, which copies the token the CLI keeps in the keychain
 (service `wiki.livingbrain.cli`, account = the API URL; macOS asks first).
-The app keeps its own copy under service `wiki.livingbrain.mac`. Tokens are
-never logged or shown, and a 401 signs the app out.
+The app keeps its own copies under service `wiki.livingbrain.mac`, one per
+workspace (account = `<API URL>#<workspace id>`); the list of workspaces (id
+and name only) is in user defaults. Tokens are never logged or shown, and a
+401 signs the app out of that workspace only.
+
+**Several workspaces.** The sidebar footer and the **Workspace** menu switch
+between every workspace signed in on this Mac; **Add Workspace…** runs the
+same device flow. A token is minted for the workspace the browser is signed
+in to, and the approval page has a workspace picker for choosing another
+before Approve. Switching starts the workspace views afresh. Sync and the
+job runner still use the CLI's sign-in.
 
 - **Wiki** — the page list (`GET /v1/pages`), search with a project filter
   (`GET /v1/search`, ⌘K), pages rendered natively (headings, lists, quotes,
@@ -144,10 +153,9 @@ never logged or shown, and a 401 signs the app out.
 What the API does not offer a bearer token, so the app links to the web
 Settings instead: creating API tokens (`POST /v1/tokens` takes the web
 session only, so a token can never mint a token), Slack connection status
-(no endpoint reports it), and switching workspaces (a token belongs to one
-workspace; switch in the web app and sign in here again). Settings →
-Workspace shows the workspace and who the token is connected as, from the
-bearer-readable `GET /v1/me`.
+(no endpoint reports it). Settings → Workspace shows the workspace and who
+the token is connected as, from the bearer-readable `GET /v1/me`, and lists
+the signed-in workspaces with Switch and Sign Out.
 
 Keyboard: ⌘K search, ⌘N new note, ⌘R sync, ⌘E edit, ⌘S save, ⌘1–⌘7 sections.
 
