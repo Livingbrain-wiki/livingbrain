@@ -441,7 +441,7 @@ Worker's cron tick, after the compile drain.
 ### Settings and the Dreaming page
 
 Each workspace chooses how its dreaming runs (migration
-`0045_coding-agents_0006_dreaming_settings`, table `dreaming_settings`, one
+`0047_coding-agents_0006_dreaming_settings`, table `dreaming_settings`, one
 row per workspace that changed anything; a missing row is the defaults).
 
 - `enabled` (default on). Off: the cron neither runs the model pass nor the
