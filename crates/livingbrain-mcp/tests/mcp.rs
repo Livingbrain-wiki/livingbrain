@@ -27,6 +27,8 @@ const ENDPOINT: &str = "/v1/pages/mcp";
 /// named no host at all: the production origin, the same fallback the
 /// discovery documents' compiled-in constant covers.
 const CHALLENGE: &str = "Bearer resource_metadata=\"https://mcp.livingbrain.wiki/.well-known/oauth-protected-resource\"";
+/// The challenge for a credential that was presented and refused (RFC 6750).
+const CHALLENGE_INVALID: &str = "Bearer error=\"invalid_token\", resource_metadata=\"https://mcp.livingbrain.wiki/.well-known/oauth-protected-resource\"";
 
 /// A bearer resolver over a fixed table: a known token names an asker, an
 /// unknown one names nobody. That is the whole of what #72 replaces.
@@ -372,11 +374,9 @@ fn what_the_server_will_not_serve_is_a_json_rpc_error() {
         code_of(&post_raw(&fixture, Some("token-a"), "{not json")),
         -32700
     );
+    // An empty or absent query is a listing, not an error (see the test below).
     for arguments in [
-        json!({}),
         json!({ "query": 7 }),
-        json!({ "query": "   " }),
-        json!({ "slug": null }),
         json!({ "limit": "many", "query": "x" }),
     ] {
         let response = post(&fixture, "token-a", call("brain_search", arguments.clone()));
@@ -643,7 +643,9 @@ fn brain_note_facts_keep_their_history_and_brain_facts_reads_it() {
 fn no_credential_or_a_wrong_one_is_a_challenged_401() {
     let fixture = world();
     let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
-    for token in [None, Some("not-a-token")] {
+    // No credential is the plain challenge; a presented one that is refused
+    // says so in the challenge.
+    for (token, challenge) in [(None, CHALLENGE), (Some("not-a-token"), CHALLENGE_INVALID)] {
         let response = post_raw(&fixture, token, &message);
         assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{token:?}");
         assert_eq!(
@@ -652,7 +654,7 @@ fn no_credential_or_a_wrong_one_is_a_challenged_401() {
         );
         assert_eq!(
             header_of(&response, header::WWW_AUTHENTICATE),
-            Some(CHALLENGE)
+            Some(challenge)
         );
     }
     // A credential that resolves to an asker with no workspace or no user
@@ -664,14 +666,110 @@ fn no_credential_or_a_wrong_one_is_a_challenged_401() {
         let response = method(&empty, "token-e", "tools/list");
         assert_eq!(response.status, StatusCode::UNAUTHORIZED);
     }
-    // The handshake does not need one: a client has to be able to learn the
-    // server exists before it holds a credential.
-    let handshake = post(
+    // Every message is authenticated, the handshake included: an open
+    // `initialize` would look connected to a client that then never signs in.
+    let handshake = post_raw(
         &fixture,
-        "not-a-token",
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+        None,
+        &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }).to_string(),
     );
-    assert_eq!(handshake.status, StatusCode::OK);
+    assert_eq!(handshake.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        header_of(&handshake, header::WWW_AUTHENTICATE),
+        Some(CHALLENGE)
+    );
+}
+
+/// A presented token that is refused is a 401 whose challenge says why, so a
+/// client that holds a revoked token starts the sign-in again.
+#[test]
+fn a_refused_token_is_an_invalid_token_challenge() {
+    let fixture = world();
+    let message = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
+    let response = post_raw(&fixture, Some("revoked-token"), &message);
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        header_of(&response, header::WWW_AUTHENTICATE),
+        Some(CHALLENGE_INVALID)
+    );
+}
+
+/// The OAuth gate covers every method, and a good token works as before.
+#[test]
+fn every_method_is_challenged_without_a_token_and_served_with_one() {
+    let fixture = world();
+    let messages = [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        call("brain_search", json!({ "query": "anything" })),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ];
+    for message in &messages {
+        let response = post_raw(&fixture, None, &message.to_string());
+        assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{message}");
+        assert_eq!(
+            header_of(&response, header::WWW_AUTHENTICATE),
+            Some(CHALLENGE),
+            "{message}"
+        );
+        let refused = post_raw(&fixture, Some("revoked-token"), &message.to_string());
+        assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{message}");
+    }
+    for message in &messages {
+        let response = post_raw(&fixture, Some("token-a"), &message.to_string());
+        assert_ne!(response.status, StatusCode::UNAUTHORIZED, "{message}");
+    }
+}
+
+/// `brain_search` with no query lists the pages the asker can read, and never
+/// a page in someone else's scope.
+#[test]
+fn an_empty_search_lists_the_pages_the_asker_can_read() {
+    let fixture = world();
+    seed(
+        &fixture,
+        "ws-one",
+        &user("u-a"),
+        "first-note",
+        "---\ntitle: First note\n---\nAn early note.",
+    );
+    seed(
+        &fixture,
+        "ws-one",
+        &user("u-a"),
+        "second-note",
+        "---\ntitle: Second note\n---\nA later note.",
+    );
+    seed(
+        &fixture,
+        "ws-one",
+        &user("u-b"),
+        "theirs",
+        "---\ntitle: Theirs\n---\nSomebody else's.",
+    );
+
+    for arguments in [json!({}), json!({ "query": "" }), json!({ "query": "   " })] {
+        let result = result_of(&post(
+            &fixture,
+            "token-a",
+            call("brain_search", arguments.clone()),
+        ));
+        let titles: Vec<&str> = result["structuredContent"]["results"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{arguments}: a results array: {result}"))
+            .iter()
+            .map(|hit| hit["title"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(titles.len(), 2, "{arguments}: {titles:?}");
+        assert!(
+            titles.contains(&"First note") && titles.contains(&"Second note"),
+            "{titles:?}"
+        );
+        assert!(
+            !titles.contains(&"Theirs"),
+            "{arguments} listed another member's page"
+        );
+    }
 }
 
 /// The challenge names the metadata on the host the request itself reached,

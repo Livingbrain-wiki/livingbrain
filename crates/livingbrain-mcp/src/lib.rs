@@ -45,10 +45,15 @@ const MCP_ORIGIN: &str = "https://mcp.livingbrain.wiki";
 /// discovery documents use (issue #72), so one Worker fronts `api.`,
 /// `staging-api.`, `mcp.` and a `wrangler dev` on `localhost:8787`, and every
 /// challenge points the client at the host it was talking to.
-fn challenge(headers: &HeaderMap, uri: &Uri) -> HeaderValue {
+///
+/// With `error` set, the credential was presented and refused, so the
+/// challenge says `error="invalid_token"` (RFC 6750 §3.1) and a client knows
+/// to start the sign-in again rather than wait.
+fn challenge(headers: &HeaderMap, uri: &Uri, error: Option<&str>) -> HeaderValue {
     let base = origin_of_request(headers, uri).unwrap_or_else(|| MCP_ORIGIN.to_owned());
+    let error = error.map_or_else(String::new, |error| format!("error=\"{error}\", "));
     HeaderValue::from_str(&format!(
-        "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
+        "Bearer {error}resource_metadata=\"{base}/.well-known/oauth-protected-resource\""
     ))
     .expect("an origin serializes to ASCII, so it is a valid header value")
 }
@@ -125,12 +130,28 @@ pub fn router(ctx: Arc<ModuleContext>, kms: Arc<dyn Kms>, auth: Arc<dyn BearerAu
 
 /// `POST /` — one JSON-RPC message in, one response out. Nothing streams and
 /// nothing is remembered, so a request needs no session id.
+///
+/// Every message is authenticated before it is read, the handshake included.
+/// A client that sends `initialize` without a token must get the 401 and its
+/// challenge there, so it starts the authorization flow; a server that
+/// answered the handshake openly would look connected to the client and never
+/// send it to sign in (MCP authorization, RFC 9728 §5.1).
 async fn call(
     State(state): State<Arc<McpState>>,
     headers: HeaderMap,
     uri: Uri,
     body: Bytes,
 ) -> Response {
+    let Some(token) = protocol::bearer(&headers) else {
+        return unauthorized(&headers, &uri);
+    };
+    let asker = match state.auth.authenticate(&state.ctx.ports, token).await {
+        // An asker with no workspace or no user id names nobody: it is the
+        // credential that is wrong, and a 401 says so without saying which
+        // part was.
+        Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => asker,
+        _ => return rejected(&headers, &uri),
+    };
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return jsonrpc(protocol::error(
             &Value::Null,
@@ -152,38 +173,31 @@ async fn call(
         return StatusCode::ACCEPTED.into_response();
     }
     let id = object["id"].clone();
-    let Some(method) = object.get("method").and_then(Value::as_str) else {
+    if object.get("method").and_then(Value::as_str).is_none() {
         return jsonrpc(protocol::error(
             &id,
             protocol::Refusal::Invalid("the request names no method".to_owned()),
         ));
-    };
-    // Only the methods that read are authenticated, so a client can complete
-    // the handshake and read the 401 that says how to authenticate.
-    let asker = if protocol::needs_asker(method) {
-        let Some(token) = protocol::bearer(&headers) else {
-            return unauthorized(&headers, &uri);
-        };
-        match state.auth.authenticate(&state.ctx.ports, token).await {
-            // An asker with no workspace or no user id names nobody: it is
-            // the credential that is wrong, and a 401 says so without saying
-            // which part was.
-            Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => asker,
-            _ => return unauthorized(&headers, &uri),
-        }
-    } else {
-        Asker::member(String::new(), String::new(), None)
-    };
+    }
     jsonrpc(protocol::dispatch(&state, &asker, &id, &request).await)
 }
 
 /// The 401, with the challenge that says where to authenticate. Shared with
 /// the source importer, which answers a missing credential the same way.
 pub(crate) fn unauthorized(headers: &HeaderMap, uri: &Uri) -> Response {
+    challenged(headers, uri, None)
+}
+
+/// The 401 for a credential that was presented and refused.
+pub(crate) fn rejected(headers: &HeaderMap, uri: &Uri) -> Response {
+    challenged(headers, uri, Some("invalid_token"))
+}
+
+fn challenged(headers: &HeaderMap, uri: &Uri, error: Option<&str>) -> Response {
     let mut response = Problem::new(&UNAUTHORIZED).into_response();
     response
         .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, challenge(headers, uri));
+        .insert(header::WWW_AUTHENTICATE, challenge(headers, uri, error));
     response
 }
 

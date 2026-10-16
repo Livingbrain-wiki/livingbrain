@@ -13,8 +13,8 @@ use cratefield_core::axum::body::Body;
 use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use cratefield_core::{Kid, Payload, Ports, RandomBytes, RandomError, Signer, Statement};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
-use cratefield_testing::{MemoryBlob, TestHarness};
-use livingbrain_tokens::{Avatars, DevicePorts, Me, Tokens};
+use cratefield_testing::{FakeRateLimiter, MemoryBlob, TestHarness};
+use livingbrain_tokens::{Avatars, DevicePorts, Me, OAuth, Tokens};
 use livingbrain_workspaces::{AvatarRebind, Workspaces};
 use serde_json::{Value, json};
 
@@ -60,7 +60,16 @@ pub struct Kit {
 
 /// The kit, with [`OWNER`] and [`OTHER`] seeded.
 pub async fn signed_in() -> Kit {
-    let kit = kit();
+    seeded(kit(true)).await
+}
+
+/// The kit with no rate limiter bound: the composition a deployment without
+/// one gets, in which client registration must refuse (issue #72).
+pub async fn signed_in_without_limiter() -> Kit {
+    seeded(kit(false)).await
+}
+
+async fn seeded(kit: Kit) -> Kit {
     let workspace = Statement::with_values(
         "INSERT INTO workspaces (id, name, owner_id, created_at) VALUES (?, ?, ?, ?)",
         vec![
@@ -95,7 +104,7 @@ pub async fn signed_in() -> Kit {
     kit
 }
 
-fn kit() -> Kit {
+fn kit(limiter: bool) -> Kit {
     let device = DevicePorts::new();
     let grant = device.clone();
     let captured: Arc<Mutex<Option<Ports>>> = Arc::new(Mutex::new(None));
@@ -112,6 +121,7 @@ fn kit() -> Kit {
                 .build(),
         ),
         Box::new(Tokens::new().device_ports(device)),
+        Box::new(OAuth::new()),
         Box::new(Me::new()),
         Box::new(Avatars::new()),
     ];
@@ -124,6 +134,17 @@ fn kit() -> Kit {
         // The venture's avatar stack: the three modules' scoped views land on
         // one `avatars/…` space.
         ports.blob = Some(Arc::new(AvatarRebind::new(Arc::new(raw))));
+        // The deployment's app origin, where the connector sign-in consent
+        // lives (issue #72). Set to this kit's own host, so requests here are
+        // already on it and nothing is sent elsewhere.
+        // The harness binds a limiter by default; the no-limiter kit clears it.
+        ports.rate_limiter = limiter.then(|| {
+            Arc::new(FakeRateLimiter::always_allow()) as Arc<dyn cratefield_core::RateLimiter>
+        });
+        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
+            "WORKSPACES_REDIRECT_BASE",
+            API_BASE,
+        )]));
         let mut copy = Ports::empty();
         copy.config = ports.config.clone();
         copy.db = ports.db.clone();
@@ -270,6 +291,20 @@ pub async fn get_at(kit: &Kit, path: &str, host: &str, proto: Option<&str>) -> R
         headers.insert("x-forwarded-proto", value(proto));
     }
     send(kit, Method::GET, path, None, &headers).await
+}
+
+/// A form post, as a browser's form or an OAuth client sends it.
+pub async fn post_form(kit: &Kit, path: &str, form: &str, who: &Caller) -> Res {
+    let body = ("application/x-www-form-urlencoded", form.to_owned());
+    send(kit, Method::POST, path, Some(body), &who.headers()).await
+}
+
+/// A JSON post from one address, as the registration limit reads it.
+pub async fn post_json_from(kit: &Kit, path: &str, body: &Value, ip: &str) -> Res {
+    let mut headers = Caller::Anonymous.headers();
+    headers.insert("cf-connecting-ip", value(ip));
+    let body = ("application/json", body.to_string());
+    send(kit, Method::POST, path, Some(body), &headers).await
 }
 
 pub async fn post_json(kit: &Kit, path: &str, body: &Value, who: &Caller) -> Res {

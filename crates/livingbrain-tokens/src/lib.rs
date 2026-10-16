@@ -19,6 +19,7 @@ mod avatars;
 mod device;
 mod handlers;
 mod me;
+mod oauth;
 mod store;
 
 use std::sync::Arc;
@@ -34,6 +35,7 @@ use livingbrain_access::{Location, Scope, scopes_for};
 pub use avatars::Avatars;
 pub use device::{DevicePorts, PatIssuer, SessionApprover};
 pub use me::Me;
+pub use oauth::OAuth;
 
 const MIGRATION_INIT: SqlMigration = SqlMigration::new(
     "0001",
@@ -49,6 +51,21 @@ const MIGRATION_INIT_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0001_init.sql"),
 );
 
+/// The expiry column an OAuth connector's access token carries (issue #72).
+/// NULL for every token minted before it, so those never expire, as before.
+const MIGRATION_EXPIRY: SqlMigration = SqlMigration::new(
+    "0002",
+    "expiry_audience",
+    include_str!("../migrations/sqlite/0002_expiry_audience.sql"),
+);
+
+/// The same column for Postgres.
+const MIGRATION_EXPIRY_POSTGRES: SqlMigration = SqlMigration::new(
+    "0002",
+    "expiry_audience",
+    include_str!("../migrations/postgres/0002_expiry_audience.sql"),
+);
+
 /// RFC 8628 §3.4. The one grant this venture's authorization server
 /// implements — hence no authorization endpoint and no redirect flow.
 pub const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -58,6 +75,10 @@ pub const DEVICE_AUTH_PATH: &str = "/v1/device-auth";
 
 /// The MCP endpoint, the protected resource the discovery document names.
 pub const MCP_PATH: &str = "/v1/pages/mcp";
+
+/// Where the authorization-code grant is mounted (issue #72): `authorize`,
+/// `register` and `token` hang off it, and the discovery document names them.
+pub const OAUTH_PATH: &str = "/v1/oauth";
 
 // ---------------------------------------------------------------------------
 // The caller
@@ -156,7 +177,19 @@ fn database(_error: DbError) -> AuthError {
 /// Resolves the caller from `Authorization: Bearer <token>`, falling back to
 /// the session cookie. The bearer is checked first: a request that presents
 /// one has said what it wants to be.
+///
+/// A connector token (issue #72, audience `mcp`) is refused here: every
+/// surface except the MCP endpoint answers it as an unknown token, so an app
+/// connected through Claude reaches nothing but the MCP tools.
 pub async fn authenticate(ports: &Ports, headers: &HeaderMap) -> Result<Member, AuthError> {
+    authenticate_member(ports, headers, false).await
+}
+
+async fn authenticate_member(
+    ports: &Ports,
+    headers: &HeaderMap,
+    connectors: bool,
+) -> Result<Member, AuthError> {
     let db = port(ports.db.clone())?;
     if let Some(token) = cratefield_core::bearer_token(headers) {
         let clock = port(ports.clock.clone())?;
@@ -167,6 +200,9 @@ pub async fn authenticate(ports: &Ports, headers: &HeaderMap) -> Result<Member, 
         else {
             return Err(AuthError);
         };
+        if principal.audience.is_some() && !connectors {
+            return Err(AuthError);
+        }
         return member_for(db, principal).await;
     }
     session(ports, headers).await
@@ -227,6 +263,24 @@ pub async fn authenticate_any(
     ports: &Ports,
     headers: &HeaderMap,
 ) -> Result<Authenticated, AuthError> {
+    authenticate_any_for(ports, headers, false).await
+}
+
+/// [`authenticate_any`] for the MCP endpoint, which also accepts a connector
+/// token (issue #72). Nothing else calls it, so a connector token reaches the
+/// MCP tools and no other route.
+pub async fn authenticate_mcp(
+    ports: &Ports,
+    headers: &HeaderMap,
+) -> Result<Authenticated, AuthError> {
+    authenticate_any_for(ports, headers, true).await
+}
+
+async fn authenticate_any_for(
+    ports: &Ports,
+    headers: &HeaderMap,
+    connectors: bool,
+) -> Result<Authenticated, AuthError> {
     if let Some(token) = cratefield_core::bearer_token(headers)
         && token.starts_with(&format!("{AGENT_KEY_BRAND}_"))
     {
@@ -254,7 +308,7 @@ pub async fn authenticate_any(
             credential: key.prefix,
         }));
     }
-    authenticate(ports, headers)
+    authenticate_member(ports, headers, connectors)
         .await
         .map(Authenticated::Member)
 }
@@ -411,9 +465,10 @@ impl Module for Tokens {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_EXPIRY];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 1] = [MIGRATION_INIT_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
+            [MIGRATION_INIT_POSTGRES, MIGRATION_EXPIRY_POSTGRES];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,

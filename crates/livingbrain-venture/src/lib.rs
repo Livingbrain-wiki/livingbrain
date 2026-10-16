@@ -61,7 +61,7 @@ use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_models::jev::{JevConnector, JevKey};
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
-use livingbrain_tokens::{Authenticated, Avatars, DevicePorts, Me, Tokens};
+use livingbrain_tokens::{Authenticated, Avatars, DevicePorts, Me, OAuth, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
@@ -437,6 +437,9 @@ fn build(
             .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
+            // Issue #72: the authorization-code grant a browser MCP client (a
+            // Claude connector) signs in through, at `/v1/oauth/*`.
+            .module(OAuth::new())
             // `GET /v1/me` (ADR 0004): who a bearer or a session speaks for.
             .module(Me::new())
             // `GET /v1/avatars/{id}`: a member's or the workspace's avatar,
@@ -685,7 +688,9 @@ fn pages_module(
     // the other can open.
     let auth: Arc<dyn BearerAuth> = Arc::new(TokenBearer);
     let mcp_kms = Arc::clone(&kms);
-    let mcp_auth = Arc::clone(&auth);
+    // The MCP endpoint alone also takes a connector token (issue #72); every
+    // other bearer surface refuses one, as `TokenBearer` does.
+    let mcp_auth: Arc<dyn BearerAuth> = Arc::new(McpBearer);
     // The page routes the web app reads and writes answer to its session
     // cookie as well as to a bearer; the MCP endpoint below takes the bearer
     // resolver alone and stays bearer-only, and the importer takes the
@@ -1063,6 +1068,39 @@ impl BearerAuth for TokenBearer {
     }
 }
 
+/// The [`BearerAuth`] for the MCP endpoint alone (issue #72). It resolves the
+/// same credentials [`TokenBearer`] does, and additionally a connector token,
+/// the one kind of token no other surface accepts. The connector token is
+/// non-admin by construction (its scope subset), so the MCP tools see exactly
+/// what that subset grants.
+struct McpBearer;
+
+#[async_trait::async_trait]
+impl BearerAuth for McpBearer {
+    async fn authenticate(&self, ports: &Ports, token: &str) -> Result<Asker, AuthError> {
+        if !token.bytes().all(is_cookie_octet) {
+            return Err(AuthError::Rejected);
+        }
+        let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+            return Err(AuthError::Rejected);
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, value);
+        match livingbrain_tokens::authenticate_mcp(ports, &headers).await {
+            Ok(Authenticated::Member(member)) => Ok(member_asker(member)),
+            Ok(Authenticated::Agent(agent)) => Ok(Asker {
+                workspace_id: agent.workspace_id,
+                user_id: agent.agent_id,
+                token_scopes: agent.scopes,
+                agent_owner: Some(agent.owner_id),
+                role: None,
+                credential: Some(agent.credential),
+            }),
+            Err(_) => Err(AuthError::Rejected),
+        }
+    }
+}
+
 /// A member as the wiki routes see them: workspace, id, role, and the
 /// credential's scope subset and prefix (a session carries neither).
 fn member_asker(member: livingbrain_tokens::Member) -> Asker {
@@ -1221,13 +1259,54 @@ fn page_referrer_policy(method: &str, path: &str) -> Option<&'static str> {
     (is_page && is_read).then_some("same-origin")
 }
 
-#[event(fetch)]
+/// The connector token endpoint (issue #72), and the device grant's poll path.
+const OAUTH_TOKEN_PATH: &str = "/v1/oauth/token";
+const DEVICE_TOKEN_PATH: &str = "/v1/device-auth/token";
+
+/// Whether a token request's form body names the device grant.
+fn is_device_poll(body: &str) -> bool {
+    body.split('&').any(|pair| {
+        matches!(
+            pair,
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code"
+                | "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
+        )
+    })
+}
+
+/// One token endpoint for every grant a client may use (RFC 8628 §3.4 and
+/// issue #72): a device-grant poll sent to `/v1/oauth/token` is re-addressed to
+/// the device grant's own token path, the same request otherwise. The device
+/// handler is mounted by the harness and cannot be reached from the OAuth
+/// module, so the Worker does the forwarding; the body is read once and sent
+/// on unchanged.
+async fn route_token_request(mut req: Request) -> worker::Result<Request> {
+    if req.method().as_ref() != "POST" || req.path() != OAUTH_TOKEN_PATH {
+        return Ok(req);
+    }
+    let body = req.text().await?;
+    let target = if is_device_poll(&body) {
+        DEVICE_TOKEN_PATH
+    } else {
+        OAUTH_TOKEN_PATH
+    };
+    let mut url = req.url()?;
+    url.set_path(target);
+    let mut init = worker::RequestInit::new();
+    init.with_method(req.method())
+        .with_headers(req.headers().clone());
+    init.body = Some(worker::wasm_bindgen::JsValue::from_str(&body));
+    Request::new_with_init(url.as_str(), &init)
+}
+
 /// Worker fetch entry point.
 ///
 /// # Errors
 ///
 /// Propagates `worker::Error` from the harness router.
+#[event(fetch)]
 pub async fn fetch(req: Request, env: Env, ctx: Context) -> worker::Result<Response> {
+    let req = route_token_request(req).await?;
     let (harness, runtime, turns) = instance(&env);
     // Issue #7: publish this request's `CONVERSATIONS` namespace, so the
     // agent loop's turn calls reach the conversation objects. The publish is
@@ -2614,5 +2693,27 @@ mod erasure_tests {
                     .is_err()
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod device_poll_tests {
+    use super::is_device_poll;
+
+    /// L4: the device grant's poll is recognised in both encodings a client may
+    /// send, and nothing else is re-addressed.
+    #[test]
+    fn a_device_poll_is_recognised_and_nothing_else_is() {
+        assert!(is_device_poll(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=x&client_id=livingbrain-cli"
+        ));
+        assert!(is_device_poll(
+            "device_code=x&grant_type=urn:ietf:params:oauth:grant-type:device_code"
+        ));
+        assert!(!is_device_poll("grant_type=authorization_code&code=x"));
+        assert!(!is_device_poll("grant_type=refresh_token&refresh_token=x"));
+        assert!(!is_device_poll(
+            "note=grant_type=urn:ietf:params:oauth:grant-type:device_code"
+        ));
     }
 }

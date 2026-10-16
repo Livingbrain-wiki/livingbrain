@@ -54,13 +54,17 @@ pub(crate) fn descriptors() -> Value {
             "Search the pages you are allowed to read, best match first. A page matches \
              when it holds any of the query's words (stopwords like \"what\" or \"the\" \
              are ignored, plurals fold); pages holding more of the words, rarer ones, or \
-             the words in their title rank higher.",
+             the words in their title rank higher. With no query (or an empty one), it \
+             returns the most recently updated pages you can read instead.",
             json!({
-                "query": { "type": "string", "description": "The words or question to look for." },
+                "query": { "type": "string",
+                           "description": "The words or question to look for. Leave it out, or \
+                                           send it empty, to list the most recently updated \
+                                           pages you can read." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
                            "description": "How many pages to return." },
             }),
-            &["query"],
+            &[],
         ),
         tool(
             "brain_page",
@@ -135,6 +139,10 @@ pub(crate) enum Call {
         query: String,
         limit: usize,
     },
+    /// `brain_search` with no query: the most recently updated pages.
+    Recent {
+        limit: usize,
+    },
     Page {
         slug: String,
     },
@@ -157,10 +165,21 @@ pub(crate) enum Call {
 /// One tool call, parsed. The `Err` is the `-32602` message.
 pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
     match name {
-        "brain_search" => Ok(Call::Search {
-            query: required(arguments, "query")?.to_owned(),
-            limit: limit(arguments)?,
-        }),
+        "brain_search" => {
+            // An absent or blank query is not an error: it asks for what was
+            // read most recently. A query that is not a string still is.
+            let query = match arguments.get("query") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) if value.trim().is_empty() => None,
+                Some(Value::String(value)) => Some(value.to_owned()),
+                Some(_) => return Err("`query` must be a string".to_owned()),
+            };
+            let limit = limit(arguments)?;
+            Ok(match query {
+                Some(query) => Call::Search { query, limit },
+                None => Call::Recent { limit },
+            })
+        }
         "brain_page" => Ok(Call::Page {
             slug: required(arguments, "slug")?.to_owned(),
         }),
@@ -203,6 +222,7 @@ pub(crate) async fn run(
     let filters = plan.filters(KIND_PAGES, Permission::Read);
     match call {
         Call::Search { query, limit } => search(store, base, &filters, &query, limit).await,
+        Call::Recent { limit } => recent(store, base, &filters, limit).await,
         Call::Page { slug } => page(store, base, &filters, &slug).await,
         Call::ContextFor { repo, task } => {
             context_for(store, facts, base, asker, plan, &repo, &task).await
@@ -240,16 +260,42 @@ pub(crate) async fn run(
 // ---------------------------------------------------------------------------
 // The tools
 
-/// `brain_search`: every page in the asker's scopes holding **every** word
-/// of `query`.
-async fn search(
+/// `brain_search` with no query: the most recently updated pages the asker
+/// may read, newest first, in the same shape a search answers.
+async fn recent(
     store: &PageStore,
     base: &str,
     filters: &[ScopeFilter],
-    query: &str,
     limit: usize,
 ) -> Result<Value, String> {
-    let found = find(store, base, filters, query, limit).await?;
+    let scopes: Vec<&str> = filters.iter().map(|filter| filter.scope.as_str()).collect();
+    let listed = if scopes.is_empty() {
+        Vec::new()
+    } else {
+        store.list(&scopes, limit).await.map_err(store_failed)?
+    };
+    let mut found = Vec::with_capacity(listed.len());
+    for item in listed {
+        // The grant's slug filter applies to a listing exactly as to a search:
+        // a page outside it is not named, not even by its title.
+        let readable = filters
+            .iter()
+            .any(|filter| filter.scope == item.scope && filter.matches(&item.slug));
+        if !readable {
+            continue;
+        }
+        match store.read(&item.scope, &item.slug).await {
+            Ok(Some(page)) => found.push(Found::new(base, &item.scope, &item.slug, &page)),
+            Ok(None) => {}
+            Err(error) => return Err(store_failed(error)),
+        }
+    }
+    Ok(pages_answer(&found, "You have no readable pages yet.\n"))
+}
+
+/// The answer a page listing gives: one numbered line per page with its
+/// snippet, then the citations the model is told to use.
+fn pages_answer(found: &[Found], empty: &str) -> Value {
     let mut text = String::new();
     for (index, page) in found.iter().enumerate() {
         text.push_str(&format!(
@@ -261,13 +307,10 @@ async fn search(
         ));
     }
     if found.is_empty() {
-        text.push_str(
-            "No page you can read mentions any word of that query. Try other, \
-             more specific words, or call brain_context_for instead.\n",
-        );
+        text.push_str(empty);
     }
-    Ok(answer(
-        append_citations(&text, &found),
+    answer(
+        append_citations(&text, found),
         json!({
             "results": found.iter().map(|page| json!({
                 "title": page.title,
@@ -276,6 +319,23 @@ async fn search(
                 "snippet": snippet(&page.body),
             })).collect::<Vec<_>>(),
         }),
+    )
+}
+
+/// `brain_search`: every page in the asker's scopes holding **every** word
+/// of `query`.
+async fn search(
+    store: &PageStore,
+    base: &str,
+    filters: &[ScopeFilter],
+    query: &str,
+    limit: usize,
+) -> Result<Value, String> {
+    let found = find(store, base, filters, query, limit).await?;
+    Ok(pages_answer(
+        &found,
+        "No page you can read mentions any word of that query. Try other, \
+         more specific words, or call brain_context_for instead.\n",
     ))
 }
 

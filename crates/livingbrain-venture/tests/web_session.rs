@@ -785,3 +785,63 @@ async fn facts_answer_the_cookie_from_its_own_origin_and_the_bearer() {
     let anonymous = send(&kit, Method::GET, "/v1/facts", Via::Anonymous, None).await;
     assert_status(&anonymous, StatusCode::UNAUTHORIZED, "no credential");
 }
+
+/// H1: a connector token (audience `mcp`, the one the OAuth grant mints) is
+/// accepted by the MCP endpoint alone. A page route, which resolves bearers
+/// through the general resolver, answers it as an unknown token.
+#[pollster::test]
+async fn a_connector_token_is_refused_by_the_pages_routes() {
+    let kit = seeded().await;
+    let alice = session(&kit, WORKSPACE, ALICE);
+    let minted = send(
+        &kit,
+        Method::POST,
+        "/v1/tokens",
+        Via::App(&alice),
+        Some(json!({ "name": "connected app", "scopes": [] })),
+    )
+    .await;
+    assert_status(&minted, StatusCode::CREATED, "a token is minted");
+    let token = minted.json()["token"].as_str().expect("a token").to_owned();
+    let prefix = token
+        .rsplit_once('_')
+        .expect("a token has a secret half")
+        .0
+        .to_owned();
+
+    // The same row the OAuth grant writes for a connector.
+    kit.db
+        .execute(&Statement::with_values(
+            "UPDATE personal_access_tokens SET audience = 'mcp' WHERE prefix = ?",
+            vec![text(&prefix)],
+        ))
+        .await
+        .expect("the audience is stamped");
+
+    let read = send(
+        &kit,
+        Method::GET,
+        "/v1/pages/from-cli",
+        Via::Bearer(&token),
+        None,
+    )
+    .await;
+    assert_status(
+        &read,
+        StatusCode::UNAUTHORIZED,
+        "a connector cannot read pages",
+    );
+    let write = send(
+        &kit,
+        Method::PUT,
+        "/v1/pages/from-connector",
+        Via::Bearer(&token),
+        Some(page("# Written by a connected app\n", None)),
+    )
+    .await;
+    assert_status(
+        &write,
+        StatusCode::UNAUTHORIZED,
+        "a connector cannot write pages",
+    );
+}

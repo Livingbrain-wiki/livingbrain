@@ -17,11 +17,34 @@ opencode mcp add livingbrain --url https://mcp.livingbrain.wiki/v1/pages/mcp
 Then ask it something about a repository. `claude` calls `brain_context_for`
 and answers with a cited brief.
 
+## Connect from Claude (connectors)
+
+Claude on the web and Claude Desktop connect to the same endpoint through a
+custom connector, with no token to copy:
+
+1. In Claude, open **Settings → Connectors → Add custom connector**.
+2. Enter **`https://mcp.livingbrain.wiki/v1/pages/mcp`** and add it.
+3. Claude opens a Living Brain page in your browser. Sign in there (the usual
+   email link), then **Approve**. The page names the app asking and the
+   workspace the connection is for; if you belong to several workspaces, pick
+   the one you want from the menu first.
+4. Claude returns to the conversation with the connector connected.
+
+An app whose address Living Brain does not recognise as Claude is shown on the
+Approve page as **unverified**, with its address in full, and it can only reach
+the MCP tools. A connected app can never change settings, manage tokens or
+reach the write routes.
+
+The connection is listed in **Settings → API tokens** as
+`Claude connector · <name>` (or `Connected app · <name>` when unverified). Revoking it there disconnects Claude at once: its
+access and its renewal both stop. It also renews itself while Claude uses it,
+and ends after 30 days without use.
+
 ## Tools
 
 | tool | what it does |
 |---|---|
-| `brain_search(query, limit?)` | pages you may read holding **every** word of the query |
+| `brain_search(query?, limit?)` | pages you may read holding **every** word of the query; with no query, the most recently updated pages you may read |
 | `brain_page(slug)` | one page's Markdown, by slug |
 | `brain_context_for(repo, task)` | a brief: the pages that mention the task, full text, cited |
 | `brain_note(text, title?, facts?)` | writes to your own private memory, redacted first; `facts` are temporal facts the note states ([format](temporal-facts.md)) |
