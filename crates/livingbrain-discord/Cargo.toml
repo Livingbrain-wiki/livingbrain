@@ -33,7 +33,7 @@ livingbrain-pages = { path = "../livingbrain-pages" }
 livingbrain-access = { path = "../livingbrain-access" }
 
 [dev-dependencies]
-cratefield-testing = { workspace = true }
+cratefield-testing = { workspace = true, features = ["postgres"] }
 pollster = { workspace = true }
 tower = { workspace = true }
 async-trait = { workspace = true }
