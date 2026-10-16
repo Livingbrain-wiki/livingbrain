@@ -95,7 +95,7 @@
       <div id="nav-scrim" class="scrim" hidden></div>
       <div class="shell__col">
 
-    <main id="main" class="wrap shell__main signin">
+    <main id="main" class="wrap shell__main">
       <!-- The session check. Until it settles neither the form nor the home
            is shown, so a signed-in visitor never sees a flash of "Sign in". -->
       <div id="session-checking" class="notice checking" role="status" aria-live="polite">
@@ -207,26 +207,13 @@
         </ul>
       </section>
 
-      <div id="signin-view" hidden>
-      <div class="page-head">
-        <p class="eyebrow">Your workspace</p>
-        <h1>Sign in</h1>
-        <p class="lede">
-          Four ways in, all equal. Slack is one option here, not a requirement:
-          a workspace without Slack is a first-class workspace.
-        </p>
-      </div>
+      <div id="signin-view" class="signin-panel" hidden>
+        <section class="signin-card" aria-labelledby="signin-title">
+          <h1 id="signin-title">Sign in to Living Brain</h1>
+          <p class="signin-card__sub">We'll email you a sign-in link.</p>
 
-      <div class="card">
-        <h2>Email magic link</h2>
-        <p class="muted">
-          We mail a single-use link. We never say whether an address belongs
-          to anyone — every address gets the same answer, so this form cannot
-          be used to find out who is in a workspace.
-        </p>
-        <form id="email-form" novalidate>
-          <label for="email">Email address</label>
-          <div class="join">
+          <form id="email-form" class="signin-form" novalidate>
+            <label for="email">Work email</label>
             <input
               id="email"
               name="email"
@@ -237,70 +224,20 @@
               spellcheck="false"
               placeholder="you@company.com"
             />
-            <button type="submit" data-variant="primary">Mail me a link</button>
-          </div>
-        </form>
-        <div id="email-status" class="notice" role="status" aria-live="polite"></div>
-      </div>
+            <button type="submit" data-variant="primary">Email me a sign-in link</button>
+          </form>
+          <div id="email-status" class="notice" role="status" aria-live="polite"></div>
 
-      <h2 class="section-h">Other ways in</h2>
-      <ul class="methods">
-        <li>
-          <strong>Slack</strong>
-          <span class="muted">
-            Connect a Slack team. Your workspace is ours, not Slack's, so you
-            can leave Slack later without losing the brain.
-          </span>
-          <a id="signin-slack" class="btn" href="#">Continue with Slack</a>
-        </li>
+          <div class="signin-divider" aria-hidden="true"><span>or</span></div>
 
-        <li>
-          <strong>Passkey</strong>
-          <span class="muted">
-            Deferred: passkeys move with the follow-up identity work
-            (ADR 0002), so there is no server route to sign in with yet.
-          </span>
-          <span id="passkey-note" class="pill" data-state="disabled"
-            >Not available yet</span
-          >
-          <button type="button" disabled aria-describedby="passkey-note">
-            Continue with a passkey
-          </button>
-        </li>
+          <a id="signin-slack" class="btn signin-card__alt" href="#">Continue with Slack</a>
+        </section>
 
-        <li>
-          <strong>Discord</strong>
-          <span class="muted">
-            Discord is planned as an equal team chat alongside Slack (#56).
-            There is no OAuth route yet, so this button does nothing.
-          </span>
-          <span id="discord-note" class="pill" data-state="disabled"
-            >Not available yet</span
-          >
-          <button type="button" disabled aria-describedby="discord-note">
-            Continue with Discord
-          </button>
-        </li>
-
-        <li>
-          <strong>Ask, or connect an agent</strong>
-          <span class="muted">
-            The CLI and coding harnesses sign in over MCP and the device flow,
-            then share the same session.
-          </span>
-          <span id="agent-note" class="pill" data-state="disabled"
-            >Not in this app yet</span
-          >
-          <button type="button" disabled aria-describedby="agent-note">
-            Set up the CLI
-          </button>
-        </li>
-      </ul>
-
-      <p class="tiny">
-        The session is an HttpOnly cookie set by the API. Nothing on this page
-        ever sees a token.
-      </p>
+        <p class="signin-foot">New here? Signing in creates your workspace.</p>
+        <nav class="signin-links" aria-label="Legal">
+          <a href="https://livingbrain.wiki/privacy/">Privacy</a>
+          <a href="https://livingbrain.wiki/terms/">Terms</a>
+        </nav>
       </div>
     </main>
 

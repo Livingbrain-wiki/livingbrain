@@ -645,9 +645,8 @@ pages.signin = async function signin() {
     }
   });
 
-  // Slack is one of four equal options, not the privileged one. The route
-  // exists server-side; the button is a plain link so it degrades to nothing
-  // rather than to a broken fetch.
+  // The Slack button is a plain link to the server's start route, so it
+  // degrades to nothing rather than to a broken fetch.
   const slack = $("#signin-slack");
   slack.href = `${apiBase()}/v1/workspaces/slack/start`;
 };
