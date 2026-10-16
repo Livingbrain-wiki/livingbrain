@@ -711,3 +711,19 @@ test("installer-unknown: the banner explains, and Finish connecting starts anoth
   await mountGithub(other.deps);
   assert.equal(plain.registry.get("github-retry").hidden, true);
 });
+
+test("the install button is off and says so once the app is installed", async () => {
+  const doc = githubDocument();
+  const { deps: d } = deps(doc, {
+    answers: {
+      "GET /v1/github": {
+        ...SHARED_EMPTY,
+        installations: [{ id: 7001, account: "Acme", account_type: "Organization", repository_selection: "selected" }],
+      },
+    },
+  });
+  await mountGithub(d);
+  const button = doc.registry.get("github-shared-install");
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, "Installed on GitHub ✓");
+});
