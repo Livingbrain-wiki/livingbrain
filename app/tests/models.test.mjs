@@ -308,11 +308,11 @@ test("the settings page speaks to people, not to developers", () => {
   // Nothing in "Coming soon" looks like a control.
   const soon = SETTINGS_HTML.slice(
     SETTINGS_HTML.indexOf('id="soon"'),
-    SETTINGS_HTML.indexOf('id="stack"'),
+    SETTINGS_HTML.indexOf('</section>', SETTINGS_HTML.indexOf('id="soon"')),
   );
   assert.doesNotMatch(soon, /<(input|select|button|textarea)\b/);
-  // "Built with" is collapsed.
-  assert.match(SETTINGS_HTML, /<details class="disclosure" id="stack">/);
+  // "Built with" is gone from the product.
+  assert.doesNotMatch(SETTINGS_HTML, /id="stack"/);
   // The ids the page script and the token rules rely on are still there.
   for (const id of [
     "settings-notice",
@@ -331,10 +331,6 @@ test("the settings page speaks to people, not to developers", () => {
     "copy-token",
     "dismiss-token",
     "mcp-url",
-    "stack-rows",
-    "stack-venture",
-    "stack-subprocessors",
-    "stack-source",
   ]) {
     assert.match(SETTINGS_HTML, new RegExp(`id="${id}"`), id);
   }
