@@ -27,6 +27,13 @@
 //!   and compiles it at once in the request. Triage never loses a session:
 //!   its source is untouched, and this is the way back from a wrong call.
 //!
+//! The status route also answers a `sources` block: the GitHub, Discord and
+//! Imports lanes (units by status, sources pending and compiled), counted
+//! over the asker's scopes. The cron tick files stored GitHub items, Discord
+//! days and imports into units and compiles up to
+//! [`SOURCE_UNITS_PER_TICK`] of them after the sessions
+//! (`livingbrain_compiler::source_units`).
+//!
 //! All five answer only for the asker's own scopes — the same two clauses the
 //! source listing applies — so a member sees and spends nothing of anybody
 //! else's. The cron tick (`scheduled`) drains every workspace in bounded
@@ -61,12 +68,13 @@ use cratefield_core::axum::routing::{get, post};
 use cratefield_core::{
     AnyError, BoxFuture, Clock, Config, ConfigError, DataKind, Database, Disposition, HttpClient,
     IdGen, Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem, ScheduledBudget,
-    SqlMigration,
+    SqlMigration, SubjectVia,
 };
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::{
     Call, ClaimFilter, Classifiers, Compiler, Dreams, Emitted, Fact, FactSink, Gate, HeldFact, Job,
-    JobStatus, Model, ModelFailure, Queue, Reply, Settings, StoredDreamTuning, Window,
+    JobStatus, LANE_DISCORD, LANE_GITHUB, LANE_IMPORTS, LaneCounts, Model, ModelFailure, Queue,
+    Reply, Settings, StoredDreamTuning, Window,
 };
 use livingbrain_memory::timeline::{self, FactStatus, TimedFact};
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError, Structured};
@@ -174,6 +182,44 @@ impl Module for CodingAgents {
                 redacted: &[],
                 subject_via: None,
             },
+            PersonalDataSet {
+                table: "source_compile_units",
+                subject: "owner",
+                kind: DataKind::Identifier,
+                disposition: Disposition::Erase,
+                description: "For each unit of source material compiled (a repository's day of \
+                              GitHub items, a Discord channel-day, an imported file): its \
+                              owner, lane, day, project folder, status, token counts and the \
+                              wiki slugs it wrote. No source text. Erasing you deletes the \
+                              rows; pages already written stay where their scope keeps them.",
+                redacted: &[],
+                subject_via: None,
+            },
+            PersonalDataSet {
+                table: "source_compile_members",
+                subject: "unit_key",
+                kind: DataKind::Identifier,
+                disposition: Disposition::Erase,
+                description: "Which stored sources a compile unit holds and how far each is \
+                              compiled. Found through the unit the member belongs to; erased \
+                              with it.",
+                redacted: &[],
+                subject_via: Some(SubjectVia {
+                    table: "source_compile_units",
+                    subject: "owner",
+                    key: "unit_key",
+                }),
+            },
+            PersonalDataSet::none(
+                "source_compile_spend",
+                "the row is one workspace's tokens spent by source units on one UTC day \
+                 — nothing in it identifies or describes a person",
+            ),
+            PersonalDataSet::none(
+                "source_compile_cursor",
+                "the row is the backlog pass's high-water mark: the last source id it \
+                 scanned, a row name and a time — nothing about a person",
+            ),
             PersonalDataSet::none(
                 "coding_agent_spend",
                 "the row is one workspace's pooled compile tokens for one UTC day — nothing \
@@ -200,22 +246,24 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 6] = [
+        const SQLITE: [SqlMigration; 7] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
             livingbrain_compiler::MIGRATION_PARALLEL,
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS,
+            livingbrain_compiler::MIGRATION_SOURCE_UNITS,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 6] = [
+        const POSTGRES: [SqlMigration; 7] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
             livingbrain_compiler::MIGRATION_PARALLEL_POSTGRES,
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT_POSTGRES,
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS_POSTGRES,
+            livingbrain_compiler::MIGRATION_SOURCE_UNITS_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -237,6 +285,7 @@ impl Module for CodingAgents {
             "CODING_AGENTS_JOB_TOKENS",
             "CODING_AGENTS_DAILY_TOKENS",
             "CODING_AGENTS_MONTHLY_TOKENS",
+            "CODING_AGENTS_SOURCE_SHARE_PERCENT",
         ] {
             if let Some(raw) = cfg.get(key)
                 && raw.trim().parse::<u64>().is_err()
@@ -296,9 +345,27 @@ impl Module for CodingAgents {
                 Ok(_) => {}
                 Err(reason) => eprintln!("dreaming: sweep failed: {reason}"),
             }
+            // Source material (GitHub items, Discord channel-days, imports):
+            // filed by a bounded backlog pass, then compiled with what the
+            // session drain left of the tick. A failure is logged, never a
+            // failed tick.
+            let mut scopes = BTreeSet::new();
+            if let Err(error) = compiler.enqueue_sources().await {
+                eprintln!("coding-agents: filing source units failed: {error}");
+            }
+            match compiler
+                .drain_sources(None, SOURCE_UNITS_PER_TICK, &ctx.scheduled)
+                .await
+            {
+                Ok(runs) => {
+                    for run in runs.iter().filter(|run| run.status == JobStatus::Done) {
+                        scopes.insert(run.scope.clone());
+                    }
+                }
+                Err(error) => eprintln!("coding-agents: source units failed: {error}"),
+            }
             // The lint runs over the scopes this tick compiled into: cheap,
             // model-free, and only where something changed.
-            let mut scopes = BTreeSet::new();
             if let Some(ledger) = sources(ctx, &self.wiki) {
                 for done in processed.iter().filter(|p| p.status == JobStatus::Done) {
                     if let Ok(Some(source)) = ledger.by_id(&done.source_id).await {
@@ -407,6 +474,12 @@ impl Classifiers for WorkspaceJev {
             .and_then(|effective| effective.classifier)
     }
 }
+
+/// The most source units (a repository's day, a channel's day, an imported
+/// file) one cron tick compiles, after the sessions it had room for. A unit
+/// runs at most its workspace's `max_chunks` calls; the rest of a larger one
+/// waits for the next tick.
+const SOURCE_UNITS_PER_TICK: usize = 2;
 
 /// The most dream passes one cron tick runs: a pass is a model call, and a
 /// tick is shared with the compile drain.
@@ -843,6 +916,10 @@ async fn queue(
         .savings(&asker.workspace_id, &scopes)
         .await
         .map_err(|_| Problem::internal())?;
+    let lanes = queue
+        .unit_counts(&asker.workspace_id, &scopes)
+        .await
+        .map_err(|_| Problem::internal())?;
     // The workspace's effective settings: its own, else the env vars.
     let own = livingbrain_usage::budgets_or_default(&*db, &asker.workspace_id).await;
     let settings = crate::budgets::compiler_settings(&*ctx.config, &own);
@@ -920,8 +997,34 @@ async fn queue(
             "tokens_sent": savings.tokens_sent,
             "tokens_saved": savings.tokens_saved(),
         },
+        "sources": source_lanes_view(&lanes),
         "jobs": jobs.iter().map(job_view).collect::<Vec<_>>(),
     })))
+}
+
+/// The source lanes as the status route answers them: each lane's name as
+/// the person sees it, its units by status, and how many of its sources
+/// are compiled and still waiting. A lane with nothing stored is listed
+/// with zeros, so the card names every lane it can compile.
+fn source_lanes_view(lanes: &BTreeMap<String, LaneCounts>) -> Value {
+    let lane = |key: &str, label: &str| {
+        let counts = lanes.get(key).cloned().unwrap_or_default();
+        json!({
+            "label": label,
+            "units": counts
+                .units
+                .iter()
+                .map(|(status, n)| (status.as_str().to_owned(), json!(n)))
+                .collect::<serde_json::Map<String, Value>>(),
+            "sources_pending": counts.sources_pending,
+            "sources_compiled": counts.sources_compiled,
+        })
+    };
+    json!({
+        "github": lane(LANE_GITHUB, "GitHub"),
+        "discord": lane(LANE_DISCORD, "Discord"),
+        "imports": lane(LANE_IMPORTS, "Imports"),
+    })
 }
 
 /// `POST /process` — compile up to `max` of the asker's jobs now.

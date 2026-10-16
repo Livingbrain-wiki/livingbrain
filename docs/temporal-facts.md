@@ -373,6 +373,13 @@ existed. The migration is `0042_pages_0008_dreaming`.
   compile), and valid from the day the model gave, else the session's day.
 - A session with no time at all yields undated facts, which are refused and
   named in the log. A fact is never dated to the day it was compiled.
+- Source units (GitHub items, Discord days, imports; see
+  [coding-agents.md](coding-agents.md#source-units-github-discord-and-imports))
+  follow the same rules, observed at the newest item of the chunk the fact came
+  from, valid from the item's day when the model gives none. Their facts go to
+  the unit's own scope, shared for GitHub and personal for an import. Their
+  `written_by` is the same `brain:coding-agents` marker, so dreaming treats them
+  as the compiler's.
 
 ### Reconciliation at write time (compiler)
 
