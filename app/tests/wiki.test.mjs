@@ -15,6 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { formatDay } from "../assets/facts.js";
 
 /* ------------------------------------------------------------------ stubs */
 
@@ -2298,6 +2299,20 @@ test("facts: a page without facts has no Facts card", async () => {
   assert.equal(el("page-facts-card").hidden, true);
 });
 
+/** The stubs keep a class in `attrs.class` (setAttribute does not fill
+ * `className`), so the Facts tests find rendered nodes by their class here. */
+function withClass(root, name) {
+  const out = [];
+  const visit = (node) => {
+    for (const child of node.children || []) {
+      if (child && child.attrs && String(child.attrs.class || "").split(/\s+/).includes(name)) out.push(child);
+      visit(child);
+    }
+  };
+  visit(root);
+  return out;
+}
+
 test("facts: ?view=facts lists every timeline, as of a date and back to now", async () => {
   reset({ search: "?view=facts" });
   seedTriggers();
@@ -2312,25 +2327,114 @@ test("facts: ?view=facts lists every timeline, as of a date and back to now", as
   await drain();
   assert.equal(el("facts-view").hidden, false);
   assert.equal(el("home-view").hidden, true);
-  const first = () => walk(el("facts-list"), "td").map((n) => n.textContent);
-  assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "41 EU"]);
-  assert.equal(el("facts-status").textContent, "Now");
+  const titles = () => withClass(el("facts-list"), "fact__title").map((n) => n.textContent);
+  const values = () => withClass(el("facts-list"), "fact__value").map((n) => n.textContent);
+  assert.deepEqual(titles(), ["Shoe size"], "the attribute reads as a title");
+  assert.equal(withClass(el("facts-list"), "fact__title")[0].getAttribute("title"), "shoe_size", "the raw key is on hover");
+  assert.deepEqual(values(), ["41 EU"]);
+  assert.equal(withClass(el("facts-list"), "facts-subject__name")[0].textContent, "ada");
+  assert.equal(el("facts-status").textContent, "1 fact");
+  assert.equal(el("facts-now").disabled, true, "Today is off when the view is already today");
 
   el("facts-as-of").value = "2025-06-01";
   await el("facts-as-of").fire("change");
   await drain();
   // Confirmed 2025-03-02, so 91 days stale by 2025-06-01: hidden until asked for.
-  assert.deepEqual(first(), []);
-  assert.equal(el("facts-status").textContent, "As of 2025-06-01 · 1 stale fact hidden");
+  assert.deepEqual(values(), []);
+  assert.equal(el("facts-status").textContent, `0 facts · as of ${formatDay("2025-06-01")} · 1 stale fact hidden`);
   el("facts-show-stale").checked = true;
   await el("facts-show-stale").fire("change");
-  assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "40 EU"]);
-  assert.equal(el("facts-status").textContent, "As of 2025-06-01");
+  assert.deepEqual(values(), ["40 EU"]);
+  assert.equal(el("facts-status").textContent, `1 fact · as of ${formatDay("2025-06-01")}`);
+  assert.equal(el("facts-now").disabled, false);
 
   await el("facts-now").click();
   await drain();
   assert.equal(el("facts-as-of").value, "");
-  assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "41 EU"]);
+  assert.deepEqual(values(), ["41 EU"]);
+});
+
+test("facts: search filters as you type, sort and clear work, and an empty search says so", async () => {
+  reset({ search: "?view=facts" });
+  seedTriggers();
+  const OTHER = {
+    subject: "project/checkout",
+    attribute: "payment_processor",
+    scope: "shared",
+    cardinality: "one",
+    current: [{ ...SHOE_KEY.current[0], id: "fact-p", value: "Stripe Connect", unit: null, valid_from: "2026-10", observed_at: "2026-10-10T09:00:00Z", last_confirmed_at: "2026-10-10T09:00:00Z" }],
+    history: [],
+  };
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [] });
+    if (url === "/v1/facts") return json({ as_of: "now", keys: [SHOE_KEY, OTHER] });
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  const titles = () => withClass(el("facts-list"), "fact__title").map((n) => n.textContent);
+  const subjects = () => withClass(el("facts-rail"), "facts-rail__name").map((n) => n.textContent);
+  assert.deepEqual(subjects(), ["ada", "checkout"], "the rail lists subjects with their counts; ties sort by name");
+  assert.equal(walk(el("facts-jump"), "option").length, 2, "and so does the select on narrow screens");
+  assert.equal(el("facts-status").textContent, "2 facts");
+
+  el("facts-search").value = "stripe";
+  await el("facts-search").fire("input");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await drain();
+  assert.deepEqual(titles(), ["Payment processor"]);
+  assert.equal(el("facts-status").textContent, "1 fact");
+
+  el("facts-search").value = "nothing matches this";
+  await el("facts-search").fire("input");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await drain();
+  assert.deepEqual(titles(), []);
+  assert.match(withClass(el("facts-list"), "facts-none")[0].textContent, /No facts match/u);
+  await el("facts-view").fire("click", { target: walk(el("facts-list"), "[data-clear]")[0] });
+  await drain();
+  assert.equal(el("facts-search").value, "");
+  assert.equal(titles().length, 2);
+
+  el("facts-sort").value = "recent";
+  await el("facts-sort").fire("change");
+  await drain();
+  // Shoe size was observed on the 15th, Payment processor on the 10th: the
+  // recent sort puts the newer first, where the A to Z order had it last.
+  assert.deepEqual(titles(), ["Shoe size", "Payment processor"]);
+});
+
+test("facts: the subject rail jumps to a section, and Show more expands a value in place", async () => {
+  reset({ search: "?view=facts" });
+  seedTriggers();
+  const LONG = "word ".repeat(60).trim();
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json({ projects: [] });
+    if (url === "/v1/facts") {
+      return json({
+        as_of: "now",
+        keys: [
+          { ...SHOE_KEY, current: [{ ...SHOE_KEY.current[0], value: LONG, observed_at: "2026-10-10T09:00:00Z", last_confirmed_at: "2026-10-10T09:00:00Z" }], history: [] },
+        ],
+      });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  const more = walk(el("facts-list"), "[data-more]")[0];
+  assert.equal(more.textContent, "Show more");
+  await el("facts-view").fire("click", { target: more });
+  assert.equal(more.textContent, "Show less");
+  assert.equal(more.getAttribute("aria-expanded"), "true");
+
+  const before = scrolled.length;
+  const jump = walk(el("facts-rail"), "[data-jump]")[0];
+  await el("facts-view").fire("click", { target: jump });
+  assert.equal(scrolled.length, before + 1);
+  assert.equal(scrolled[scrolled.length - 1].attrs.id, "facts-subject-0", "the rail scrolls to its section");
 });
 
 test("facts: signed out, the Facts view asks to sign in and fetches nothing", async () => {
