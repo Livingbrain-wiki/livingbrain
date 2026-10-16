@@ -80,13 +80,6 @@ pub(crate) fn error(id: &Value, refusal: Refusal) -> Value {
     })
 }
 
-/// Does this method speak for somebody? The handshake does not: a client has
-/// to be able to learn the server exists, and to read the 401 that tells it
-/// how to authenticate, before it holds a credential.
-pub(crate) fn needs_asker(method: &str) -> bool {
-    matches!(method, "tools/list" | "tools/call")
-}
-
 /// The `Authorization: Bearer …` value, or `None` for a request that carries
 /// none. The scheme is matched case-insensitively (RFC 7235 §2.1).
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {

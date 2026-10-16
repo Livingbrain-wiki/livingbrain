@@ -720,6 +720,65 @@ pub(crate) async fn list_workspaces(
     Ok(Json(items).into_response())
 }
 
+/// One workspace a signed-in person may act in, with the member id they hold
+/// there. The OAuth consent page (`livingbrain-tokens`) offers these as its
+/// workspace picker and mints the approved token for the chosen pair, so the
+/// picker never has to switch the browser's session cookie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChoice {
+    pub workspace_id: String,
+    pub name: String,
+    /// The member's id **in that workspace** — not necessarily the id the
+    /// caller holds in the workspace they are signed in to.
+    pub user_id: String,
+    pub role: Role,
+}
+
+/// Every workspace `user_id` in `workspace_id` may act in: the same list
+/// [`list_workspaces`] answers (every workspace where an email identity of
+/// theirs is a live member), with the workspace they are signed in to always
+/// present. Ordered as the switcher orders it, current one first when it is
+/// the only one.
+///
+/// # Errors
+///
+/// [`DbError`] when a lookup fails.
+pub async fn workspace_choices(
+    db: &dyn cratefield_core::Database,
+    workspace_id: &str,
+    user_id: &str,
+) -> Result<Vec<WorkspaceChoice>, cratefield_core::DbError> {
+    let addresses = store::email_identities(db, workspace_id, user_id).await?;
+    let mut items: Vec<WorkspaceChoice> = store::memberships_for(db, &addresses)
+        .await?
+        .into_iter()
+        .map(|found| WorkspaceChoice {
+            workspace_id: found.workspace_id,
+            name: found.workspace_name,
+            user_id: found.user_id,
+            role: found.role,
+        })
+        .collect();
+    items.dedup_by(|a, b| a.workspace_id == b.workspace_id);
+    if !items.iter().any(|item| item.workspace_id == workspace_id)
+        && let (Some(workspace), Some(member)) = (
+            store::workspace(db, workspace_id).await?,
+            store::member(db, workspace_id, user_id).await?,
+        )
+    {
+        items.insert(
+            0,
+            WorkspaceChoice {
+                workspace_id: workspace.id,
+                name: workspace.name,
+                user_id: member.user_id,
+                role: member.role,
+            },
+        );
+    }
+    Ok(items)
+}
+
 /// The most workspaces one person may own: past any real need, and short of
 /// a loop minting rows.
 pub(crate) const MAX_OWNED_WORKSPACES: usize = 20;

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::store::{Store, Summary};
-use crate::{DEVICE_AUTH_PATH, DEVICE_CODE_GRANT, MCP_PATH, Member};
+use crate::{DEVICE_AUTH_PATH, DEVICE_CODE_GRANT, MCP_PATH, Member, OAUTH_PATH};
 
 /// No credential, a malformed one, an unknown one, a revoked one, and one
 /// whose member has left the workspace are all this one problem.
@@ -244,20 +244,31 @@ fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
         .map_err(|refused| Problem::new(&CROSS_SITE_REQUEST).with_detail(refused.detail))
 }
 
-/// An authorization server for exactly one grant and one client: the device
-/// code grant, for a machine with no browser. There is no authorization
-/// endpoint to describe, which is why `response_types_supported` is empty
-/// rather than absent, and why the client authenticates with `none` — the
-/// device code *is* the proof. `scopes_supported` is deliberately absent:
-/// two of the three scopes are per-person, so there is no finite list, and
-/// publishing a prefix a client must then guess the rest of is worse.
+/// The authorization server, under the origin the request reached. Two
+/// grants: the device code grant for a machine with no browser (its poll stays
+/// at `/v1/device-auth/token`, which the CLI calls by that path), and the
+/// authorization-code grant with PKCE for a browser-based MCP client, which
+/// signs in at `/v1/oauth/authorize`, registers at `/v1/oauth/register` and
+/// redeems at `/v1/oauth/token` — the `token_endpoint` advertised here, since
+/// no client reads the device poll from metadata. Every client is public
+/// (`none`): a registration names no secret, and PKCE is what binds a code to
+/// the client that asked for it. `scopes_supported` is deliberately absent:
+/// a connector's token carries every scope its member holds, and the device
+/// grant's two per-person scopes have no finite list.
 fn authorization_server(base: &str) -> serde_json::Value {
     json!({
         "issuer": base,
+        "authorization_endpoint": format!("{base}{OAUTH_PATH}/authorize"),
+        "token_endpoint": format!("{base}{OAUTH_PATH}/token"),
+        "registration_endpoint": format!("{base}{OAUTH_PATH}/register"),
         "device_authorization_endpoint": format!("{base}{DEVICE_AUTH_PATH}/code"),
-        "token_endpoint": format!("{base}{DEVICE_AUTH_PATH}/token"),
-        "grant_types_supported": [DEVICE_CODE_GRANT],
-        "response_types_supported": [],
+        "grant_types_supported": [
+            "authorization_code",
+            "refresh_token",
+            DEVICE_CODE_GRANT,
+        ],
+        "response_types_supported": ["code"],
+        "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
     })
 }
@@ -274,6 +285,10 @@ fn protected_resource(base: &str) -> serde_json::Value {
         "bearer_methods_supported": ["header"],
     })
 }
+
+/// The path the MCP endpoint is served at, which the protected-resource
+/// document names (RFC 9728 §3.1 puts a resource's path into its metadata URL).
+pub(crate) const MCP_RESOURCE_SUFFIX: &str = "/oauth-protected-resource/v1/pages/mcp";
 
 /// The two `/.well-known` routers, as paths relative to the prefix.
 ///
@@ -308,7 +323,10 @@ pub(crate) fn discovery(fallback: Option<&str>) -> axum::Router {
     };
     axum::Router::new()
         .route("/oauth-authorization-server", get(server))
-        .route("/oauth-protected-resource", get(resource))
+        .route("/oauth-protected-resource", get(resource.clone()))
+        // RFC 9728 §3: the path-suffixed form, which a client derives from the
+        // resource's own URL. Both name the same resource.
+        .route(MCP_RESOURCE_SUFFIX, get(resource))
 }
 
 /// The origin these documents are written under, or `None` when the request

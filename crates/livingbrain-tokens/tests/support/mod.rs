@@ -14,7 +14,7 @@ use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, Statu
 use cratefield_core::{Kid, Payload, Ports, RandomBytes, RandomError, Signer, Statement};
 use cratefield_module_device_auth::{DeviceAuth, DeviceClient};
 use cratefield_testing::{MemoryBlob, TestHarness};
-use livingbrain_tokens::{Avatars, DevicePorts, Me, Tokens};
+use livingbrain_tokens::{Avatars, DevicePorts, Me, OAuth, Tokens};
 use livingbrain_workspaces::{AvatarRebind, Workspaces};
 use serde_json::{Value, json};
 
@@ -112,6 +112,7 @@ fn kit() -> Kit {
                 .build(),
         ),
         Box::new(Tokens::new().device_ports(device)),
+        Box::new(OAuth::new()),
         Box::new(Me::new()),
         Box::new(Avatars::new()),
     ];
@@ -124,6 +125,13 @@ fn kit() -> Kit {
         // The venture's avatar stack: the three modules' scoped views land on
         // one `avatars/…` space.
         ports.blob = Some(Arc::new(AvatarRebind::new(Arc::new(raw))));
+        // The deployment's app origin, where the connector sign-in consent
+        // lives (issue #72). Set to this kit's own host, so requests here are
+        // already on it and nothing is sent elsewhere.
+        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
+            "WORKSPACES_REDIRECT_BASE",
+            API_BASE,
+        )]));
         let mut copy = Ports::empty();
         copy.config = ports.config.clone();
         copy.db = ports.db.clone();
@@ -270,6 +278,12 @@ pub async fn get_at(kit: &Kit, path: &str, host: &str, proto: Option<&str>) -> R
         headers.insert("x-forwarded-proto", value(proto));
     }
     send(kit, Method::GET, path, None, &headers).await
+}
+
+/// A form post, as a browser's form or an OAuth client sends it.
+pub async fn post_form(kit: &Kit, path: &str, form: &str, who: &Caller) -> Res {
+    let body = ("application/x-www-form-urlencoded", form.to_owned());
+    send(kit, Method::POST, path, Some(body), &who.headers()).await
 }
 
 pub async fn post_json(kit: &Kit, path: &str, body: &Value, who: &Caller) -> Res {

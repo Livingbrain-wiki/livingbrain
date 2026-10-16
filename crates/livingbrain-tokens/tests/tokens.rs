@@ -457,19 +457,37 @@ async fn the_discovery_documents_name_this_deployment() {
         metadata["device_authorization_endpoint"],
         json!(format!("{API_BASE}/v1/device-auth/code"))
     );
+    // The authorization-code grant (issue #72) is advertised beside the device
+    // grant, whose poll stays at its own path.
+    assert_eq!(
+        metadata["authorization_endpoint"],
+        json!(format!("{API_BASE}/v1/oauth/authorize"))
+    );
+    assert_eq!(
+        metadata["registration_endpoint"],
+        json!(format!("{API_BASE}/v1/oauth/register"))
+    );
     assert_eq!(
         metadata["token_endpoint"],
-        json!(format!("{API_BASE}/v1/device-auth/token"))
+        json!(format!("{API_BASE}/v1/oauth/token"))
     );
     assert_eq!(
         metadata["grant_types_supported"],
-        json!(["urn:ietf:params:oauth:grant-type:device_code"])
+        json!([
+            "authorization_code",
+            "refresh_token",
+            "urn:ietf:params:oauth:grant-type:device_code"
+        ])
     );
-    assert_eq!(metadata["response_types_supported"], json!([]));
+    assert_eq!(metadata["response_types_supported"], json!(["code"]));
+    assert_eq!(
+        metadata["code_challenge_methods_supported"],
+        json!(["S256"])
+    );
     assert_eq!(
         metadata["token_endpoint_auth_methods_supported"],
         json!(["none"]),
-        "a device client has no secret to present"
+        "every client is public: PKCE, not a secret, binds its codes"
     );
     assert!(
         metadata.get("scopes_supported").is_none(),
@@ -491,6 +509,16 @@ async fn the_discovery_documents_name_this_deployment() {
     );
     assert_eq!(protected["authorization_servers"], json!([API_BASE]));
     assert_eq!(protected["bearer_methods_supported"], json!(["header"]));
+
+    // RFC 9728 §3: the path-suffixed form names the same resource.
+    let suffixed = support::get(
+        &kit,
+        "/.well-known/oauth-protected-resource/v1/pages/mcp",
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(suffixed.status, StatusCode::OK, "{}", suffixed.text());
+    assert_eq!(suffixed.json(), protected);
 }
 
 /// The documents name the host they were fetched from, not a base baked in at

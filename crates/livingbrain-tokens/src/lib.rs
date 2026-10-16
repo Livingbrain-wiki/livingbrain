@@ -19,6 +19,7 @@ mod avatars;
 mod device;
 mod handlers;
 mod me;
+mod oauth;
 mod store;
 
 use std::sync::Arc;
@@ -34,6 +35,7 @@ use livingbrain_access::{Location, Scope, scopes_for};
 pub use avatars::Avatars;
 pub use device::{DevicePorts, PatIssuer, SessionApprover};
 pub use me::Me;
+pub use oauth::OAuth;
 
 const MIGRATION_INIT: SqlMigration = SqlMigration::new(
     "0001",
@@ -49,6 +51,21 @@ const MIGRATION_INIT_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0001_init.sql"),
 );
 
+/// The expiry column an OAuth connector's access token carries (issue #72).
+/// NULL for every token minted before it, so those never expire, as before.
+const MIGRATION_EXPIRY: SqlMigration = SqlMigration::new(
+    "0002",
+    "expiry",
+    include_str!("../migrations/sqlite/0002_expiry.sql"),
+);
+
+/// The same column for Postgres.
+const MIGRATION_EXPIRY_POSTGRES: SqlMigration = SqlMigration::new(
+    "0002",
+    "expiry",
+    include_str!("../migrations/postgres/0002_expiry.sql"),
+);
+
 /// RFC 8628 §3.4. The one grant this venture's authorization server
 /// implements — hence no authorization endpoint and no redirect flow.
 pub const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -58,6 +75,10 @@ pub const DEVICE_AUTH_PATH: &str = "/v1/device-auth";
 
 /// The MCP endpoint, the protected resource the discovery document names.
 pub const MCP_PATH: &str = "/v1/pages/mcp";
+
+/// Where the authorization-code grant is mounted (issue #72): `authorize`,
+/// `register` and `token` hang off it, and the discovery document names them.
+pub const OAUTH_PATH: &str = "/v1/oauth";
 
 // ---------------------------------------------------------------------------
 // The caller
@@ -411,9 +432,10 @@ impl Module for Tokens {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_EXPIRY];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 1] = [MIGRATION_INIT_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
+            [MIGRATION_INIT_POSTGRES, MIGRATION_EXPIRY_POSTGRES];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,

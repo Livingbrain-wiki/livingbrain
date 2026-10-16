@@ -66,6 +66,7 @@ pub use flow::{FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE};
 pub use handlers::{Caller, caller, caller_for};
 pub use install::{BotTokenError, bot_token};
 pub use livingbrain_pages::Answers;
+pub use members::{WorkspaceChoice, workspace_choices};
 pub use profile::{
     AVATAR_BODY_CEILING, AVATAR_CACHE_CONTROL, AVATAR_MAX_BYTES, AVATAR_MAX_SIDE, AVATAR_PREFIX,
     AvatarRebind, AvatarRef, CleanImage, ImageError, ImageKind, NAME_MAX_CHARS, NameError,

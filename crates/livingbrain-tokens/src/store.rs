@@ -116,7 +116,8 @@ impl Store {
     }
 
     /// Mints a token for one member and stores its hash. An empty `scopes`
-    /// stores the empty string, which reads back as "no subset".
+    /// stores the empty string, which reads back as "no subset". The token
+    /// never expires.
     pub(crate) async fn mint(
         &self,
         workspace_id: &str,
@@ -124,14 +125,34 @@ impl Store {
         name: &str,
         scopes: &[String],
     ) -> Result<Minted, DbError> {
+        self.mint_expiring(workspace_id, user_id, name, scopes, None)
+            .await
+    }
+
+    /// [`Store::mint`], with an optional expiry. `expires_at` is the instant
+    /// after which [`Store::verify`] refuses the token; `None` never refuses
+    /// it on time.
+    pub(crate) async fn mint_expiring(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        name: &str,
+        scopes: &[String],
+        expires_at: Option<OffsetDateTime>,
+    ) -> Result<Minted, DbError> {
         let (id, secret) = self.generate()?;
         let prefix = format!("{PREFIX_TAG}_{id}");
         let token = format!("{prefix}_{secret}");
         let created_at = stamp(self.clock.now());
+        let expires_at = match expires_at {
+            Some(at) => text(&stamp(at)),
+            None => Value::String(None),
+        };
         let statement = Statement::with_values(
             "INSERT INTO personal_access_tokens \
-                 (prefix, secret_hash, workspace_id, user_id, name, scopes, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (prefix, secret_hash, workspace_id, user_id, name, scopes, created_at, \
+                  expires_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 text(&prefix),
                 text(&sha256_hex(&token)),
@@ -140,6 +161,7 @@ impl Store {
                 text(name),
                 text(&scopes.join(" ")),
                 text(&created_at),
+                expires_at,
             ],
         );
         self.db.execute(&statement).await?;
@@ -161,7 +183,7 @@ impl Store {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT secret_hash, workspace_id, user_id, scopes, revoked_at \
+                "SELECT secret_hash, workspace_id, user_id, scopes, revoked_at, expires_at \
                  FROM personal_access_tokens WHERE prefix = ?",
                 vec![text(prefix)],
             ))
@@ -170,8 +192,14 @@ impl Store {
             return Ok(None);
         };
         let field = |name: &str| row.get::<Option<String>>(name).flatten();
-        // A revoked key is refused by the same path as an unknown one.
+        // A revoked key is refused by the same path as an unknown one, and so
+        // is one past its expiry.
         if field("revoked_at").is_some() {
+            return Ok(None);
+        }
+        if let Some(expiry) = field("expires_at")
+            && !live_at(&expiry, self.clock.now())
+        {
             return Ok(None);
         }
         let Some(expected) = field("secret_hash") else {
@@ -201,15 +229,21 @@ impl Store {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT prefix, name, scopes, created_at FROM personal_access_tokens \
+                "SELECT prefix, name, scopes, created_at, expires_at FROM personal_access_tokens \
                  WHERE workspace_id = ? AND user_id = ? AND revoked_at IS NULL \
                  ORDER BY created_at DESC, prefix ASC",
                 vec![text(workspace_id), text(user_id)],
             ))
             .await?;
+        let now = self.clock.now();
         Ok(rows
             .rows
             .iter()
+            .filter(|row| {
+                row.get::<Option<String>>("expires_at")
+                    .flatten()
+                    .is_none_or(|expiry| live_at(&expiry, now))
+            })
             .map(|row| {
                 let field = |name: &str| {
                     row.get::<Option<String>>(name)
@@ -224,6 +258,23 @@ impl Store {
                 }
             })
             .collect())
+    }
+
+    /// Whether the token named by `prefix` has not been revoked. Expiry is
+    /// deliberately not consulted: a refresh exists to renew a token that has
+    /// run out, so only revocation ends the chain.
+    pub(crate) async fn is_unrevoked(&self, prefix: &str) -> Result<bool, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT revoked_at FROM personal_access_tokens WHERE prefix = ?",
+                vec![text(prefix)],
+            ))
+            .await?;
+        Ok(rows
+            .rows
+            .first()
+            .is_some_and(|row| row.get::<Option<String>>("revoked_at").flatten().is_none()))
     }
 
     /// Revokes one of a member's own tokens. `Ok(false)` when the prefix
@@ -248,6 +299,12 @@ impl Store {
         );
         Ok(self.db.execute(&statement).await? > 0)
     }
+}
+
+/// Whether an expiry stamp is still in the future. An unreadable stamp is not:
+/// a token whose expiry cannot be read is refused rather than kept forever.
+fn live_at(expiry: &str, now: OffsetDateTime) -> bool {
+    OffsetDateTime::parse(expiry, &Rfc3339).is_ok_and(|at| at > now)
 }
 
 /// `{prefix}_{secret}` into its public half, refusing a malformed token

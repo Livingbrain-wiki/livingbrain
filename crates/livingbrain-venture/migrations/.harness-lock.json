@@ -186,5 +186,13 @@
   "coding-agents/0006": {
     "file": "0047_coding-agents_0006_dreaming_settings.sql",
     "sha256": "cf5077af3b7ce774bb533bb766a4700273003cc91a63dcabcbf1212d8fce174e"
+  },
+  "tokens/0002": {
+    "file": "0048_tokens_0002_expiry.sql",
+    "sha256": "4ade36a010e2605fc98b6bef2de1599fe07a3000f7282472926ca57135e7c689"
+  },
+  "oauth/0001": {
+    "file": "0049_oauth_0001_init.sql",
+    "sha256": "0874b704218bbee32dcc2539ba5fada150397ff3c3746f4de3c28881850310fa"
   }
 }

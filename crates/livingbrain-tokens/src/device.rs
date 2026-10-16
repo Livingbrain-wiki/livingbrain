@@ -171,7 +171,7 @@ impl Approver for SessionApprover {
 /// `sign_in_url` with `return_to` appended, percent-encoded rather than
 /// concatenated — it always carries its own query, so it could otherwise
 /// break out of the parameter.
-fn sign_in_location(sign_in_url: &str, return_to: &str) -> String {
+pub(crate) fn sign_in_location(sign_in_url: &str, return_to: &str) -> String {
     let encoded: String = return_to
         .bytes()
         .map(|byte| match byte {

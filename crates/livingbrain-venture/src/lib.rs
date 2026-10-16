@@ -61,7 +61,7 @@ use livingbrain_mcp::{Asker, AuthError, BearerAuth};
 use livingbrain_models::Models;
 use livingbrain_models::jev::{JevConnector, JevKey};
 use livingbrain_pages::{Answered, Answers, PageAnswers, PageStore, Pages};
-use livingbrain_tokens::{Authenticated, Avatars, DevicePorts, Me, Tokens};
+use livingbrain_tokens::{Authenticated, Avatars, DevicePorts, Me, OAuth, Tokens};
 use livingbrain_tools::Tools;
 use livingbrain_usage::Usage;
 use livingbrain_workspaces::{
@@ -437,6 +437,9 @@ fn build(
             .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))
+            // Issue #72: the authorization-code grant a browser MCP client (a
+            // Claude connector) signs in through, at `/v1/oauth/*`.
+            .module(OAuth::new())
             // `GET /v1/me` (ADR 0004): who a bearer or a session speaks for.
             .module(Me::new())
             // `GET /v1/avatars/{id}`: a member's or the workspace's avatar,
