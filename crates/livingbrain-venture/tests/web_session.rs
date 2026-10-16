@@ -18,7 +18,9 @@ use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, Request, Statu
 use cratefield_core::{Blob, Kid, Module, Payload, Signer, Statement};
 use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness};
-use livingbrain_api::{Ask, Export, Facts, Notes, PagesRebind, Search, Sources, pages_routes};
+use livingbrain_api::{
+    Ask, Export, Facts, Graph, Notes, PagesRebind, Search, Sources, pages_routes,
+};
 use livingbrain_pages::Pages;
 use livingbrain_tokens::Tokens;
 use livingbrain_workspaces::{SESSION_COOKIE, SESSION_PURPOSE, Workspaces};
@@ -57,6 +59,7 @@ fn kit() -> TestHarness {
         Box::new(Ask::new(wiki.clone())),
         Box::new(Export::new(wiki.clone())),
         Box::new(Facts::new(wiki.clone())),
+        Box::new(Graph::new(wiki.clone())),
         Box::new(Sources::new(wiki)),
         // The grants tables every wiki route reads its access plan from.
         Box::new(livingbrain_accounts::Access::new()),
@@ -567,6 +570,8 @@ async fn no_credential_and_a_forged_cookie_are_401() {
         "/v1/search?q=launch",
         "/v1/sources/projects",
         "/v1/sources?kind=agent_log",
+        "/v1/graph",
+        "/v1/graph?limit=5",
         "/v1/export",
     ] {
         let anon = send(&kit, Method::GET, path, Via::Anonymous, None).await;

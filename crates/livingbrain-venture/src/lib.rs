@@ -1767,6 +1767,26 @@ mod tests {
         );
     }
 
+    /// The brain map's route (`GET /v1/graph`) diverts to the CLI stack like
+    /// the listings it sits beside, and its module is mounted with the key
+    /// ring. Without this the map would be served by `serve`, which answers
+    /// 404 to an anonymous caller instead of the 401 every other route gives.
+    #[test]
+    fn the_graph_route_diverts_and_its_module_is_mounted() {
+        let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
+            .expect("a well-formed key");
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        assert!(serves_cli(&harness, "/v1/graph"), "the map must divert");
+        assert!(
+            harness.modules().iter().any(|m| m.name() == "graph"),
+            "the graph module mounts with the key ring"
+        );
+        assert!(
+            !serves_cli(&harness, "/v1/graphs"),
+            "a sibling path that only shares the prefix does not divert"
+        );
+    }
+
     /// A token carrying a cookie delimiter is refused before it is spliced
     /// into a `Cookie` header, so it cannot smuggle a second cookie in.
     #[test]
@@ -1786,7 +1806,9 @@ mod tests {
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
-        for module in ["notes", "search", "ask", "export", "sources", "facts"] {
+        for module in [
+            "notes", "search", "ask", "export", "sources", "facts", "graph",
+        ] {
             assert!(!names.contains(&module), "{names:?}");
         }
         for route in CLI_ROUTES {

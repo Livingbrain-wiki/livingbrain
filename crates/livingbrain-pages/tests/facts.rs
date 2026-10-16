@@ -270,6 +270,10 @@ fn values_are_sealed_and_redacted() {
         let kit = kit();
         let mut input = shoe("40", None);
         input.quote = Some("mail me at ada@example.com, size 40".to_owned());
+        // The sealed column is base64 of random ciphertext, so a short probe
+        // such as "EU" turns up in it by chance; the unit witness must be
+        // long enough that a match is not a realistic outcome.
+        input.unit = Some("eu-shoe-unit".to_owned());
         let recorded = kit.facts.record("user-a", input, "u-a").await.unwrap();
         assert!(
             !recorded
@@ -285,7 +289,7 @@ fn values_are_sealed_and_redacted() {
             .await
             .unwrap();
         let sealed = rows.rows[0].get::<String>("sealed").unwrap();
-        assert!(!sealed.contains("size 40") && !sealed.contains("EU"));
+        assert!(!sealed.contains("size 40") && !sealed.contains("eu-shoe-unit"));
         // Undated: valid from the observation instant.
         assert_eq!(recorded.fact.valid_from.text(), "2025-03-02T12:00:00Z");
     });
