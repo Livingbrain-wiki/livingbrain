@@ -182,5 +182,9 @@
   "discord/0001": {
     "file": "0046_discord_0001_init.sql",
     "sha256": "49474a0585db89c5801f1281fdb67868b596043a22f54439fde34b59e821a162"
+  },
+  "coding-agents/0006": {
+    "file": "0047_coding-agents_0006_dreaming_settings.sql",
+    "sha256": "cf5077af3b7ce774bb533bb766a4700273003cc91a63dcabcbf1212d8fce174e"
   }
 }

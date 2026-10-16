@@ -154,6 +154,7 @@ import { wikiPage, projectSegment } from "./wiki.js";
 import { createMultiSelect } from "./multiselect.js";
 import { mountShell } from "./shell.js";
 import { brainPage } from "./brain.js";
+import { dreamingPage } from "./dreaming.js";
 import { settingsTab, SETTINGS_TABS } from "./nav.js";
 import {
   nameError,
@@ -3035,6 +3036,7 @@ async function wireAccess() {
 // The controller itself lives in `wiki.js`, imported above; boot passes no
 // arguments, so the registry entry closes over this module's `api` wrapper.
 pages.wiki = () => wikiPage(api);
+pages.dreaming = () => dreamingPage(api);
 
 /**
  * `LB` is the app's whole public surface: the DOM helpers, the fetch wrapper,

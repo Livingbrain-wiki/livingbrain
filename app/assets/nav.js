@@ -19,6 +19,7 @@ export const NAV = Object.freeze([
       { id: "ask", label: "Ask the brain", href: "wiki.html?view=ask", icon: "ask", hint: "Search pages, or ask a question" },
       { id: "pages", label: "Pages", href: "wiki.html", icon: "pages", hint: "Your projects, then pinned and recent pages" },
       { id: "facts", label: "Facts", href: "wiki.html?view=facts", icon: "facts", hint: "What is true, and since when" },
+      { id: "dreaming", label: "Dreaming", href: "dreaming.html", icon: "moon", hint: "How the brain tidies its facts" },
       { id: "map", label: "Brain map", href: "brain.html", icon: "map", hint: "Your brain as a 3D graph" },
     ],
   },
@@ -128,6 +129,7 @@ export function activeId({ pathname = "", search = "", hash = "" } = {}, view = 
   const file = pageFile(pathname);
   if (file === "index.html") return "home";
   if (file === "brain.html") return "map";
+  if (file === "dreaming.html") return "dreaming";
   if (file === "settings.html") return settingsTab(hash);
   if (file === "wiki.html") {
     const params = new URLSearchParams(search);
@@ -322,6 +324,7 @@ export const ICONS = Object.freeze({
   plug: ["M9 3v5", "M15 3v5", "M6 8h12v3a6 6 0 0 1-12 0z", "M12 17v4"],
   key: ["M8 14a4 4 0 1 0 0-.01", "M11 11l9-9", "M17 5l2 2", "M15 7l2 2"],
   user: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M4 21a8 8 0 0 1 16 0"],
+  moon: ["M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"],
   collapse: ["M15 6l-6 6 6 6"],
   expand: ["M9 6l6 6-6 6"],
 });

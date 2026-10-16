@@ -163,7 +163,8 @@ test("palette: an empty query lists every destination, then the actions", () => 
 });
 
 test("palette: a query narrows destinations, lists page hits, and offers to ask", () => {
-  assert.deepEqual(matchDestinations("fac").map((item) => item.id), ["facts"]);
+  // Dreaming's hint says "its facts", so it matches too, after the label hit.
+  assert.deepEqual(matchDestinations("fac").map((item) => item.id), ["facts", "dreaming"]);
   assert.deepEqual(matchDestinations("token").map((item) => item.id), ["tokens"]);
   // A word from the hint finds it too.
   assert.ok(matchDestinations("budgets").some((item) => item.id === "limits"));

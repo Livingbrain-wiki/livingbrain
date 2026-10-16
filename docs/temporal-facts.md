@@ -428,7 +428,8 @@ Worker's cron tick, after the compile drain.
   reason (a short lowercase word), and the ids the model was shown as JSON.
   That log is the record of why a fact changed, and training data for a later
   model that learns ADD / UPDATE / DELETE / NOOP over facts. The `model`
-  column records the call's role (`dreaming`), not the model id.
+  column records the job slot the call ran on (`main`, `triage` or
+  `research`; `rules` for a rule-pass retraction), not the model id.
 - **Read.** A timeline in `GET /v1/facts` carries `dream` (`at`,
   `facts_seen`, `decisions`, `applied`) when it was tidied, and each fact a
   decision applied to carries `dreamed` (`retract`, `end`, `supersede` or
@@ -436,4 +437,54 @@ Worker's cron tick, after the compile drain.
   updated" and "Ended while dreaming".
 - **Forgetting.** `forget_scope` deletes both tables' rows with the scope's
   facts.
+
+### Settings and the Dreaming page
+
+Each workspace chooses how its dreaming runs (migration
+`0047_coding-agents_0006_dreaming_settings`, table `dreaming_settings`, one
+row per workspace that changed anything; a missing row is the defaults).
+
+- `enabled` (default on). Off: the cron neither runs the model pass nor the
+  rule pass for the workspace's scopes, queues nothing for them, and leaves
+  what was already queued unspent until it is turned back on.
+- `rules_enabled` (default on). Off: the rule pass keeps the workspace's facts;
+  the model pass still runs. The rule scan's position moves over every
+  workspace's facts, so a fact passed over while its workspace had the rules
+  off is reached again only when the scan wraps round.
+- `model` (default `main`). The job slot a dream calls: `main`, `triage` or
+  `research`. Only a slot the workspace has connected in Settings → Models
+  can be chosen (`triage` and `research` fall back to Main when unconnected,
+  so they are not offered then). The model is the one `invoke` resolves for
+  that slot, and it is spent from the same compile budget as a compile.
+- `run_requested_at`. "Run now" sets it; the next cron tick marks each of the
+  workspace's subjects that are not already queued or running as due, and
+  clears it. Nothing is computed in the request.
+- No per-feature budget share: the compile budget is one pool per workspace
+  (`coding_agent_spend`), so dreaming has no cap of its own. A `daily_budget_share`
+  would need that pool split by feature first.
+
+Routes, all under `/v1/dreaming` (`livingbrain-api`, module `dreaming`):
+
+- `GET /` — any member: the three settings, the slots and whether each is
+  connected (`models`), `editable` (owner or admin), and the status strip:
+  `queued`, `reviewed_week` (subjects whose last pass finished in the last
+  seven days), `last_run_at`, `changes_week` (applied decisions by op) and
+  `run_requested`.
+- `PUT /` — owner or admin: any of `enabled`, `rules_enabled`, `model`; a model
+  not connected is a 422, an unknown slot a 400. Nothing else is written.
+- `GET /decisions?limit=&before=` — any member: the decision log of the scopes
+  the caller may read (the facts access plan's read scopes, then the subject's
+  grant), newest pass first and in the model's order within a pass, each row
+  with `op`, `applied`, `reason`, `subject`, `where`, the `fact` and `by`
+  (attribute and value, read from the same scope), `new_attribute`,
+  `new_valid_to`, `model` and `at`. `next` is the `before` of the next page,
+  `dream_at|scope|seq`.
+- `POST /run` — owner or admin: sets `run_requested_at`. 409 while dreaming is
+  off.
+
+The web app's page is `dreaming.html` (sidebar: Brain → Dreaming). Its
+settings card is read-only for a member; the status strip and "Recent changes"
+are for everyone. A refused decision is shown muted with the reason in plain
+words; the page never shows the internal words (`op`, `scope`, `cursor`,
+`supersede`).
 

@@ -326,6 +326,24 @@ pub struct DreamPass {
     pub applied: i64,
 }
 
+/// One row of the decision log, as a read returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DreamDecisionRecord {
+    pub scope: String,
+    pub dream_at: String,
+    pub seq: i64,
+    pub subject: String,
+    pub op: String,
+    pub fact_id: String,
+    pub by_fact_id: Option<String>,
+    pub new_valid_to: Option<String>,
+    pub new_attribute: Option<String>,
+    pub reason: Option<String>,
+    pub applied: bool,
+    pub model: String,
+    pub decided_at: String,
+}
+
 /// What dreaming did in a set of scopes: the passes, and every applied
 /// decision as `(scope, subject, fact id, op)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1347,6 +1365,69 @@ impl FactStore {
             .await
             .map_err(PageError::Store)?;
         Ok(())
+    }
+
+    /// The decision log in `scopes`, newest pass first, then by scope and
+    /// position in the pass. `before` is the `(dream_at, scope, seq)` of the
+    /// last row of the previous page; `limit` rows are read (the caller asks
+    /// for one more to know whether a page follows). Scope-filtered like every
+    /// read here.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_decisions(
+        &self,
+        scopes: &[&str],
+        before: Option<(&str, &str, i64)>,
+        limit: usize,
+    ) -> Result<Vec<DreamDecisionRecord>, FactError> {
+        if scopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut values = Vec::new();
+        let placeholders = in_list(scopes, &mut values);
+        let mut sql = format!(
+            "SELECT scope, dream_at, seq, subject, op, fact_id, by_fact_id, new_valid_to, \
+             new_attribute, reason, applied, model, decided_at FROM fact_dream_decisions \
+             WHERE scope IN ({placeholders})"
+        );
+        if let Some((dream_at, scope, seq)) = before {
+            sql.push_str(
+                " AND (dream_at < ? OR (dream_at = ? AND (scope > ? OR (scope = ? AND seq > ?))))",
+            );
+            values.push(text(dream_at));
+            values.push(text(dream_at));
+            values.push(text(scope));
+            values.push(text(scope));
+            values.push(SeaValue::BigInt(Some(seq)));
+        }
+        sql.push_str(" ORDER BY dream_at DESC, scope ASC, seq ASC LIMIT ?");
+        values.push(SeaValue::BigInt(Some(limit as i64)));
+        let rows = self
+            .db
+            .query(&Statement::with_values(sql, values))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .iter()
+            .map(|row| DreamDecisionRecord {
+                scope: row.get::<String>("scope").unwrap_or_default(),
+                dream_at: row.get::<String>("dream_at").unwrap_or_default(),
+                seq: row.get::<i64>("seq").unwrap_or_default(),
+                subject: row.get::<String>("subject").unwrap_or_default(),
+                op: row.get::<String>("op").unwrap_or_default(),
+                fact_id: row.get::<String>("fact_id").unwrap_or_default(),
+                by_fact_id: row.get::<String>("by_fact_id"),
+                new_valid_to: row.get::<String>("new_valid_to"),
+                new_attribute: row.get::<String>("new_attribute"),
+                reason: row.get::<String>("reason"),
+                applied: row.get::<i64>("applied").unwrap_or_default() != 0,
+                model: row.get::<String>("model").unwrap_or_default(),
+                decided_at: row.get::<String>("decided_at").unwrap_or_default(),
+            })
+            .collect())
     }
 
     /// What dreaming did in the asker's scopes: each completed pass per

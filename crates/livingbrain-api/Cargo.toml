@@ -51,6 +51,7 @@ livingbrain-tokens = { path = "../livingbrain-tokens" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 # The grants tables a test harness needs beside the routes (ADR 0004).
