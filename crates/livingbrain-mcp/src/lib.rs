@@ -18,8 +18,8 @@ mod protocol;
 mod sources;
 mod tools;
 
-pub use auth::{Asker, AuthError, BearerAuth, page_scope, page_scopes};
-pub use sources::sources_router;
+pub use auth::{Asker, AuthError, BearerAuth, SessionAuth, page_scope, page_scopes};
+pub use sources::{sources_router, sources_router_with_session};
 
 use std::sync::Arc;
 

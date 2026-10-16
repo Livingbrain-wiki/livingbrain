@@ -159,7 +159,12 @@ import {
   profileView,
   profileErrorMessage,
   paintAvatar,
-  cropToSquare,
+  AVATAR_SIDE,
+  cropRect,
+  panCrop,
+  drawCrop,
+  encodeAvatar,
+  readImage,
 } from "./profile.js";
 import { mountGithub } from "./github.js";
 import { startUpdateWatch } from "./update.js";
@@ -1976,66 +1981,174 @@ async function wireMembers() {
 /* --- your profile and the workspace's -------------------------------- */
 
 /**
- * One picture editor: a file input, a canvas that previews the centred
- * square crop, and Use / Cancel / Remove. `target` is `"me"` or
- * `"workspace"`; `after` runs once the server has the change.
+ * One picture editor: a square you click or drop an image on. Picking one
+ * turns the square into a cropper — drag to move, the slider or the wheel to
+ * zoom, a circle showing what a round avatar keeps — with Use / Cancel; with
+ * a stored picture, Remove. `target` is `"me"` or `"workspace"`; `after`
+ * runs once the server has the change.
  */
 function wireAvatarEditor({ prefix, target, status, what, after }) {
+  const picker = $(`#${prefix}-picker`);
   const avatar = $(`#${prefix}-avatar`);
   const preview = $(`#${prefix}-preview`);
+  const guide = $(`#${prefix}-guide`);
+  const zoomRow = $(`#${prefix}-zoom-row`);
+  const zoom = $(`#${prefix}-zoom`);
   const file = $(`#${prefix}-file`);
   const save = $(`#${prefix}-avatar-save`);
   const cancel = $(`#${prefix}-avatar-cancel`);
   const remove = $(`#${prefix}-avatar-remove`);
-  if (!avatar || !preview || !file || !save || !cancel || !remove) return { paint() {}, enable() {} };
-  let pending = null;
+  if (!picker || !avatar || !preview || !file || !save || !cancel || !remove) return { paint() {}, enable() {} };
+  let image = null;
+  let view = null;
   let person = {};
+  let enabled = true;
 
-  const showPreview = (on) => {
+  const draw = () => {
+    if (!image) return;
+    view = cropRect(image.width, image.height, view || {});
+    drawCrop(preview, image, view);
+    if (zoom) zoom.value = String(view.zoom);
+  };
+  const showCrop = (on) => {
     preview.hidden = !on;
     avatar.hidden = on;
+    if (guide) guide.hidden = !on;
+    if (zoomRow) zoomRow.hidden = !on;
+    picker.classList.toggle("is-cropping", on);
+    picker.setAttribute("aria-label", on ? "Drag to move the picture; arrow keys move it, + and - zoom" : picker.dataset.label);
     save.hidden = !on;
     cancel.hidden = !on;
     remove.hidden = on || !person.url;
   };
   const reset = () => {
-    pending = null;
+    if (image && typeof image.close === "function") image.close();
+    image = null;
+    view = null;
     file.value = "";
-    fieldError(`${prefix}File`, "", file);
-    showPreview(false);
+    fieldError(`${prefix}File`, "", picker);
+    showCrop(false);
   };
+  picker.dataset.label = picker.getAttribute("aria-label") || "Change the picture";
 
-  file.addEventListener("change", async () => {
-    const picked = file.files && file.files[0];
+  const take = async (picked) => {
+    if (!enabled) return;
     const problem = avatarFileError(picked);
     if (problem) {
-      fieldError(`${prefix}File`, problem, file);
+      fieldError(`${prefix}File`, problem, picker);
       return;
     }
     try {
-      const { blob } = await cropToSquare(picked, preview);
-      avatarUploadRequest(blob, target);
-      pending = blob;
-      fieldError(`${prefix}File`, "", file);
-      showPreview(true);
+      const next = await readImage(picked);
+      reset();
+      image = next;
+      view = { zoom: 1 };
+      showCrop(true);
+      draw();
     } catch (error) {
-      pending = null;
-      fieldError(`${prefix}File`, error.message || "The image could not be read.", file);
-      showPreview(false);
+      reset();
+      fieldError(`${prefix}File`, error.message || "The image could not be read.", picker);
+    }
+  };
+
+  file.addEventListener("change", () => take(file.files && file.files[0]));
+  picker.addEventListener("click", () => {
+    if (enabled && !image) file.click();
+  });
+
+  // Drop an image on the square, whether or not one is being cropped.
+  picker.addEventListener("dragover", (event) => {
+    if (!enabled) return;
+    event.preventDefault();
+    picker.classList.add("is-over");
+  });
+  picker.addEventListener("dragleave", () => picker.classList.remove("is-over"));
+  picker.addEventListener("drop", (event) => {
+    picker.classList.remove("is-over");
+    if (!enabled) return;
+    event.preventDefault();
+    const dropped = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+    if (dropped) take(dropped);
+  });
+
+  // Drag to move the crop.
+  let drag = null;
+  picker.addEventListener("pointerdown", (event) => {
+    if (!image) return;
+    drag = { x: event.clientX, y: event.clientY };
+    picker.setPointerCapture(event.pointerId);
+  });
+  picker.addEventListener("pointermove", (event) => {
+    if (!drag || !image) return;
+    const shown = picker.getBoundingClientRect().width;
+    view = panCrop(image.width, image.height, view, event.clientX - drag.x, event.clientY - drag.y, shown);
+    drag = { x: event.clientX, y: event.clientY };
+    draw();
+  });
+  const endDrag = () => {
+    drag = null;
+  };
+  picker.addEventListener("pointerup", endDrag);
+  picker.addEventListener("pointercancel", endDrag);
+
+  // Zoom about the centre: the slider, the wheel, and + / - on the keyboard.
+  const zoomTo = (value) => {
+    if (!image) return;
+    view = { ...view, zoom: value };
+    draw();
+  };
+  if (zoom) zoom.addEventListener("input", () => zoomTo(Number(zoom.value)));
+  picker.addEventListener(
+    "wheel",
+    (event) => {
+      if (!image) return;
+      event.preventDefault();
+      zoomTo(view.zoom * Math.exp(-event.deltaY / 400));
+    },
+    { passive: false },
+  );
+  picker.addEventListener("keydown", (event) => {
+    if (!enabled) return;
+    if (!image) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        file.click();
+      }
+      return;
+    }
+    const step = 8;
+    const moves = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] };
+    if (moves[event.key]) {
+      event.preventDefault();
+      const shown = picker.getBoundingClientRect().width;
+      view = panCrop(image.width, image.height, view, moves[event.key][0], moves[event.key][1], shown);
+      draw();
+    } else if (event.key === "+" || event.key === "=") {
+      zoomTo(view.zoom * 1.1);
+    } else if (event.key === "-") {
+      zoomTo(view.zoom / 1.1);
+    } else if (event.key === "Escape") {
+      reset();
     }
   });
 
   save.addEventListener("click", async () => {
-    if (!pending) return;
+    if (!image) return;
     save.disabled = true;
     try {
-      const request = avatarUploadRequest(pending, target);
+      // The upload is drawn fresh at `AVATAR_SIDE`, from the same view.
+      const out = document.createElement("canvas");
+      out.width = AVATAR_SIDE;
+      out.height = AVATAR_SIDE;
+      drawCrop(out, image, view);
+      const request = avatarUploadRequest(await encodeAvatar(out), target);
       await api(request.path, { method: request.method, raw: request.raw, contentType: request.contentType });
       reset();
       toast("Picture saved.", "ok");
       await after();
     } catch (error) {
-      notice(status, profileErrorMessage(error, `save ${what} picture`), "bad");
+      if (error && error.status) notice(status, profileErrorMessage(error, `save ${what} picture`), "bad");
+      else fieldError(`${prefix}File`, error.message || "The image could not be prepared.", picker);
     } finally {
       save.disabled = false;
     }
@@ -2069,7 +2182,9 @@ function wireAvatarEditor({ prefix, target, status, what, after }) {
     },
     /** Read-only for someone who may not change it. */
     enable(on) {
-      file.disabled = !on;
+      enabled = on;
+      picker.setAttribute("aria-disabled", on ? "false" : "true");
+      picker.tabIndex = on ? 0 : -1;
       if (!on) {
         reset();
         remove.hidden = true;

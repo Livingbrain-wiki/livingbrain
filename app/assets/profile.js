@@ -208,14 +208,69 @@ export function squareCrop(width, height) {
   return { sx: Math.floor((width - side) / 2), sy: Math.floor((height - side) / 2), side };
 }
 
+/** The most the cropper zooms in: a quarter of the largest square. */
+export const ZOOM_MAX = 4;
+
 /**
- * Crops `file` to its centred square, scaled to `AVATAR_SIDE`, on `canvas` —
- * which is also the preview, so nothing needs a `blob:` URL and the page's
- * `img-src` stays `'self' data:`. Answers the canvas and the image to upload:
- * WebP where the browser encodes it, PNG otherwise, and JPEG if that is still
- * over the limit. Re-encoding through a canvas is also what leaves the
- * original's metadata (EXIF, GPS) behind before anything is sent; the server
- * strips it again regardless.
+ * The source square a crop view shows, in image pixels: `zoom` from 1 (the
+ * largest square that fits) to `ZOOM_MAX`, centred on `(cx, cy)` and kept
+ * inside the image. Answers the square and the centre it was clamped to.
+ */
+export function cropRect(width, height, { zoom = 1, cx = width / 2, cy = height / 2 } = {}) {
+  const fit = Math.max(0, Math.min(Number(width) || 0, Number(height) || 0));
+  const z = Math.min(ZOOM_MAX, Math.max(1, Number(zoom) || 1));
+  const side = fit / z;
+  const half = side / 2;
+  const x = Math.min(Math.max(Number(cx), half), width - half);
+  const y = Math.min(Math.max(Number(cy), half), height - half);
+  return { sx: x - half, sy: y - half, side, cx: x, cy: y, zoom: z };
+}
+
+/** The view after dragging `dx, dy` screen pixels across a crop shown
+ * `shown` pixels wide: the image moves with the pointer, so the centre moves
+ * the other way, scaled from screen to image pixels. */
+export function panCrop(width, height, view, dx, dy, shown) {
+  const rect = cropRect(width, height, view);
+  const scale = shown > 0 ? rect.side / shown : 0;
+  return cropRect(width, height, { zoom: rect.zoom, cx: rect.cx - dx * scale, cy: rect.cy - dy * scale });
+}
+
+/** Draws the `rect` of `image` onto `canvas`, filling it. */
+export function drawCrop(canvas, image, rect) {
+  const context = canvas.getContext("2d");
+  context.imageSmoothingQuality = "high";
+  if (typeof context.clearRect === "function") context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, rect.sx, rect.sy, rect.side, rect.side, 0, 0, canvas.width, canvas.height);
+}
+
+/**
+ * The image to upload from a canvas holding the crop at `AVATAR_SIDE`: WebP
+ * where the browser encodes it, PNG otherwise, and JPEG if that is still over
+ * the limit. Re-encoding through a canvas is also what leaves the original's
+ * metadata (EXIF, GPS) behind before anything is sent; the server strips it
+ * again regardless.
+ */
+export async function encodeAvatar(canvas) {
+  const encode = (type, quality) =>
+    new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), type, quality));
+  let blob = await encode("image/webp", 0.9);
+  if (!blob || blob.type !== "image/webp") blob = await encode("image/png");
+  if (blob && blob.size > AVATAR_MAX_BYTES) blob = await encode("image/jpeg", 0.85);
+  if (!blob) throw new Error("The image could not be prepared.");
+  return blob;
+}
+
+/** Reads a picked file into something a canvas can draw. */
+export async function readImage(file, { createBitmap = globalThis.createImageBitmap } = {}) {
+  if (typeof createBitmap !== "function") throw new Error("This browser cannot read the image.");
+  const bitmap = await createBitmap(file);
+  if (!bitmap.width || !bitmap.height) throw new Error("The image has no pixels.");
+  return bitmap;
+}
+
+/**
+ * Crops `file` to its centred square, scaled to `AVATAR_SIDE`, on `canvas`,
+ * and answers the canvas and the encoded image (see `encodeAvatar`).
  */
 export async function cropToSquare(file, canvas, { createBitmap = globalThis.createImageBitmap } = {}) {
   if (typeof createBitmap !== "function") throw new Error("This browser cannot read the image.");
@@ -224,15 +279,7 @@ export async function cropToSquare(file, canvas, { createBitmap = globalThis.cre
   if (!side) throw new Error("The image has no pixels.");
   canvas.width = AVATAR_SIDE;
   canvas.height = AVATAR_SIDE;
-  const context = canvas.getContext("2d");
-  context.imageSmoothingQuality = "high";
-  context.drawImage(bitmap, sx, sy, side, side, 0, 0, AVATAR_SIDE, AVATAR_SIDE);
+  drawCrop(canvas, bitmap, { sx, sy, side });
   if (typeof bitmap.close === "function") bitmap.close();
-  const encode = (type, quality) =>
-    new Promise((resolve) => canvas.toBlob((blob) => resolve(blob), type, quality));
-  let blob = await encode("image/webp", 0.9);
-  if (!blob || blob.type !== "image/webp") blob = await encode("image/png");
-  if (blob && blob.size > AVATAR_MAX_BYTES) blob = await encode("image/jpeg", 0.85);
-  if (!blob) throw new Error("The image could not be prepared.");
-  return { canvas, blob };
+  return { canvas, blob: await encodeAvatar(canvas) };
 }

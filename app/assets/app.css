@@ -3267,8 +3267,106 @@ main > p.tiny:last-child {
   flex: 1 1 16rem;
   min-width: 0;
 }
-.profile__pic-actions input[type="file"] {
-  max-width: min(100%, 28rem);
+
+/* The picture picker: one square you click or drop an image on. With an
+   image picked it becomes the cropper — drag to move, the slider or the
+   wheel to zoom — and the circle shows what a round avatar keeps. */
+.pic-picker {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 9rem;
+  height: 9rem;
+  overflow: hidden;
+  border: 1px dashed var(--field-line);
+  border-radius: 14px;
+  background: var(--bg3);
+  color: var(--ink3);
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.pic-picker:hover,
+.pic-picker.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.pic-picker:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.pic-picker[aria-disabled="true"] {
+  cursor: default;
+}
+.pic-picker .avatar--xl {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  font-size: 48px;
+}
+.pic-picker__label {
+  position: absolute;
+  inset: auto 0 0;
+  padding: 6px 0;
+  background: oklch(0 0 0 / 0.55);
+  color: oklch(1 0 0 / 0.92);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+  pointer-events: none;
+}
+.pic-picker:hover .pic-picker__label,
+.pic-picker:focus-visible .pic-picker__label,
+.pic-picker.is-over .pic-picker__label {
+  opacity: 1;
+}
+.pic-picker[aria-disabled="true"] .pic-picker__label {
+  display: none;
+}
+.pic-picker.is-cropping {
+  border-style: solid;
+  border-color: var(--line);
+  cursor: grab;
+  touch-action: none;
+}
+.pic-picker.is-cropping:active {
+  cursor: grabbing;
+}
+.pic-picker.is-cropping .pic-picker__label {
+  display: none;
+}
+.pic-picker canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.pic-picker__guide {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 100vmax oklch(0 0 0 / 0.42);
+  outline: 1px solid oklch(1 0 0 / 0.6);
+  pointer-events: none;
+}
+.pic-picker__guide[hidden] {
+  display: none;
+}
+.pic-picker__zoom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 9rem;
+  color: var(--ink3);
+  font-size: 12px;
+}
+.pic-picker__zoom[hidden] {
+  display: none;
+}
+.pic-picker__zoom input {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
 }
 .profile__name {
   max-width: 32rem;
@@ -3895,4 +3993,119 @@ body[data-page="signin"]:not([data-session="signed-in"]) .topbar .brand__word {
 }
 .github-owner span {
   white-space: nowrap;
+}
+
+/* Imports → upload: a drop zone for notes or a whole folder. */
+.upload {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.upload[hidden] {
+  display: none;
+}
+.dropzone {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: var(--space-4) var(--space-3);
+  border: 1.5px dashed var(--field-line);
+  border-radius: 14px;
+  background: var(--bg2);
+  color: var(--ink2);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.dropzone:hover,
+.dropzone.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.dropzone:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.dropzone.is-busy {
+  cursor: progress;
+  opacity: 0.7;
+}
+.dropzone__icon {
+  color: var(--accent);
+}
+.dropzone__title {
+  color: var(--ink);
+  font-weight: 600;
+}
+.dropzone__hint {
+  max-width: 34rem;
+  color: var(--ink3);
+  font-size: 0.875rem;
+}
+.dropzone__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.upload__options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+.segmented {
+  display: inline-flex;
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg2);
+}
+.segmented label {
+  position: relative;
+  padding: 5px 12px;
+  border-radius: 7px;
+  color: var(--ink2);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.segmented label:has(input:checked) {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.segmented label:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+}
+.upload__project {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink3);
+  font-size: 0.875rem;
+}
+.upload__project input {
+  width: 12rem;
+  max-width: 100%;
+}
+.upload__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink2);
+  font-size: 0.875rem;
+}
+.upload__progress[hidden] {
+  display: none;
+}
+.upload__progress progress {
+  flex: 0 1 16rem;
+  height: 6px;
+  accent-color: var(--accent);
 }
