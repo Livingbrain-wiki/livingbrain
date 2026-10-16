@@ -29,6 +29,12 @@ const SUBJECT_TYPES: [&str; 7] = [
 /// The most facts one compile may emit (the spec's per-request cap).
 pub const MAX_FACTS: usize = 50;
 
+/// Who the store records as the writer of a compiled fact (`written_by`).
+/// Only facts with this writer are the compiler's own: the dreaming rule
+/// pass retracts nothing else, so a fact a person or the API wrote is never
+/// removed by a rule.
+pub const COMPILER_WRITER: &str = "brain:coding-agents";
+
 /// The most current facts of a subject the model is shown, or dreaming
 /// reads. The newest are kept: a prompt of every fact an old subject ever
 /// had would crowd out the session it is about.
@@ -146,16 +152,28 @@ pub struct HeldFact {
     pub last_confirmed_at: String,
 }
 
-/// The newest `MAX_HELD` of `held`, newest `valid_from` first.
+/// The newest `MAX_HELD` of `held`, newest `valid_from` first, by the date
+/// each starts at (not by its text). A `valid_from` that is not a date sorts
+/// last.
 #[must_use]
 pub fn newest_first(mut held: Vec<HeldFact>) -> Vec<HeldFact> {
     held.sort_by(|a, b| {
-        b.valid_from
-            .cmp(&a.valid_from)
+        livingbrain_pages::date_start(&b.valid_from)
+            .cmp(&livingbrain_pages::date_start(&a.valid_from))
             .then_with(|| a.id.cmp(&b.id))
     });
     held.truncate(MAX_HELD);
     held
+}
+
+/// Whether the date `a` starts strictly before the date `b` starts, both as
+/// written (`2026`, `2026-10`, `2026-10-15` or RFC 3339). `None` when either
+/// is not a date: the caller refuses rather than guess. `2026` does not start
+/// before `2026-01-01` (the same instant), and an RFC 3339 instant is compared
+/// by the instant it names, whatever its offset.
+#[must_use]
+pub fn starts_before(a: &str, b: &str) -> Option<bool> {
+    Some(livingbrain_pages::date_start(a)? < livingbrain_pages::date_start(b)?)
 }
 
 /// One fact, in the v1 emitter shape. `status`, `supersedes` and
@@ -247,6 +265,10 @@ pub fn partial_date(value: &str) -> bool {
 pub struct Emitted {
     /// How many the store holds now: stored, or a repeat of a live fact.
     pub recorded: usize,
+    /// The ids of the facts this batch actually stored (not repeats of a
+    /// live fact, whose id is not this batch's to undo). A sink that does not
+    /// report ids leaves it empty.
+    pub created: Vec<String>,
     /// One short, log-safe reason per fact the store refused. A refusal is
     /// that fact's alone; the rest of the batch is still recorded.
     pub skipped: Vec<String>,
@@ -454,6 +476,68 @@ mod tests {
         }
         assert_eq!(attribute_rule("issue_335_status"), Some("per-item"));
         assert_eq!(attribute_rule("session_cost"), Some("event"));
+    }
+
+    #[test]
+    fn partial_dates_are_compared_as_the_instant_they_start_at() {
+        // A year and the first day of it start at the same instant.
+        assert_eq!(starts_before("2026", "2026-01-01"), Some(false));
+        assert_eq!(starts_before("2026-01-01", "2026"), Some(false));
+        assert_eq!(starts_before("2025", "2026-01"), Some(true));
+        assert_eq!(starts_before("2026-01", "2026-01-15"), Some(true));
+        assert_eq!(starts_before("2026-01-15", "2026-01"), Some(false));
+        // Text order is wrong across offsets: 00:30 at +02:00 is 22:30 the
+        // day before, so it is the earlier instant.
+        assert_eq!(
+            starts_before("2026-01-01T00:30:00+02:00", "2025-12-31T23:00:00Z"),
+            Some(true)
+        );
+        assert_eq!(
+            starts_before("2025-12-31T23:00:00Z", "2026-01-01T00:30:00+02:00"),
+            Some(false)
+        );
+        // The same instant in two offsets is not before itself.
+        assert_eq!(
+            starts_before("2026-01-01T00:00:00+01:00", "2025-12-31T23:00:00Z"),
+            Some(false)
+        );
+        // Anything that is not a date is refused, not compared.
+        for bad in [
+            "",
+            "last week",
+            "2026-13",
+            "2026-02-30",
+            "2026-01-01T25:00:00Z",
+        ] {
+            assert_eq!(starts_before(bad, "2026"), None, "{bad:?}");
+            assert_eq!(starts_before("2026", bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn newest_first_orders_by_the_instant_and_puts_a_non_date_last() {
+        let held = |id: &str, valid_from: &str| HeldFact {
+            id: id.to_owned(),
+            subject: "project/demo".to_owned(),
+            attribute: "database".to_owned(),
+            value: "D1".to_owned(),
+            unit: None,
+            valid_from: valid_from.to_owned(),
+            valid_to: None,
+            source: None,
+            observed_at: "2026-10-15T00:00:00Z".to_owned(),
+            last_confirmed_at: "2026-10-15T00:00:00Z".to_owned(),
+        };
+        let kept = newest_first(vec![
+            held("fact-a", "2025-12-31T23:00:00Z"),
+            held("fact-b", "2026-01-01T00:30:00+02:00"),
+            held("fact-c", "not a date"),
+            held("fact-d", "2026-01-01"),
+        ]);
+        let order: Vec<&str> = kept.iter().map(|fact| fact.id.as_str()).collect();
+        // fact-b is 2025-12-31T22:30Z, an hour before fact-a's 23:00Z, so it
+        // sorts after it although its text reads as a later day.
+        assert_eq!(order, ["fact-d", "fact-a", "fact-b", "fact-c"]);
     }
 
     #[test]

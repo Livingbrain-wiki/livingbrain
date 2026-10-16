@@ -413,8 +413,16 @@ Worker's cron tick, after the compile drain.
   original as a duplicate.
 - **Across names.** A supersede may also name a newer fact under another
   attribute, when it is the same property under another name. The older
-  must start before the newer; its history is then filed under the newer
-  attribute, ended where the newer begins, and the original is retracted.
+  must start before the newer, compared as the instant each starts at (so
+  `2026` does not start before `2026-01-01`, and offsets are respected); a
+  date that is not one is refused as `bad-date`. Its history is then filed
+  under the newer attribute, ended where the newer begins, and the original
+  is retracted. If that retract fails, the copy just stored is retracted
+  again and the move is refused with the retract's reason, so a failed move
+  leaves no duplicate.
+- **Rule scope.** The rule pass (the first step of a dream) retracts only
+  facts the compiler wrote: `written_by` is `brain:coding-agents`. A fact a
+  person or the API wrote is never retracted by a rule, whatever its key.
 - **Log.** Every decision is written to `fact_dream_decisions` whether or not
   it was applied: the pass key, the op, the fact ids, the new end or key, the
   reason (a short lowercase word), and the ids the model was shown as JSON.

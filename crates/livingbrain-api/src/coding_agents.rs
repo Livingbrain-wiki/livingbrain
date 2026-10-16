@@ -73,7 +73,7 @@ use livingbrain_models::invoke::{self, ChatRequest, InvokeError, Structured};
 use livingbrain_models::jobs::{self, Dispatch, JobCall};
 use livingbrain_pages::access::{AccessPlan, KIND_PAGES, KIND_SOURCES, ScopeFilter};
 use livingbrain_pages::{
-    DreamCandidate, DreamDecisionRow, DreamFinish, FactError, FactInput, FactStore,
+    DreamCandidate, DreamDecisionRow, DreamFinish, FactError, FactInput, FactOutcome, FactStore,
 };
 use serde_json::{Value, json};
 
@@ -403,8 +403,10 @@ impl Classifiers for WorkspaceJev {
 /// tick is shared with the compile drain.
 const DREAM_PASSES_PER_TICK: usize = 2;
 
-/// Who the fact store records as the writer of a compiled fact.
-pub const FACT_WRITER: &str = "brain:coding-agents";
+/// Who the fact store records as the writer of a compiled fact: the
+/// compiler's own marker, which the dreaming rule pass checks before it
+/// retracts anything.
+pub const FACT_WRITER: &str = livingbrain_compiler::COMPILER_WRITER;
 
 /// The compiler's [`FactSink`] over the temporal facts store
 /// (`docs/temporal-facts.md`): each fact is recorded in the scope the
@@ -479,7 +481,12 @@ impl FactSink for StoreFacts {
                 cardinality: fact.cardinality.clone(),
             };
             match self.store.record(scope, input, FACT_WRITER).await {
-                Ok(_) => emitted.recorded += 1,
+                Ok(recorded) => {
+                    emitted.recorded += 1;
+                    if recorded.outcome == FactOutcome::Created {
+                        emitted.created.push(recorded.fact.id);
+                    }
+                }
                 Err(error) => emitted.skipped.push(skip_reason(fact, &error)),
             }
         }
