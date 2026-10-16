@@ -213,7 +213,7 @@ impl Finish {
 /// The queue over the `Database` port.
 #[derive(Clone)]
 pub struct Queue {
-    db: Arc<dyn Database>,
+    pub(crate) db: Arc<dyn Database>,
 }
 
 impl Queue {

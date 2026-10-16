@@ -617,3 +617,54 @@ fn the_queue_names_where_the_workspaces_jev_runs_and_its_switch_turns_it_off() {
         "{other}"
     );
 }
+
+/// The status card counts the source lanes: stored GitHub items and
+/// imports, each in its own lane, and an import only in its importer's
+/// own counts. The backlog pass has not run, so the stored sources are
+/// pending.
+#[test]
+fn the_status_counts_the_github_and_imports_lanes_per_scope() {
+    let fx = fixture();
+    let shared = livingbrain_pages::page_scope(WORKSPACE, &livingbrain_access::Scope::Shared);
+    let store = |kind: SourceKind, scope: String, rel_path: &str, body: String| {
+        pollster::block_on(
+            fx.ingestor(Arc::new(FakeDefer::default()))
+                .ingest(SourceIngest {
+                    kind,
+                    workspace: WORKSPACE.to_owned(),
+                    scope,
+                    origin_ref: None,
+                    author: None,
+                    rel_path: rel_path.to_owned(),
+                    imported_by: "user-a".to_owned(),
+                    body,
+                    project: Some("demo".to_owned()),
+                }),
+        )
+        .expect("an ingest");
+    };
+    store(
+        SourceKind::GithubCommit,
+        shared.clone(),
+        "github/acme/demo/commit/abc1234",
+        json!({"sha": "abc1234", "message": "m", "files": []}).to_string(),
+    );
+    store(
+        SourceKind::Import,
+        scope_of(WORKSPACE, "user-a"),
+        "notes/plan.md",
+        "# Plan\n".to_owned(),
+    );
+    let mine = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    assert_eq!(mine["sources"]["github"]["label"], "GitHub", "{mine}");
+    assert_eq!(mine["sources"]["github"]["sources_pending"], 1, "{mine}");
+    assert_eq!(mine["sources"]["imports"]["label"], "Imports", "{mine}");
+    assert_eq!(mine["sources"]["imports"]["sources_pending"], 1, "{mine}");
+    assert_eq!(mine["sources"]["discord"]["sources_pending"], 0, "{mine}");
+    // The other member's personal import is not theirs to count.
+    let theirs = get(&fx, TOKEN_B, "/v1/coding-agents/queue").json();
+    assert_eq!(
+        theirs["sources"]["imports"]["sources_pending"], 0,
+        "{theirs}"
+    );
+}

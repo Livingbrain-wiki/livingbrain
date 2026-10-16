@@ -49,6 +49,8 @@ pub mod pool;
 pub mod prompt;
 pub mod queue;
 pub mod record;
+pub mod source_compile;
+pub mod source_units;
 pub mod triage;
 
 pub use compile::{
@@ -61,6 +63,11 @@ pub use dream_settings::{DreamSettings, DreamStatus, DreamTuning, StoredDreamTun
 pub use facts::{COMPILER_WRITER, Emitted, Fact, FactSink, HeldFact, NoFacts};
 pub use pool::{CONCURRENCY_CEILING, MAX_CALL, MAX_IN_FLIGHT, WALL_AFTER_BUDGET};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, PoolRow, Queue, Savings};
+pub use source_compile::{UnitRun, render_item, split_pieces};
+pub use source_units::{
+    BACKLOG_PER_TICK, LANE_DISCORD, LANE_GITHUB, LANE_IMPORTS, LaneCounts, UNIT_KINDS, Unit,
+    UnitFinish,
+};
 
 use cratefield_core::SqlMigration;
 
@@ -152,11 +159,28 @@ pub const MIGRATION_DREAMING_SETTINGS_POSTGRES: SqlMigration = SqlMigration::new
     include_str!("../migrations/postgres/0006_dreaming_settings.sql"),
 );
 
+/// The seventh migration: source compile units and their members — GitHub
+/// items, Discord channel-days and imported files compiled into pages.
+pub const MIGRATION_SOURCE_UNITS: SqlMigration = SqlMigration::new(
+    "0007",
+    "source_compile_jobs",
+    include_str!("../migrations/sqlite/0007_source_compile_jobs.sql"),
+);
+
+/// The Postgres form: the counters are `BIGINT`, like the others.
+pub const MIGRATION_SOURCE_UNITS_POSTGRES: SqlMigration = SqlMigration::new(
+    "0007",
+    "source_compile_jobs",
+    include_str!("../migrations/postgres/0007_source_compile_jobs.sql"),
+);
+
 /// The tables the module that mounts the compiler owns.
-pub const TABLES: [&str; 5] = [
+pub const TABLES: [&str; 7] = [
     "coding_agent_jobs",
     "coding_agent_spend",
     "coding_agent_reservations",
     "coding_agent_pool",
     "dreaming_settings",
+    "source_compile_units",
+    "source_compile_members",
 ];

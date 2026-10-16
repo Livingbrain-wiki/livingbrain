@@ -59,7 +59,9 @@ and live under Sources → Agent sessions, named by their titles.
 
 ## The queue
 
-There is one job per `agent_log` source body. Jobs are keyed like the
+There is one job per `agent_log` source body (GitHub items, Discord days and
+imports are compiled as units, see [Source units](#source-units-github-discord-and-imports)).
+Jobs are keyed like the
 ledger, `(scope, body_sha256)`, so enqueueing the same body twice still
 makes one job. The queue is built from the ledger itself
 (`INSERT … SELECT … ON CONFLICT DO NOTHING`). That means sessions synced
@@ -178,6 +180,53 @@ and five at once, a workspace compiles up to five sessions a run, twelve
 runs an hour — about 60 an hour, where the free plan's 45 steps allowed one
 a run, four an hour. A higher sessions-per-run setting lets a run start
 more, up to what six connections get through in its four minutes.
+
+## Source units: GitHub, Discord and imports
+
+Stored material that is not an agent session is compiled too: GitHub
+commits, pull requests and issues (`github_commit`, `github_pr`,
+`github_issue`), Discord channel-days (`discord`) and imported files
+(`import`). It is not one job per source. A **unit** is the batch one compile
+works on:
+
+| Lane | Unit | Compiles into | Facts |
+| :--- | :--- | :--- | :--- |
+| `github` (label "GitHub") | one repository's day: the commits, pull requests and issues stored that UTC day | `coding-agents--github--<repo>--…`, in the **shared** scope the repository is stored in | `project/<repo>` and `system/github` |
+| `discord` | one channel-day | `coding-agents--discord--<server>--…` in the source's scope | `project/<server>` and `system/discord` |
+| `imports` (label "Imports") | one imported file, cut into pieces when large | `coding-agents--imports--<folder>--…` in the **importer's personal** scope | `project/<folder>` and `system/imports` |
+
+A unit compiles into the scope its sources were stored in and never another.
+An import is never written to the shared scope, and another member's scope
+holds none of it. Each call sends one chunk of items, fenced as data, with
+the pages it may write and the current facts of its subjects. Each item's
+header carries the citation to use. A fact's `source` must name one of the
+items sent, and it is observed at that item's time.
+
+**Queueing** is a bounded backlog pass in the same cron tick. It files up to
+200 stored sources that have no unit yet, oldest first (`source_compile_units`
+and `source_compile_members`, migration
+`0048_coding-agents_0007_source_compile_jobs`). A second pass files nothing,
+so the existing backlog is queued once and new sources are picked up on the
+next tick. A new item for a day already compiled reopens that unit, and only
+the new item is sent.
+
+**Progress.** Each member records `pieces_done` of `pieces_total`. After a
+chunk is applied, the members it covered advance, so a unit larger than the
+per-run call limit (the workspace's `max_chunks`) carries on at the next tick
+and nothing is compiled twice.
+
+**Budget and priority.** Units draw on the same compile budget as sessions:
+each call reserves its share first, and a unit stops when the budget is spent,
+leaving its members queued (`over-budget`). The cron runs the sessions first,
+then compiles at most two units (`SOURCE_UNITS_PER_TICK`), so the backlog gets
+a fixed share of each tick and never starves a session. A paused workspace's
+units wait, and a workspace with no model parks them as `skipped-no-model`.
+
+**Status.** `GET /v1/coding-agents/queue` answers a `sources` block with one
+entry per lane (`github`, `discord`, `imports`): its label, its units by
+status, and how many of its sources are `sources_pending` (stored, not yet
+compiled, including those the backlog pass has not reached) and
+`sources_compiled`. It counts only the asker's scopes.
 
 ## Triage and compaction
 

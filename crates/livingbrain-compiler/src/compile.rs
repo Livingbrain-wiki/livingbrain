@@ -456,7 +456,7 @@ impl Tally {
 }
 
 /// What one edit came to.
-enum Applied {
+pub(crate) enum Applied {
     Written,
     Rejected,
     Conflict,
@@ -927,6 +927,7 @@ impl Compiler {
             totals: session.totals.clone(),
             previously_compiled: self.queue.previously_compiled(job).await.ok().flatten(),
         };
+        let cite = Cite::session(&head);
         let (raw_chunks, _) = session.chunks(settings.chunk_chars, settings.max_chunks);
         if raw_chunks.is_empty() || session.turns.is_empty() {
             return Finish::status(JobStatus::Skipped, Some("empty-session"));
@@ -1246,7 +1247,7 @@ impl Compiler {
                     }
                 };
                 match self
-                    .apply(&job.scope, &allowed, &shown, edit, &head, now, tick)
+                    .apply(&job.scope, &allowed, &shown, edit, &cite, now, tick)
                     .await
                 {
                     Applied::Written => tally.written(&edit.slug),
@@ -1255,14 +1256,14 @@ impl Compiler {
                 }
             }
             for end in &output.ended {
-                self.end_fact(job, &held, end, &mut tally).await;
+                self.end_fact(&job.scope, &held, end, &mut tally).await;
             }
             if !output.facts.is_empty() {
                 // A fact is refused on its own: outside the format once
                 // redacted, undated (no time in the answer and none in the
                 // session), or not state (an event or a per-item key).
                 let mut facts: Vec<Fact> = Vec::new();
-                for fact in self.prepare_facts(&output.facts, &head, me.as_deref(), now) {
+                for fact in self.prepare_facts(&output.facts, &cite, me.as_deref(), now) {
                     if fact.valid_from.is_none() {
                         tally
                             .skipped_facts
@@ -1472,7 +1473,7 @@ impl Compiler {
     /// Creates the two pages every scope's folder starts from, when they
     /// are not there: the conventions (the person's to edit from then on)
     /// and the log.
-    async fn seed(&self, scope: &str, now: OffsetDateTime) -> Result<(), PageError> {
+    pub(crate) async fn seed(&self, scope: &str, now: OffsetDateTime) -> Result<(), PageError> {
         for (slug, title, body) in [
             (
                 layout::SCHEMA,
@@ -1515,7 +1516,7 @@ impl Compiler {
     /// With `topics` (the triage classifier's picks), the session's own
     /// topic pages are only those it picked; the fixed pages are always
     /// shown.
-    async fn context(
+    pub(crate) async fn context(
         &self,
         scope: &str,
         allowed: &Allowed,
@@ -1594,13 +1595,13 @@ impl Compiler {
     /// always was: the next run shows the model their edit rather than
     /// merging around it.
     #[allow(clippy::too_many_arguments)]
-    async fn apply(
+    pub(crate) async fn apply(
         &self,
         scope: &str,
         allowed: &Allowed,
         shown: &[Shown],
         edit: &PageEdit,
-        head: &SessionHead,
+        cite: &Cite,
         now: OffsetDateTime,
         tick: &Tick,
     ) -> Applied {
@@ -1622,7 +1623,7 @@ impl Compiler {
         let Ok((body, _)) = redact(&strip_frontmatter(&edit.body), Policy::Redact) else {
             return Applied::Rejected;
         };
-        let ours = with_citation(&fix_links(&body), head);
+        let ours = with_citation(&fix_links(&body), cite);
         let title = edit
             .title
             .as_deref()
@@ -1676,7 +1677,7 @@ impl Compiler {
                     .unwrap_or_default();
                 merge::three_way(base_body.as_deref().unwrap_or_default(), &theirs, &ours)
             };
-            let mut sources: Vec<String> = vec![head.source_id.clone()];
+            let mut sources: Vec<String> = cite.source_ids.clone();
             if let Some(page) = &current
                 && let Some(listed) = page.frontmatter.get("sources")
             {
@@ -1742,7 +1743,7 @@ impl Compiler {
     /// the store can end it. Every refusal is a skip the log names.
     async fn end_fact(
         &self,
-        job: &Job,
+        scope: &str,
         held: &[HeldFact],
         end: &edits::EndedFact,
         tally: &mut Tally,
@@ -1759,7 +1760,7 @@ impl Compiler {
                 .push("ended: valid_to is not a date".to_owned());
             return;
         }
-        match self.facts.end(&job.scope, &end.id, &end.valid_to).await {
+        match self.facts.end(scope, &end.id, &end.valid_to).await {
             Ok(true) => tally.ended = tally.ended.saturating_add(1),
             Ok(false) => tally
                 .skipped_facts
@@ -1776,14 +1777,14 @@ impl Compiler {
     /// text redacted. `me` becomes the syncing person's own subject. A fact
     /// with neither a stated time nor a session time keeps `valid_from`
     /// `None`, and is refused rather than dated to the compile.
-    fn prepare_facts(
+    pub(crate) fn prepare_facts(
         &self,
         facts: &[Fact],
-        head: &SessionHead,
+        cite: &Cite,
         me: Option<&str>,
         now: OffsetDateTime,
     ) -> Vec<Fact> {
-        let (observed, default_from) = fact_times(head.started_at.as_deref(), now);
+        let (observed, default_from) = fact_times(cite.started_at.as_deref(), now);
         facts
             .iter()
             .map(|fact| Fact {
@@ -1794,8 +1795,12 @@ impl Compiler {
                 source: Some(
                     fact.source
                         .clone()
-                        .filter(|source| source.contains(&head.source_id))
-                        .unwrap_or_else(|| format!("source:{}", head.source_id)),
+                        .filter(|source| {
+                            cite.source_ids
+                                .iter()
+                                .any(|id| source.contains(id.as_str()))
+                        })
+                        .unwrap_or_else(|| format!("source:{}", cite.source_ids[0])),
                 ),
                 observed_at: Some(observed.clone()),
                 valid_from: fact
@@ -1813,7 +1818,7 @@ impl Compiler {
     /// Appends one line to the log page — the one page only the server
     /// writes. Re-read and re-appended on a lost race, so a line is never
     /// dropped and never written twice.
-    async fn append_log(&self, scope: &str, line: &str, tick: &Tick) -> bool {
+    pub(crate) async fn append_log(&self, scope: &str, line: &str, tick: &Tick) -> bool {
         // Compiles running side by side append to the same log: one at a time.
         let _turn = tick.page(scope, layout::LOG).await;
         for _ in 0..4 {
@@ -2139,7 +2144,7 @@ pub fn strip_frontmatter(markdown: &str) -> String {
 
 /// A compiled page's frontmatter: the Topic schema's keys, the folder it
 /// sits in, the day it was last compiled and the sources behind it.
-fn frontmatter(place: &Place, title: &str, day: &str, sources: &[String]) -> String {
+pub(crate) fn frontmatter(place: &Place, title: &str, day: &str, sources: &[String]) -> String {
     let mut out = String::from("---\ntype: topic\n");
     out.push_str(&format!("title: {}\n", edits::one_line(title, 120)));
     out.push_str(&format!("collection: {}\n", layout::PREFIX));
@@ -2161,7 +2166,7 @@ fn frontmatter(place: &Place, title: &str, day: &str, sources: &[String]) -> Str
 }
 
 /// The title a page gets when the model named none.
-fn default_title(place: &Place) -> String {
+pub(crate) fn default_title(place: &Place) -> String {
     match place {
         Place::Top(page) => format!("Coding agents: {page}"),
         Place::Agent { agent, page } => format!("{agent}: {page}"),
@@ -2176,7 +2181,7 @@ fn default_title(place: &Place) -> String {
 
 /// `[[target]]` links the page store would refuse (not a slug) become
 /// plain text, so one bad link cannot cost a whole page.
-fn fix_links(body: &str) -> String {
+pub(crate) fn fix_links(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut rest = body;
     while let Some(start) = rest.find("[[") {
@@ -2204,31 +2209,65 @@ fn fix_links(body: &str) -> String {
 
 /// Makes sure the page cites this session: a `## Sources` list at the end
 /// gains the session's link when the body does not already name it.
-fn with_citation(body: &str, head: &SessionHead) -> String {
+fn with_citation(body: &str, cite: &Cite) -> String {
     let mut out = body.trim_end().to_owned();
-    if out.contains(&head.source_id) {
+    let missing: Vec<&String> = cite
+        .source_ids
+        .iter()
+        .filter(|id| !out.contains(id.as_str()))
+        .take(MAX_CITATIONS_ADDED)
+        .collect();
+    if missing.is_empty() {
         out.push('\n');
         return out;
     }
     if !out.contains("\n## Sources") && !out.starts_with("## Sources") {
         out.push_str("\n\n## Sources\n");
     }
-    out.push_str(&format!(
-        "\n- [session {} · {}]({})\n",
-        head.day,
-        head.agent_folder,
-        prompt::source_href(&head.source_id)
-    ));
+    for id in missing {
+        out.push_str(&format!(
+            "\n- [{}]({})\n",
+            cite.label,
+            prompt::source_href(id)
+        ));
+    }
     out
 }
 
+/// What a compile cites: the session it reads (one source), or a unit of
+/// source items (a repository's day, one imported file). `source_ids` is
+/// never empty; its first id is the fallback a fact's source is given.
+#[derive(Debug, Clone)]
+pub(crate) struct Cite {
+    /// The citation's link text, e.g. `session 2026-10-15 · claude`.
+    pub label: String,
+    pub source_ids: Vec<String>,
+    /// When the material happened, RFC 3339: facts are observed then.
+    pub started_at: Option<String>,
+}
+
+/// How many citation lines one page gains when its body names none of the
+/// items it was compiled from: a unit of fifty commits must not add fifty.
+const MAX_CITATIONS_ADDED: usize = 5;
+
+impl Cite {
+    /// The citation of one coding-agent session.
+    pub(crate) fn session(head: &SessionHead) -> Self {
+        Self {
+            label: format!("session {} · {}", head.day, head.agent_folder),
+            source_ids: vec![head.source_id.clone()],
+            started_at: head.started_at.clone(),
+        }
+    }
+}
+
 /// One redacted line of model text.
-fn redacted_line(text: &str) -> String {
+pub(crate) fn redacted_line(text: &str) -> String {
     edits::one_line(&redacted_text(text), 300)
 }
 
 /// Model text redacted; a text redaction refuses becomes nothing.
-fn redacted_text(text: &str) -> String {
+pub(crate) fn redacted_text(text: &str) -> String {
     redact(text, Policy::Redact)
         .map(|(clean, _)| clean)
         .unwrap_or_default()

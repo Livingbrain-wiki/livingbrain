@@ -17,8 +17,9 @@ use cratefield_testing::{FakeDefer, MemoryBlob, TestHarness};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_compiler::layout;
 use livingbrain_compiler::{
-    BATCH_CEILING, Call, ClaimFilter, Compiler, Gate, JOB_TOKENS_CEILING, JobStatus, Model,
-    ModelFailure, NoFacts, NoGate, Overrides, Queue, Reply, Settings, Tuning,
+    BATCH_CEILING, Call, ClaimFilter, Compiler, Emitted, Fact, FactSink, Gate, JOB_TOKENS_CEILING,
+    JobStatus, LANE_GITHUB, Model, ModelFailure, NoFacts, NoGate, Overrides, Queue, Reply,
+    Settings, Tuning,
 };
 use livingbrain_pages::{
     Author, EntityType, Ingestor, PageStore, PageWrite, Pages, SourceIngest, SourceKind,
@@ -49,12 +50,13 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 5] = [
+        const SET: [cratefield_core::SqlMigration; 6] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
             livingbrain_compiler::MIGRATION_PARALLEL,
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
+            livingbrain_compiler::MIGRATION_SOURCE_UNITS,
         ];
         Migrations {
             sqlite: &SET,
@@ -3491,4 +3493,514 @@ fn the_chosen_model_slot_is_the_one_called() {
         "{:?}",
         model.roles()
     );
+}
+
+// ---- Source units: GitHub items, Discord days and imports --------------
+
+/// A fact sink that keeps what it was handed, with the scope it went to.
+#[derive(Default)]
+struct Recording(Mutex<Vec<(String, Fact)>>);
+
+impl Recording {
+    fn facts(&self) -> Vec<(String, Fact)> {
+        self.0.lock().expect("facts").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl FactSink for Recording {
+    async fn emit(&self, _workspace: &str, scope: &str, facts: &[Fact]) -> Result<Emitted, String> {
+        let mut kept = self.0.lock().expect("facts");
+        for fact in facts {
+            kept.push((scope.to_owned(), fact.clone()));
+        }
+        Ok(Emitted {
+            recorded: facts.len(),
+            ..Emitted::default()
+        })
+    }
+}
+
+fn shared() -> String {
+    page_scope(WORKSPACE, &Scope::Shared)
+}
+
+/// A reply that changes no page and teaches nothing: the unit's progress is
+/// what a test watches.
+fn empty_reply() -> Reply {
+    Reply {
+        text: serde_json::json!({"format": 1, "summary": "nothing new", "pages": [], "facts": []})
+            .to_string(),
+        prompt_tokens: 500,
+        completion_tokens: 50,
+        ..Reply::default()
+    }
+}
+
+fn github_commit(sha: &str, message: &str) -> String {
+    serde_json::json!({
+        "schema": 1, "kind": "commit", "repo": "acme/demo", "sha": sha,
+        "origin_ref": format!("https://github.com/acme/demo/commit/{sha}"),
+        "message": message,
+        "author": {"login": "alice", "name": "Alice"},
+        "authored_at": "2026-10-15T09:00:00Z",
+        "files": [{"path": "src/db.rs", "status": "modified", "additions": 3, "deletions": 1, "patch": null}],
+        "totals": {"files_changed": 1, "additions": 3, "deletions": 1}
+    })
+    .to_string()
+}
+
+fn github_pr(number: u64, title: &str) -> String {
+    serde_json::json!({
+        "schema": 1, "kind": "pull_request", "repo": "acme/demo", "number": number,
+        "origin_ref": format!("https://github.com/acme/demo/pull/{number}"),
+        "title": title, "body": "Moves storage to D1.", "state": "closed",
+        "author": "bob", "labels": [], "created_at": "2026-10-15T10:00:00Z",
+        "updated_at": "2026-10-15T12:00:00Z", "closed_at": "2026-10-15T12:00:00Z",
+        "merged_at": "2026-10-15T12:00:00Z",
+        "activity": [{"kind": "review", "at": "2026-10-15T11:00:00Z", "author": "carol",
+                      "body": "looks good", "state": "APPROVED", "origin_ref": null}]
+    })
+    .to_string()
+}
+
+impl World {
+    /// Stores one source through the real ingest pipeline and answers its id.
+    fn store(
+        &self,
+        kind: SourceKind,
+        scope: &str,
+        user: &str,
+        rel_path: &str,
+        origin: Option<&str>,
+        body: String,
+    ) -> String {
+        let ingested = pollster::block_on(
+            Ingestor::new(self.sources(), Arc::new(self.defer.clone())).ingest(SourceIngest {
+                kind,
+                workspace: WORKSPACE.to_owned(),
+                scope: scope.to_owned(),
+                origin_ref: origin.map(str::to_owned),
+                author: None,
+                rel_path: rel_path.to_owned(),
+                imported_by: user.to_owned(),
+                body,
+                project: Some("demo".to_owned()),
+            }),
+        )
+        .expect("an ingest");
+        self.clock.advance(Duration::seconds(1));
+        ingested.source.id
+    }
+
+    fn compiler_recording(
+        &self,
+        model: &Fake,
+        sink: Arc<dyn FactSink>,
+        settings: Settings,
+    ) -> Compiler {
+        Compiler::new(
+            self.pages(),
+            self.sources(),
+            Queue::new(self.db.clone()),
+            Arc::new(model.clone()),
+            sink,
+            Arc::new(NoGate),
+            Arc::new(self.clock.clone()),
+            settings,
+        )
+    }
+
+    fn enqueue_units(&self, compiler: &Compiler) -> usize {
+        pollster::block_on(compiler.enqueue_sources(None)).expect("a backlog pass")
+    }
+
+    fn drain_units(&self, compiler: &Compiler, max: usize) -> Vec<livingbrain_compiler::UnitRun> {
+        pollster::block_on(compiler.drain_sources(None, max, &ScheduledBudget::unbounded()))
+            .expect("a unit drain")
+    }
+
+    fn unit_rows(&self) -> i64 {
+        self.count("source_compile_units")
+    }
+}
+
+#[test]
+fn a_github_repo_day_is_one_unit_compiled_into_the_shared_scope() {
+    let world = world();
+    let commit = world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/abc1234",
+        Some("https://github.com/acme/demo/commit/abc1234"),
+        github_commit("abc1234", "Switch the demo to D1"),
+    );
+    let pr = world.store(
+        SourceKind::GithubPr,
+        &shared(),
+        "u1",
+        "github/acme/demo/pr/12",
+        Some("https://github.com/acme/demo/pull/12"),
+        github_pr(12, "Move storage to D1"),
+    );
+    let issue = world.store(
+        SourceKind::GithubIssue,
+        &shared(),
+        "u1",
+        "github/acme/demo/issue/7",
+        None,
+        serde_json::json!({"schema": 1, "kind": "issue", "repo": "acme/demo", "number": 7,
+            "origin_ref": "https://github.com/acme/demo/issues/7", "title": "Slow cold start",
+            "body": null, "state": "open", "author": "dan", "labels": [],
+            "created_at": "2026-10-15T13:00:00Z", "updated_at": "2026-10-15T13:00:00Z",
+            "closed_at": null, "merged_at": null, "activity": []})
+        .to_string(),
+    );
+    let decisions = layout::project_page("github", "demo", "decisions");
+    let model = {
+        let decisions = decisions.clone();
+        let commit = commit.clone();
+        Fake::answering(move |_, _| {
+            Ok(Reply {
+                text: serde_json::json!({
+                    "format": 1, "summary": "the repo moved storage to D1",
+                    "pages": [{"slug": decisions, "base_version": null, "title": "Decisions",
+                               "body": format!("# Decisions\n\n- **2026-10-15** · Use D1 for storage · [commit](source:{commit})")}],
+                    "facts": [{"subject": "project/demo", "attribute": "database", "value": "D1",
+                               "valid_from": "2026-10-15", "source": format!("source:{commit}"),
+                               "quote": "Switch the demo to D1", "confidence": 0.9}],
+                    "ended": []
+                })
+                .to_string(),
+                prompt_tokens: 1_000,
+                completion_tokens: 200,
+                ..Reply::default()
+            })
+        })
+    };
+    let sink = Arc::new(Recording::default());
+    let compiler = world.compiler_recording(&model, sink.clone(), Settings::default());
+
+    // Three stored items of one repository on one day are one unit.
+    assert_eq!(world.enqueue_units(&compiler), 3);
+    assert_eq!(world.unit_rows(), 1);
+    assert_eq!(world.enqueue_units(&compiler), 0);
+
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].status, JobStatus::Done, "{runs:?}");
+    assert_eq!(runs[0].scope, shared());
+    assert_eq!(model.calls(), 1, "three small items are one call");
+    let inputs = model.inputs().join("\n");
+    for id in [&commit, &pr, &issue] {
+        assert!(inputs.contains(id.as_str()), "the item {id} is sent");
+    }
+    assert!(inputs.contains("project/demo"));
+
+    // The page is in the shared scope and nowhere else.
+    let page = pollster::block_on(world.pages().read(&shared(), &decisions))
+        .expect("a read")
+        .expect("the decisions page");
+    assert!(page.markdown.contains("Use D1 for storage"));
+    assert!(
+        pollster::block_on(world.pages().read(&personal(WORKSPACE, "u1"), &decisions))
+            .expect("a read")
+            .is_none()
+    );
+
+    // The fact went to the shared scope, about the project, from the item.
+    let facts = sink.facts();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(facts[0].0, shared());
+    assert_eq!(facts[0].1.subject, "project/demo");
+    assert_eq!(
+        facts[0].1.source.as_deref(),
+        Some(format!("source:{commit}").as_str())
+    );
+
+    // The status surface names the lane, and the unit and its members.
+    let lanes =
+        pollster::block_on(Queue::new(world.db.clone()).unit_counts(WORKSPACE, &[shared()]))
+            .expect("counts");
+    let github = &lanes[LANE_GITHUB];
+    assert_eq!(github.units.get(&JobStatus::Done), Some(&1));
+    assert_eq!(github.sources_compiled, 3);
+    assert_eq!(github.sources_pending, 0);
+}
+
+#[test]
+fn a_new_item_on_a_compiled_day_reopens_the_unit_for_itself_only() {
+    let world = world();
+    let first = world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/aaa1111",
+        None,
+        github_commit("aaa1111", "First"),
+    );
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    let compiler = world.compiler_recording(&model, Arc::new(NoFacts), Settings::default());
+    world.enqueue_units(&compiler);
+    assert_eq!(world.drain_units(&compiler, 5)[0].status, JobStatus::Done);
+    let before = model.calls();
+
+    let second = world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/bbb2222",
+        None,
+        github_commit("bbb2222", "Second"),
+    );
+    assert_eq!(
+        world.enqueue_units(&compiler),
+        1,
+        "only the new item is filed"
+    );
+    assert_eq!(world.unit_rows(), 1, "it joins the day's unit");
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs[0].status, JobStatus::Done);
+    assert_eq!(model.calls(), before + 1, "one call, for the new item");
+    let sent = model.inputs().last().cloned().unwrap_or_default();
+    assert!(sent.contains(&second));
+    assert!(
+        !sent.contains(&first),
+        "the compiled item is not sent again"
+    );
+}
+
+#[test]
+fn an_import_compiles_into_the_importers_personal_scope_never_shared() {
+    let world = world();
+    world.store(
+        SourceKind::Import,
+        &personal(WORKSPACE, "u1"),
+        "u1",
+        "notes/plan.md",
+        None,
+        "# Plan\n\nWe will ship the importer on Friday.\n".to_owned(),
+    );
+    let slug = layout::project_page("imports", "demo", "index");
+    let model = {
+        let slug = slug.clone();
+        Fake::answering(move |_, _| {
+            Ok(reply(&[(
+                &slug,
+                None,
+                "# Notes\n\n- Ship the importer on Friday.",
+            )]))
+        })
+    };
+    let compiler = world.compiler(&model);
+    assert_eq!(world.enqueue_units(&compiler), 1);
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs[0].status, JobStatus::Done, "{runs:?}");
+    assert_eq!(runs[0].scope, personal(WORKSPACE, "u1"));
+
+    let mine =
+        pollster::block_on(world.pages().read(&personal(WORKSPACE, "u1"), &slug)).expect("a read");
+    assert!(mine.is_some(), "the page is in the importer's scope");
+    let in_shared = pollster::block_on(world.pages().read(&shared(), &slug)).expect("a read");
+    assert!(
+        in_shared.is_none(),
+        "an import never writes the shared scope"
+    );
+    // Another member's personal scope holds none of it.
+    let theirs =
+        pollster::block_on(world.pages().read(&personal(WORKSPACE, "u2"), &slug)).expect("a read");
+    assert!(theirs.is_none());
+}
+
+#[test]
+fn the_backlog_pass_files_each_source_once() {
+    let world = world();
+    world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/c1",
+        None,
+        github_commit("c1", "one"),
+    );
+    world.store(
+        SourceKind::GithubPr,
+        &shared(),
+        "u1",
+        "github/acme/demo/pr/3",
+        None,
+        github_pr(3, "three"),
+    );
+    world.store(
+        SourceKind::Import,
+        &personal(WORKSPACE, "u1"),
+        "u1",
+        "notes/a.md",
+        None,
+        "# A\n".to_owned(),
+    );
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    let compiler = world.compiler(&model);
+    assert_eq!(world.enqueue_units(&compiler), 3);
+    assert_eq!(
+        world.enqueue_units(&compiler),
+        0,
+        "a second pass files nothing"
+    );
+    assert_eq!(world.enqueue_units(&compiler), 0);
+    assert_eq!(world.count("source_compile_members"), 3);
+    assert_eq!(world.unit_rows(), 2, "one repository day and one import");
+    let runs = world.drain_units(&compiler, 10);
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|run| run.status == JobStatus::Done));
+    assert_eq!(
+        world.drain_units(&compiler, 10).len(),
+        0,
+        "nothing left to compile"
+    );
+}
+
+#[test]
+fn budget_exhaustion_leaves_the_unit_waiting_without_a_call() {
+    let world = world();
+    world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/z9",
+        None,
+        github_commit("z9", "spent"),
+    );
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    // No daily budget at all: the reservation is refused before any call.
+    let settings = Settings {
+        daily_tokens: 0,
+        ..Settings::default()
+    };
+    let compiler = world.compiler_with(&model, settings, Arc::new(NoGate));
+    world.enqueue_units(&compiler);
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs[0].status, JobStatus::OverBudget);
+    assert_eq!(model.calls(), 0, "no call once the budget is spent");
+    let lanes =
+        pollster::block_on(Queue::new(world.db.clone()).unit_counts(WORKSPACE, &[shared()]))
+            .expect("counts");
+    assert_eq!(lanes[LANE_GITHUB].sources_pending, 1, "the item waits");
+}
+
+#[test]
+fn a_session_compiles_before_the_backlog_and_is_not_starved_by_it() {
+    let world = world();
+    let session = world.sync(WORKSPACE, "u1", "s-9", "we decided to use D1");
+    for n in 1..=5 {
+        world.store(
+            SourceKind::GithubCommit,
+            &shared(),
+            "u1",
+            &format!("github/acme/repo{n}/commit/k{n}"),
+            None,
+            github_commit(&format!("k{n}"), "backlog"),
+        );
+    }
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    let compiler = world.compiler(&model);
+    world.enqueue_units(&compiler);
+    // The cron order: sessions first, then the backlog's share of the tick.
+    let jobs = world.drain(&compiler);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].source_id, session);
+    assert_eq!(jobs[0].status, JobStatus::Done);
+    assert_eq!(
+        world.drain_units(&compiler, 2).len(),
+        2,
+        "the share of one tick"
+    );
+    assert_eq!(model.calls(), 3, "one session call and two unit calls");
+}
+
+#[test]
+fn a_unit_larger_than_its_call_limit_carries_on_at_the_next_run() {
+    let world = world();
+    let body: String = (1..=40)
+        .map(|n| format!("Line {n}: the importer keeps the plan for item {n}.\n"))
+        .collect();
+    let source = world.store(
+        SourceKind::Import,
+        &personal(WORKSPACE, "u1"),
+        "u1",
+        "notes/long.md",
+        None,
+        body,
+    );
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    let settings = Settings {
+        chunk_chars: 1_000,
+        max_chunks: 1,
+        ..Settings::default()
+    };
+    let compiler = world.compiler_with(&model, settings, Arc::new(NoGate));
+    world.enqueue_units(&compiler);
+    let mut statuses = Vec::new();
+    for run in 1..=3 {
+        let runs = world.drain_units(&compiler, 5);
+        statuses.push(runs[0].status);
+        assert_eq!(model.calls(), run, "one call per run");
+    }
+    assert_eq!(
+        statuses,
+        vec![JobStatus::Queued, JobStatus::Queued, JobStatus::Queued]
+    );
+    let inputs = model.inputs();
+    assert!(inputs[0].contains("piece 1 of"));
+    assert!(inputs[1].contains("piece 2 of"));
+    assert!(
+        !inputs[1].contains("piece 1 of"),
+        "a piece is not sent twice"
+    );
+    let pending = pollster::block_on(
+        Queue::new(world.db.clone())
+            .pending_members(&personal(WORKSPACE, "u1"), &format!("import:{source}")),
+    )
+    .expect("a count");
+    assert_eq!(pending, 1, "the file is still waiting for its rest");
+}
+
+#[test]
+fn an_import_is_only_ever_read_by_its_own_scope() {
+    let world = world();
+    world.store(
+        SourceKind::Import,
+        &personal(WORKSPACE, "u1"),
+        "u1",
+        "private/salary.md",
+        None,
+        "# Private\n\nA note only u1 may see.\n".to_owned(),
+    );
+    let slug = layout::project_page("imports", "demo", "index");
+    let model = {
+        let slug = slug.clone();
+        Fake::answering(move |_, _| Ok(reply(&[(&slug, None, "# Private\n\n- A note.")])))
+    };
+    let compiler = world.compiler(&model);
+    world.enqueue_units(&compiler);
+    world.drain_units(&compiler, 5);
+    // A second member's listing shows none of u1's compiled pages.
+    let theirs = pollster::block_on(world.pages().list(
+        &[personal(WORKSPACE, "u2").as_str(), shared().as_str()],
+        100,
+    ))
+    .expect("a listing");
+    assert!(
+        theirs
+            .iter()
+            .all(|page| !page.slug.starts_with("coding-agents--imports--demo"))
+    );
+    let mine = pollster::block_on(
+        world
+            .pages()
+            .list(&[personal(WORKSPACE, "u1").as_str()], 100),
+    )
+    .expect("a listing");
+    assert!(mine.iter().any(|page| page.slug == slug));
 }
