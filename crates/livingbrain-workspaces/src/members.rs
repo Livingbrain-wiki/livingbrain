@@ -51,8 +51,8 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::flow::{self, Session};
 use crate::handlers::{
-    ModuleState, database, mail_failed, port, require_same_origin, session_scope, sign_in_token,
-    token_hash,
+    ModuleState, database, mail_failed, new_user_id, new_workspace_id, port, require_same_origin,
+    session_scope, sign_in_token, token_hash,
 };
 use crate::profile::{self, AvatarRef};
 use crate::store::{self, Member, Role, RosterOutcome};
@@ -602,6 +602,118 @@ pub(crate) async fn list_workspaces(
         );
     }
     Ok(Json(items).into_response())
+}
+
+/// The most workspaces one person may own: past any real need, and short of
+/// a loop minting rows.
+pub(crate) const MAX_OWNED_WORKSPACES: usize = 20;
+
+/// A new workspace needs an address to reach it by.
+const NO_EMAIL: ProblemDef = ProblemDef {
+    slug: "workspaces/no-email",
+    status: StatusCode::CONFLICT,
+    title: "Sign in with your email address first",
+    description: "A new workspace is reached through the email address you sign in with, \
+                  and this sign-in has none. Sign in with your email address and try again.",
+};
+
+/// The person already owns as many workspaces as one may.
+const TOO_MANY_WORKSPACES: ProblemDef = ProblemDef {
+    slug: "workspaces/too-many",
+    status: StatusCode::CONFLICT,
+    title: "You own as many workspaces as one person may",
+    description: "Delete or hand over one you no longer use first.",
+};
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateBody {
+    name: String,
+}
+
+/// `POST /` — a new workspace, owned by the signed-in person, who is moved
+/// into it. Session only and same-origin, like the switcher.
+///
+/// The person is the same person through their email address: the new
+/// workspace gets a member row of its own (`usr_…`, owner, the name they go
+/// by here) and the same addresses as identities, so the switcher lists it
+/// and `/switch` reaches it — and so a sign-in link to that address can
+/// open it, exactly as for a workspace created at sign-up.
+pub(crate) async fn create_workspace(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateBody>,
+) -> Result<Response, Problem> {
+    require_same_origin(&headers)?;
+    let (workspace, member, _) = session_scope(&state, &headers).await?;
+    let name = profile::clean_name(&body.name).map_err(profile::name_problem)?;
+    let db = port(state.ctx.ports.db.clone())?;
+    let addresses = store::email_identities(&*db, &workspace.id, &member.user_id)
+        .await
+        .map_err(database)?;
+    if addresses.is_empty() {
+        return Err(Problem::new(&NO_EMAIL));
+    }
+    let mut owned: Vec<String> = store::memberships_for(&*db, &addresses)
+        .await
+        .map_err(database)?
+        .into_iter()
+        .filter(|found| found.role == Role::Owner)
+        .map(|found| found.workspace_id)
+        .collect();
+    owned.dedup();
+    if owned.len() >= MAX_OWNED_WORKSPACES {
+        return Err(Problem::new(&TOO_MANY_WORKSPACES));
+    }
+
+    let id_gen = port(state.ctx.ports.id_gen.clone())?;
+    let (_, now) = now_text(&state)?;
+    let workspace_id = new_workspace_id(&*id_gen);
+    let owner_id = new_user_id(&*id_gen);
+    store::ensure_workspace(&*db, &workspace_id, &name, &owner_id, &now)
+        .await
+        .map_err(database)?;
+    for address in &addresses {
+        store::link_identity(&*db, &workspace_id, "email", address, &owner_id, &now)
+            .await
+            .map_err(database)?;
+    }
+    // The owner row: `upsert_member` makes the workspace's owner an owner.
+    store::upsert_member(
+        &*db,
+        &workspace_id,
+        &owner_id,
+        store::MemberFields {
+            name: Some(member.name.as_str()),
+            ..store::MemberFields::default()
+        },
+        &now,
+    )
+    .await
+    .map_err(database)?;
+
+    let signer = port(state.ctx.ports.signer.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+    let value = flow::seal(
+        &*signer,
+        flow::SESSION_PURPOSE,
+        &Session {
+            workspace_id: workspace_id.clone(),
+            user_id: owner_id,
+            exp: clock.now().unix_timestamp() + flow::SESSION_TTL_SECS,
+        },
+    )
+    .ok_or_else(Problem::internal)?;
+    let mut response = (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": workspace_id, "name": name, "role": "owner" })),
+    )
+        .into_response();
+    response.headers_mut().append(
+        cratefield_core::axum::http::header::SET_COOKIE,
+        flow::set_cookie(flow::SESSION_COOKIE, &value, flow::SESSION_TTL_SECS)
+            .ok_or_else(Problem::internal)?,
+    );
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]

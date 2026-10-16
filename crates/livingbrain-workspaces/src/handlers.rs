@@ -294,7 +294,10 @@ pub(crate) fn router(
         .route("/slack/manifest", get(slack_manifest))
         .route("/slack/events", post(slack_events))
         .route("/me", get(me))
-        .route("/", get(members::list_workspaces))
+        .route(
+            "/",
+            get(members::list_workspaces).post(members::create_workspace),
+        )
         .route("/current", axum::routing::patch(members::rename_workspace))
         .route(
             "/current/avatar",
@@ -363,7 +366,7 @@ fn not_allowed() -> Problem {
 
 /// A workspace id we mint: `ws_` plus an IdGen id, which is what ADR 0002
 /// makes the id — opaque and ours, never a Slack team id.
-fn new_workspace_id(id_gen: &dyn IdGen) -> String {
+pub(crate) fn new_workspace_id(id_gen: &dyn IdGen) -> String {
     format!("ws_{}", id_gen.ulid())
 }
 
@@ -371,7 +374,7 @@ fn new_workspace_id(id_gen: &dyn IdGen) -> String {
 /// member first seen through Slack keeps the Slack user id as their member
 /// id, so `0001`'s rows and issue #6's `apply_user_change` seam are
 /// unchanged.
-fn new_user_id(id_gen: &dyn IdGen) -> String {
+pub(crate) fn new_user_id(id_gen: &dyn IdGen) -> String {
     format!("usr_{}", id_gen.ulid())
 }
 

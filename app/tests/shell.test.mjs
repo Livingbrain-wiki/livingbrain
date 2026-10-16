@@ -304,7 +304,8 @@ test("signed in: the switcher names the workspace and lists the others to switch
   assert.equal(byId.get("ws-menu").hidden, false);
   assert.equal(byId.get("ws-button").getAttribute("aria-expanded"), "true");
   const items = all(byId.get("ws-menu"), "button");
-  assert.deepEqual(items.map((b) => b.disabled), [true, false], "the current one is not a switch");
+  assert.deepEqual(items.map((b) => b.disabled), [true, false, false], "the current one is not a switch");
+  assert.match(items[2].className, /menu__item--new/, "the last one starts a new workspace");
   assert.equal(items[0].getAttribute("aria-current"), "true");
   await items[1].click();
   assert.deepEqual(calls.at(-1), { path: "/v1/workspaces/switch", method: "POST", body: { workspace_id: "T1" } });
