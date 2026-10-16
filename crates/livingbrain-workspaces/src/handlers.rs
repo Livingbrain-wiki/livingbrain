@@ -1642,9 +1642,11 @@ fn verify_page(body: &str) -> Response {
 /// and seal the same session cookie the Slack path seals.
 ///
 /// The row decides what happens. A row with a workspace id signs in the
-/// member the address is already an identity of, and a row with none
-/// creates a workspace with that address as its owner and first member. A
-/// link for a workspace where the address is nobody's identity is refused:
+/// member the address is already an identity of. A row with none signs in
+/// to a workspace the address already belongs to (an owned one first), and
+/// only creates a workspace, with that address as its owner and first
+/// member, when it belongs to none; a row that names a workspace always
+/// creates one. A link for a workspace where the address is nobody's identity is refused:
 /// ADR 0002 makes a magic link a way *into* a workspace you belong to, not
 /// a way to claim one you do not.
 async fn email_verify(
@@ -1714,53 +1716,90 @@ async fn email_verify(
                 },
             }
         }
+        // No workspace named. The sign-in form posts only the address, so
+        // this arm cannot tell a returning person from a new one unless it
+        // looks: an address that already belongs to a workspace signs in to
+        // it, and only an address with nowhere to go gets a workspace made
+        // for it. A non-empty `workspace_name` on the row is the one explicit
+        // request for a new, named workspace, so it skips the lookup. The
+        // raw field is checked, not `workspace_name(&row)`, which falls back
+        // to the local part of the address and would never be empty.
         None => {
-            let owner_id = new_user_id(&*id_gen);
-            let workspace_id = new_workspace_id(&*id_gen);
-            let name = workspace_name(&row);
-            // Insert-if-absent, owner this signer — the same rule Slack
-            // sign-in follows, and the only moment an owner is decided.
-            store::ensure_workspace(&*db, &workspace_id, &name, &owner_id, &now_text)
+            let asks_for_new = !row.workspace_name.trim().is_empty();
+            let existing = if asks_for_new {
+                Vec::new()
+            } else {
+                store::memberships_for(&*db, std::slice::from_ref(&row.email))
+                    .await
+                    .map_err(database)?
+            };
+            // Prefer a workspace this address owns, and among those the
+            // oldest: a person who once got an accidental second workspace
+            // still lands in the one they built. With none owned, the oldest
+            // they belong to. A `None` name and `None` invited role leave the
+            // member row and its role as they are: `upsert_member` writes
+            // nothing new.
+            let oldest = |owned: bool| {
+                existing
+                    .iter()
+                    .filter(|membership| !owned || membership.role == store::Role::Owner)
+                    .min_by(|a, b| a.workspace_created_at.cmp(&b.workspace_created_at))
+            };
+            if let Some(membership) = oldest(true).or_else(|| oldest(false)) {
+                (
+                    membership.workspace_id.clone(),
+                    membership.user_id.clone(),
+                    None,
+                    None,
+                )
+            } else {
+                let owner_id = new_user_id(&*id_gen);
+                let workspace_id = new_workspace_id(&*id_gen);
+                let name = workspace_name(&row);
+                // Insert-if-absent, owner this signer — the same rule Slack
+                // sign-in follows, and the only moment an owner is decided.
+                store::ensure_workspace(&*db, &workspace_id, &name, &owner_id, &now_text)
+                    .await
+                    .map_err(database)?;
+                // `('email', address)` is unique across every workspace, not
+                // within one: the first workspace ever created from an address
+                // owns that connection, and `UNIQUE (platform, external_id)`
+                // refuses a second. So the two outcomes are not the same
+                // thing, and the outcome is named rather than dropped:
+                //
+                // - `Linked` / `AlreadyThisWorkspace` — this workspace now has
+                //   the address as a connection, which is the normal case.
+                // - `Conflict` — this address is already the connection of
+                //   *another* workspace, and that row is left exactly as it
+                //   was. That is expected, not an error: a person may create a
+                //   second workspace from the same address, and signing in is
+                //   decided by `member_identities`, which is per workspace and
+                //   is written just below, so this workspace is reachable by
+                //   its owner's address either way. The row that holds the
+                //   address is the first workspace's, and taking it from them
+                //   would be the hijack `link_connection` refuses everywhere
+                //   else.
+                match store::link_connection(&*db, &workspace_id, "email", &row.email, &now_text)
+                    .await
+                    .map_err(database)?
+                {
+                    LinkOutcome::Linked | LinkOutcome::AlreadyThisWorkspace => {}
+                    LinkOutcome::Conflict => {}
+                }
+                store::link_identity(
+                    &*db,
+                    &workspace_id,
+                    "email",
+                    &row.email,
+                    &owner_id,
+                    &now_text,
+                )
                 .await
                 .map_err(database)?;
-            // `('email', address)` is unique across every workspace, not
-            // within one: the first workspace ever created from an address
-            // owns that connection, and `UNIQUE (platform, external_id)`
-            // refuses a second. So the two outcomes are not the same
-            // thing, and the outcome is named rather than dropped:
-            //
-            // - `Linked` / `AlreadyThisWorkspace` — this workspace now has
-            //   the address as a connection, which is the normal case.
-            // - `Conflict` — this address is already the connection of
-            //   *another* workspace, and that row is left exactly as it
-            //   was. That is expected, not an error: a person may create a
-            //   second workspace from the same address, and signing in is
-            //   decided by `member_identities`, which is per workspace and
-            //   is written just below, so this workspace is reachable by
-            //   its owner's address either way. The row that holds the
-            //   address is the first workspace's, and taking it from them
-            //   would be the hijack `link_connection` refuses everywhere
-            //   else.
-            match store::link_connection(&*db, &workspace_id, "email", &row.email, &now_text)
-                .await
-                .map_err(database)?
-            {
-                LinkOutcome::Linked | LinkOutcome::AlreadyThisWorkspace => {}
-                LinkOutcome::Conflict => {}
+                // The local part is the closest thing to a name an address
+                // carries, and it is what the person would have typed anyway.
+                (workspace_id, owner_id, Some(name), None)
             }
-            store::link_identity(
-                &*db,
-                &workspace_id,
-                "email",
-                &row.email,
-                &owner_id,
-                &now_text,
-            )
-            .await
-            .map_err(database)?;
-            // The local part is the closest thing to a name an address
-            // carries, and it is what the person would have typed anyway.
-            (workspace_id, owner_id, Some(name), None)
         }
     };
 

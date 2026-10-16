@@ -815,6 +815,9 @@ pub(crate) struct Membership {
     pub workspace_avatar: Option<String>,
     pub user_id: String,
     pub role: Role,
+    /// When the workspace was created (RFC 3339), so a sign-in that names
+    /// no workspace can pick the oldest one the address belongs to.
+    pub workspace_created_at: String,
 }
 
 /// Every workspace where one of `addresses` is a live member's email
@@ -830,7 +833,8 @@ pub(crate) async fn memberships_for(
     let statement = Statement::with_values(
         format!(
             "SELECT DISTINCT w.id AS workspace_id, w.name AS workspace_name, \
-                    w.avatar AS workspace_avatar, m.user_id AS user_id, m.role AS role \
+                    w.avatar AS workspace_avatar, w.created_at AS workspace_created_at, \
+                    m.user_id AS user_id, m.role AS role \
                FROM member_identities i \
                JOIN workspace_members m \
                  ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
@@ -855,6 +859,9 @@ pub(crate) async fn memberships_for(
                 .get::<String>("role")
                 .and_then(|role| Role::parse(&role))
                 .unwrap_or(Role::Viewer),
+            workspace_created_at: row
+                .get::<String>("workspace_created_at")
+                .unwrap_or_default(),
         })
         .collect())
 }
