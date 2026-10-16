@@ -166,5 +166,9 @@
   "pages/0008": {
     "file": "0042_pages_0008_dreaming.sql",
     "sha256": "3f3048117a3c55f6ef0782ef5341c544094683c34ca13f6bfde473df1bdffc3c"
+  },
+  "pages/0009": {
+    "file": "0043_pages_0009_dream_cursor.sql",
+    "sha256": "382c8cc35ffe998fc93f7fd783c4d44b62141590a048de8911836d2c216fffe7"
   }
 }

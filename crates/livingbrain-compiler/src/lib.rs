@@ -55,7 +55,7 @@ pub use compile::{
     MAX_CHUNKS_CEILING, MAX_OUTPUT_TOKENS_CEILING, Model, ModelFailure, NoGate, NoTuning,
     Overrides, Processed, Reply, Settings, Tuning,
 };
-pub use dream::{Dreams, Sweep};
+pub use dream::{Dreams, Sweep, Window};
 pub use facts::{Emitted, Fact, FactSink, HeldFact, NoFacts};
 pub use pool::{CONCURRENCY_CEILING, MAX_CALL, MAX_IN_FLIGHT, WALL_AFTER_BUDGET};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, PoolRow, Queue, Savings};

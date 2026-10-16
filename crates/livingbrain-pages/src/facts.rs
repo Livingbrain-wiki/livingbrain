@@ -231,6 +231,27 @@ pub struct DreamCandidate {
     pub updated_at: Option<String>,
 }
 
+/// What a dream run does to a subject's window cursor when it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorUpdate<'a> {
+    /// Leave it as it was (a run that could not start, or failed: the next
+    /// run reviews the same window again).
+    Keep,
+    /// The sweep reached the end: the next sweep starts from the beginning.
+    Clear,
+    /// More of the subject is left: the next run starts after this window.
+    Set(&'a str),
+}
+
+/// One window of a subject's current facts, for a dream pass: the facts in
+/// order, whether more follow, and the cursor after the last of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DreamWindow {
+    pub facts: Vec<TimedFact>,
+    pub more: bool,
+    pub cursor: Option<String>,
+}
+
 /// How one dream run ended, for [`FactStore::dream_finish`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DreamFinish<'a> {
@@ -238,6 +259,8 @@ pub struct DreamFinish<'a> {
     pub status: &'a str,
     /// Whether the pass read the subject: sets `dreamt_at`.
     pub dreamt: bool,
+    /// Where the next run of this subject starts.
+    pub cursor: CursorUpdate<'a>,
     pub facts_seen: usize,
     pub decisions: usize,
     pub applied: usize,
@@ -1032,26 +1055,154 @@ impl FactStore {
         now: i64,
     ) -> Result<(), FactError> {
         let at = timeline::rfc3339(now);
+        // The cursor is set, cleared or left alone; only the first two write it.
+        let (cursor_sql, cursor_value) = match outcome.cursor {
+            CursorUpdate::Keep => ("", None),
+            CursorUpdate::Clear => (", cursor = ?", None),
+            CursorUpdate::Set(cursor) => (", cursor = ?", Some(cursor)),
+        };
+        let mut values = vec![
+            text(outcome.status),
+            opt_text(outcome.dreamt.then_some(at.as_str())),
+            SeaValue::BigInt(Some(outcome.facts_seen as i64)),
+            SeaValue::BigInt(Some(outcome.decisions as i64)),
+            SeaValue::BigInt(Some(outcome.applied as i64)),
+            opt_text(outcome.error),
+            text(&at),
+        ];
+        if !cursor_sql.is_empty() {
+            values.push(opt_text(cursor_value));
+        }
+        values.push(text(scope));
+        values.push(text(subject));
         self.db
             .execute(&Statement::with_values(
-                "UPDATE fact_dreams SET status = ?, dreamt_at = COALESCE(?, dreamt_at), \
-                 facts_seen = ?, decisions = ?, applied = ?, last_error = ?, lease_until = NULL, \
-                 updated_at = ? WHERE scope = ? AND subject = ?",
-                vec![
-                    text(outcome.status),
-                    opt_text(outcome.dreamt.then_some(at.as_str())),
-                    SeaValue::BigInt(Some(outcome.facts_seen as i64)),
-                    SeaValue::BigInt(Some(outcome.decisions as i64)),
-                    SeaValue::BigInt(Some(outcome.applied as i64)),
-                    opt_text(outcome.error),
-                    text(&at),
-                    text(scope),
-                    text(subject),
-                ],
+                format!(
+                    "UPDATE fact_dreams SET status = ?, dreamt_at = COALESCE(?, dreamt_at), \
+                     facts_seen = ?, decisions = ?, applied = ?, last_error = ?, lease_until = NULL, \
+                     updated_at = ?{cursor_sql} WHERE scope = ? AND subject = ?"
+                ),
+                values,
             ))
             .await
             .map_err(PageError::Store)?;
         Ok(())
+    }
+
+    /// Where a subject's next dream window starts (`created_at|id` of the
+    /// last fact reviewed), `None` from the beginning.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_cursor(
+        &self,
+        scope: &str,
+        subject: &str,
+    ) -> Result<Option<String>, FactError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT cursor FROM fact_dreams WHERE scope = ? AND subject = ?",
+                vec![text(scope), text(subject)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .first()
+            .and_then(|row| row.get::<String>("cursor")))
+    }
+
+    /// The next window of a subject's **current** facts after `cursor`, in
+    /// the order a dream reads them (`created_at`, then `id`), at most
+    /// `limit`. `more` says whether any current fact follows the window; the
+    /// returned cursor is the last fact's position. Superseded, ended and
+    /// retracted facts are never in a window.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_window(
+        &self,
+        scope: &str,
+        subject: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<DreamWindow, FactError> {
+        let mut values = vec![text(scope), text(subject)];
+        let mut sql = String::from(
+            "SELECT * FROM facts WHERE scope = ? AND subject = ? AND status = 'current'",
+        );
+        if let Some((created, id)) = cursor.and_then(|c| c.split_once('|')) {
+            sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
+            values.push(text(created));
+            values.push(text(created));
+            values.push(text(id));
+        }
+        sql.push_str(" ORDER BY created_at ASC, id ASC LIMIT ?");
+        values.push(SeaValue::BigInt(Some(limit as i64 + 1)));
+        let rows = self
+            .db
+            .query(&Statement::with_values(sql, values))
+            .await
+            .map_err(PageError::Store)?;
+        let more = rows.rows.len() > limit;
+        let kept = &rows.rows[..rows.rows.len().min(limit)];
+        let cursor = kept.last().map(|row| {
+            format!(
+                "{}|{}",
+                row.get::<String>("created_at").unwrap_or_default(),
+                row.get::<String>("id").unwrap_or_default()
+            )
+        });
+        let facts = self
+            .decode(kept)
+            .await?
+            .into_iter()
+            .map(|(_, fact)| fact)
+            .collect();
+        Ok(DreamWindow {
+            facts,
+            more,
+            cursor,
+        })
+    }
+
+    /// The attribute vocabulary of a subject's current facts: each distinct
+    /// attribute with how many current facts carry it and the id of its
+    /// latest fact (ids are time-ordered, so the largest is the newest), by
+    /// name. Plaintext columns only; at most 300 keys.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_vocabulary(
+        &self,
+        scope: &str,
+        subject: &str,
+    ) -> Result<Vec<(String, i64, String)>, FactError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT attribute, COUNT(*) AS n, MAX(id) AS latest FROM facts \
+                 WHERE scope = ? AND subject = ? AND status = 'current' \
+                 GROUP BY attribute ORDER BY attribute ASC LIMIT 300",
+                vec![text(scope), text(subject)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        Ok(rows
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String>("attribute").unwrap_or_default(),
+                    row.get::<i64>("n").unwrap_or_default(),
+                    row.get::<String>("latest").unwrap_or_default(),
+                )
+            })
+            .collect())
     }
 
     /// Writes one decision of a pass to the decision log, applied or not.

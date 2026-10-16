@@ -48,10 +48,10 @@ pub use entity::{
     EntityType, Frontmatter, MAX_SLUG_LEN, extract_links, is_slug, parse_frontmatter,
 };
 pub use facts::{
-    DreamCandidate, DreamDecisionRow, DreamFinish, DreamOutcomes, DreamPass, FactError, FactInput,
-    FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS, MAX_FACT_TEXT, MAX_INDEX_KEYS,
-    Recorded, Timeline, brief_lines, brief_section, fact_json, is_subject, person_subject,
-    relevant, relevant_where,
+    CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, DreamOutcomes, DreamPass,
+    DreamWindow, FactError, FactInput, FactOutcome, FactStore, MAX_BRIEF_TIMELINES, MAX_FACT_ROWS,
+    MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, Timeline, brief_lines, brief_section, fact_json,
+    is_subject, person_subject, relevant, relevant_where,
 };
 pub use graph::{
     GraphLink, GraphPage, GraphReach, GraphRows, GraphSource, GraphSubject, graph_rows,
@@ -145,6 +145,13 @@ const MIGRATION_DREAMING: SqlMigration = SqlMigration::new(
     "0008",
     "dreaming",
     include_str!("../migrations/sqlite/0008_dreaming.sql"),
+);
+
+/// Dreaming's window cursor on the queue row, same portable subset.
+const MIGRATION_DREAM_CURSOR: SqlMigration = SqlMigration::new(
+    "0009",
+    "dream_cursor",
+    include_str!("../migrations/sqlite/0009_dream_cursor.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -414,7 +421,7 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 8] = [
+        const MIGRATIONS: [SqlMigration; 9] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
@@ -423,6 +430,7 @@ impl Module for Pages {
             MIGRATION_FACTS,
             MIGRATION_PAGE_TITLES,
             MIGRATION_DREAMING,
+            MIGRATION_DREAM_CURSOR,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

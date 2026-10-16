@@ -66,7 +66,7 @@ use cratefield_core::{
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::{
     Call, ClaimFilter, Classifiers, Compiler, Dreams, Emitted, Fact, FactSink, Gate, HeldFact, Job,
-    JobStatus, Model, ModelFailure, Queue, Reply, Settings,
+    JobStatus, Model, ModelFailure, Queue, Reply, Settings, Window,
 };
 use livingbrain_memory::timeline::{self, FactStatus, TimedFact};
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError, Structured};
@@ -558,6 +558,43 @@ impl Dreams for StoreFacts {
     async fn log(&self, row: DreamDecisionRow<'_>) -> Result<(), String> {
         self.store
             .dream_log(&row)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn cursor(&self, scope: &str, subject: &str) -> Result<Option<String>, String> {
+        self.store
+            .dream_cursor(scope, subject)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn window(
+        &self,
+        scope: &str,
+        subject: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Window, String> {
+        let window = self
+            .store
+            .dream_window(scope, subject, after, limit)
+            .await
+            .map_err(|_| "store error".to_owned())?;
+        Ok(Window {
+            facts: window.facts.iter().map(held_fact).collect(),
+            more: window.more,
+            cursor: window.cursor,
+        })
+    }
+
+    async fn vocabulary(
+        &self,
+        scope: &str,
+        subject: &str,
+    ) -> Result<Vec<(String, i64, String)>, String> {
+        self.store
+            .dream_vocabulary(scope, subject)
             .await
             .map_err(|_| "store error".to_owned())
     }
