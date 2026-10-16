@@ -201,7 +201,7 @@ export function validateConnect(form) {
       } else if (parsed.username || parsed.password) {
         errors.baseUrl = "Put the key in the API key field, not in the URL.";
       } else if (/\$\{\w+\}/.test(raw)) {
-        errors.baseUrl = "Fill in the placeholder in the URL.";
+        errors.baseUrl = "Replace the ${…} text in the URL with the real address.";
       } else {
         baseUrl = raw.replace(/\/+$/, "");
       }
@@ -762,7 +762,7 @@ export function jevView(status) {
     line = "Off — switched off for this workspace. The free triage rules still run.";
   } else if (s.available === false) {
     label = "Off";
-    line = "Off — this server cannot call TypeSafe.";
+    line = "Off — Jev isn't available here.";
   } else {
     label = "Off";
     line = "Off — no TypeSafe key here. Add one to turn Jev on; the free triage rules run meanwhile.";

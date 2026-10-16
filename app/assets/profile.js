@@ -196,7 +196,7 @@ export function profileErrorMessage(error, what) {
   if (error && error.status === 403) return `You can't ${what}: your role does not allow it.`;
   if (error && error.status === 413) return "That image is larger than 512 KB, even after cropping. Try a smaller one.";
   if (error && error.status === 415) return "That file is not a PNG, JPEG or WebP image.";
-  if (error && error.status === 503) return "Avatars are not available on this server yet.";
+  if (error && error.status === 503) return "Avatars aren't available right now.";
   const detail = error && error.body && (error.body.detail || error.body.title);
   return `Could not ${what}: ${detail || (error && error.message) || String(error)}`;
 }

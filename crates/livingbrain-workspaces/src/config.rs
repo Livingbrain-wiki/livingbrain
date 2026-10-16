@@ -90,6 +90,46 @@ impl Settings {
     pub fn callback_url(&self) -> String {
         format!("{}/v1/workspaces/slack/callback", self.redirect_base)
     }
+
+    /// True when both Slack credentials are real values, not placeholders
+    /// (see [`is_real_credential`]). This is what decides whether the sign-in
+    /// page offers Slack.
+    #[must_use]
+    pub fn has_real_credentials(&self) -> bool {
+        is_real_credential(&self.client_id) && is_real_credential(&self.client_secret)
+    }
+}
+
+/// Whether a Slack credential is a real value rather than a placeholder.
+///
+/// `wrangler.toml` ships `replace-with-your-slack-app-client-id` until an
+/// operator sets the real client id, so a value that is blank, or that reads
+/// as a placeholder, is not configured. The check is deliberately blunt: a
+/// real Slack client id is `digits.digits`, and a real secret is a long
+/// random string, so none of the patterns below can match one by accident.
+/// Matching is case-insensitive and ignores surrounding whitespace.
+#[must_use]
+pub fn is_real_credential(raw: &str) -> bool {
+    let value = raw.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return false;
+    }
+    // `xxx`, `xxxx`, … are the usual "fill this in" stand-in.
+    if value.len() >= 3 && value.chars().all(|c| c == 'x') {
+        return false;
+    }
+    if value.starts_with("todo") {
+        return false;
+    }
+    [
+        "placeholder",
+        "changeme",
+        "change-me",
+        "replace-with",
+        "your-slack",
+    ]
+    .iter()
+    .all(|word| !value.contains(word))
 }
 
 /// The Slack app's signing secret (`WORKSPACES_SLACK_SIGNING_SECRET`), or
@@ -175,4 +215,52 @@ fn required(
         ));
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_slack_credentials_are_configured() {
+        assert!(is_real_credential("1234.5678"));
+        assert!(is_real_credential("8f3c9a0e1b7d4c2a9e6f5b4a3c2d1e0f"));
+        // A real secret that happens to contain `x` or `todo` mid-value.
+        assert!(is_real_credential("a1xxb2c3"));
+        assert!(is_real_credential("mytodolist9"));
+    }
+
+    #[test]
+    fn blank_and_placeholder_credentials_are_not_configured() {
+        for placeholder in [
+            "",
+            "   ",
+            "replace-with-your-slack-app-client-id",
+            "REPLACE-WITH-YOUR-SLACK-APP-CLIENT-ID",
+            "placeholder",
+            "changeme",
+            "change-me",
+            "xxx",
+            "XXXXXXXX",
+            "TODO: set the client id",
+            "your-slack-client-id",
+        ] {
+            assert!(!is_real_credential(placeholder), "{placeholder:?}");
+        }
+    }
+
+    #[test]
+    fn a_settings_pair_needs_both_credentials_real() {
+        let settings = |id: &str, secret: &str| Settings {
+            client_id: id.to_owned(),
+            client_secret: secret.to_owned(),
+            redirect_base: "https://brain.example".to_owned(),
+        };
+        assert!(settings("1234.5678", "8f3c9a0e1b7d4c2a").has_real_credentials());
+        assert!(
+            !settings("replace-with-your-slack-app-client-id", "8f3c9a0e1b7d4c2a")
+                .has_real_credentials()
+        );
+        assert!(!settings("1234.5678", "changeme").has_real_credentials());
+    }
 }

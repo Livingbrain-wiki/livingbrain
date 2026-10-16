@@ -25,7 +25,7 @@ import {
  */
 const FIXTURE_KEY = ["lb", "test", "byok", "fixture"].join("-");
 
-test("the sections the issue asks for are present", () => {
+test("the sections the page changes are the ones with a server route", () => {
   assert.deepEqual(SECTIONS, [
     "models",
     "model-switch",
@@ -33,11 +33,6 @@ test("the sections the issue asks for are present", () => {
     "jev",
     "jev-test",
     "budgets",
-    "proactivity",
-    "tools",
-    "automations",
-    "skills",
-    "colonizer",
   ]);
   for (const section of SECTIONS) assert.ok(isSection(section));
   assert.ok(!isSection("billing"));
@@ -46,7 +41,6 @@ test("the sections the issue asks for are present", () => {
 test("a budgets change is one PATCH carrying the patch beside the audit triple", () => {
   const patch = { coding_agents: { daily_tokens: 3000000, batch: null } };
   const request = settingRequest("budgets", "limits", patch);
-  assert.equal(request.wired, true);
   assert.equal(request.method, "PATCH");
   assert.equal(request.path, "/v1/settings/budgets");
   assert.deepEqual(request.body.coding_agents, patch.coding_agents);
@@ -62,7 +56,6 @@ test("a models change is a PUT to the role's path", () => {
     model: "deepseek-chat",
     fallback_to_managed: false,
   });
-  assert.equal(request.wired, true);
   assert.equal(request.method, "PUT");
   assert.equal(request.path, "/v1/models/main");
   assert.equal(request.section, "models");
@@ -108,31 +101,17 @@ test("the body carries section, key and value next to the change", () => {
 });
 
 test("a non-models change carries the same triple", () => {
-  const request = settingRequest("proactivity", "nightly-evolve", true);
+  const request = settingRequest("budgets", "limits", true);
   assert.deepEqual(request.body, {
-    section: "proactivity",
-    key: "nightly-evolve",
+    section: "budgets",
+    key: "limits",
     value: true,
   });
 });
 
-test("a section with no server route is not wired, and has no path", () => {
-  for (const section of [
-    "proactivity",
-    "tools",
-    "automations",
-    "skills",
-    "colonizer",
-  ]) {
-    const request = settingRequest(section, "anything", true);
-    assert.equal(request.wired, false, section);
-    assert.equal(request.method, null);
-    assert.equal(request.path, null);
-    assert.deepEqual(request.body, {
-      section,
-      key: "anything",
-      value: true,
-    });
+test("a section with no server route cannot be described, so nothing is sent for it", () => {
+  for (const section of ["proactivity", "tools", "automations", "skills", "colonizer"]) {
+    assert.throws(() => settingRequest(section, "anything", true), /unknown settings section/);
   }
 });
 
@@ -158,11 +137,8 @@ test("auditRecord is the shape a server would log", () => {
   });
 });
 
-test("the outcome text says plainly when nothing was sent", () => {
-  const unwired = settingRequest("tools", "mcp-tools", false);
+test("the outcome text says whether the change was saved", () => {
   const wired = settingRequest("models", "main", {});
-  assert.match(describeOutcome(unwired, false), /no server route yet/);
-  assert.match(describeOutcome(unwired, false), /tools\.mcp-tools/);
   assert.match(describeOutcome(wired, true), /models\.main saved/);
   assert.match(describeOutcome(wired, false), /could not be saved/);
 });

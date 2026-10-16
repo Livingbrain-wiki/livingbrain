@@ -150,6 +150,16 @@ export function applySignInPage(els, state, origin) {
 }
 
 /**
+ * Whether the sign-in page offers Slack, from the server's
+ * `/v1/workspaces/sign-in-methods` answer. Only a clear `slack: true` offers
+ * it: a failed request, an older server or a malformed body all mean the
+ * email form alone.
+ */
+export function signInOffersSlack(methods) {
+  return Boolean(methods) && methods.slack === true;
+}
+
+/**
  * The header on the other pages: "Signed in as …" and Sign out when there is
  * a session, the plain "Sign in" link otherwise (and while checking, and
  * when the check could not tell — a link is never wrong).

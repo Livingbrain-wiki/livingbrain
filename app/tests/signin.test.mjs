@@ -4,6 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { signInOffersSlack } from "../assets/session.js";
 
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const block = html.slice(
@@ -30,4 +31,18 @@ test("the sign-in panel carries no design notes, passkeys or Discord", () => {
 test("the divider is decorative and the submit button is a submit", () => {
   assert.match(block, /class="signin-divider" aria-hidden="true"/);
   assert.match(block, /<button type="submit"[^>]*>Email me a sign-in link<\/button>/);
+});
+
+test("Slack is hidden by default, so a failed answer leaves the email form alone", () => {
+  assert.match(block, /<a id="signin-slack"[^>]*\shidden[\s>]/);
+  assert.match(block, /<div id="signin-or" class="signin-divider"[^>]*\shidden[\s>]/);
+});
+
+test("Slack is offered only when the server says slack is true", () => {
+  assert.equal(signInOffersSlack({ email: true, slack: true }), true);
+  assert.equal(signInOffersSlack({ email: true, slack: false }), false);
+  assert.equal(signInOffersSlack({ email: true }), false);
+  assert.equal(signInOffersSlack({ email: true, slack: "yes" }), false);
+  assert.equal(signInOffersSlack(null), false);
+  assert.equal(signInOffersSlack(undefined), false);
 });

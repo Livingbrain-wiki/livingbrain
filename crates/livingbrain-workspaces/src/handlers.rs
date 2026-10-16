@@ -29,6 +29,7 @@ use cratefield_core::{
 use cratefield_kms::Kms;
 use livingbrain_pages::Answers;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
@@ -294,6 +295,7 @@ pub(crate) fn router(
         .route("/slack/manifest", get(slack_manifest))
         .route("/slack/events", post(slack_events))
         .route("/me", get(me))
+        .route("/sign-in-methods", get(sign_in_methods))
         .route(
             "/",
             get(members::list_workspaces).post(members::create_workspace),
@@ -376,6 +378,22 @@ pub(crate) fn new_workspace_id(id_gen: &dyn IdGen) -> String {
 /// unchanged.
 pub(crate) fn new_user_id(id_gen: &dyn IdGen) -> String {
     format!("usr_{}", id_gen.ulid())
+}
+
+/// `GET /v1/workspaces/sign-in-methods` — the sign-in methods this deployment
+/// offers, so the sign-in page shows only the ones that work.
+///
+/// Unauthenticated, and it reports availability only: no credential, and no
+/// reason. Slack is offered when both of its credentials are real values
+/// (see [`Settings::has_real_credentials`]), so a placeholder client id, or a
+/// missing secret, answers `false` rather than sending people to a Slack page
+/// that cannot complete.
+async fn sign_in_methods(State(state): State<Arc<ModuleState>>) -> Json<Value> {
+    let slack = state
+        .settings
+        .as_ref()
+        .is_ok_and(Settings::has_real_credentials);
+    Json(json!({ "email": true, "slack": slack }))
 }
 
 /// `GET /slack/start` — mint the CSRF state and OIDC nonce, seal them into

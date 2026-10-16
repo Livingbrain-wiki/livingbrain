@@ -8,8 +8,7 @@
 
 /**
  * The sidebar's groups, in order. An item is `{ id, label, href, icon,
- * hint }`; an item with `soon` instead of an `href` is a reserved slot,
- * shown but never a link (GitHub until its UI lands, the #180 slots).
+ * hint }`. Every destination is a link: nothing is shown that does not work.
  */
 export const NAV = Object.freeze([
   {
@@ -48,7 +47,7 @@ export const NAV = Object.freeze([
     items: [
       { id: "models", label: "Models", href: "settings.html#models", icon: "model", hint: "The models the brain thinks with" },
       { id: "limits", label: "Usage & limits", href: "settings.html#limits", icon: "gauge", hint: "Budgets and spend" },
-      { id: "integrations", label: "Integrations", href: "settings.html#integrations", icon: "plug", hint: "MCP, the CLI and what is coming" },
+      { id: "integrations", label: "Integrations", href: "settings.html#integrations", icon: "plug", hint: "MCP and the CLI" },
       { id: "tokens", label: "API tokens", href: "settings.html#tokens", icon: "key", hint: "Tokens for agents and the CLI" },
       { id: "account", label: "Account", href: "settings.html#account", icon: "user", hint: "You, your workspaces, sign out" },
     ],
@@ -77,7 +76,7 @@ export function navItem(id, nav = NAV) {
 export const SETTINGS_TABS = Object.freeze({
   models: ["models"],
   limits: ["limits"],
-  integrations: ["connect", "github", "soon"],
+  integrations: ["connect", "github"],
   tokens: ["tokens"],
   members: ["workspace", "members"],
   agents: ["agents"],

@@ -161,7 +161,7 @@ test("each field's mistake is named under that field", () => {
   const custom = (baseUrl) =>
     validateConnect({ ...good, provider: "custom", baseUrl, wire: "openai", auth: "bearer" }).errors;
   assert.match(custom("").baseUrl, /base URL/);
-  assert.match(custom("https://h.example/${X}").baseUrl, /placeholder/);
+  assert.match(custom("https://h.example/${X}").baseUrl, /\$\{…\}/);
   assert.match(custom("not a url").baseUrl, /not a URL/);
   assert.match(custom("http://api.example.com/v1").baseUrl, /https/);
   assert.match(custom("https://user:pw@api.example.com/v1").baseUrl, /API key field/);
@@ -302,15 +302,17 @@ test("the settings page speaks to people, not to developers", () => {
     "mcp.livingbrain.wiki",
     "openai-compatible",
     "No server route yet",
+    "Coming soon",
+    "Not available yet",
+    "Colonizer",
+    "this server",
+    "this deployment",
+    "server's schedule",
   ]) {
     assert.ok(!SETTINGS_HTML.includes(jargon), `settings.html still says ${jargon}`);
   }
-  // Nothing in "Coming soon" looks like a control.
-  const soon = SETTINGS_HTML.slice(
-    SETTINGS_HTML.indexOf('id="soon"'),
-    SETTINGS_HTML.indexOf('</section>', SETTINGS_HTML.indexOf('id="soon"')),
-  );
-  assert.doesNotMatch(soon, /<(input|select|button|textarea)\b/);
+  // The placeholder card for unbuilt features is gone, not hidden.
+  assert.doesNotMatch(SETTINGS_HTML, /id="soon"/);
   // "Built with" is gone from the product.
   assert.doesNotMatch(SETTINGS_HTML, /id="stack"/);
   // The ids the page script and the token rules rely on are still there.

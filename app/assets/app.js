@@ -140,6 +140,7 @@ import { isSafeHref } from "./markdown.js";
 import {
   checkSession,
   applySignInPage,
+  signInOffersSlack,
   applyHeader,
   signOutRequest,
   SLOTS,
@@ -402,10 +403,6 @@ export function wireThemeToggle(button) {
  */
 export async function setSetting(section, key, value) {
   const request = settingRequest(section, key, value);
-  if (!request.wired) {
-    // No server route yet: say so rather than sending a request that 404s.
-    return { ok: false, sent: false, message: describeOutcome(request, false) };
-  }
   try {
     const data = await api(request.path, { method: request.method, body: request.body });
     return { ok: true, sent: true, message: describeOutcome(request, true), data };
@@ -645,10 +642,19 @@ pages.signin = async function signin() {
     }
   });
 
-  // The Slack button is a plain link to the server's start route, so it
-  // degrades to nothing rather than to a broken fetch.
+  // The Slack button is a plain link to the server's start route. It and its
+  // divider stay hidden until the server says Slack is configured, so a failed
+  // request leaves the email form on its own.
   const slack = $("#signin-slack");
+  const divider = $("#signin-or");
   slack.href = `${apiBase()}/v1/workspaces/slack/start`;
+  api("/v1/workspaces/sign-in-methods")
+    .then((methods) => {
+      const offered = signInOffersSlack(methods);
+      slack.hidden = !offered;
+      divider.hidden = !offered;
+    })
+    .catch(() => {});
 };
 
 /* --- the brain map ---------------------------------------------------- */
@@ -1274,7 +1280,7 @@ async function wireModels() {
       "Your sign-in never leaves your device: the brain hands the job to it, and only the answer comes back.";
     $("#runner-seen").textContent = runnersAvailable
       ? lastSeenText(lastSeen)
-      : "Running jobs on your device is not available on this server yet.";
+      : "Running jobs on your device isn't available right now.";
     const how = $("#runner-how");
     how.replaceChildren();
     how.append("Turn on ");
@@ -1718,7 +1724,7 @@ const DISCOVER_UNREACHABLE_NOTE = "Couldn't get this provider's model list right
 /** A device-runner change that did not take, in words. */
 function runnerFailure(outcome) {
   if (outcome.status === 404 || outcome.status === 405) {
-    return "Running jobs on your device is not available on this server yet.";
+    return "Running jobs on your device isn't available right now.";
   }
   return `Not saved: ${outcome.message}`;
 }

@@ -1613,7 +1613,7 @@ test("transcript nodes: a version-1 record (names only) still reads", () => {
   const all = textOf(transcriptNodes(v1));
   assert.match(all, /hi/);
   assert.match(all, /Bash/);
-  assert.match(all, /version 1 record/);
+  assert.match(all, /summary/);
   assert.match(all, /left out to fit/);
 });
 

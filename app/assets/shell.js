@@ -70,9 +70,9 @@ function textEl(doc, tag, text, className) {
 }
 
 /**
- * Builds the sidebar's groups into `nav`: a label and a list per group, a
- * link per destination, and a non-link "Soon" row per reserved slot.
- * Returns the links by destination id, for the current-item marking.
+ * Builds the sidebar's groups into `nav`: a label and a list per group, and a
+ * link per destination. Returns the links by destination id, for the
+ * current-item marking.
  */
 export function renderSidebar(doc, nav, groups = NAV) {
   nav.replaceChildren();
@@ -88,18 +88,13 @@ export function renderSidebar(doc, nav, groups = NAV) {
     list.setAttribute("aria-labelledby", `nav-group-${group.id}`);
     for (const item of group.items) {
       const li = doc.createElement("li");
-      const row = doc.createElement(item.href ? "a" : "span");
-      row.className = item.href ? "sidebar__link" : "sidebar__link sidebar__link--soon";
-      if (item.href) row.setAttribute("href", item.href);
-      else {
-        row.setAttribute("aria-disabled", "true");
-        row.setAttribute("title", item.soon || "Coming soon");
-      }
+      const row = doc.createElement("a");
+      row.className = "sidebar__link";
+      row.setAttribute("href", item.href);
       row.setAttribute("data-nav", item.id);
       const glyph = icon(doc, item.icon);
       if (glyph) row.appendChild(glyph);
       row.appendChild(textEl(doc, "span", item.label, "sidebar__text"));
-      if (!item.href) row.appendChild(textEl(doc, "span", "Soon", "pill sidebar__soon"));
       li.appendChild(row);
       list.appendChild(li);
       links.set(item.id, row);

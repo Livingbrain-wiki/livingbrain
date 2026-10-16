@@ -745,3 +745,54 @@ fn user_ids(rows: &Value) -> Vec<&str> {
         .filter_map(|row| row["user_id"].as_str())
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Which sign-in methods the page offers
+
+const SIGN_IN_METHODS: &str = "/v1/workspaces/sign-in-methods";
+
+#[pollster::test]
+async fn sign_in_methods_offers_slack_when_both_credentials_are_real() {
+    let http = TokenHttp::new();
+    let kit = harness(&http);
+
+    // Unauthenticated: the sign-in page asks before anyone has signed in.
+    let methods = get(&kit.router, SIGN_IN_METHODS, &[]).await;
+    assert_eq!(methods.status, StatusCode::OK);
+    assert_eq!(methods.json(), json!({"email": true, "slack": true}));
+}
+
+#[pollster::test]
+async fn sign_in_methods_hides_slack_while_the_client_id_is_a_placeholder() {
+    // The value `wrangler.toml` ships until an operator sets the real one.
+    let http = TokenHttp::new();
+    let config = MapConfig::from_pairs([
+        (
+            "WORKSPACES_SLACK_CLIENT_ID",
+            "replace-with-your-slack-app-client-id",
+        ),
+        ("WORKSPACES_SLACK_CLIENT_SECRET", CLIENT_SECRET),
+        ("WORKSPACES_REDIRECT_BASE", REDIRECT_BASE),
+    ]);
+    let kit = harness_at(&http, config, NOW);
+
+    let methods = get(&kit.router, SIGN_IN_METHODS, &[]).await;
+    assert_eq!(methods.status, StatusCode::OK);
+    assert_eq!(methods.json(), json!({"email": true, "slack": false}));
+}
+
+#[pollster::test]
+async fn sign_in_methods_hides_slack_without_the_client_secret() {
+    let http = TokenHttp::new();
+    let config = MapConfig::from_pairs([
+        ("WORKSPACES_SLACK_CLIENT_ID", CLIENT_ID),
+        ("WORKSPACES_REDIRECT_BASE", REDIRECT_BASE),
+    ]);
+    let kit = harness_at(&http, config, NOW);
+
+    let methods = get(&kit.router, SIGN_IN_METHODS, &[]).await;
+    assert_eq!(methods.status, StatusCode::OK);
+    assert_eq!(methods.json(), json!({"email": true, "slack": false}));
+    // And the answer names no credential, placeholder or otherwise.
+    assert!(!String::from_utf8_lossy(&methods.body).contains(CLIENT_ID));
+}
