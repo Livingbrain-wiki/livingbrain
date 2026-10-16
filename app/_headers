@@ -58,6 +58,10 @@
   Cache-Control: private, no-cache
 /brain.html
   Cache-Control: private, no-cache
+/dreaming
+  Cache-Control: private, no-cache
+/dreaming.html
+  Cache-Control: private, no-cache
 
 # Content-hashed copies: the name changes whenever the bytes do, so a copy is
 # good forever. Every page, module import, stylesheet url(), manifest icon and

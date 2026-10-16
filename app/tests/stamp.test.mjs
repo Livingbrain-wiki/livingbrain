@@ -21,7 +21,7 @@ process.on("exit", () => rmSync(OUT, { recursive: true, force: true }));
 
 const read = (p) => readFileSync(join(OUT, p), "utf8");
 const sha = (data) => createHash("sha256").update(data).digest("hex");
-const PAGES = ["index.html", "settings.html", "wiki.html", "brain.html"];
+const PAGES = ["index.html", "settings.html", "wiki.html", "brain.html", "dreaming.html"];
 const resolveFrom = (file, spec) => posix.normalize(posix.join(posix.dirname(file), spec.split(/[?#]/)[0]));
 
 function walk(dir, rel = "") {
@@ -143,7 +143,7 @@ test("_headers: pages revalidate, hashed files are immutable, originals revalida
     assert.ok(at >= 0, `rule for ${path}`);
     return headers.slice(at + path.length + 2).split(/\n(?! )/)[0];
   };
-  for (const path of ["/", "/index.html", "/settings", "/settings.html", "/wiki", "/wiki.html", "/brain", "/brain.html"]) {
+  for (const path of ["/", "/index.html", "/settings", "/settings.html", "/wiki", "/wiki.html", "/brain", "/brain.html", "/dreaming", "/dreaming.html"]) {
     assert.match(rule(path), /Cache-Control: private, no-cache$/, path);
   }
   assert.match(rule("/static/*"), /Cache-Control: public, max-age=31536000, immutable$/);
