@@ -32,12 +32,10 @@ set -euo pipefail
 STACK_URL="${STACK_URL:-https://factory0.ventures/stack.json}"
 STACK_VENTURE="${STACK_VENTURE:-FZ-018}"
 
-# The vendored copies. Both are checked against the registry, and against each
-# other, so the browser copy and the copy compiled into the binary can never
-# quietly disagree.
+# The vendored copy, checked against the registry (the app no longer shows a
+# browser copy; the binary's copy feeds the mail footer).
 VENDORED=(
   "crates/livingbrain-stack/src/stack.json"
-  "app/assets/stack.json"
 )
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
