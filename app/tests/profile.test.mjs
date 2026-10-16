@@ -296,3 +296,27 @@ test("settings has both editors, the workspace's heads the Members tab, and the 
   const headers = readFileSync(new URL("../_headers", import.meta.url), "utf8");
   assert.match(headers, /img-src 'self' data:;/, "no blob:, no remote image hosts");
 });
+
+test("the cropper's square zooms from the largest fit and stays inside the image", async () => {
+  const { cropRect, panCrop, ZOOM_MAX } = await import("../assets/profile.js");
+  assert.deepEqual(cropRect(400, 300), { sx: 50, sy: 0, side: 300, cx: 200, cy: 150, zoom: 1 });
+  const zoomed = cropRect(400, 300, { zoom: 2, cx: 0, cy: 0 });
+  assert.deepEqual([zoomed.sx, zoomed.sy, zoomed.side], [0, 0, 150]);
+  assert.equal(cropRect(400, 300, { zoom: 99 }).zoom, ZOOM_MAX);
+  assert.equal(cropRect(400, 300, { zoom: 0.2 }).zoom, 1);
+  // Dragging right by half the shown width moves the centre left by half a side.
+  const moved = panCrop(400, 300, { zoom: 2 }, 50, 0, 100);
+  assert.equal(moved.cx, 200 - 75);
+  // And never past the edge.
+  assert.equal(panCrop(400, 300, { zoom: 1 }, 10000, 0, 100).sx, 0);
+});
+
+test("both pictures are a square picker with a zoom slider", () => {
+  const html = readFileSync(new URL("../settings.html", import.meta.url), "utf8");
+  for (const prefix of ["profile", "workspace"]) {
+    for (const id of ["picker", "guide", "zoom", "zoom-row"]) {
+      assert.match(html, new RegExp(`id="${prefix}-${id}"`), `#${prefix}-${id}`);
+    }
+  }
+  assert.doesNotMatch(html, /<input\s+id="(profile|workspace)-file"\s+type="file"(?![^>]*hidden)/);
+});

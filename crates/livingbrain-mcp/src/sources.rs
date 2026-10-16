@@ -17,16 +17,20 @@
 //! - **The server redacts; the client never gets the choice.** Body *and* path
 //!   go through the ingest pipeline's redaction (issue #77), so a client that
 //!   skipped it (issue #108) lands the same ledger as one that did not.
-//! - **The credential is the MCP endpoint's.** No cookie, no second way in: a
-//!   missing or rejected bearer gets the same 401, with the same
-//!   `WWW-Authenticate` challenge, as [`crate::router`] answers.
+//! - **The credential is the MCP endpoint's**, plus — only where the
+//!   composition wires one ([`sources_router_with_session`]) — the web app's
+//!   session cookie, so the Imports page can upload a file. A cookie is read
+//!   only when there is no `Authorization` header at all, and a cookie write
+//!   must pass [`SessionAuth::same_origin`]. A missing or rejected credential
+//!   gets the same 401, with the same `WWW-Authenticate` challenge, as
+//!   [`crate::router`] answers.
 
 use std::sync::Arc;
 
 use cratefield_core::axum::body::Bytes;
 use cratefield_core::axum::extract::State;
 use cratefield_core::axum::extract::rejection::BytesRejection;
-use cratefield_core::axum::http::{HeaderMap, StatusCode, Uri};
+use cratefield_core::axum::http::{HeaderMap, StatusCode, Uri, header};
 use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::post;
 use cratefield_core::axum::{self, Json, Router};
@@ -38,8 +42,7 @@ use livingbrain_pages::{
 };
 use serde_json::{Value, json};
 
-use crate::McpState;
-use crate::auth::{Asker, BearerAuth, page_scope};
+use crate::auth::{Asker, BearerAuth, SessionAuth, page_scope};
 use crate::{port, unauthorized};
 
 /// A `scope` this endpoint does not have. A closed set, like the source kind:
@@ -109,6 +112,24 @@ const TOO_LARGE: ProblemDef = ProblemDef {
     description: "Split the document on a line or record boundary and send it again.",
 };
 
+/// A cookie-authenticated upload from another origin. Nothing was stored.
+const CROSS_SITE: ProblemDef = ProblemDef {
+    slug: "sources/cross-site-request",
+    status: StatusCode::FORBIDDEN,
+    title: "A same-origin request is required",
+    description: "An import signed in with the session cookie is accepted only from this \
+                  venture's own origin. Nothing was stored.",
+};
+
+/// What the routes hold: the module's context, the custodian, the bearer
+/// resolver, and the cookie one when the composition wired it.
+struct SourcesState {
+    ctx: Arc<ModuleContext>,
+    kms: Arc<dyn Kms>,
+    auth: Arc<dyn BearerAuth>,
+    session: Option<Arc<dyn SessionAuth>>,
+}
+
 /// Anything else redaction refused. 422: the endpoint cannot fix it by being
 /// asked differently, and nothing was stored.
 const NOT_REDACTABLE: ProblemDef = ProblemDef {
@@ -129,7 +150,33 @@ pub fn sources_router(
     kms: Arc<dyn Kms>,
     auth: Arc<dyn BearerAuth>,
 ) -> Router {
-    let state = Arc::new(McpState { ctx, kms, auth });
+    build(SourcesState {
+        ctx,
+        kms,
+        auth,
+        session: None,
+    })
+}
+
+/// [`sources_router`], also answering to the web app's session cookie: the
+/// Imports page's upload. The cookie is consulted only for a request with no
+/// `Authorization` header, and must come from the deployment's own origin.
+pub fn sources_router_with_session(
+    ctx: Arc<ModuleContext>,
+    kms: Arc<dyn Kms>,
+    auth: Arc<dyn BearerAuth>,
+    session: Arc<dyn SessionAuth>,
+) -> Router {
+    build(SourcesState {
+        ctx,
+        kms,
+        auth,
+        session: Some(session),
+    })
+}
+
+fn build(state: SourcesState) -> Router {
+    let state = Arc::new(state);
     axum::Router::new()
         .route("/", post(create))
         .with_state(state)
@@ -154,17 +201,20 @@ pub fn sources_router(
 /// `sources/too-large` problem any other unreadable body does, rather than the
 /// extractor's own error.
 async fn create(
-    State(state): State<Arc<McpState>>,
+    State(state): State<Arc<SourcesState>>,
     headers: HeaderMap,
     uri: Uri,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, Problem> {
     let asker = match asker(&state, &headers).await {
         Ok(asker) => asker,
+        Err(Refused::CrossSite(detail)) => {
+            return Err(Problem::new(&CROSS_SITE).with_detail(detail));
+        }
         // The 401 the MCP endpoint answers with, challenge and all — one
         // definition, so both surfaces say the same thing to a client that
         // arrives at the wrong one.
-        Err(()) => return Ok(unauthorized(&headers, &uri)),
+        Err(Refused::Unauthorized) => return Ok(unauthorized(&headers, &uri)),
     };
     let body = body.map_err(|_| Problem::new(&TOO_LARGE))?;
     let request = parse(&body)?;
@@ -373,15 +423,33 @@ fn ingest_failed(error: IngestError) -> Problem {
     }
 }
 
-/// The credential, resolved exactly as the MCP endpoint resolves it: no
-/// `Authorization` header, or one that names nobody — including an asker with
-/// no workspace or no user id — gets the same 401.
-async fn asker(state: &McpState, headers: &HeaderMap) -> Result<Asker, ()> {
-    let Some(token) = crate::protocol::bearer(headers) else {
-        return Err(());
+/// Why no asker came out of a request.
+enum Refused {
+    /// No credential, or one that names nobody: the MCP endpoint's 401.
+    Unauthorized,
+    /// A cookie upload from another origin, with the failed signal.
+    CrossSite(String),
+}
+
+/// The credential: a bearer resolved exactly as the MCP endpoint resolves it
+/// or, with no `Authorization` header at all and a session wired, the web
+/// app's cookie from this origin. Anything that names nobody — including an
+/// asker with no workspace or no user id — gets the same 401.
+async fn asker(state: &SourcesState, headers: &HeaderMap) -> Result<Asker, Refused> {
+    let resolved = if headers.contains_key(header::AUTHORIZATION) {
+        let Some(token) = crate::protocol::bearer(headers) else {
+            return Err(Refused::Unauthorized);
+        };
+        state.auth.authenticate(&state.ctx.ports, token).await
+    } else {
+        let Some(session) = &state.session else {
+            return Err(Refused::Unauthorized);
+        };
+        session.same_origin(headers).map_err(Refused::CrossSite)?;
+        session.session(&state.ctx.ports, headers).await
     };
-    match state.auth.authenticate(&state.ctx.ports, token).await {
+    match resolved {
         Ok(asker) if !asker.workspace_id.is_empty() && !asker.user_id.is_empty() => Ok(asker),
-        _ => Err(()),
+        _ => Err(Refused::Unauthorized),
     }
 }

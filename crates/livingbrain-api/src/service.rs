@@ -14,49 +14,14 @@
 use std::sync::Arc;
 
 use cratefield_core::axum::http::{HeaderMap, Method, header};
-use cratefield_core::{ModuleContext, Ports, Problem};
+use cratefield_core::{ModuleContext, Problem};
 use cratefield_kms::Kms;
-use livingbrain_mcp::{Asker, AuthError, BearerAuth};
+use livingbrain_mcp::{Asker, BearerAuth, SessionAuth};
 use livingbrain_pages::access::AccessPlan;
 use livingbrain_pages::{FactStore, PageStore, SourceStore};
 
 use crate::problems::{CROSS_SITE_REQUEST, UNAUTHORIZED};
 use crate::{Wiki, port};
-
-/// Resolves the web app's **session cookie** to the asker it speaks for —
-/// the second way into these routes, beside [`BearerAuth`].
-///
-/// The web app never sends an `Authorization` header (`app/assets/app.js`):
-/// its session is an `HttpOnly` cookie the browser attaches on its own. So
-/// without this seam every call the wiki page makes is a 401. The seam is
-/// separate from [`BearerAuth`] on purpose: the MCP endpoint takes that one
-/// and stays bearer-only, and a composition that wires no session here
-/// gets exactly the bearer-only surface it had before.
-///
-/// Like [`BearerAuth`] it is implemented by the composition, which can see
-/// the module that owns sessions; this crate only decides **when** it is
-/// consulted (no `Authorization` header at all) and **what** a cookie may
-/// do (a write must pass [`SessionAuth::same_origin`]).
-#[async_trait::async_trait]
-pub trait SessionAuth: Send + Sync {
-    /// The member the request's session cookie names, as an [`Asker`] — a
-    /// full session carries `token_scopes: None`.
-    ///
-    /// # Errors
-    ///
-    /// [`AuthError`] when there is no cookie, it does not verify, it has
-    /// expired, or its member is gone. Every case is the same 401.
-    async fn session(&self, ports: &Ports, headers: &HeaderMap) -> Result<Asker, AuthError>;
-
-    /// Whether the browser signals (`sec-fetch-site`, then `Origin`) place
-    /// this request on the deployment's own origin. Consulted for every
-    /// cookie-authenticated request whose method is not safe.
-    ///
-    /// # Errors
-    ///
-    /// The detail a 403 problem carries, saying which signal failed.
-    fn same_origin(&self, headers: &HeaderMap) -> Result<(), String>;
-}
 
 /// The state behind every route in this crate.
 ///

@@ -9,12 +9,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use cratefield_core::axum::http::{Method, StatusCode, header};
+use cratefield_core::axum::body::Body;
+use cratefield_core::axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use cratefield_core::{Blob, Clock, Database, Ports, ScopedBlob, Statement, UlidIdGen};
 use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
-use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
+use livingbrain_mcp::{Asker, AuthError, BearerAuth, SessionAuth, page_scope};
 use livingbrain_pages::{Pages, SourceStore};
 use serde_json::{Value, json};
 
@@ -81,6 +82,10 @@ struct Fixture {
 }
 
 fn fixture(auth: Arc<dyn BearerAuth>) -> Fixture {
+    fixture_with(auth, None)
+}
+
+fn fixture_with(auth: Arc<dyn BearerAuth>, session: Option<Arc<dyn SessionAuth>>) -> Fixture {
     // The kit's default port set has no blob store; the source store needs
     // one, so it goes in and a handle is kept here.
     let mut blob: Option<Arc<dyn Blob>> = None;
@@ -95,12 +100,18 @@ fn fixture(auth: Arc<dyn BearerAuth>) -> Fixture {
         .nest("/mcp", move |ctx| {
             livingbrain_mcp::router(ctx, Arc::clone(&key_for_mcp), Arc::clone(&auth_for_mcp))
         })
-        .nest("/sources", move |ctx| {
-            livingbrain_mcp::sources_router(
+        .nest("/sources", move |ctx| match &session {
+            Some(session) => livingbrain_mcp::sources_router_with_session(
                 ctx,
                 Arc::clone(&key_for_sources),
                 Arc::clone(&auth_for_sources),
-            )
+                Arc::clone(session),
+            ),
+            None => livingbrain_mcp::sources_router(
+                ctx,
+                Arc::clone(&key_for_sources),
+                Arc::clone(&auth_for_sources),
+            ),
         });
     let kit = TestHarness::with_ports(
         vec![
@@ -836,4 +847,100 @@ fn a_secret_shaped_project_is_dropped_not_stored() {
     assert!(answer["redacted"].as_u64().unwrap_or(0) >= 1, "{answer}");
     let stored = rows(&fixture, "SELECT project FROM sources");
     assert_eq!(stored[0].get::<String>("project"), None);
+}
+
+/// A session resolver over one fixed cookie, and the same-origin rule read
+/// from `sec-fetch-site` alone: the shape the venture's `WebSession` has.
+struct Cookies;
+
+#[async_trait::async_trait]
+impl SessionAuth for Cookies {
+    async fn session(&self, _ports: &Ports, headers: &HeaderMap) -> Result<Asker, AuthError> {
+        match headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+            Some("lb_session=u-a") => Ok(Asker {
+                workspace_id: "ws-one".to_owned(),
+                user_id: "u-a".to_owned(),
+                token_scopes: None,
+                agent_owner: None,
+                role: None,
+                credential: None,
+            }),
+            _ => Err(AuthError::Rejected),
+        }
+    }
+
+    fn same_origin(&self, headers: &HeaderMap) -> Result<(), String> {
+        match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+            Some("same-origin") => Ok(()),
+            _ => Err("sec-fetch-site is not same-origin".to_owned()),
+        }
+    }
+}
+
+fn post_cookie(fixture: &Fixture, headers: &[(&str, &str)], body: &str) -> StatusCode {
+    use tower::ServiceExt;
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(ENDPOINT)
+        .header(header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder
+        .body(Body::from(body.to_owned()))
+        .expect("a request");
+    pollster::block_on(fixture.router.clone().oneshot(request))
+        .expect("an answer")
+        .status()
+}
+
+/// The Imports page uploads with its session cookie, from its own origin
+/// only; without a wired session the endpoint stays bearer-only.
+#[test]
+fn a_same_origin_cookie_upload_is_taken_where_a_session_is_wired() {
+    let body =
+        json!({ "path": "dropped.md", "body": "# Dropped\n", "scope": "shared" }).to_string();
+    let fixture = fixture_with(Arc::new(Tokens::default()), Some(Arc::new(Cookies)));
+
+    let cross = post_cookie(
+        &fixture,
+        &[
+            ("cookie", "lb_session=u-a"),
+            ("sec-fetch-site", "cross-site"),
+        ],
+        &body,
+    );
+    assert_eq!(cross, StatusCode::FORBIDDEN);
+    let stranger = post_cookie(
+        &fixture,
+        &[
+            ("cookie", "lb_session=nobody"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        &body,
+    );
+    assert_eq!(stranger, StatusCode::UNAUTHORIZED);
+    assert_eq!(row_count(&fixture), 0, "nothing was stored");
+
+    let ok = post_cookie(
+        &fixture,
+        &[
+            ("cookie", "lb_session=u-a"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        &body,
+    );
+    assert_eq!(ok, StatusCode::CREATED);
+    assert_eq!(row_count(&fixture), 1);
+
+    let bearer_only = fixture_with(Arc::new(Tokens::default()), None);
+    let refused = post_cookie(
+        &bearer_only,
+        &[
+            ("cookie", "lb_session=u-a"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        &body,
+    );
+    assert_eq!(refused, StatusCode::UNAUTHORIZED);
 }

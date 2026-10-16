@@ -222,26 +222,34 @@
               </p>
               <div class="profile">
                 <div class="profile__pic">
-                  <span id="workspace-avatar" class="avatar avatar--xl" aria-hidden="true"></span>
-                  <canvas
-                    id="workspace-preview"
-                    class="avatar avatar--xl avatar__preview"
-                    width="256"
-                    height="256"
-                    role="img"
-                    aria-label="Preview of the new picture"
-                    hidden
-                  ></canvas>
+                  <div
+                    id="workspace-picker"
+                    class="pic-picker"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Change the workspace picture"
+                    aria-describedby="workspace-file-hint err-workspaceFile"
+                  >
+                    <span id="workspace-avatar" class="avatar avatar--xl" aria-hidden="true"></span>
+                    <canvas
+                      id="workspace-preview"
+                      width="512"
+                      height="512"
+                      role="img"
+                      aria-label="The new picture, as it will be cropped"
+                      hidden
+                    ></canvas>
+                    <span id="workspace-guide" class="pic-picker__guide" hidden></span>
+                    <span class="pic-picker__label" aria-hidden="true">Change</span>
+                  </div>
+                  <label class="pic-picker__zoom" id="workspace-zoom-row" hidden>
+                    Zoom
+                    <input id="workspace-zoom" type="range" min="1" max="4" step="0.01" value="1" />
+                  </label>
+                  <input id="workspace-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
                 </div>
                 <div class="profile__pic-actions">
-                  <label for="workspace-file">Picture</label>
-                  <input
-                    id="workspace-file"
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    aria-describedby="workspace-file-hint err-workspaceFile"
-                  />
-                  <p class="hint" id="workspace-file-hint">PNG, JPEG or WebP, cropped to a square. Everyone in the workspace sees it.</p>
+                  <p class="hint" id="workspace-file-hint">Click or drop a PNG, JPEG or WebP image on the square, then drag and zoom to crop it. Everyone in the workspace sees it.</p>
                   <p class="field-error" id="err-workspaceFile"></p>
                   <div class="form-actions">
                     <button type="button" data-variant="primary" id="workspace-avatar-save" hidden>Use this picture</button>
@@ -386,26 +394,34 @@
               <div id="profile-status" class="notice" role="status" aria-live="polite"></div>
               <div class="profile">
                 <div class="profile__pic">
-                  <span id="profile-avatar" class="avatar avatar--xl" aria-hidden="true"></span>
-                  <canvas
-                    id="profile-preview"
-                    class="avatar avatar--xl avatar__preview"
-                    width="256"
-                    height="256"
-                    role="img"
-                    aria-label="Preview of the new picture"
-                    hidden
-                  ></canvas>
+                  <div
+                    id="profile-picker"
+                    class="pic-picker"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Change your picture"
+                    aria-describedby="profile-file-hint err-profileFile"
+                  >
+                    <span id="profile-avatar" class="avatar avatar--xl" aria-hidden="true"></span>
+                    <canvas
+                      id="profile-preview"
+                      width="512"
+                      height="512"
+                      role="img"
+                      aria-label="The new picture, as it will be cropped"
+                      hidden
+                    ></canvas>
+                    <span id="profile-guide" class="pic-picker__guide" hidden></span>
+                    <span class="pic-picker__label" aria-hidden="true">Change</span>
+                  </div>
+                  <label class="pic-picker__zoom" id="profile-zoom-row" hidden>
+                    Zoom
+                    <input id="profile-zoom" type="range" min="1" max="4" step="0.01" value="1" />
+                  </label>
+                  <input id="profile-file" type="file" accept="image/png,image/jpeg,image/webp" hidden />
                 </div>
                 <div class="profile__pic-actions">
-                  <label for="profile-file">Picture</label>
-                  <input
-                    id="profile-file"
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    aria-describedby="profile-file-hint err-profileFile"
-                  />
-                  <p class="hint" id="profile-file-hint">PNG, JPEG or WebP. It is cropped to a square here, and the original's location and camera data is never sent.</p>
+                  <p class="hint" id="profile-file-hint">Click or drop a PNG, JPEG or WebP image on the square, then drag and zoom to crop it. The original's location and camera data is never sent.</p>
                   <p class="field-error" id="err-profileFile"></p>
                   <div class="form-actions">
                     <button type="button" data-variant="primary" id="profile-avatar-save" hidden>Use this picture</button>

@@ -350,6 +350,37 @@
           <h1>Imports</h1>
           <p class="lede">The notes and documents imported into the brain, newest first. Open one to read it.</p>
         </div>
+        <!-- upload: drop files or a folder, or choose them -->
+        <div id="imports-upload" class="upload" hidden>
+          <div id="imports-drop" class="dropzone" tabindex="0" role="button" aria-describedby="imports-drop-hint">
+            <span class="dropzone__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+            </span>
+            <span class="dropzone__title">Drop notes or a folder here</span>
+            <span class="dropzone__hint" id="imports-drop-hint">Markdown or text, up to 1 MB each. Secrets are redacted before anything is stored.</span>
+            <span class="dropzone__actions">
+              <button type="button" id="imports-choose-files">Choose files</button>
+              <button type="button" id="imports-choose-folder">Choose a folder</button>
+            </span>
+          </div>
+          <input id="imports-files" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple hidden />
+          <input id="imports-folder" type="file" webkitdirectory multiple hidden />
+          <div class="upload__options">
+            <fieldset class="segmented" aria-label="Who can read them">
+              <label><input type="radio" name="imports-scope" value="personal" checked /> Just me</label>
+              <label><input type="radio" name="imports-scope" value="shared" /> Everyone in the workspace</label>
+            </fieldset>
+            <label class="upload__project">
+              <span>Project</span>
+              <input id="imports-project" type="text" list="imports-projects" placeholder="optional" maxlength="64" autocomplete="off" spellcheck="false" />
+            </label>
+            <datalist id="imports-projects"></datalist>
+          </div>
+          <div id="imports-progress" class="upload__progress" hidden>
+            <progress id="imports-bar" max="1" value="0"></progress>
+            <span id="imports-progress-text" role="status" aria-live="polite"></span>
+          </div>
+        </div>
         <div class="wiki-toolbar">
           <span class="status" id="imports-status" role="status"></span>
         </div>
@@ -358,7 +389,7 @@
         <div id="imports-empty" class="card wiki-empty" hidden>
           <h2>No imports yet</h2>
           <p>
-            Bring an existing vault or folder of notes in with
+            Drop notes above, or bring a whole vault in from a terminal with
             <code>livingbrain import &lt;folder&gt;</code>. Every file is kept
             as a source the pages cite.
           </p>

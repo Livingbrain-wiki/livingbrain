@@ -661,8 +661,9 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
     let mcp_kms = Arc::clone(&kms);
     let mcp_auth = Arc::clone(&auth);
     // The page routes the web app reads and writes answer to its session
-    // cookie as well as to a bearer; the MCP endpoint and the importer
-    // below take the bearer resolver alone and stay bearer-only.
+    // cookie as well as to a bearer; the MCP endpoint below takes the bearer
+    // resolver alone and stays bearer-only, and the importer takes the
+    // cookie too so the Imports page can upload (same origin only).
     let surface = wiki(Arc::clone(&kms));
     let cell = answers.clone();
     Pages::new()
@@ -686,7 +687,12 @@ fn pages_module(kms: Option<Arc<dyn Kms>>, answers: &AnswersCell) -> Pages {
             livingbrain_mcp::router(ctx, Arc::clone(&mcp_kms), Arc::clone(&mcp_auth))
         })
         .nest("/sources", move |ctx| {
-            livingbrain_mcp::sources_router(ctx, Arc::clone(&kms), Arc::clone(&auth))
+            livingbrain_mcp::sources_router_with_session(
+                ctx,
+                Arc::clone(&kms),
+                Arc::clone(&auth),
+                Arc::new(WebSession),
+            )
         })
 }
 

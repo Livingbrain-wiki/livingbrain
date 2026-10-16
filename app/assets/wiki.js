@@ -46,6 +46,14 @@ import {
   accessErrorMessage,
 } from "./access.js";
 import { createMultiSelect } from "./multiselect.js";
+import {
+  IMPORT_CONCURRENCY,
+  droppedFiles,
+  importPath,
+  importRequest,
+  importSkipReason,
+  importSummary,
+} from "./imports.js";
 
 /** Where the per-browser list of pinned `scope/slug` keys lives. */
 const PIN_KEY = "lb-wiki-pinned";
@@ -1672,6 +1680,17 @@ export async function wikiPage(api) {
     importsList: $("#imports-list"),
     importsMore: $("#imports-more"),
     importsEmpty: $("#imports-empty"),
+    importsUpload: $("#imports-upload"),
+    importsDrop: $("#imports-drop"),
+    importsFiles: $("#imports-files"),
+    importsFolder: $("#imports-folder"),
+    importsChooseFiles: $("#imports-choose-files"),
+    importsChooseFolder: $("#imports-choose-folder"),
+    importsProject: $("#imports-project"),
+    importsProjects: $("#imports-projects"),
+    importsProgress: $("#imports-progress"),
+    importsBar: $("#imports-bar"),
+    importsProgressText: $("#imports-progress-text"),
     githubKind: $("#github-kind"),
     githubProject: $("#github-project"),
     githubStatus: $("#github-status"),
@@ -2396,8 +2415,81 @@ export async function wikiPage(api) {
     return li;
   }
 
+  /** Files the projects datalist with the projects sources are filed under. */
+  function fillImportProjects() {
+    if (!els.importsProjects) return;
+    els.importsProjects.replaceChildren(
+      ...state.projects.map((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.project;
+        return option;
+      }),
+    );
+  }
+
+  /** Uploads `[{ file, path }]`: skips what the CLI would skip, sends the
+   * rest a few at a time, reports as it goes, then reloads the list. */
+  async function uploadImports(picked) {
+    if (state.uploading || !picked.length) return;
+    state.uploading = true;
+    const scopeInput = document.querySelector('input[name="imports-scope"]:checked');
+    const scope = scopeInput ? scopeInput.value : "personal";
+    const project = els.importsProject ? els.importsProject.value.trim() : "";
+    if (project && !validProject(project)) {
+      notice(els.notice, "A project is letters, digits, `.`, `_` and `-`, starting with a letter or digit.", "bad");
+      state.uploading = false;
+      return;
+    }
+    const queue = [];
+    const counts = { total: 0, created: 0, unchanged: 0, failed: 0, skipped: 0 };
+    const failures = [];
+    for (const item of picked) {
+      if (importSkipReason(item.path, item.file.size)) counts.skipped += 1;
+      else queue.push(item);
+    }
+    counts.total = queue.length;
+    const paint = (done = false) => {
+      els.importsProgress.hidden = false;
+      els.importsBar.max = Math.max(1, counts.total);
+      els.importsBar.value = counts.created + counts.unchanged + counts.failed;
+      els.importsBar.hidden = done;
+      els.importsProgressText.textContent = importSummary({ ...counts, done });
+    };
+    els.importsDrop.classList.add("is-busy");
+    clearNotice();
+    paint();
+    const worker = async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        try {
+          const request = importRequest({ path: item.path, body: await item.file.text(), scope, project });
+          const answer = await api(request.path, { method: request.method, body: request.body });
+          if (answer && answer.created === false) counts.unchanged += 1;
+          else counts.created += 1;
+        } catch (error) {
+          counts.failed += 1;
+          failures.push(`${item.path}: ${error.message}`);
+          if (error instanceof ApiError && error.status === 401) queue.length = 0;
+        }
+        paint();
+      }
+    };
+    await Promise.all(Array.from({ length: IMPORT_CONCURRENCY }, worker));
+    paint(true);
+    els.importsDrop.classList.remove("is-busy");
+    state.uploading = false;
+    if (failures.length) {
+      notice(els.notice, `Some files were not imported. ${failures.slice(0, 3).join("; ")}${failures.length > 3 ? "; …" : ""}`, "bad");
+    }
+    if (counts.created) {
+      await loadImports();
+      loadProjects().then(fillImportProjects);
+    }
+  }
+
   async function loadImports({ more = false } = {}) {
     showView("imports");
+    if (els.importsUpload) els.importsUpload.hidden = !state.signedIn;
     if (!state.signedIn) {
       els.importsList.hidden = true;
       els.importsEmpty.hidden = true;
@@ -2640,6 +2732,7 @@ export async function wikiPage(api) {
     fillProjectSelect(els.searchProject, state.project);
     fillProjectSelect(els.sessionsProject, state.sessionsProject);
     fillProjectSelect(els.githubProject, state.githubProject);
+    fillImportProjects();
   }
 
   /* -- agent sessions ------------------------------------------------ */
@@ -3806,6 +3899,49 @@ export async function wikiPage(api) {
   }
   if (els.importsMore) {
     els.importsMore.addEventListener("click", () => loadImports({ more: true }));
+  }
+  if (els.importsDrop) {
+    const drop = els.importsDrop;
+    const fromInput = (input) => {
+      const files = Array.from(input.files || []).map((file) => ({ file, path: importPath(file.webkitRelativePath || file.name) }));
+      input.value = "";
+      uploadImports(files);
+    };
+    els.importsFiles.addEventListener("change", () => fromInput(els.importsFiles));
+    els.importsFolder.addEventListener("change", () => fromInput(els.importsFolder));
+    els.importsChooseFiles.addEventListener("click", (event) => {
+      event.stopPropagation();
+      els.importsFiles.click();
+    });
+    els.importsChooseFolder.addEventListener("click", (event) => {
+      event.stopPropagation();
+      els.importsFolder.click();
+    });
+    drop.addEventListener("click", () => {
+      if (!state.uploading) els.importsFiles.click();
+    });
+    drop.addEventListener("keydown", (event) => {
+      if (event.target !== drop || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      els.importsFiles.click();
+    });
+    drop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      drop.classList.add("is-over");
+    });
+    drop.addEventListener("dragleave", (event) => {
+      if (!drop.contains(event.relatedTarget)) drop.classList.remove("is-over");
+    });
+    drop.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      drop.classList.remove("is-over");
+      const items = event.dataTransfer ? event.dataTransfer.items : null;
+      const files = items && items.length
+        ? await droppedFiles(items)
+        : Array.from((event.dataTransfer && event.dataTransfer.files) || []).map((file) => ({ file, path: importPath(file.name) }));
+      uploadImports(files);
+    });
+    fillImportProjects();
   }
   if (els.githubKind) {
     els.githubKind.addEventListener("change", () => {
