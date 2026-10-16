@@ -892,31 +892,6 @@ legend {
   color: var(--ink3);
 }
 
-/* the email form: the website's join row, input and button side by side */
-.join {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 0;
-  max-width: none;
-}
-
-.join > input {
-  flex: 1 1 220px;
-  min-width: 0;
-  width: auto;
-}
-
-.join > button {
-  flex: 0 0 auto;
-}
-
-@media (max-width: 480px) {
-  .join > button {
-    flex: 1 1 100%;
-  }
-}
-
 /*   notices: errors, confirmations and empty states
    ---------------------------------------------------------------- */
 
@@ -986,14 +961,111 @@ legend {
 /*   sign-in
    ---------------------------------------------------------------- */
 
-.signin {
-  max-width: 880px;
+/* A plain, centred sign-in panel near the top of the viewport. The width cap
+   sits on the panel itself: `main.shell__main` sets its own max-width. */
+.signin-panel {
+  max-width: 400px;
+  margin-inline: auto;
+  padding-block: clamp(16px, 8vh, 72px) var(--space-5);
 }
 
-.signin .card + .section-h {
-  margin-top: var(--space-5);
+.signin-panel p {
+  max-width: none;
 }
 
+.signin-card {
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-card);
+  padding: clamp(24px, 4vw, 32px);
+  min-width: 0;
+}
+
+.signin-card h1 {
+  font-size: 26px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.signin-card__sub {
+  margin: 0 0 24px;
+  text-align: center;
+  color: var(--ink2);
+  font-size: 15px;
+}
+
+.signin-form {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.signin-form > label {
+  margin: 0;
+}
+
+.signin-form > input {
+  margin-bottom: 4px;
+}
+
+.signin-form > button,
+.signin-card__alt {
+  width: 100%;
+  min-height: 50px;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.signin-card #email-status {
+  margin-bottom: 0;
+}
+
+.signin-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  font-family: var(--f-mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink3);
+}
+
+.signin-divider::before,
+.signin-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--line2);
+}
+
+.signin-foot {
+  margin: 20px 0 8px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--ink2);
+}
+
+.signin-links {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 13px;
+}
+
+.signin-links a {
+  color: var(--ink2);
+}
+
+.signin-links a:hover {
+  color: var(--accent);
+}
+
+/* The methods list (the "steps" list on the home page) keeps its grid. */
 .methods {
   list-style: none;
   margin: var(--space-3) 0 var(--space-4);
