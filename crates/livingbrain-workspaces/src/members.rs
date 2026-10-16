@@ -102,6 +102,22 @@ const UNKNOWN_ROLE: ProblemDef = ProblemDef {
                   with access grants (ADR 0004, phase c).",
 };
 
+/// The typed name is not the workspace's name.
+const CONFIRM_MISMATCH: ProblemDef = ProblemDef {
+    slug: "workspaces/confirm-mismatch",
+    status: StatusCode::BAD_REQUEST,
+    title: "The name does not match",
+    description: "Type the workspace name exactly as it is shown.",
+};
+
+/// The person has no other workspace to go to.
+const ONLY_WORKSPACE: ProblemDef = ProblemDef {
+    slug: "workspaces/only-workspace",
+    status: StatusCode::CONFLICT,
+    title: "This is your only workspace.",
+    description: "Join or create another workspace first, then delete this one.",
+};
+
 /// The mailer is not wired.
 const MAIL_NOT_CONFIGURED: ProblemDef = ProblemDef {
     slug: "workspaces/mail-not-configured",
@@ -486,6 +502,106 @@ async fn administered(
 pub(crate) struct WorkspacePatch {
     #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeleteBody {
+    /// The workspace's name, typed by the owner: the guard against a
+    /// deletion sent by mistake.
+    confirm: String,
+}
+
+/// `DELETE /current` — delete the workspace (ADR 0004, "Deleting a
+/// workspace"). Owners only, session only, same-origin.
+///
+/// The order is deliberate. Everything that can be refused is checked first:
+/// the owner, the typed name, and that the person keeps another workspace to
+/// sign in to. The next session is sealed before anything is destroyed. Then
+/// the content and the credentials other modules hold are erased through the
+/// [`WorkspaceErasure`] seam, which is idempotent, so a failure there leaves
+/// the workspace whole for another attempt. Last, this module's own rows go
+/// in one batch and the workspace is tombstoned, which every read refuses.
+pub(crate) async fn delete_workspace(
+    State(state): State<Arc<ModuleState>>,
+    headers: HeaderMap,
+    Json(body): Json<DeleteBody>,
+) -> Result<Response, Problem> {
+    require_same_origin(&headers)?;
+    let (workspace, actor, _) = session_scope(&state, &headers).await?;
+    if actor.role != Role::Owner {
+        return Err(forbidden());
+    }
+    if body.confirm != workspace.name {
+        return Err(Problem::new(&CONFIRM_MISMATCH));
+    }
+    let db = port(state.ctx.ports.db.clone())?;
+    let erasure = port(state.erasure.clone())?;
+    let signer = port(state.ctx.ports.signer.clone())?;
+    let clock = port(state.ctx.ports.clock.clone())?;
+
+    // The other workspaces this person signs in to, decided before this one
+    // loses its identities. The oldest is where they land.
+    let addresses = store::email_identities(&*db, &workspace.id, &actor.user_id)
+        .await
+        .map_err(database)?;
+    let next = store::memberships_for(&*db, &addresses)
+        .await
+        .map_err(database)?
+        .into_iter()
+        .filter(|found| found.workspace_id != workspace.id)
+        .min_by(|a, b| a.workspace_created_at.cmp(&b.workspace_created_at))
+        .ok_or_else(|| Problem::new(&ONLY_WORKSPACE))?;
+    let value = flow::seal(
+        &*signer,
+        flow::SESSION_PURPOSE,
+        &Session {
+            workspace_id: next.workspace_id.clone(),
+            user_id: next.user_id.clone(),
+            exp: clock.now().unix_timestamp() + flow::SESSION_TTL_SECS,
+        },
+    )
+    .ok_or_else(Problem::internal)?;
+
+    let (now, now_text) = now_text(&state)?;
+    // Every member id this workspace ever had: each one's personal space is
+    // this workspace's content, removed members' included.
+    let members = store::every_member_id(&*db, &workspace.id)
+        .await
+        .map_err(database)?;
+    let mut spaces = vec!["shared".to_owned()];
+    spaces.extend(members.iter().map(|id| format!("personal:{id}")));
+    spaces.extend(
+        store::channel_keys(&*db, &workspace.id)
+            .await
+            .map_err(database)?
+            .into_iter()
+            .map(|key| format!("channel:{key}")),
+    );
+    erasure
+        .erase(&*db, now, &workspace.id, &spaces)
+        .await
+        .map_err(|_| Problem::internal())?;
+    store::delete_workspace_rows(&*db, &workspace.id, &now_text)
+        .await
+        .map_err(database)?;
+    // The workspace's own avatar image goes too. Best effort, like the
+    // avatar routes: the row that named it is already gone.
+    if let (Some(blob), Some(avatar)) = (state.ctx.ports.blob.clone(), workspace.avatar.as_deref())
+    {
+        profile::forget_avatar(&*blob, &workspace.id, Some(avatar), None).await;
+    }
+
+    let mut response = Json(serde_json::json!({
+        "deleted": workspace.id,
+        "next": { "id": next.workspace_id, "name": next.workspace_name },
+    }))
+    .into_response();
+    response.headers_mut().append(
+        cratefield_core::axum::http::header::SET_COOKIE,
+        flow::set_cookie(flow::SESSION_COOKIE, &value, flow::SESSION_TTL_SECS)
+            .ok_or_else(Problem::internal)?,
+    );
+    Ok(response)
 }
 
 /// `PATCH /current` — rename the workspace. Owners and admins only; the

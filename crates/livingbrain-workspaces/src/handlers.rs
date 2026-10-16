@@ -43,7 +43,7 @@ use crate::members;
 use crate::profile::AvatarRef;
 use crate::slack;
 use crate::store::{self, LinkOutcome, Member, Workspace};
-use crate::{EmailLedger, MemberRemoval, SignInMail, SignInMailInput};
+use crate::{EmailLedger, MemberRemoval, SignInMail, SignInMailInput, WorkspaceErasure};
 
 /// A cookie-carrying write a browser reports as coming from another site.
 /// The same refusal `livingbrain-tokens` answers its cookie writes with.
@@ -218,6 +218,9 @@ pub(crate) struct ModuleState {
     /// revoke their tokens, disable their agent accounts. `None` does
     /// nothing more than the tombstone, which already refuses both.
     pub(crate) removal: Option<Arc<dyn MemberRemoval>>,
+    /// What a workspace deletion shreds and revokes through (ADR 0004). `None`
+    /// refuses the deletion.
+    pub(crate) erasure: Option<Arc<dyn WorkspaceErasure>>,
 }
 
 impl ModuleState {
@@ -267,6 +270,7 @@ pub(crate) fn router(
     ledger: Option<Arc<dyn EmailLedger>>,
     sign_in_mail: Option<Arc<dyn SignInMail>>,
     removal: Option<Arc<dyn MemberRemoval>>,
+    erasure: Option<Arc<dyn WorkspaceErasure>>,
 ) -> axum::Router {
     let settings = Settings::from_config(&*ctx.config).map_err(|err| err.to_string());
     let public_base = config::public_base(&*ctx.config);
@@ -285,6 +289,7 @@ pub(crate) fn router(
         ledger,
         sign_in_mail: sign_in_mail.unwrap_or_else(|| Arc::new(PlainSignInMail)),
         removal,
+        erasure,
     });
     axum::Router::new()
         .route("/slack/start", get(slack_start))
@@ -300,7 +305,10 @@ pub(crate) fn router(
             "/",
             get(members::list_workspaces).post(members::create_workspace),
         )
-        .route("/current", axum::routing::patch(members::rename_workspace))
+        .route(
+            "/current",
+            axum::routing::patch(members::rename_workspace).delete(members::delete_workspace),
+        )
         .route(
             "/current/avatar",
             axum::routing::put(members::put_workspace_avatar)

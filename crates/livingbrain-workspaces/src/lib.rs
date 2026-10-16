@@ -182,6 +182,21 @@ const MIGRATION_0006_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0006_profiles.sql"),
 );
 
+/// Deleting a workspace (ADR 0004, "Deleting a workspace"): the workspace
+/// keeps a tombstone (`deleted_at`) and its name and avatar are cleared.
+const MIGRATION_0007: SqlMigration = SqlMigration::new(
+    "0007",
+    "delete_workspace",
+    include_str!("../migrations/sqlite/0007_delete_workspace.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_0007`], the same file byte for byte.
+const MIGRATION_0007_POSTGRES: SqlMigration = SqlMigration::new(
+    "0007",
+    "delete_workspace",
+    include_str!("../migrations/postgres/0007_delete_workspace.sql"),
+);
+
 /// What the composition does once a member has been removed (ADR 0004).
 ///
 /// The tombstone this module writes already refuses the removed member's
@@ -202,6 +217,40 @@ pub trait MemberRemoval: Send + Sync {
         user_id: &str,
     );
 }
+
+/// What deleting a workspace does beyond this module's own rows (ADR 0004,
+/// "Deleting a workspace").
+///
+/// The content of a workspace lives in page scopes this module cannot name (a
+/// scope is a hash that the pages crate computes), and the tokens, agent
+/// accounts, grants and provider keys belong to modules the graph runs
+/// above this one. So the composition does those steps through this seam.
+///
+/// Every step must be idempotent: the deletion runs `erase` before it touches
+/// this module's rows, so a failure here leaves the workspace in place and
+/// the owner can run the deletion again. A failure aborts the deletion; it is
+/// never best effort, because a deleted workspace whose content is still
+/// readable is the one outcome the deletion exists to prevent. A composition
+/// that cannot shred (no key custodian) must answer `Err`, not `Ok`.
+#[async_trait::async_trait]
+pub trait WorkspaceErasure: Send + Sync {
+    /// Shreds the content of every space in `spaces` (`shared`,
+    /// `personal:<member id>` or `channel:<platform>:<channel>`, as access
+    /// grants name them) and revokes what other modules hold for
+    /// `workspace_id`: personal access tokens, agent accounts and their keys,
+    /// grants, and the workspace's provider and tool credentials.
+    async fn erase(
+        &self,
+        db: &dyn Database,
+        now: OffsetDateTime,
+        workspace_id: &str,
+        spaces: &[String],
+    ) -> Result<(), ErasureFailed>;
+}
+
+/// The erasure could not complete; the deletion did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErasureFailed;
 
 /// Records an email send into the cost ledger, for the composition to
 /// inject (issue #12). A seam rather than a dependency because the graph
@@ -298,6 +347,10 @@ pub struct Workspaces {
     sign_in_mail: Option<Arc<dyn SignInMail>>,
     /// The seam a member removal cleans up through (ADR 0004).
     removal: Option<Arc<dyn MemberRemoval>>,
+    /// The seam a workspace deletion shreds and revokes through. Without it
+    /// the deletion route refuses: nothing may be deleted that cannot be
+    /// shredded.
+    erasure: Option<Arc<dyn WorkspaceErasure>>,
 }
 
 // The seams are `dyn`s and not a `Debug`; the module itself is still
@@ -310,6 +363,7 @@ impl std::fmt::Debug for Workspaces {
             .field("ledger", &self.ledger.is_some())
             .field("sign_in_mail", &self.sign_in_mail.is_some())
             .field("removal", &self.removal.is_some())
+            .field("erasure", &self.erasure.is_some())
             .finish()
     }
 }
@@ -376,6 +430,13 @@ impl Workspaces {
     #[must_use]
     pub fn on_member_removed(mut self, removal: Arc<dyn MemberRemoval>) -> Self {
         self.removal = Some(removal);
+        self
+    }
+
+    /// Shred and revoke through `erasure` when an owner deletes a workspace.
+    #[must_use]
+    pub fn on_workspace_erasure(mut self, erasure: Arc<dyn WorkspaceErasure>) -> Self {
+        self.erasure = Some(erasure);
         self
     }
 }
@@ -568,24 +629,26 @@ impl Module for Workspaces {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 6] = [
+        const MIGRATIONS: [SqlMigration; 7] = [
             MIGRATION_INIT,
             MIGRATION_0002,
             MIGRATION_0003,
             MIGRATION_0004,
             MIGRATION_0005,
             MIGRATION_0006,
+            MIGRATION_0007,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or
         // an entry out of order at build time.
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 6] = [
+        const MIGRATIONS_POSTGRES: [SqlMigration; 7] = [
             MIGRATION_INIT_POSTGRES,
             MIGRATION_0002_POSTGRES,
             MIGRATION_0003_POSTGRES,
             MIGRATION_0004_POSTGRES,
             MIGRATION_0005_POSTGRES,
             MIGRATION_0006_POSTGRES,
+            MIGRATION_0007_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
@@ -629,6 +692,7 @@ impl Module for Workspaces {
             self.ledger.clone(),
             self.sign_in_mail.clone(),
             self.removal.clone(),
+            self.erasure.clone(),
         )
     }
 }

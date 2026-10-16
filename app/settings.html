@@ -275,6 +275,28 @@
                   <button type="submit" data-variant="primary" id="workspace-save">Save name</button>
                 </div>
               </form>
+              <!-- owners only (wireDeleteWorkspace). Hidden for everyone else,
+                   and replaced by a line when this is the only workspace. -->
+              <div class="danger-zone" id="workspace-danger" hidden>
+                <h3>Delete workspace</h3>
+                <p class="hint" id="workspace-danger-only" hidden>You can't delete your only workspace.</p>
+                <div id="workspace-danger-panel-wrap">
+                  <button type="button" class="btn-danger" id="workspace-delete-open">Delete workspace</button>
+                  <div id="workspace-delete-panel" hidden>
+                    <p id="workspace-delete-copy">
+                      This permanently deletes <strong id="workspace-delete-name"></strong>, its wiki, sources, facts and members' access. It can't be undone.
+                    </p>
+                    <div id="workspace-delete-status" class="notice" role="status" aria-live="polite"></div>
+                    <div class="field">
+                      <label for="workspace-delete-confirm">Type the workspace name to confirm</label>
+                      <input id="workspace-delete-confirm" type="text" autocomplete="off" />
+                    </div>
+                    <div class="form-actions">
+                      <button type="button" class="btn-danger" id="workspace-delete-submit" disabled>Delete this workspace</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <!-- members and invitations (ADR 0004). Painted by
