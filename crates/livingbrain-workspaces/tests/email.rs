@@ -116,35 +116,60 @@ async fn a_person_creates_a_workspace_with_only_an_email_address() {
 }
 
 #[pollster::test]
-async fn a_second_workspace_from_the_same_address_is_created_and_the_first_keeps_the_connection() {
+async fn signing_in_again_with_the_same_address_opens_the_same_workspace() {
     let http = TokenHttp::new();
     let kit = harness(&http);
 
-    // Alice creates a workspace with her address, twice. The second link is
-    // minted and spent like any other: the start route answers every
-    // address the same way, and nothing in it says a workspace already
-    // exists.
+    // Alice creates her workspace with her address. Her second sign-in sends
+    // only the address, as the form does, and must open that workspace
+    // rather than mint another one.
     let first = verify(&kit, &mailed_after(&kit, ALICE).await).await;
     let second = verify(&kit, &mailed_after(&kit, ALICE).await).await;
-    assert_ne!(first, second, "two links, two sessions");
-
     let one = get(&kit.router, ME, &[(SESSION_COOKIE, &first)])
         .await
         .json();
     let two = get(&kit.router, ME, &[(SESSION_COOKIE, &second)])
         .await
         .json();
-    assert_ne!(one["workspace"]["id"], two["workspace"]["id"]);
-    assert_ne!(one["member"]["user_id"], two["member"]["user_id"]);
-    assert_eq!(one["is_owner"], true);
+    assert_eq!(one["workspace"]["id"], two["workspace"]["id"]);
+    assert_eq!(one["member"]["user_id"], two["member"]["user_id"]);
+    assert_eq!(two["is_owner"], true, "still the owner of it");
+    assert_eq!(count_workspaces(&kit).await, 1, "no second workspace");
+}
+
+#[pollster::test]
+async fn a_named_link_makes_a_second_workspace_and_the_first_keeps_the_connection() {
+    let http = TokenHttp::new();
+    let kit = harness(&http);
+
+    let first = verify(&kit, &mailed_after(&kit, ALICE).await).await;
+    let first_id = get(&kit.router, ME, &[(SESSION_COOKIE, &first)])
+        .await
+        .json()["workspace"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+
+    // A workspace name is the explicit request for a new workspace, even
+    // though the address already has one.
+    post_json(
+        &kit.router,
+        START,
+        &[],
+        &json!({"email": ALICE, "workspace_name": "Side Project"}),
+    )
+    .await;
+    let second = verify(&kit, &mailed_token(&kit)).await;
+    let two = get(&kit.router, ME, &[(SESSION_COOKIE, &second)])
+        .await
+        .json();
+    assert_ne!(two["workspace"]["id"], first_id);
+    assert_eq!(two["workspace"]["name"], "Side Project");
     assert_eq!(two["is_owner"], true);
     assert_eq!(count_workspaces(&kit).await, 2, "both workspaces exist");
 
-    // `('email', address)` is unique across the whole table, so the first
-    // workspace keeps it and the second gets no connection row at all.
-    // That is not a failure: the address is written to
-    // `member_identities` for *both* workspaces, and that — not the
-    // connection — is what signs a person in.
+    // `('email', address)` is unique across the table, so the first
+    // workspace keeps the connection, as it did before this rule.
     assert_eq!(
         first_value(
             &kit,
@@ -154,34 +179,96 @@ async fn a_second_workspace_from_the_same_address_is_created_and_the_first_keeps
         )
         .await
         .as_deref(),
-        Some(one["workspace"]["id"].as_str().expect("an id")),
+        Some(first_id.as_str()),
         "the first workspace still holds the address"
     );
-    for me in [&one, &two] {
-        let workspace_id = me["workspace"]["id"].as_str().expect("an id");
-        let owner_id = me["workspace"]["owner_id"].as_str().expect("an owner");
-        assert_eq!(
-            first_value(
-                &kit,
-                "SELECT user_id AS value FROM member_identities \
-                 WHERE workspace_id = ? AND platform = 'email' AND external_id = ?",
-                vec![text(workspace_id), text(ALICE)],
-            )
-            .await
-            .as_deref(),
-            Some(owner_id),
-            "the address is an identity of that workspace's owner"
-        );
 
-        // And each workspace can still be reached by the address, which is
-        // what the missing connection row must not have cost.
-        let session = scoped_session(&kit, ALICE, workspace_id).await;
-        let again = get(&kit.router, ME, &[(SESSION_COOKIE, &session)])
-            .await
-            .json();
-        assert_eq!(again["workspace"]["id"], workspace_id);
-        assert_eq!(again["member"]["user_id"], owner_id);
-    }
+    // Both are reachable by the address.
+    let back = scoped_session(&kit, ALICE, &first_id).await;
+    let again = get(&kit.router, ME, &[(SESSION_COOKIE, &back)])
+        .await
+        .json();
+    assert_eq!(again["workspace"]["id"], first_id.as_str());
+}
+
+#[pollster::test]
+async fn an_address_in_two_workspaces_signs_in_to_the_one_it_owns() {
+    let http = TokenHttp::new();
+    let kit = harness(&http);
+
+    // A Slack workspace Bob created, which Alice joined. Her address is an
+    // identity of her member row there, so she is a plain member of it.
+    let bob = sign_in(&kit, &http, TEAM, BOB_SLACK, "Bob").await;
+    sign_in(&kit, &http, TEAM, ALICE_SLACK, "Alice").await;
+    link_identity(
+        &*kit.db,
+        &bob.workspace_id,
+        "email",
+        ALICE,
+        ALICE_SLACK,
+        RFC3339_NOW,
+    )
+    .await
+    .expect("Alice's address is an identity of her member row");
+
+    // She also owns one, made from her address. Its name sorts after the
+    // Slack workspace's ("T0SCOPEDAA workspace"), so the first by name
+    // would be the wrong one.
+    post_json(
+        &kit.router,
+        START,
+        &[],
+        &json!({"email": ALICE, "workspace_name": "Zebra"}),
+    )
+    .await;
+    let owned = verify(&kit, &mailed_token(&kit)).await;
+    let owned_id = get(&kit.router, ME, &[(SESSION_COOKIE, &owned)])
+        .await
+        .json()["workspace"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    assert_eq!(count_workspaces(&kit).await, 2);
+
+    let session = verify(&kit, &mailed_after(&kit, ALICE).await).await;
+    let me = get(&kit.router, ME, &[(SESSION_COOKIE, &session)])
+        .await
+        .json();
+    assert_eq!(
+        me["workspace"]["id"], owned_id,
+        "the owned one, not the first"
+    );
+    assert_eq!(me["is_owner"], true);
+    assert_eq!(me["member"]["user_id"], me["workspace"]["owner_id"]);
+    assert_eq!(count_workspaces(&kit).await, 2, "nothing new was created");
+}
+
+#[pollster::test]
+async fn an_address_that_only_belongs_to_a_workspace_as_a_member_signs_in_to_it() {
+    let http = TokenHttp::new();
+    let kit = harness(&http);
+
+    let bob = sign_in(&kit, &http, TEAM, BOB_SLACK, "Bob").await;
+    sign_in(&kit, &http, TEAM, ALICE_SLACK, "Alice").await;
+    link_identity(
+        &*kit.db,
+        &bob.workspace_id,
+        "email",
+        ALICE,
+        ALICE_SLACK,
+        RFC3339_NOW,
+    )
+    .await
+    .expect("Alice's address is an identity of her member row");
+
+    let session = verify(&kit, &mailed_after(&kit, ALICE).await).await;
+    let me = get(&kit.router, ME, &[(SESSION_COOKIE, &session)])
+        .await
+        .json();
+    assert_eq!(me["workspace"]["id"], bob.workspace_id);
+    assert_eq!(me["member"]["user_id"], ALICE_SLACK);
+    assert_eq!(me["is_owner"], false);
+    assert_eq!(count_workspaces(&kit).await, 1, "no workspace was created");
 }
 
 #[pollster::test]

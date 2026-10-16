@@ -50,9 +50,11 @@ ADR 0001. The email route, `POST /v1/workspaces/email/start`, always answers
 random bytes and only its SHA-256 is stored, in `sign_in_links`, single use with
 a 15-minute TTL. `GET /email/verify` only renders a form, because mail scanners
 prefetch links; `POST /email/verify` spends the token and seals the same
-session cookie as Slack. A link either creates a workspace, with the email
-owner as owner, or signs in to a workspace where that email is a member
-identity. The email routes work without Slack credentials and answer `503`
+session cookie as Slack. A link with a workspace id signs in to that
+workspace, where the email is a member identity. A link with no workspace id
+signs in to a workspace the address already belongs to (an owned one first),
+and creates one, with the email owner as owner, only when it belongs to none;
+a link that names a workspace always creates one. The email routes work without Slack credentials and answer `503`
 without a mailer. The session cookie now carries `workspace_id`, and a serde
 alias still accepts the old `team_id`.
 
