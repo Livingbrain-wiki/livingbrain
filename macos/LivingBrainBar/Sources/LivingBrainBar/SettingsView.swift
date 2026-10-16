@@ -7,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject var bar: BarModel
     @ObservedObject var runner: RunnerModel
     @ObservedObject var router: Router
+    @ObservedObject var updates: UpdateModel
     @State private var models: [ModelConnection] = []
     @State private var modelsError: String?
     @State private var tokens: [TokenSummary] = []
@@ -29,6 +30,7 @@ struct SettingsView: View {
             runnerSection
             slackSection
             syncSection
+            updatesSection
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
@@ -270,6 +272,69 @@ struct SettingsView: View {
             }
             Toggle("Launch at login", isOn: Binding(get: { bar.launchAtLogin }, set: { bar.setLaunchAtLogin($0) }))
             Button("Projects & Sync…") { router.destination = .projects }
+        }
+    }
+
+    private var updatesSection: some View {
+        Section("Updates") {
+            LabeledContent("Current version", value: updates.currentVersion)
+            Toggle("Automatically check for updates", isOn: $updates.autoCheck)
+            LabeledContent("Last checked") {
+                if let checked = updates.lastChecked {
+                    Text(checked, style: .relative).foregroundStyle(.secondary)
+                } else {
+                    Text("Never").foregroundStyle(.secondary)
+                }
+            }
+            if let newer = updates.newerRelease {
+                updateDetails(newer)
+            }
+            updateStatus
+            Button("Check for Updates") { updates.checkForUpdates() }
+                .disabled(updates.isBusy)
+        }
+    }
+
+    @ViewBuilder private func updateDetails(_ newer: Release) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Version \(newer.version.description) is available")
+                .font(.headline)
+            if updates.skippedVersion == newer.version.description {
+                Text("You skipped this version. It will not be offered again; you can still install it here.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            let notes = releaseNotesPreview(newer.notes)
+            if !notes.isEmpty {
+                Text(notes).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        }
+        if case let .downloading(fraction) = updates.state {
+            ProgressView(value: fraction) { Text("Downloading…") }
+        }
+        if updates.canInstallInPlace {
+            HStack {
+                Button("Install and Relaunch") { updates.installUpdate() }
+                    .disabled(updates.isBusy)
+                Button("Skip This Version") { updates.skip(newer) }
+                    .disabled(updates.isBusy)
+                Button("Release notes") { updates.openReleasePage() }
+            }
+        } else {
+            Text("Move Living Brain to Applications to update.")
+                .font(.callout).foregroundStyle(.secondary)
+            Button("Release notes") { updates.openReleasePage() }
+        }
+    }
+
+    @ViewBuilder private var updateStatus: some View {
+        switch updates.state {
+        case .checking: Text("Checking for updates…").foregroundStyle(.secondary)
+        case .upToDate: Text("Living Brain is up to date.").foregroundStyle(.secondary)
+        case .verifying: Text("Verifying the download…").foregroundStyle(.secondary)
+        case .readyToInstall: Text("Preparing the update…").foregroundStyle(.secondary)
+        case .installing: Text("Relaunching…").foregroundStyle(.secondary)
+        case let .failed(message): Text(message).font(.callout).foregroundStyle(.red)
+        case .idle, .available, .downloading: EmptyView()
         }
     }
 
