@@ -101,6 +101,9 @@ pub enum SourceKind {
     /// A pull request on a connected GitHub repository, its reviews and
     /// comments folded in.
     GithubPr,
+    /// One channel's messages on one UTC day, from a Discord server the
+    /// workspace connected.
+    Discord,
 }
 
 impl SourceKind {
@@ -119,6 +122,7 @@ impl SourceKind {
             Self::GithubCommit => "github_commit",
             Self::GithubIssue => "github_issue",
             Self::GithubPr => "github_pr",
+            Self::Discord => "discord",
         }
     }
 
@@ -137,6 +141,7 @@ impl SourceKind {
             "github_commit" => Some(Self::GithubCommit),
             "github_issue" => Some(Self::GithubIssue),
             "github_pr" => Some(Self::GithubPr),
+            "discord" => Some(Self::Discord),
             _ => None,
         }
     }

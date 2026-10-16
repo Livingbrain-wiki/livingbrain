@@ -173,6 +173,7 @@ import {
   readImage,
 } from "./profile.js";
 import { mountGithub } from "./github.js";
+import { mountDiscord } from "./discord.js";
 import { startUpdateWatch } from "./update.js";
 
 /**
@@ -751,6 +752,14 @@ pages.settings = async function settings() {
       location,
       history: window.history,
     }).catch((error) => notice($("#github-status"), `Could not load GitHub: ${error.message}`, "bad")),
+    mountDiscord({
+      api,
+      confirm: confirmAction,
+      notify: notice,
+      document,
+      location,
+      history: window.history,
+    }).catch(() => null),
   ]);
 };
 

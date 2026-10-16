@@ -150,6 +150,12 @@ new_sqlite_classes = ["ConversationObject"]
 [vars]
 ENV = "production"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
+# The Discord connection (docs/discord.md). The client id is public (it is in
+# the install URL); the client secret and the bot token are Worker secrets:
+# `wrangler secret put DISCORD_CLIENT_SECRET` and `wrangler secret put
+# DISCORD_BOT_TOKEN`, per environment with `--env`. Until real values are set
+# the integration reports itself unavailable and the settings page shows nothing.
+DISCORD_CLIENT_ID = "replace-with-your-discord-app-client-id"
 # The origin this Worker answers on — under `wrangler dev` that is the
 # cloudflared tunnel, because Slack must call the callback back over HTTPS.
 WORKSPACES_REDIRECT_BASE = "https://replace-with-your-tunnel.trycloudflare.com"
@@ -229,6 +235,7 @@ class_name = "ConversationObject"
 [env.staging.vars]
 ENV = "staging"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
+DISCORD_CLIENT_ID = "replace-with-your-discord-app-client-id"
 WORKSPACES_REDIRECT_BASE = "https://staging-api.livingbrain.wiki"
 # The device grant's `verification_uri` (issue #72). Same origin as the host
 # above — the API and the app are one Worker, so the approval page the CLI
@@ -294,6 +301,7 @@ class_name = "ConversationObject"
 [env.production.vars]
 ENV = "production"
 WORKSPACES_SLACK_CLIENT_ID = "replace-with-your-slack-app-client-id"
+DISCORD_CLIENT_ID = "replace-with-your-discord-app-client-id"
 WORKSPACES_REDIRECT_BASE = "https://app.livingbrain.wiki"
 # The device grant's `verification_uri` (issue #72): production's own origin.
 DEVICE_AUTH_API_BASE = "https://app.livingbrain.wiki"
