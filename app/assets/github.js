@@ -352,7 +352,13 @@ export async function mountGithub(deps) {
         ? "GitHub isn't available here yet. You can still use your own GitHub App under Advanced."
         : "GitHub isn't available here yet.";
     }
-    if (sharedInstall) sharedInstall.disabled = !view.canManage;
+    // Already installed: the button says so and stays off; each installation
+    // keeps its own "Manage on GitHub" link for repositories and accounts.
+    const installed = view.installations.length > 0;
+    if (sharedInstall) {
+      sharedInstall.disabled = !view.canManage || installed;
+      sharedInstall.textContent = installed ? "Installed on GitHub ✓" : "Install Living Brain on GitHub";
+    }
     setHidden([retry], !(retryId && view.shared.configured && view.canManage));
     setHidden([readonly], view.canManage);
     if (readonly) readonly.textContent = "Only a workspace owner or admin can connect GitHub or change it.";
