@@ -196,7 +196,7 @@
     "sha256": "006c64b0d37111553f2d91a7dc0635b620d7b5a7a85c05c6e5dbc58f9f432621"
   },
   "coding-agents/0007": {
-    "file": "0048_coding-agents_0007_source_compile_jobs.sql",
-    "sha256": "64923874fce20fed073182af60923858a001774aa37a9d1676219a00ac48d509"
+    "file": "0050_coding-agents_0007_source_compile_jobs.sql",
+    "sha256": "7cb342603c3517a407593e04902810dfaf0eff36271a37fc115e0702286d7858"
   }
 }

@@ -52,3 +52,24 @@ CREATE TABLE IF NOT EXISTS source_compile_members (
 
 CREATE INDEX IF NOT EXISTS source_compile_members_by_unit
     ON source_compile_members (scope, unit_key, compiled_at);
+
+-- The source units' share of the workspace's compile budget: the tokens
+-- their calls spent, per workspace and UTC day. Sessions never read it; it
+-- is what the units' cap (`source_share_percent` of the daily and monthly
+-- budgets) is checked against, so a backlog cannot use the whole budget.
+CREATE TABLE IF NOT EXISTS source_compile_spend (
+    workspace   TEXT NOT NULL,
+    day         TEXT NOT NULL,              -- UTC 'YYYY-MM-DD'
+    tokens      BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (workspace, day)
+);
+
+-- The backlog pass's high-water mark over `sources`: the last source id it
+-- scanned (ULIDs sort in arrival order). Each pass reads only ids after it,
+-- so a source is read once, not once per tick. One row, named `sources`.
+CREATE TABLE IF NOT EXISTS source_compile_cursor (
+    name        TEXT NOT NULL PRIMARY KEY,
+    last_id     TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+

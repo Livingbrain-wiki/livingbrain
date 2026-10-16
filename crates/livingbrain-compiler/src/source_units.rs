@@ -31,7 +31,15 @@ use sea_query::Value as SeaValue;
 use std::collections::BTreeMap;
 use time::{Duration, OffsetDateTime};
 
-use crate::queue::{JobStatus, MAX_ATTEMPTS, Queue, rfc3339};
+use crate::queue::{JobStatus, MAX_ATTEMPTS, Queue, rfc3339, utc_day};
+
+/// What one backlog pass did: how many stored sources it scanned after the
+/// cursor, and how many of them it filed under a unit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Filed {
+    pub scanned: usize,
+    pub filed: usize,
+}
 
 /// The lane a GitHub unit belongs to (its pages' agent folder is `github`).
 pub const LANE_GITHUB: &str = "github";
@@ -49,9 +57,8 @@ pub const UNIT_KINDS: [&str; 5] = [
     "import",
 ];
 
-/// The most sources one backlog pass files: a bounded read, however large
-/// the backlog. The 1,668 GitHub items of one workspace take about nine
-/// cron ticks at this size.
+/// The most sources one backlog pass scans: a bounded read after the cursor.
+/// A ledger of N stored sources is read once, in about N / 200 cron ticks.
 pub const BACKLOG_PER_TICK: usize = 200;
 
 /// The most members one unit run reads: a run compiles at most its
@@ -231,10 +238,12 @@ fn unit_from(row: &Row) -> Option<Unit> {
 }
 
 impl Queue {
-    /// Files up to `limit` stored sources of [`UNIT_KINDS`] that have no
-    /// member row under their unit, oldest first, in `workspace` or in all
-    /// workspaces. A unit that was `done` reopens (`queued`) when a member
-    /// joins it. Answers how many sources were filed.
+    /// The backlog pass: scans up to `limit` stored sources after the
+    /// cursor (the last id a pass scanned), files the ones of [`UNIT_KINDS`]
+    /// under their units, and moves the cursor past everything it scanned.
+    /// A source is read once, not once per tick. Held sources are filed too
+    /// (their members wait for the release, see [`Queue::pending_members_of`]),
+    /// and a `done` unit that gained a releasable member reopens here.
     ///
     /// # Errors
     ///
@@ -242,96 +251,208 @@ impl Queue {
     pub async fn enqueue_sources(
         &self,
         now: OffsetDateTime,
-        workspace: Option<&str>,
         limit: usize,
-    ) -> Result<usize, DbError> {
-        if limit == 0 {
-            return Ok(0);
-        }
-        let marks = vec!["?"; UNIT_KINDS.len()].join(", ");
-        let mut values: Vec<SeaValue> = UNIT_KINDS.iter().map(|kind| text(kind)).collect();
-        let mut sql = format!(
-            "SELECT s.id, s.scope, s.workspace, s.kind, s.rel_path, s.project, s.imported_by, \
-                    s.created_at \
-             FROM sources s \
-             LEFT JOIN source_compile_members m ON m.scope = s.scope AND m.source_id = s.id \
-             WHERE m.source_id IS NULL AND s.held = 0 AND s.kind IN ({marks})"
-        );
-        if let Some(workspace) = workspace {
-            sql.push_str(" AND s.workspace = ?");
-            values.push(text(workspace));
-        }
-        sql.push_str(" ORDER BY s.created_at ASC, s.id ASC LIMIT ?");
-        values.push(big(limit as u64));
-        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+    ) -> Result<Filed, DbError> {
         let stamp = rfc3339(now);
-        let mut filed = 0;
-        for row in &rows.rows {
-            let (Some(id), Some(scope), Some(workspace), Some(kind), Some(created)) = (
-                row.get::<String>("id"),
-                row.get::<String>("scope"),
-                row.get::<String>("workspace"),
-                row.get::<String>("kind"),
-                row.get::<String>("created_at"),
-            ) else {
-                continue;
-            };
-            let rel_path = row.get::<String>("rel_path").unwrap_or_default();
-            let project = row.get::<String>("project");
-            let owner = row.get::<String>("imported_by").unwrap_or_default();
-            let Some(place) = placement(&kind, &id, &rel_path, &created) else {
-                continue;
-            };
-            let label = unit_label(place.lane, &rel_path, project.as_deref());
-            self.db
-                .execute(&Statement::with_values(
-                    "INSERT INTO source_compile_units \
-                     (scope, unit_key, workspace, owner, lane, unit_day, label, status, \
-                      queued_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) \
-                     ON CONFLICT (scope, unit_key) DO NOTHING",
-                    vec![
-                        text(&scope),
-                        text(&place.unit_key),
-                        text(&workspace),
-                        text(&owner),
-                        text(place.lane),
-                        text(&place.unit_day),
-                        text(&label),
-                        text(&stamp),
-                        text(&stamp),
-                    ],
-                ))
-                .await?;
-            let joined = self
+        let mut report = Filed::default();
+        if limit > 0 {
+            let cursor = self.source_cursor().await?;
+            let rows = self
                 .db
-                .execute(&Statement::with_values(
-                    "INSERT INTO source_compile_members \
-                     (scope, source_id, unit_key, pieces_total, pieces_done, compiled_at, \
-                      source_created_at) \
-                     VALUES (?, ?, ?, 0, 0, NULL, ?) \
-                     ON CONFLICT (scope, source_id) DO NOTHING",
-                    vec![
-                        text(&scope),
-                        text(&id),
-                        text(&place.unit_key),
-                        text(&created),
-                    ],
+                .query(&Statement::with_values(
+                    "SELECT id, scope, workspace, kind, rel_path, project, imported_by, created_at \
+                     FROM sources WHERE id > ? ORDER BY id ASC LIMIT ?",
+                    vec![text(cursor.as_deref().unwrap_or("")), big(limit as u64)],
                 ))
                 .await?;
-            if joined == 1 {
-                filed += 1;
+            let mut last: Option<String> = None;
+            for row in &rows.rows {
+                report.scanned += 1;
+                let (Some(id), Some(scope), Some(workspace), Some(kind), Some(created)) = (
+                    row.get::<String>("id"),
+                    row.get::<String>("scope"),
+                    row.get::<String>("workspace"),
+                    row.get::<String>("kind"),
+                    row.get::<String>("created_at"),
+                ) else {
+                    continue;
+                };
+                last = Some(id.clone());
+                if !UNIT_KINDS.contains(&kind.as_str()) {
+                    continue;
+                }
+                let rel_path = row.get::<String>("rel_path").unwrap_or_default();
+                let project = row.get::<String>("project");
+                let owner = row.get::<String>("imported_by").unwrap_or_default();
+                let Some(place) = placement(&kind, &id, &rel_path, &created) else {
+                    continue;
+                };
+                let label = unit_label(place.lane, &rel_path, project.as_deref());
                 self.db
                     .execute(&Statement::with_values(
-                        "UPDATE source_compile_units SET status = 'queued', next_attempt_at = NULL, \
-                                updated_at = ? \
-                         WHERE scope = ? AND unit_key = ? AND status = 'done'",
-                        vec![text(&stamp), text(&scope), text(&place.unit_key)],
+                        "INSERT INTO source_compile_units \
+                         (scope, unit_key, workspace, owner, lane, unit_day, label, status, \
+                          queued_at, updated_at) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) \
+                         ON CONFLICT (scope, unit_key) DO NOTHING",
+                        vec![
+                            text(&scope),
+                            text(&place.unit_key),
+                            text(&workspace),
+                            text(&owner),
+                            text(place.lane),
+                            text(&place.unit_day),
+                            text(&label),
+                            text(&stamp),
+                            text(&stamp),
+                        ],
+                    ))
+                    .await?;
+                let joined = self
+                    .db
+                    .execute(&Statement::with_values(
+                        "INSERT INTO source_compile_members \
+                         (scope, source_id, unit_key, pieces_total, pieces_done, compiled_at, \
+                          source_created_at) \
+                         VALUES (?, ?, ?, 0, 0, NULL, ?) \
+                         ON CONFLICT (scope, source_id) DO NOTHING",
+                        vec![
+                            text(&scope),
+                            text(&id),
+                            text(&place.unit_key),
+                            text(&created),
+                        ],
+                    ))
+                    .await?;
+                report.filed += joined as usize;
+            }
+            if let Some(last) = last {
+                self.db
+                    .execute(&Statement::with_values(
+                        "INSERT INTO source_compile_cursor (name, last_id, updated_at) \
+                         VALUES ('sources', ?, ?) \
+                         ON CONFLICT (name) DO UPDATE SET last_id = excluded.last_id, \
+                                updated_at = excluded.updated_at",
+                        vec![text(&last), text(&stamp)],
                     ))
                     .await?;
             }
         }
-        Ok(filed)
+        // A released source's member is pending again: its done unit reopens.
+        self.db
+            .execute(&Statement::with_values(
+                "UPDATE source_compile_units SET status = 'queued', next_attempt_at = NULL, \
+                        updated_at = ? \
+                 WHERE status = 'done' AND EXISTS (\
+                     SELECT 1 FROM source_compile_members m \
+                     JOIN sources s ON s.scope = m.scope AND s.id = m.source_id \
+                     WHERE m.scope = source_compile_units.scope \
+                       AND m.unit_key = source_compile_units.unit_key \
+                       AND m.compiled_at IS NULL AND s.held = 0)",
+                vec![text(&stamp)],
+            ))
+            .await?;
+        Ok(report)
+    }
+
+    /// The backlog pass's cursor: the last source id it scanned, or `None`
+    /// before its first pass.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn source_cursor(&self) -> Result<Option<String>, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::new(
+                "SELECT last_id FROM source_compile_cursor WHERE name = 'sources'",
+            ))
+            .await?;
+        Ok(rows.first().and_then(|row| row.get::<String>("last_id")))
+    }
+
+    /// Tokens the source units of `workspace` spent on UTC days `first`
+    /// through `last` (settled calls only).
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn unit_spent(
+        &self,
+        workspace: &str,
+        first: &str,
+        last: &str,
+    ) -> Result<u64, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT tokens FROM source_compile_spend WHERE workspace = ? AND day >= ? AND day <= ?",
+                vec![text(workspace), text(first), text(last)],
+            ))
+            .await?;
+        Ok(rows
+            .rows
+            .iter()
+            .filter_map(|row| row.get::<i64>("tokens"))
+            .filter_map(|n| u64::try_from(n).ok())
+            .sum())
+    }
+
+    /// Tokens held by the source units' calls in flight on UTC days `first`
+    /// through `last` (their holds, not yet settled or lapsed).
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn unit_held(
+        &self,
+        workspace: &str,
+        first: &str,
+        last: &str,
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT tokens FROM coding_agent_reservations \
+                 WHERE workspace = ? AND day >= ? AND day <= ? AND expires_at > ? \
+                   AND id LIKE 'source-hold:%'",
+                vec![
+                    text(workspace),
+                    text(first),
+                    text(last),
+                    text(&rfc3339(now)),
+                ],
+            ))
+            .await?;
+        Ok(rows
+            .rows
+            .iter()
+            .filter_map(|row| row.get::<i64>("tokens"))
+            .filter_map(|n| u64::try_from(n).ok())
+            .sum())
+    }
+
+    /// Records the tokens one settled unit call spent, on its day.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn record_unit_spend(
+        &self,
+        workspace: &str,
+        now: OffsetDateTime,
+        tokens: u64,
+    ) -> Result<(), DbError> {
+        self.db
+            .execute(&Statement::with_values(
+                "INSERT INTO source_compile_spend (workspace, day, tokens) VALUES (?, ?, ?) \
+                 ON CONFLICT (workspace, day) DO UPDATE SET \
+                        tokens = source_compile_spend.tokens + excluded.tokens",
+                vec![text(workspace), text(&utc_day(now)), big(tokens)],
+            ))
+            .await?;
+        Ok(())
     }
 
     /// The units a drain may take now, oldest first, at most `limit`.
@@ -466,9 +587,12 @@ impl Queue {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT source_id, pieces_done, source_created_at FROM source_compile_members \
-                 WHERE scope = ? AND unit_key = ? AND compiled_at IS NULL \
-                 ORDER BY source_created_at ASC, source_id ASC LIMIT ?",
+                "SELECT m.source_id AS source_id, m.pieces_done AS pieces_done, \
+                        m.source_created_at AS source_created_at \
+                 FROM source_compile_members m \
+                 JOIN sources s ON s.scope = m.scope AND s.id = m.source_id \
+                 WHERE m.scope = ? AND m.unit_key = ? AND m.compiled_at IS NULL AND s.held = 0 \
+                 ORDER BY m.source_created_at ASC, m.source_id ASC LIMIT ?",
                 vec![text(scope), text(unit_key), big(limit as u64)],
             ))
             .await?;
@@ -529,8 +653,9 @@ impl Queue {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT COUNT(*) AS n FROM source_compile_members \
-                 WHERE scope = ? AND unit_key = ? AND compiled_at IS NULL",
+                "SELECT COUNT(*) AS n FROM source_compile_members m \
+                 JOIN sources s ON s.scope = m.scope AND s.id = m.source_id \
+                 WHERE m.scope = ? AND m.unit_key = ? AND m.compiled_at IS NULL AND s.held = 0",
                 vec![text(scope), text(unit_key)],
             ))
             .await?;
@@ -669,17 +794,21 @@ impl Queue {
             counts.sources_pending = count("pending");
             counts.sources_compiled = count("compiled");
         }
-        // Stored and not filed yet: the backlog pass has not reached them.
+        // Stored and not filed yet: everything after the backlog cursor. The
+        // read is bounded by what the pass has not reached, not by the ledger.
+        let cursor = self.source_cursor().await?.unwrap_or_default();
+        let kinds = vec!["?"; UNIT_KINDS.len()].join(", ");
         let mut values = vec![text(workspace)];
         values.extend(scopes.iter().map(|scope| text(scope)));
+        values.push(text(&cursor));
+        values.extend(UNIT_KINDS.iter().map(|kind| text(kind)));
         let unfiled = self
             .db
             .query(&Statement::with_values(
                 format!(
-                    "SELECT s.kind AS kind, COUNT(*) AS n FROM sources s \
-                     LEFT JOIN source_compile_members m ON m.scope = s.scope AND m.source_id = s.id \
-                     WHERE s.workspace = ? AND s.scope IN ({marks}) AND s.held = 0 \
-                       AND m.source_id IS NULL GROUP BY s.kind"
+                    "SELECT kind, COUNT(*) AS n FROM sources \
+                     WHERE workspace = ? AND scope IN ({marks}) AND held = 0 AND id > ? \
+                       AND kind IN ({kinds}) GROUP BY kind"
                 ),
                 values,
             ))

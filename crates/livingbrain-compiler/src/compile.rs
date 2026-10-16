@@ -180,6 +180,12 @@ pub struct Settings {
     /// How readily triage holds a session back
     /// (`CODING_AGENTS_TRIAGE_STRICTNESS`, default `balanced`).
     pub strictness: Strictness,
+    /// The share of a workspace's daily and monthly compile budget the
+    /// source units (GitHub, Discord, imports) may spend, in per cent
+    /// (`CODING_AGENTS_SOURCE_SHARE_PERCENT`, default 25, at most 100). The
+    /// rest is the sessions': a backlog can use this much and never more,
+    /// so it cannot park a session.
+    pub source_share_percent: u64,
 }
 
 impl Default for Settings {
@@ -199,6 +205,7 @@ impl Default for Settings {
             triage: true,
             compaction: true,
             strictness: Strictness::Balanced,
+            source_share_percent: 25,
         }
     }
 }
@@ -250,6 +257,10 @@ impl Settings {
                 .get("CODING_AGENTS_TRIAGE_STRICTNESS")
                 .and_then(|raw| Strictness::parse(&raw))
                 .unwrap_or(default.strictness),
+            source_share_percent: number(
+                "CODING_AGENTS_SOURCE_SHARE_PERCENT",
+                default.source_share_percent,
+            ),
         }
         .bounded()
     }
@@ -285,6 +296,7 @@ impl Settings {
             triage: overrides.triage.unwrap_or(self.triage),
             compaction: overrides.compaction.unwrap_or(self.compaction),
             strictness: overrides.triage_strictness.unwrap_or(self.strictness),
+            source_share_percent: self.source_share_percent,
         }
         .bounded()
     }
@@ -297,6 +309,7 @@ impl Settings {
         self.max_chunks = self.max_chunks.clamp(1, MAX_CHUNKS_CEILING);
         self.max_output_tokens = self.max_output_tokens.clamp(256, MAX_OUTPUT_TOKENS_CEILING);
         self.job_tokens = self.job_tokens.min(JOB_TOKENS_CEILING);
+        self.source_share_percent = self.source_share_percent.min(100);
         self
     }
 }
@@ -2509,7 +2522,7 @@ fn summary_line(
     )
 }
 
-fn start_of_next_day(now: OffsetDateTime) -> OffsetDateTime {
+pub(crate) fn start_of_next_day(now: OffsetDateTime) -> OffsetDateTime {
     let date = now.to_offset(time::UtcOffset::UTC).date();
     date.next_day().unwrap_or(date).midnight().assume_utc()
 }

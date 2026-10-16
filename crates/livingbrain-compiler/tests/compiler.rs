@@ -17,9 +17,9 @@ use cratefield_testing::{FakeDefer, MemoryBlob, TestHarness};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_compiler::layout;
 use livingbrain_compiler::{
-    BATCH_CEILING, Call, ClaimFilter, Compiler, Emitted, Fact, FactSink, Gate, JOB_TOKENS_CEILING,
-    JobStatus, LANE_GITHUB, Model, ModelFailure, NoFacts, NoGate, Overrides, Queue, Reply,
-    Settings, Tuning,
+    BATCH_CEILING, Call, ClaimFilter, Compiler, Emitted, Fact, FactSink, Filed, Gate,
+    JOB_TOKENS_CEILING, JobStatus, LANE_GITHUB, Model, ModelFailure, NoFacts, NoGate, Overrides,
+    Queue, Reply, Settings, Tuning,
 };
 use livingbrain_pages::{
     Author, EntityType, Ingestor, PageStore, PageWrite, Pages, SourceIngest, SourceKind,
@@ -3612,7 +3612,11 @@ impl World {
     }
 
     fn enqueue_units(&self, compiler: &Compiler) -> usize {
-        pollster::block_on(compiler.enqueue_sources(None)).expect("a backlog pass")
+        self.backlog(compiler).filed
+    }
+
+    fn backlog(&self, compiler: &Compiler) -> Filed {
+        pollster::block_on(compiler.enqueue_sources()).expect("a backlog pass")
     }
 
     fn drain_units(&self, compiler: &Compiler, max: usize) -> Vec<livingbrain_compiler::UnitRun> {
@@ -4003,4 +4007,148 @@ fn an_import_is_only_ever_read_by_its_own_scope() {
     )
     .expect("a listing");
     assert!(mine.iter().any(|page| page.slug == slug));
+}
+
+#[test]
+fn the_backlog_cursor_reads_each_source_once() {
+    let world = world();
+    for n in 1..=3 {
+        world.store(
+            SourceKind::GithubCommit,
+            &shared(),
+            "u1",
+            &format!("github/acme/demo/commit/cur{n}"),
+            None,
+            github_commit(&format!("cur{n}"), "one of three"),
+        );
+    }
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    let compiler = world.compiler(&model);
+    let first = world.backlog(&compiler);
+    assert_eq!(
+        first,
+        Filed {
+            scanned: 3,
+            filed: 3
+        }
+    );
+    // The cursor is past everything: a second tick reads nothing and files
+    // nothing, so the same backlog is never read twice.
+    assert_eq!(
+        world.backlog(&compiler),
+        Filed {
+            scanned: 0,
+            filed: 0
+        }
+    );
+    assert_eq!(
+        world.backlog(&compiler),
+        Filed {
+            scanned: 0,
+            filed: 0
+        }
+    );
+    // A new source is the only thing the next tick reads.
+    world.store(
+        SourceKind::GithubPr,
+        &shared(),
+        "u1",
+        "github/acme/demo/pr/9",
+        None,
+        github_pr(9, "new"),
+    );
+    assert_eq!(
+        world.backlog(&compiler),
+        Filed {
+            scanned: 1,
+            filed: 1
+        }
+    );
+    assert_eq!(world.count("source_compile_members"), 4);
+}
+
+#[test]
+fn a_held_source_waits_for_its_release_and_then_compiles() {
+    let world = world();
+    let id = world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/held1",
+        None,
+        github_commit("held1", "held until screened"),
+    );
+    pollster::block_on(world.db.execute(&Statement::new(format!(
+        "UPDATE sources SET held = 1 WHERE id = '{id}'"
+    ))))
+    .expect("hold it");
+    let model = Fake::answering(|_, _| Ok(empty_reply()));
+    let compiler = world.compiler(&model);
+    assert_eq!(world.enqueue_units(&compiler), 1, "filed while held");
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs[0].status, JobStatus::Done);
+    assert_eq!(model.calls(), 0, "a held source is never read");
+    // Released: the cursor has moved on, but the unit reopens for it.
+    pollster::block_on(world.db.execute(&Statement::new(format!(
+        "UPDATE sources SET held = 0 WHERE id = '{id}'"
+    ))))
+    .expect("release it");
+    assert_eq!(world.enqueue_units(&compiler), 0, "nothing new to scan");
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs[0].status, JobStatus::Done);
+    assert_eq!(model.calls(), 1, "the released source compiles once");
+}
+
+#[test]
+fn units_stop_at_their_share_of_the_budget_and_sessions_still_compile() {
+    let world = world();
+    let session = world.sync(WORKSPACE, "u1", "s-share", "we decided to use D1");
+    for n in 1..=10 {
+        world.store(
+            SourceKind::GithubCommit,
+            &shared(),
+            "u1",
+            &format!("github/acme/share{n}/commit/s{n}"),
+            None,
+            github_commit(&format!("s{n}"), "backlog"),
+        );
+    }
+    // Each call is a fixed 1 200 tokens. A 40 000-token day gives the units
+    // 25% (10 000): a handful of calls fit, and the rest of the backlog waits.
+    let model = Fake::answering(|_, _| Ok(reply(&[])));
+    let settings = Settings {
+        daily_tokens: 40_000,
+        max_output_tokens: 1_000,
+        ..Settings::default()
+    };
+    let compiler = world.compiler_with(&model, settings, Arc::new(NoGate));
+    assert_eq!(world.enqueue_units(&compiler), 10);
+    let runs = world.drain_units(&compiler, 10);
+    let done = runs
+        .iter()
+        .filter(|run| run.status == JobStatus::Done)
+        .count();
+    let waiting = runs
+        .iter()
+        .filter(|run| run.status == JobStatus::OverBudget)
+        .count();
+    assert!((5..10).contains(&done), "{runs:?}");
+    assert_eq!(waiting, 10 - done, "{runs:?}");
+    assert_eq!(model.calls(), done, "one call per unit that ran");
+    let today = livingbrain_compiler::queue::utc_day(world.clock.now());
+    let spent =
+        pollster::block_on(Queue::new(world.db.clone()).unit_spent(WORKSPACE, &today, &today))
+            .expect("the units' spend");
+    assert!(
+        spent > 0 && spent <= 10_000,
+        "the units spent {spent}, within their share"
+    );
+
+    // The sessions run the same day, on the 75% the units left them.
+    let jobs = world.drain(&compiler);
+    let mine = jobs
+        .iter()
+        .find(|job| job.source_id == session)
+        .expect("the session");
+    assert_eq!(mine.status, JobStatus::Done, "{jobs:?}");
 }

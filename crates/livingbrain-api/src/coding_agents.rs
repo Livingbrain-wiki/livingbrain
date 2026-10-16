@@ -211,6 +211,16 @@ impl Module for CodingAgents {
                 }),
             },
             PersonalDataSet::none(
+                "source_compile_spend",
+                "the row is one workspace's tokens spent by source units on one UTC day \
+                 — nothing in it identifies or describes a person",
+            ),
+            PersonalDataSet::none(
+                "source_compile_cursor",
+                "the row is the backlog pass's high-water mark: the last source id it \
+                 scanned, a row name and a time — nothing about a person",
+            ),
+            PersonalDataSet::none(
                 "coding_agent_spend",
                 "the row is one workspace's pooled compile tokens for one UTC day — nothing \
                  in it identifies or describes a person",
@@ -275,6 +285,7 @@ impl Module for CodingAgents {
             "CODING_AGENTS_JOB_TOKENS",
             "CODING_AGENTS_DAILY_TOKENS",
             "CODING_AGENTS_MONTHLY_TOKENS",
+            "CODING_AGENTS_SOURCE_SHARE_PERCENT",
         ] {
             if let Some(raw) = cfg.get(key)
                 && raw.trim().parse::<u64>().is_err()
@@ -339,7 +350,7 @@ impl Module for CodingAgents {
             // session drain left of the tick. A failure is logged, never a
             // failed tick.
             let mut scopes = BTreeSet::new();
-            if let Err(error) = compiler.enqueue_sources(None).await {
+            if let Err(error) = compiler.enqueue_sources().await {
                 eprintln!("coding-agents: filing source units failed: {error}");
             }
             match compiler

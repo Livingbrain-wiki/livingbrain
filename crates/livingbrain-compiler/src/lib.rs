@@ -65,7 +65,7 @@ pub use pool::{CONCURRENCY_CEILING, MAX_CALL, MAX_IN_FLIGHT, WALL_AFTER_BUDGET};
 pub use queue::{ClaimFilter, Finish, Job, JobStatus, PoolRow, Queue, Savings};
 pub use source_compile::{UnitRun, render_item, split_pieces};
 pub use source_units::{
-    BACKLOG_PER_TICK, LANE_DISCORD, LANE_GITHUB, LANE_IMPORTS, LaneCounts, UNIT_KINDS, Unit,
+    BACKLOG_PER_TICK, Filed, LANE_DISCORD, LANE_GITHUB, LANE_IMPORTS, LaneCounts, UNIT_KINDS, Unit,
     UnitFinish,
 };
 
@@ -175,7 +175,7 @@ pub const MIGRATION_SOURCE_UNITS_POSTGRES: SqlMigration = SqlMigration::new(
 );
 
 /// The tables the module that mounts the compiler owns.
-pub const TABLES: [&str; 7] = [
+pub const TABLES: [&str; 9] = [
     "coding_agent_jobs",
     "coding_agent_spend",
     "coding_agent_reservations",
@@ -183,4 +183,6 @@ pub const TABLES: [&str; 7] = [
     "dreaming_settings",
     "source_compile_units",
     "source_compile_members",
+    "source_compile_spend",
+    "source_compile_cursor",
 ];

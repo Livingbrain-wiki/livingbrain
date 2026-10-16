@@ -33,7 +33,7 @@ use time::OffsetDateTime;
 
 use crate::compile::{
     Applied, Budget, COMPILE_ROLE, Call, Cite, Compiler, ModelFailure, Settings, redacted_line,
-    session_instant, strip_frontmatter,
+    session_instant, start_of_next_day, strip_frontmatter,
 };
 use crate::edits::{self, PageEdit};
 use crate::facts::{self, Fact, HeldFact, newest_first, refusal};
@@ -42,7 +42,8 @@ use crate::pool::Tick;
 use crate::prompt::{self, Shown};
 use crate::queue::{JobStatus, MAX_ATTEMPTS, utc_day};
 use crate::source_units::{
-    BACKLOG_PER_TICK, LANE_DISCORD, LANE_GITHUB, LANE_IMPORTS, MEMBERS_PER_RUN, Unit, UnitFinish,
+    BACKLOG_PER_TICK, Filed, LANE_DISCORD, LANE_GITHUB, LANE_IMPORTS, MEMBERS_PER_RUN, Unit,
+    UnitFinish,
 };
 
 /// What the model is told about source material. Its output is the same
@@ -316,16 +317,46 @@ fn observed_at(unit_day: &str, created: &[&str]) -> Option<String> {
 }
 
 impl Compiler {
-    /// Files up to [`BACKLOG_PER_TICK`] stored sources that have no unit
-    /// yet, in every workspace or in one (see [`Queue::enqueue_sources`]).
+    /// One backlog pass: scans up to [`BACKLOG_PER_TICK`] stored sources
+    /// after the cursor and files the source units among them (see
+    /// [`Queue::enqueue_sources`]).
     ///
     /// # Errors
     ///
     /// [`DbError`] from the database.
-    pub async fn enqueue_sources(&self, workspace: Option<&str>) -> Result<usize, DbError> {
+    pub async fn enqueue_sources(&self) -> Result<Filed, DbError> {
         self.queue
-            .enqueue_sources(self.clock.now(), workspace, BACKLOG_PER_TICK)
+            .enqueue_sources(self.clock.now(), BACKLOG_PER_TICK)
             .await
+    }
+
+    /// The tokens the source units of `workspace` may still spend now: the
+    /// workspace's daily and monthly compile budgets, each at
+    /// `source_share_percent`, less what the units spent and hold. The
+    /// smaller of the two.
+    pub(crate) async fn source_share_left(
+        &self,
+        workspace: &str,
+        now: OffsetDateTime,
+        settings: &Settings,
+    ) -> Result<u64, DbError> {
+        let today = utc_day(now);
+        let first = format!("{}-01", &today[..7]);
+        let daily_cap = settings
+            .daily_tokens
+            .saturating_mul(settings.source_share_percent)
+            / 100;
+        let monthly_cap = settings
+            .monthly_tokens
+            .saturating_mul(settings.source_share_percent)
+            / 100;
+        let daily_used = self.queue.unit_spent(workspace, &today, &today).await?
+            + self.queue.unit_held(workspace, &today, &today, now).await?;
+        let monthly_used = self.queue.unit_spent(workspace, &first, &today).await?
+            + self.queue.unit_held(workspace, &first, &today, now).await?;
+        Ok(daily_cap
+            .saturating_sub(daily_used)
+            .min(monthly_cap.saturating_sub(monthly_used)))
     }
 
     /// Compiles up to `max_units` source units, oldest first, each under its
@@ -415,6 +446,25 @@ impl Compiler {
                 // Held by calls in flight: it stays queued for a later tick.
                 Budget::Held => continue,
                 Budget::Open => {}
+            }
+            // The share is spent: the unit waits for the next day, and the
+            // sessions keep the rest of the budget.
+            if self
+                .source_share_left(&unit.workspace, now, &settings)
+                .await?
+                == 0
+            {
+                self.queue
+                    .park_unit(
+                        &unit,
+                        JobStatus::OverBudget,
+                        now,
+                        start_of_next_day(now),
+                        "source-share",
+                    )
+                    .await?;
+                out.push(parked_run(&unit, JobStatus::OverBudget, "source-share"));
+                continue;
             }
             if !budget.try_spend(9) {
                 break;
@@ -596,9 +646,31 @@ impl Compiler {
                 // The unit's own cap: what is left waits for the next run.
                 break;
             }
+            let share_left = match self
+                .source_share_left(&unit.workspace, self.clock.now(), settings)
+                .await
+            {
+                Ok(left) => left,
+                Err(_) => {
+                    status = JobStatus::Failed;
+                    error = Some("store".to_owned());
+                    retry_at = Some(now + time::Duration::minutes(15));
+                    break;
+                }
+            };
+            if estimate > share_left {
+                // The units' share of the budget is spent for today (or this
+                // month): what is left waits, and the sessions are untouched.
+                status = JobStatus::OverBudget;
+                error = Some("source-share".to_owned());
+                retry_at = Some(start_of_next_day(now));
+                refund = true;
+                break;
+            }
             let at = self.clock.now();
             let ref_key = format!("{}:source:{}:{index}", unit.scope, unit.unit_key);
-            let hold = format!("{ref_key}:{}", unit.attempts);
+            // The `source-hold:` prefix is how the share finds these holds.
+            let hold = format!("source-hold:{ref_key}:{}", unit.attempts);
             match self
                 .queue
                 .reserve(
@@ -657,6 +729,12 @@ impl Compiler {
                 .filter(|reply| !reply.runner)
                 .map(|reply| reply.prompt_tokens + reply.completion_tokens);
             let _ = self.queue.settle(&hold, at, &unit.workspace, spent).await;
+            if let Some(tokens) = spent {
+                let _ = self
+                    .queue
+                    .record_unit_spend(&unit.workspace, at, tokens)
+                    .await;
+            }
             let reply = match answered {
                 Ok(reply) => reply,
                 Err(ModelFailure::NoModel) => {
