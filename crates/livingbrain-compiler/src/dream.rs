@@ -536,11 +536,19 @@ impl Compiler {
     /// one the shared attribute rules refuse, logging every retraction. Its
     /// position is kept by the store, so successive ticks cover the whole
     /// fact set in bounded batches.
+    ///
+    /// Only facts the compiler wrote (`written_by` is [`facts::COMPILER_WRITER`])
+    /// are candidates. A fact a person or the API wrote is never retracted
+    /// here, whatever its key looks like: the rules judge what the compiler
+    /// may store, not what someone chose to record.
     async fn rule_pass(&self, dreams: &dyn Dreams, now: OffsetDateTime) -> Result<Cleaned, String> {
         let batch = dreams.rule_batch(RULE_BATCH, now.unix_timestamp()).await?;
         let key = now.format(&Rfc3339).map_err(|_| "clock".to_owned())?;
         let mut cleaned = Cleaned::default();
         for (seq, fact) in batch.iter().enumerate() {
+            if fact.written_by != facts::COMPILER_WRITER {
+                continue;
+            }
             let Some(rule) = attribute_rule(&fact.attribute) else {
                 continue;
             };
@@ -813,20 +821,18 @@ impl Compiler {
                     };
                 }
                 // The same property under another name: only an older fact
-                // can be superseded by a newer one. ISO-style dates compare
-                // as text, as `newest_first` orders them.
-                if old.valid_from >= new.valid_from {
-                    return Err("not-older");
+                // can be superseded by a newer one. Dates compare as the
+                // instants they start at; one that is not a date is refused.
+                match facts::starts_before(&old.valid_from, &new.valid_from) {
+                    Some(true) => {}
+                    Some(false) => return Err("not-older"),
+                    None => return Err("bad-date"),
                 }
                 // File the older history under the newer name, born ended
                 // where the newer begins, then retract the original.
                 let copy = copy_of(old, &new.attribute, Some(new.valid_from.clone()));
-                self.emit_copy(workspace, scope, &copy).await?;
-                match self.facts.retract(scope, id).await {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err("not-in-memory"),
-                    Err(_) => Err("store-refused"),
-                }
+                let copied = self.emit_copy(workspace, scope, &copy).await?;
+                self.retract_or_undo(scope, id, copied.as_deref()).await
             }
             Decision::Retract { id, .. } => {
                 in_window(id)?;
@@ -855,12 +861,8 @@ impl Compiler {
                 // The copy keeps what the original said and when; the
                 // original is then retracted as a duplicate of it.
                 let copy = copy_of(old, attribute, old.valid_to.clone());
-                self.emit_copy(workspace, scope, &copy).await?;
-                match self.facts.retract(scope, id).await {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err("not-in-memory"),
-                    Err(_) => Err("store-refused"),
-                }
+                let copied = self.emit_copy(workspace, scope, &copy).await?;
+                self.retract_or_undo(scope, id, copied.as_deref()).await
             }
         }
     }
@@ -868,13 +870,15 @@ impl Compiler {
 
 impl Compiler {
     /// Stores `copy` in `scope` after the same checks a rename or a move
-    /// needs; the refusal reason is the one the log keeps.
+    /// needs; the refusal reason is the one the log keeps. Answers the id of
+    /// the copy when this call stored it, `None` when the store already held
+    /// it (a repeat is not this move's to undo).
     async fn emit_copy(
         &self,
         workspace: &str,
         scope: &str,
         copy: &Fact,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Option<String>, &'static str> {
         if !facts::valid(copy) || refusal(copy).is_some() {
             return Err("bad-attribute");
         }
@@ -886,7 +890,29 @@ impl Compiler {
         if emitted.recorded == 0 {
             return Err("store-refused");
         }
-        Ok(())
+        Ok(emitted.created.into_iter().next())
+    }
+
+    /// The second step of a move: retracts the original `id`. When that fails,
+    /// the copy this move stored (`copied`) is retracted again, so a failed
+    /// move leaves no duplicate beside the original, and the original failure
+    /// reason is returned. If the undo itself fails the copy stays; it is a
+    /// compiler fact, and the log shows the refusal.
+    async fn retract_or_undo(
+        &self,
+        scope: &str,
+        id: &str,
+        copied: Option<&str>,
+    ) -> Result<(), &'static str> {
+        let reason = match self.facts.retract(scope, id).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => "not-in-memory",
+            Err(_) => "store-refused",
+        };
+        if let Some(copy) = copied {
+            let _ = self.facts.retract(scope, copy).await;
+        }
+        Err(reason)
     }
 }
 

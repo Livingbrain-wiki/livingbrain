@@ -2217,8 +2217,17 @@ impl livingbrain_compiler::FactSink for Store {
                 confidence: fact.confidence,
                 cardinality: fact.cardinality.clone(),
             };
-            match self.0.record(scope, input, "brain:test").await {
-                Ok(_) => emitted.recorded += 1,
+            match self
+                .0
+                .record(scope, input, livingbrain_compiler::COMPILER_WRITER)
+                .await
+            {
+                Ok(recorded) => {
+                    emitted.recorded += 1;
+                    if recorded.outcome == livingbrain_pages::FactOutcome::Created {
+                        emitted.created.push(recorded.fact.id);
+                    }
+                }
                 Err(error) => emitted.skipped.push(error.to_string()),
             }
         }
@@ -2437,7 +2446,7 @@ fn seed_tools(world: &World, store: &Store, scope: &str, count: usize) {
                 source: Some("source:seed".to_owned()),
                 ..livingbrain_pages::FactInput::default()
             },
-            "brain:test",
+            livingbrain_compiler::COMPILER_WRITER,
         ))
         .expect("a seeded fact");
         world.clock.advance(Duration::seconds(1));
@@ -2474,7 +2483,7 @@ fn seed_project(store: &Store, scope: &str) {
                 source: Some("source:seed".to_owned()),
                 ..livingbrain_pages::FactInput::default()
             },
-            "brain:test",
+            livingbrain_compiler::COMPILER_WRITER,
         ))
         .expect("a seeded fact");
     }
@@ -2884,6 +2893,23 @@ fn a_subject_left_part_way_by_an_old_pass_is_swept_to_the_end_on_the_next_ticks(
 
 /// One current fact per attribute, in `scope`, a second apart.
 fn seed_attributes(world: &World, store: &Store, scope: &str, attributes: &[&str]) {
+    seed_attributes_by(
+        world,
+        store,
+        scope,
+        attributes,
+        livingbrain_compiler::COMPILER_WRITER,
+    );
+}
+
+/// `seed_attributes`, written by `writer` (the compiler, or a user id).
+fn seed_attributes_by(
+    world: &World,
+    store: &Store,
+    scope: &str,
+    attributes: &[&str],
+    writer: &str,
+) {
     for attribute in attributes {
         pollster::block_on(store.0.record(
             scope,
@@ -2895,7 +2921,7 @@ fn seed_attributes(world: &World, store: &Store, scope: &str, attributes: &[&str
                 source: Some("source:seed".to_owned()),
                 ..livingbrain_pages::FactInput::default()
             },
-            "brain:test",
+            writer,
         ))
         .expect("a seeded fact");
         world.clock.advance(Duration::seconds(1));
@@ -2969,6 +2995,40 @@ fn the_rule_pass_retracts_what_the_rules_refuse_and_keeps_state_without_a_model_
 }
 
 #[test]
+fn the_rule_pass_spares_facts_a_person_or_the_api_wrote() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    // A person's own keys that a rule would refuse, and the same keys written
+    // by the compiler: only the compiler's are retracted.
+    let person = ["revenue_2025", "session_cost", "issue_9_status"];
+    seed_attributes_by(&world, &store, &scope, &person, "user-7");
+    seed_attributes(&world, &store, &scope, &["issue_10_status"]);
+
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 0)).expect("a sweep");
+    assert_eq!(sweep.retracted, 1, "only the compiler's fact is retracted");
+    assert!(!is_current(&store, &scope, "issue_10_status"));
+    for attribute in person {
+        assert!(
+            is_current(&store, &scope, attribute),
+            "{attribute} is the person's"
+        );
+    }
+}
+
+#[test]
 fn a_finished_subject_the_rule_pass_cleaned_is_read_again_once_and_then_rests() {
     let world = world();
     world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
@@ -3024,14 +3084,14 @@ fn seed_two_names(world: &World, store: &Store, scope: &str, older_from: &str, n
     pollster::block_on(store.0.record(
         scope,
         fact("x_decision", "email link", older_from),
-        "brain:test",
+        livingbrain_compiler::COMPILER_WRITER,
     ))
     .expect("seed");
     world.clock.advance(Duration::seconds(1));
     pollster::block_on(store.0.record(
         scope,
         fact("x_production", "passkey", newer_from),
-        "brain:test",
+        livingbrain_compiler::COMPILER_WRITER,
     ))
     .expect("seed");
 }
@@ -3111,6 +3171,115 @@ fn a_supersede_across_attribute_names_moves_the_older_history_under_the_newer_na
         "the newer fact still holds"
     );
     assert_eq!(current.value, "passkey");
+}
+
+/// The facts store as the compiler's sink, except that retracting one fact
+/// fails: the second step of a move, made to fail on purpose.
+struct RefuseRetractOf {
+    inner: Arc<Store>,
+    id: String,
+}
+
+#[async_trait::async_trait]
+impl livingbrain_compiler::FactSink for RefuseRetractOf {
+    async fn emit(
+        &self,
+        workspace: &str,
+        scope: &str,
+        facts: &[livingbrain_compiler::Fact],
+    ) -> Result<livingbrain_compiler::Emitted, String> {
+        livingbrain_compiler::FactSink::emit(self.inner.as_ref(), workspace, scope, facts).await
+    }
+
+    async fn held(
+        &self,
+        scope: &str,
+        subjects: &[String],
+    ) -> Result<Vec<livingbrain_compiler::HeldFact>, String> {
+        livingbrain_compiler::FactSink::held(self.inner.as_ref(), scope, subjects).await
+    }
+
+    async fn retract(&self, scope: &str, id: &str) -> Result<bool, String> {
+        if id == self.id {
+            return Err("store refused the retract".to_owned());
+        }
+        livingbrain_compiler::FactSink::retract(self.inner.as_ref(), scope, id).await
+    }
+}
+
+#[test]
+fn a_move_whose_retract_fails_undoes_its_copy() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_two_names(&world, &store, &scope, "2025", "2026");
+    let old = id_with_value(&store, &scope, "x_decision", "email link");
+    let newer = id_with_value(&store, &scope, "x_production", "passkey");
+
+    let (proposed_old, proposed_new) = (old.clone(), newer.clone());
+    let model = Fake::answering(move |_, _| {
+        Ok(reply_text(
+            &serde_json::json!({"decisions": [
+                {"op": "supersede", "id": proposed_old, "by": proposed_new},
+            ]})
+            .to_string(),
+        ))
+    });
+    let sink = Arc::new(RefuseRetractOf {
+        inner: store.clone(),
+        id: old.clone(),
+    });
+    let compiler = Compiler::new(
+        world.pages(),
+        world.sources(),
+        Queue::new(world.db.clone()),
+        Arc::new(model.clone()),
+        sink,
+        Arc::new(NoGate),
+        Arc::new(world.clock.clone()),
+        Settings::default(),
+    )
+    .with_dreams(Some(store.clone()));
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep.applied, 0, "the move failed");
+    assert_eq!(
+        supersede_row(&world),
+        (Some(0), Some("store-refused".to_owned())),
+        "refused with the original failure reason"
+    );
+
+    let timelines = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        None,
+    ))
+    .expect("the timelines");
+    let all: Vec<_> = timelines.iter().flat_map(|t| t.facts.iter()).collect();
+    let copies: Vec<_> = all
+        .iter()
+        .filter(|f| f.attribute == "x_production" && f.value == "email link")
+        .collect();
+    assert_eq!(copies.len(), 1, "the copy was stored, then undone");
+    assert_eq!(copies[0].status.as_str(), "retracted", "no live duplicate");
+    assert_eq!(
+        all.iter()
+            .find(|f| f.id == old)
+            .expect("kept")
+            .status
+            .as_str(),
+        "current",
+        "the original still holds"
+    );
 }
 
 #[test]

@@ -256,13 +256,16 @@ pub enum CursorUpdate<'a> {
 }
 
 /// One current fact the rule pass reads: the plaintext columns only, since
-/// the rules look at the key and nothing else.
+/// the rules look at the key and the writer and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleFact {
     pub scope: String,
     pub subject: String,
     pub id: String,
     pub attribute: String,
+    /// Who wrote the fact (the `written_by` column): the compiler's writer
+    /// for a compiled fact, a user id for one a person or the API wrote.
+    pub written_by: String,
 }
 
 /// One window of a subject's current facts, for a dream pass: the facts in
@@ -361,6 +364,16 @@ fn date(field: &str, raw: Option<&str>) -> Result<Option<PartialDate>, FactError
             PartialDate::parse(raw).map_err(|e| FactError::Invalid(format!("`{field}`: {e}")))
         })
         .transpose()
+}
+
+/// The first instant of a stored date as written (`2026`, `2026-10`,
+/// `2026-10-15` or RFC 3339, any offset), as seconds since the epoch in UTC.
+/// `None` for anything that is not a date. Dates are compared by this, never
+/// as text: `2026` and `2026-01-01` start at the same instant, and two
+/// RFC 3339 instants with different offsets sort by their instant.
+#[must_use]
+pub fn date_start(value: &str) -> Option<i64> {
+    PartialDate::parse(value).ok().map(|date| date.start())
 }
 
 fn opt_text(value: Option<&str>) -> SeaValue {
@@ -1219,7 +1232,7 @@ impl FactStore {
             .and_then(|row| row.get::<String>("cursor"));
         let mut values = Vec::new();
         let mut sql = String::from(
-            "SELECT scope, subject, id, attribute, created_at FROM facts WHERE status = 'current'",
+            "SELECT scope, subject, id, attribute, written_by, created_at FROM facts WHERE status = 'current'",
         );
         if let Some((created, id)) = stored.as_deref().and_then(|c| c.split_once('|')) {
             sql.push_str(" AND (created_at > ? OR (created_at = ? AND id > ?))");
@@ -1262,6 +1275,7 @@ impl FactStore {
                 subject: row.get::<String>("subject").unwrap_or_default(),
                 id: row.get::<String>("id").unwrap_or_default(),
                 attribute: row.get::<String>("attribute").unwrap_or_default(),
+                written_by: row.get::<String>("written_by").unwrap_or_default(),
             })
             .collect())
     }
