@@ -3007,3 +3007,176 @@ fn a_finished_subject_the_rule_pass_cleaned_is_read_again_once_and_then_rests() 
     assert_eq!((after.retracted, after.enqueued, after.passes), (0, 0, 0));
     assert_eq!(model.calls(), 2, "read again once, not in a loop");
 }
+
+/// Two facts about one property under two names: the older `x_decision`
+/// (2025) and the newer `x_production` (2026), in `scope`, among the demo
+/// project's other facts so the subject is due a dream.
+fn seed_two_names(world: &World, store: &Store, scope: &str, older_from: &str, newer_from: &str) {
+    seed_project(store, scope);
+    let fact = |attribute: &str, value: &str, from: &str| livingbrain_pages::FactInput {
+        subject: "project/demo".to_owned(),
+        attribute: attribute.to_owned(),
+        value: value.to_owned(),
+        valid_from: Some(from.to_owned()),
+        source: Some("source:seed".to_owned()),
+        ..livingbrain_pages::FactInput::default()
+    };
+    pollster::block_on(store.0.record(
+        scope,
+        fact("x_decision", "email link", older_from),
+        "brain:test",
+    ))
+    .expect("seed");
+    world.clock.advance(Duration::seconds(1));
+    pollster::block_on(store.0.record(
+        scope,
+        fact("x_production", "passkey", newer_from),
+        "brain:test",
+    ))
+    .expect("seed");
+}
+
+/// The applied flag and reason of the one supersede row in the log.
+fn supersede_row(world: &World) -> (Option<i64>, Option<String>) {
+    let row = pollster::block_on(world.db.query(&Statement::new(
+        "SELECT applied, reason FROM fact_dream_decisions WHERE op = 'supersede'",
+    )))
+    .expect("a query");
+    let first = row.first();
+    (
+        first.and_then(|row| row.get::<i64>("applied")),
+        first.and_then(|row| row.get::<String>("reason")),
+    )
+}
+
+#[test]
+fn a_supersede_across_attribute_names_moves_the_older_history_under_the_newer_name() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_two_names(&world, &store, &scope, "2025", "2026");
+    let old = id_with_value(&store, &scope, "x_decision", "email link");
+    let newer = id_with_value(&store, &scope, "x_production", "passkey");
+
+    let (proposed_old, proposed_new) = (old.clone(), newer.clone());
+    let model = Fake::answering(move |_, _| {
+        Ok(reply_text(
+            &serde_json::json!({"decisions": [
+                {"op": "supersede", "id": proposed_old, "by": proposed_new},
+            ]})
+            .to_string(),
+        ))
+    });
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep.applied, 1, "the cross-name supersede applied");
+    assert_eq!(supersede_row(&world), (Some(1), None), "logged as applied");
+
+    let timelines = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        None,
+    ))
+    .expect("the timelines");
+    let all: Vec<_> = timelines.iter().flat_map(|t| t.facts.iter()).collect();
+    let original = all.iter().find(|f| f.id == old).expect("kept");
+    assert_eq!(
+        original.status.as_str(),
+        "retracted",
+        "the original is retracted"
+    );
+    let moved = all
+        .iter()
+        .find(|f| f.attribute == "x_production" && f.value == "email link")
+        .expect("the history is filed under the newer name");
+    assert_eq!(
+        moved.status.as_str(),
+        "superseded",
+        "born ended, not current"
+    );
+    let current = all.iter().find(|f| f.id == newer).expect("kept");
+    assert_eq!(
+        current.status.as_str(),
+        "current",
+        "the newer fact still holds"
+    );
+    assert_eq!(current.value, "passkey");
+}
+
+#[test]
+fn a_supersede_across_attribute_names_is_refused_when_the_older_starts_later() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    // The model's "older" starts after the "newer".
+    seed_two_names(&world, &store, &scope, "2026", "2025");
+    let older = id_with_value(&store, &scope, "x_decision", "email link");
+    let newer = id_with_value(&store, &scope, "x_production", "passkey");
+
+    let (proposed_old, proposed_new) = (older.clone(), newer.clone());
+    let model = Fake::answering(move |_, _| {
+        Ok(reply_text(
+            &serde_json::json!({"decisions": [
+                {"op": "supersede", "id": proposed_old, "by": proposed_new},
+            ]})
+            .to_string(),
+        ))
+    });
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep.applied, 0, "nothing applied");
+    assert_eq!(
+        supersede_row(&world),
+        (Some(0), Some("not-older".to_owned())),
+        "refused and logged as not-older"
+    );
+
+    let timelines = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        None,
+    ))
+    .expect("the timelines");
+    let all: Vec<_> = timelines.iter().flat_map(|t| t.facts.iter()).collect();
+    assert_eq!(
+        all.len(),
+        21 + 2,
+        "no copy was stored: 21 seeded facts and the 2 names"
+    );
+    assert_eq!(
+        all.iter()
+            .find(|f| f.id == older)
+            .expect("kept")
+            .status
+            .as_str(),
+        "current"
+    );
+    assert_eq!(
+        all.iter()
+            .find(|f| f.id == newer)
+            .expect("kept")
+            .status
+            .as_str(),
+        "current"
+    );
+}

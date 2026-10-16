@@ -404,13 +404,17 @@ Worker's cron tick, after the compile drain.
   as that budget is spent, leaves the subject queued, and a rate limit ends
   the tick. At most two passes run per tick.
 - **Decisions.** The model sees every current fact of the one subject and may
-  return `supersede` (an older fact replaced by a newer one of the same
-  attribute), `end` (stopped at a date), `retract` (an event, or a duplicate)
+  return `supersede` (an older fact replaced by a newer one, usually of the
+  same attribute), `end` (stopped at a date), `retract` (an event, or a duplicate)
   or `rename` (move to the ordinary key). Ids must be ones it was shown. Each
   decision goes through the store's own operations (`end`, `retract`,
   `emit`), so history is kept: a superseded or ended fact stays, with the date
   it stopped. A rename copies the fact under the new key and retracts the
   original as a duplicate.
+- **Across names.** A supersede may also name a newer fact under another
+  attribute, when it is the same property under another name. The older
+  must start before the newer; its history is then filed under the newer
+  attribute, ended where the newer begins, and the original is retracted.
 - **Log.** Every decision is written to `fact_dream_decisions` whether or not
   it was applied: the pass key, the op, the fact ids, the new end or key, the
   reason (a short lowercase word), and the ids the model was shown as JSON.
