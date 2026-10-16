@@ -12,6 +12,7 @@ final class AppState: ObservableObject {
     /// the app, before the menu is ever opened.
     let runner: RunnerModel
     let router = Router()
+    let updates = UpdateModel()
 
     init() {
         let workspace = WorkspaceModel(bar: bar)
@@ -26,14 +27,14 @@ struct LivingBrainBarApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            BarMenu(model: app.bar, runner: app.runner)
+            BarMenu(model: app.bar, runner: app.runner, updates: app.updates, router: app.router)
         } label: {
             MenuBarLabel(model: app.bar)
         }
         .menuBarExtraStyle(.menu)
 
         Window("Living Brain", id: "main") {
-            MainWindow(bar: app.bar, sessions: app.sessions, workspace: app.workspace, runner: app.runner, router: app.router)
+            MainWindow(bar: app.bar, sessions: app.sessions, workspace: app.workspace, runner: app.runner, router: app.router, updates: app.updates)
         }
         .defaultSize(width: 1180, height: 740)
         .commands {
@@ -86,6 +87,8 @@ struct MenuBarLabel: View {
 struct BarMenu: View {
     @ObservedObject var model: BarModel
     @ObservedObject var runner: RunnerModel
+    @ObservedObject var updates: UpdateModel
+    @ObservedObject var router: Router
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -173,6 +176,18 @@ struct BarMenu: View {
             Button("Choose CLI…") { model.chooseCLI() }
             Button("Use Default Location") { model.resetCLI() }
         }
+
+        Divider()
+
+        if let update = updates.offeredRelease {
+            Button("Update to \(update.version.description)…") {
+                router.destination = .settings
+                openWindow(id: "main")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+        Button("Check for Updates…") { updates.checkForUpdates() }
+            .disabled(updates.isBusy)
 
         Divider()
 

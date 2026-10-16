@@ -71,6 +71,7 @@ struct MainWindow: View {
     @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var runner: RunnerModel
     @ObservedObject var router: Router
+    @ObservedObject var updates: UpdateModel
 
     var body: some View {
         NavigationSplitView {
@@ -122,7 +123,7 @@ struct MainWindow: View {
         switch router.destination {
         case .sessions: SessionsView(model: sessions)
         case .projects: ProjectsView(bar: bar, model: sessions)
-        case .settings: SettingsView(workspace: workspace, bar: bar, runner: runner, router: router)
+        case .settings: SettingsView(workspace: workspace, bar: bar, runner: runner, router: router, updates: updates)
         case .wiki, .ask, .timeline, .usage:
             if workspace.signedIn {
                 switch router.destination {

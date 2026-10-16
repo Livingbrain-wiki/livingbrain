@@ -204,6 +204,37 @@ verify…"). Either:
 
 macOS remembers the choice; later opens are normal.
 
+## Updating
+
+Living Brain looks for a newer `macos-v*` release on GitHub ten seconds after
+launch and then every six hours. **Settings → Updates** shows the installed
+version, when it last checked, and the **Automatically check for updates**
+switch (on by default). **Check for Updates…** in the menu checks now. When a
+newer version is found the menu shows **Update to 0.1.3…**, which opens
+Settings → Updates with its release notes.
+
+- **Install and Relaunch** downloads `LivingBrain.dmg` and its
+  `LivingBrain.dmg.sha256`, and refuses the update unless the file matches
+  the checksum. It then mounts the image read-only and checks that it holds
+  the same bundle identifier, the release's version, and a valid code
+  signature. The app is copied next to the installed one, and the app quits.
+  A small helper waits for the app to exit, moves the old bundle aside, puts
+  the new one in its place, and removes the old copy only once that worked
+  (it is moved back if not). It clears the quarantine flag on the new copy
+  only, relaunches Living Brain, and removes its own working files. Nothing
+  runs with elevated privileges.
+- If the app's folder is not writable (for example, it is still running from
+  the disk image), the update is not installed; the app asks you to move Living
+  Brain to Applications and offers the release page.
+- **Skip This Version** hides that version from the menu and automatic checks.
+  **Release notes** opens the GitHub release.
+- GitHub rate limits are ignored until the next check; automatic checks stay
+  quiet about network errors.
+
+The checksum comes from the same release as the image, so it guards against
+a corrupted or altered download, not against a compromised release. Until
+releases are notarized, an update is ad-hoc signed like the first install.
+
 ## Build a release
 
 ```sh
@@ -239,7 +270,7 @@ Requires Xcode 15.3+ (Swift 5.10) on macOS 14 or later.
 
 ```sh
 cd macos/LivingBrainBar
-swift test                      # unit tests: CLI JSON, state machine, runner, debounce
+swift test                      # unit tests: CLI JSON, state machine, runner, debounce, updater
 scripts/build-app.sh            # → build/Living Brain.app
 open "build/Living Brain.app"   # run it from the build folder
 cp -R "build/Living Brain.app" /Applications/   # install
@@ -265,8 +296,9 @@ Package.swift
 Sources/LivingBrainKit/    # testable: CLI JSON models, SyncState, CLI locator/runner, opt-in file,
                            #   idle debouncer, notification throttle, FSEvents watcher, session ledger,
                            #   API client + models, keychain token store, Markdown blocks,
-                           #   the brain-jobs runner (jobs run/agents, events, activity)
-Sources/LivingBrainBar/    # the SwiftUI menu bar extra, the window, and AppKit glue
+                           #   the brain-jobs runner (jobs run/agents, events, activity),
+                           #   the updater (release list, SemVer, checksums, helper script)
+Sources/LivingBrainBar/    # the SwiftUI menu bar extra, the window, the update flow and AppKit glue
 Tests/LivingBrainKitTests/ # XCTest + recorded CLI JSON fixtures
 scripts/build-app.sh
 scripts/release.sh
