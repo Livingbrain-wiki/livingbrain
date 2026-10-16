@@ -32,8 +32,9 @@ use livingbrain_redact::{Policy, redact};
 use time::{Duration, OffsetDateTime};
 
 use crate::compact::{self, CallRef, Keep};
+use crate::dream::Dreams;
 use crate::edits::{self, PageEdit};
-use crate::facts::{Fact, FactSink};
+use crate::facts::{self, Fact, FactSink, HeldFact, newest_first, refusal};
 use crate::layout::{self, Allowed, Place};
 use crate::merge;
 use crate::pool::{CONCURRENCY_CEILING, MAX_IN_FLIGHT, Tick};
@@ -395,18 +396,21 @@ pub struct Processed {
 
 /// The compiler over one request's (or one cron tick's) ports.
 pub struct Compiler {
-    pages: PageStore,
-    sources: SourceStore,
-    queue: Queue,
-    model: Arc<dyn Model>,
-    facts: Arc<dyn FactSink>,
-    gate: Arc<dyn Gate>,
-    clock: Arc<dyn Clock>,
-    settings: Settings,
-    tuning: Arc<dyn Tuning>,
+    pub(crate) pages: PageStore,
+    pub(crate) sources: SourceStore,
+    pub(crate) queue: Queue,
+    pub(crate) model: Arc<dyn Model>,
+    pub(crate) facts: Arc<dyn FactSink>,
+    pub(crate) gate: Arc<dyn Gate>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) settings: Settings,
+    pub(crate) tuning: Arc<dyn Tuning>,
     /// The triage classifiers (Jev, per workspace), when the venture wires
     /// them.
-    classifiers: Option<Arc<dyn Classifiers>>,
+    pub(crate) classifiers: Option<Arc<dyn Classifiers>>,
+    /// Dreaming's bookkeeping (the queue, the pass record and the decision
+    /// log), when the composition has a facts store to dream over.
+    pub(crate) dreams: Option<Arc<dyn Dreams>>,
 }
 
 /// What one job accumulated across its calls.
@@ -418,6 +422,8 @@ struct Tally {
     rejected: u32,
     conflicts: u32,
     facts: u32,
+    /// Facts the model says ended and the store ended.
+    ended: u32,
     /// One reason per fact the store refused, in order.
     skipped_facts: Vec<String>,
     /// Facts the sink could not try at all, and why.
@@ -468,6 +474,7 @@ impl Compiler {
             settings,
             tuning: Arc::new(NoTuning),
             classifiers: None,
+            dreams: None,
         }
     }
 
@@ -501,6 +508,14 @@ impl Compiler {
 
     /// The settings `workspace` compiles under: the deployment's, with the
     /// workspace's own overrides on top.
+    /// Wires dreaming's bookkeeping. Without it [`Compiler::dream`] does
+    /// nothing, and the compile itself is unchanged.
+    #[must_use]
+    pub fn with_dreams(mut self, dreams: Option<Arc<dyn Dreams>>) -> Self {
+        self.dreams = dreams;
+        self
+    }
+
     pub async fn settings_for(&self, workspace: &str) -> Settings {
         self.settings
             .with_overrides(&self.tuning.overrides(workspace).await)
@@ -771,7 +786,7 @@ impl Compiler {
     /// reset) when its daily or monthly compile tokens are spent or the
     /// usage gate says it is over its budget, `Held` when what is left is
     /// held by calls in flight, else `Open`.
-    async fn over_budget(
+    pub(crate) async fn over_budget(
         &self,
         workspace: &str,
         now: OffsetDateTime,
@@ -864,6 +879,13 @@ impl Compiler {
             _ => prompt::DEFAULT_SCHEMA.to_owned(),
         };
         let head = SessionHead {
+            started_at: session_instant(
+                session
+                    .started_at
+                    .as_deref()
+                    .or(session.ended_at.as_deref())
+                    .unwrap_or_default(),
+            ),
             agent: session.agent.clone(),
             agent_folder: agent,
             project,
@@ -927,6 +949,18 @@ impl Compiler {
 
         let mut tally = Tally::default();
         let parts = chunks.len();
+        // What the store already holds for this session's two subjects, so the
+        // model reuses their keys and ends them by id. A store that cannot be
+        // read is an empty list: the pages are the primary output and the
+        // facts of this session are still recorded, just without reuse.
+        let subjects = [
+            facts::project_subject(&head.project),
+            facts::agent_subject(&head.agent_folder),
+        ];
+        let held = match self.facts.held(&job.scope, &subjects).await {
+            Ok(held) => newest_first(held),
+            Err(_) => Vec::new(),
+        };
         // A compile that waited on the owner's runner resumes after the
         // chunks it already applied; their tokens are on the row already.
         let resumed = usize::try_from(job.chunks_done).unwrap_or(0).min(parts);
@@ -943,6 +977,7 @@ impl Compiler {
                 &conventions,
                 &head,
                 &shown,
+                &held,
                 chunk,
                 index + 1,
                 parts,
@@ -1188,16 +1223,29 @@ impl Compiler {
                     Applied::Conflict => tally.conflicts += 1,
                 }
             }
+            for end in &output.ended {
+                self.end_fact(job, &held, end, &mut tally).await;
+            }
             if !output.facts.is_empty() {
-                let (facts, refused): (Vec<Fact>, Vec<Fact>) = self
-                    .prepare_facts(&output.facts, job, &head, me.as_deref(), now)
-                    .into_iter()
-                    .partition(crate::facts::valid);
-                tally.skipped_facts.extend(
-                    refused
-                        .iter()
-                        .map(|_| "outside the v1 format once redacted".to_owned()),
-                );
+                // A fact is refused on its own: outside the format once
+                // redacted, undated (no time in the answer and none in the
+                // session), or not state (an event or a per-item key).
+                let mut facts: Vec<Fact> = Vec::new();
+                for fact in self.prepare_facts(&output.facts, &head, me.as_deref(), now) {
+                    if fact.valid_from.is_none() {
+                        tally
+                            .skipped_facts
+                            .push("undated: no time in the answer or the session".to_owned());
+                    } else if !crate::facts::valid(&fact) {
+                        tally
+                            .skipped_facts
+                            .push("outside the v1 format once redacted".to_owned());
+                    } else if let Some(reason) = refusal(&fact) {
+                        tally.skipped_facts.push(reason.to_owned());
+                    } else {
+                        facts.push(fact);
+                    }
+                }
                 // A refusal is per fact, and a sink that cannot try at all
                 // is a note in the log: neither fails the job.
                 match self.facts.emit(&job.workspace, &job.scope, &facts).await {
@@ -1659,24 +1707,52 @@ impl Compiler {
             .all(|meta| meta.author_kind == AuthorKind::Brain)
     }
 
+    /// Ends one fact the model named, if it was one of the facts shown and
+    /// the store can end it. Every refusal is a skip the log names.
+    async fn end_fact(
+        &self,
+        job: &Job,
+        held: &[HeldFact],
+        end: &edits::EndedFact,
+        tally: &mut Tally,
+    ) {
+        if !held.iter().any(|fact| fact.id == end.id) {
+            tally
+                .skipped_facts
+                .push("ended: not one of the facts shown".to_owned());
+            return;
+        }
+        if !facts::partial_date(&end.valid_to) {
+            tally
+                .skipped_facts
+                .push("ended: valid_to is not a date".to_owned());
+            return;
+        }
+        match self.facts.end(&job.scope, &end.id, &end.valid_to).await {
+            Ok(true) => tally.ended = tally.ended.saturating_add(1),
+            Ok(false) => tally
+                .skipped_facts
+                .push("ended: not in this memory".to_owned()),
+            Err(reason) => tally
+                .skipped_facts
+                .push(format!("ended: {}", edits::one_line(&reason, 80))),
+        }
+    }
+
     /// The facts as the layer will store them: the session's source cited,
-    /// observed at compile time (when the brain learned it), valid from the
-    /// session's day when the model gave no time, and the free text
-    /// redacted. `me` becomes the syncing person's own subject.
+    /// observed at the session's own time (not the compile's), valid from
+    /// the model's stated time or else the session's own day, and the free
+    /// text redacted. `me` becomes the syncing person's own subject. A fact
+    /// with neither a stated time nor a session time keeps `valid_from`
+    /// `None`, and is refused rather than dated to the compile.
     fn prepare_facts(
         &self,
         facts: &[Fact],
-        job: &Job,
         head: &SessionHead,
         me: Option<&str>,
         now: OffsetDateTime,
     ) -> Vec<Fact> {
-        let observed = now
-            .to_offset(time::UtcOffset::UTC)
-            .replace_nanosecond(0)
-            .unwrap_or(now)
-            .format(&time::format_description::well_known::Rfc3339)
-            .ok();
+        let (observed, default_from) = fact_times(head.started_at.as_deref(), now);
         facts
             .iter()
             .map(|fact| Fact {
@@ -1687,15 +1763,15 @@ impl Compiler {
                 source: Some(
                     fact.source
                         .clone()
-                        .filter(|source| source.contains(&job.source_id))
-                        .unwrap_or_else(|| format!("source:{}", job.source_id)),
+                        .filter(|source| source.contains(&head.source_id))
+                        .unwrap_or_else(|| format!("source:{}", head.source_id)),
                 ),
-                observed_at: observed.clone(),
+                observed_at: Some(observed.clone()),
                 valid_from: fact
                     .valid_from
                     .clone()
                     .filter(|from| !from.trim().is_empty())
-                    .or_else(|| Some(head.day.clone())),
+                    .or_else(|| default_from.clone()),
                 value: redacted_text(&fact.value),
                 quote: fact.quote.as_deref().map(redacted_text),
                 ..fact.clone()
@@ -1895,7 +1971,7 @@ enum Admit {
 }
 
 /// A workspace's compile budget, right now.
-enum Budget {
+pub(crate) enum Budget {
     Open,
     /// What is left is held by calls in flight.
     Held,
@@ -2137,6 +2213,48 @@ const MAX_BUSY_RETRY_SECS: u64 = 30 * 60;
 const MAX_SKIPS_LOGGED: usize = 5;
 
 /// The log line for one compiled session.
+/// A session's own timestamp as RFC 3339 in UTC, or `None` when the record
+/// has none (or it does not parse). Facts are dated by it, not by the day
+/// the compile happened to run.
+#[must_use]
+pub(crate) fn session_instant(raw: &str) -> Option<String> {
+    let at =
+        OffsetDateTime::parse(raw.trim(), &time::format_description::well_known::Rfc3339).ok()?;
+    at.to_offset(time::UtcOffset::UTC)
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+/// The observation time and the default `valid_from` of a fact from one
+/// session: observed when the session was (never after the compile), and
+/// valid from its day. A session with no time has no default `valid_from`,
+/// so its facts are refused as undated; the observation then falls back to
+/// the compile's own time, which is only ever a stamp on a fact that was
+/// given its own date.
+#[must_use]
+pub(crate) fn fact_times(
+    started_at: Option<&str>,
+    now: OffsetDateTime,
+) -> (String, Option<String>) {
+    let now_text = now
+        .to_offset(time::UtcOffset::UTC)
+        .replace_nanosecond(0)
+        .unwrap_or(now)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    match started_at {
+        Some(at) => {
+            let observed = if at > now_text.as_str() {
+                now_text.clone()
+            } else {
+                at.to_owned()
+            };
+            (observed, at.get(..10).map(str::to_owned))
+        }
+        None => (now_text, None),
+    }
+}
+
 fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTime) -> String {
     let short: String = head.session_id.chars().take(8).collect();
     let summary = if tally.summaries.is_empty() {
@@ -2166,6 +2284,9 @@ fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTim
     }
     if tally.facts > 0 {
         line.push_str(&format!(" · facts recorded: {}", tally.facts));
+    }
+    if tally.ended > 0 {
+        line.push_str(&format!(" · facts ended: {}", tally.ended));
     }
     if !tally.skipped_facts.is_empty() {
         let shown = tally
@@ -2366,5 +2487,35 @@ mod tests {
         let at = day(2026, time::Month::December, 31) + Duration::hours(23);
         assert_eq!(start_of_next_month(at), day(2027, time::Month::January, 1));
         assert_eq!(start_of_next_day(at), day(2027, time::Month::January, 1));
+    }
+
+    #[test]
+    fn a_fact_is_dated_by_its_session_not_by_the_compile() {
+        let now = OffsetDateTime::parse(
+            "2026-10-16T09:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("a time");
+        // A session from last spring, compiled today: valid from its day,
+        // observed at its own time.
+        let (observed, from) = fact_times(Some("2025-04-02T10:30:00Z"), now);
+        assert_eq!(observed, "2025-04-02T10:30:00Z");
+        assert_eq!(from.as_deref(), Some("2025-04-02"));
+        // A session with no time: no default date at all, so its facts are
+        // refused as undated rather than dated to today.
+        let (_, undated) = fact_times(None, now);
+        assert_eq!(undated, None);
+        // A session stamped in the future is observed no later than now.
+        let (observed, _) = fact_times(Some("2026-12-01T00:00:00Z"), now);
+        assert_eq!(observed, "2026-10-16T09:00:00Z");
+    }
+
+    #[test]
+    fn a_session_time_is_read_as_utc_rfc3339_or_not_at_all() {
+        assert_eq!(
+            session_instant("2025-04-02T12:30:00+02:00").as_deref(),
+            Some("2025-04-02T10:30:00Z")
+        );
+        assert_eq!(session_instant("last tuesday"), None);
     }
 }

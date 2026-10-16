@@ -2184,3 +2184,307 @@ fn the_requeue_migration_takes_only_bare_bad_output_failures() {
             .is_some_and(|e| e.starts_with("bad-output: "))
     );
 }
+
+/// A unix instant as the RFC 3339 text the store keeps.
+fn unix_rfc3339(at: i64) -> String {
+    livingbrain_compiler::queue::rfc3339(OffsetDateTime::from_unix_timestamp(at).expect("a time"))
+}
+
+/// The facts store as the compiler's sink and as dreaming's bookkeeping, the
+/// way the venture's composition wires the same store.
+struct Store(livingbrain_pages::FactStore);
+
+#[async_trait::async_trait]
+impl livingbrain_compiler::FactSink for Store {
+    async fn emit(
+        &self,
+        _workspace: &str,
+        scope: &str,
+        facts: &[livingbrain_compiler::Fact],
+    ) -> Result<livingbrain_compiler::Emitted, String> {
+        let mut emitted = livingbrain_compiler::Emitted::default();
+        for fact in facts {
+            let input = livingbrain_pages::FactInput {
+                subject: fact.subject.clone(),
+                attribute: fact.attribute.clone(),
+                value: fact.value.clone(),
+                unit: fact.unit.clone(),
+                valid_from: fact.valid_from.clone(),
+                valid_to: fact.valid_to.clone(),
+                observed_at: fact.observed_at.clone(),
+                source: fact.source.clone(),
+                quote: fact.quote.clone(),
+                confidence: fact.confidence,
+                cardinality: fact.cardinality.clone(),
+            };
+            match self.0.record(scope, input, "brain:test").await {
+                Ok(_) => emitted.recorded += 1,
+                Err(error) => emitted.skipped.push(error.to_string()),
+            }
+        }
+        Ok(emitted)
+    }
+
+    async fn held(
+        &self,
+        scope: &str,
+        subjects: &[String],
+    ) -> Result<Vec<livingbrain_compiler::HeldFact>, String> {
+        let mut held = Vec::new();
+        for subject in subjects {
+            for timeline in self
+                .0
+                .timelines(&[scope], Some(subject), None)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                for fact in timeline
+                    .facts
+                    .iter()
+                    .filter(|f| f.status.as_str() == "current")
+                {
+                    held.push(livingbrain_compiler::HeldFact {
+                        id: fact.id.clone(),
+                        subject: fact.subject.clone(),
+                        attribute: fact.attribute.clone(),
+                        value: fact.value.clone(),
+                        unit: fact.unit.clone(),
+                        valid_from: fact.valid_from.text().to_owned(),
+                        valid_to: fact.valid_to.as_ref().map(|to| to.text().to_owned()),
+                        source: fact.source.clone(),
+                        observed_at: unix_rfc3339(fact.observed_at),
+                        last_confirmed_at: unix_rfc3339(fact.last_confirmed_at),
+                    });
+                }
+            }
+        }
+        Ok(held)
+    }
+
+    async fn end(&self, scope: &str, id: &str, valid_to: &str) -> Result<bool, String> {
+        self.0
+            .end(scope, id, valid_to)
+            .await
+            .map(|found| found.is_some())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn retract(&self, scope: &str, id: &str) -> Result<bool, String> {
+        self.0
+            .retract(&[scope], id)
+            .await
+            .map(|found| found.is_some())
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl livingbrain_compiler::Dreams for Store {
+    async fn candidates(
+        &self,
+        min_facts: usize,
+        limit: usize,
+    ) -> Result<Vec<livingbrain_pages::DreamCandidate>, String> {
+        self.0
+            .dream_candidates(min_facts, limit)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn enqueue(&self, scope: &str, subject: &str, now: i64) -> Result<(), String> {
+        self.0
+            .dream_enqueue(scope, subject, now)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn queued(&self, limit: usize) -> Result<Vec<(String, String)>, String> {
+        self.0.dream_queued(limit).await.map_err(|e| e.to_string())
+    }
+    async fn claim(
+        &self,
+        scope: &str,
+        subject: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<bool, String> {
+        self.0
+            .dream_claim(scope, subject, now, lease_until)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn finish(
+        &self,
+        scope: &str,
+        subject: &str,
+        outcome: livingbrain_pages::DreamFinish<'_>,
+        now: i64,
+    ) -> Result<(), String> {
+        self.0
+            .dream_finish(scope, subject, &outcome, now)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn log(&self, row: livingbrain_pages::DreamDecisionRow<'_>) -> Result<(), String> {
+        self.0.dream_log(&row).await.map_err(|e| e.to_string())
+    }
+}
+
+/// Twenty current facts about one project (and one event among them), in
+/// `scope`, stored the way a compile stores them.
+fn seed_project(store: &Store, scope: &str) {
+    let mut facts: Vec<(String, &str)> = (0..20).map(|n| (format!("tool_{n}"), "yes")).collect();
+    facts.push(("session_cost".to_owned(), "4.20 USD"));
+    for (attribute, value) in facts {
+        pollster::block_on(store.0.record(
+            scope,
+            livingbrain_pages::FactInput {
+                subject: "project/demo".to_owned(),
+                attribute,
+                value: value.to_owned(),
+                valid_from: Some("2025".to_owned()),
+                source: Some("source:seed".to_owned()),
+                ..livingbrain_pages::FactInput::default()
+            },
+            "brain:test",
+        ))
+        .expect("a seeded fact");
+    }
+}
+
+/// The fact id a dream's message shows for `attribute` of the demo project.
+fn shown_id(user: &str, attribute: &str) -> String {
+    let needle = format!("| project/demo | {attribute} =");
+    user.lines()
+        .find(|line| line.contains(&needle))
+        .and_then(|line| line.strip_prefix("- "))
+        .and_then(|line| line.split(" |").next())
+        .expect("the fact is shown")
+        .to_owned()
+}
+
+#[test]
+fn a_dream_applies_what_the_model_proposes_and_logs_every_decision() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    // The drain enqueues each synced session before dreaming runs; a scope
+    // with no compile job has no member, so nothing could be spent on it.
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_project(&store, &scope);
+
+    let model = Fake::answering(|user, _| {
+        let event = shown_id(user, "session_cost");
+        let old = shown_id(user, "tool_0");
+        let decisions = serde_json::json!({"decisions": [
+            {"op": "retract", "id": event, "reason": "Event Cost"},
+            {"op": "end", "id": old, "valid_to": "2026-01"},
+            {"op": "retract", "id": "fact-not-shown", "reason": "event"},
+        ]});
+        Ok(Reply {
+            text: decisions.to_string(),
+            prompt_tokens: 900,
+            completion_tokens: 100,
+            ..Reply::default()
+        })
+    });
+    let compiler = Compiler::new(
+        world.pages(),
+        world.sources(),
+        Queue::new(world.db.clone()),
+        Arc::new(model.clone()),
+        store.clone(),
+        Arc::new(NoGate),
+        Arc::new(world.clock.clone()),
+        Settings::default(),
+    )
+    .with_dreams(Some(store.clone()));
+
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!(sweep.enqueued, 1);
+    assert_eq!(sweep.passes, 1);
+    assert_eq!(
+        sweep.applied, 2,
+        "the unknown id is refused, the rest applied"
+    );
+    assert_eq!(model.calls(), 1);
+    assert!(model.inputs()[0].contains("SUBJECT: project/demo"));
+
+    // History is kept: the event is retracted, the old tool is ended by date.
+    let timelines = pollster::block_on(store.0.timelines(&[&scope], Some("project/demo"), None))
+        .expect("the timelines");
+    let all: Vec<_> = timelines.iter().flat_map(|t| t.facts.iter()).collect();
+    let event = all
+        .iter()
+        .find(|f| f.attribute == "session_cost")
+        .expect("kept");
+    assert_eq!(event.status.as_str(), "retracted");
+    let tool = all.iter().find(|f| f.attribute == "tool_0").expect("kept");
+    assert_eq!(tool.valid_to.as_ref().map(|to| to.text()), Some("2026-01"));
+
+    // Every decision is in the log, applied or refused, with the ids shown.
+    assert_eq!(world.count("fact_dream_decisions"), 3);
+    assert_eq!(world.count("fact_dreams"), 1);
+
+    // Nothing is due again until new facts arrive or the recheck window passes.
+    let again =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!((again.enqueued, again.passes), (0, 0));
+    assert_eq!(model.calls(), 1);
+}
+
+#[test]
+fn a_dream_stops_when_the_compile_budget_is_spent_and_stays_queued() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    // The drain enqueues each synced session before dreaming runs; a scope
+    // with no compile job has no member, so nothing could be spent on it.
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    seed_project(&store, &scope);
+    let queue = Queue::new(world.db.clone());
+    pollster::block_on(queue.record_spend(world.clock.now(), WORKSPACE, 500)).expect("spend");
+
+    let model = Fake::answering(|_, _| Ok(Reply::default()));
+    let settings = Settings {
+        daily_tokens: 100,
+        ..Settings::default()
+    };
+    let compiler = Compiler::new(
+        world.pages(),
+        world.sources(),
+        Queue::new(world.db.clone()),
+        Arc::new(model.clone()),
+        store.clone(),
+        Arc::new(NoGate),
+        Arc::new(world.clock.clone()),
+        settings,
+    )
+    .with_dreams(Some(store.clone()));
+
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 2)).expect("a sweep");
+    assert_eq!((sweep.enqueued, sweep.passes, sweep.applied), (1, 1, 0));
+    assert_eq!(model.calls(), 0, "no model call over the budget");
+    let status = pollster::block_on(store.0.dream_queued(5)).expect("the queue");
+    assert_eq!(
+        status,
+        vec![(scope.clone(), "project/demo".to_owned())],
+        "the subject is still queued for a later tick"
+    );
+}

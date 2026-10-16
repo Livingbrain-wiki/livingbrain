@@ -65,13 +65,16 @@ use cratefield_core::{
 };
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::{
-    Call, ClaimFilter, Classifiers, Compiler, Emitted, Fact, FactSink, Gate, Job, JobStatus, Model,
-    ModelFailure, Queue, Reply, Settings,
+    Call, ClaimFilter, Classifiers, Compiler, Dreams, Emitted, Fact, FactSink, Gate, HeldFact, Job,
+    JobStatus, Model, ModelFailure, Queue, Reply, Settings,
 };
+use livingbrain_memory::timeline::{self, FactStatus, TimedFact};
 use livingbrain_models::invoke::{self, ChatRequest, InvokeError, Structured};
 use livingbrain_models::jobs::{self, Dispatch, JobCall};
 use livingbrain_pages::access::{AccessPlan, KIND_PAGES, KIND_SOURCES, ScopeFilter};
-use livingbrain_pages::{FactError, FactInput, FactStore};
+use livingbrain_pages::{
+    DreamCandidate, DreamDecisionRow, DreamFinish, FactError, FactInput, FactStore,
+};
 use serde_json::{Value, json};
 
 mod tree;
@@ -273,6 +276,16 @@ impl Module for CodingAgents {
                 )
                 .await
                 .map_err(|error| Box::new(error) as AnyError)?;
+            // Dreaming: tidy the subjects that are due, from what budget the
+            // drain left. A failure is logged, never a failed tick.
+            match compiler.dream(&ctx.scheduled, DREAM_PASSES_PER_TICK).await {
+                Ok(sweep) if sweep.passes > 0 || sweep.enqueued > 0 => eprintln!(
+                    "dreaming: {} queued, {} passes, {} facts updated",
+                    sweep.enqueued, sweep.passes, sweep.applied
+                ),
+                Ok(_) => {}
+                Err(reason) => eprintln!("dreaming: sweep failed: {reason}"),
+            }
             // The lint runs over the scopes this tick compiled into: cheap,
             // model-free, and only where something changed.
             let mut scopes = BTreeSet::new();
@@ -341,6 +354,7 @@ pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
         config: Arc::clone(&ctx.config),
         clock: clock.clone(),
     });
+    let dreams: Arc<dyn Dreams> = facts.clone();
     Some(
         Compiler::new(
             pages,
@@ -352,6 +366,7 @@ pub(crate) fn compiler(ctx: &ModuleContext, wiki: &Wiki) -> Option<Compiler> {
             clock,
             Settings::from_config(&*ctx.config),
         )
+        .with_dreams(Some(dreams))
         .with_tuning(Arc::new(StoredTuning { db: db.clone() }))
         .with_classifiers(wiki.jev.clone().map(|connector| {
             Arc::new(WorkspaceJev {
@@ -382,6 +397,10 @@ impl Classifiers for WorkspaceJev {
     }
 }
 
+/// The most dream passes one cron tick runs: a pass is a model call, and a
+/// tick is shared with the compile drain.
+const DREAM_PASSES_PER_TICK: usize = 2;
+
 /// Who the fact store records as the writer of a compiled fact.
 pub const FACT_WRITER: &str = "brain:coding-agents";
 
@@ -405,6 +424,42 @@ impl StoreFacts {
 
 #[async_trait::async_trait]
 impl FactSink for StoreFacts {
+    async fn held(&self, scope: &str, subjects: &[String]) -> Result<Vec<HeldFact>, String> {
+        let mut held = Vec::new();
+        for subject in subjects {
+            let timelines = self
+                .store
+                .timelines(&[scope], Some(subject), None)
+                .await
+                .map_err(|_| "store error".to_owned())?;
+            for timeline in &timelines {
+                held.extend(
+                    timeline
+                        .facts
+                        .iter()
+                        .filter(|fact| fact.status == FactStatus::Current)
+                        .map(held_fact),
+                );
+            }
+        }
+        Ok(held)
+    }
+
+    async fn end(&self, scope: &str, id: &str, valid_to: &str) -> Result<bool, String> {
+        match self.store.end(scope, id, valid_to).await {
+            Ok(found) => Ok(found.is_some()),
+            Err(FactError::Invalid(message)) => Err(format!("refused: {message}")),
+            Err(_) => Err("store error".to_owned()),
+        }
+    }
+
+    async fn retract(&self, scope: &str, id: &str) -> Result<bool, String> {
+        match self.store.retract(&[scope], id).await {
+            Ok(found) => Ok(found.is_some()),
+            Err(_) => Err("store error".to_owned()),
+        }
+    }
+
     async fn emit(&self, _workspace: &str, scope: &str, facts: &[Fact]) -> Result<Emitted, String> {
         let mut emitted = Emitted::default();
         for fact in facts {
@@ -427,6 +482,84 @@ impl FactSink for StoreFacts {
             }
         }
         Ok(emitted)
+    }
+}
+
+/// A current fact as the compiler reads it back ([`FactSink::held`]).
+fn held_fact(fact: &TimedFact) -> HeldFact {
+    HeldFact {
+        id: fact.id.clone(),
+        subject: fact.subject.clone(),
+        attribute: fact.attribute.clone(),
+        value: fact.value.clone(),
+        unit: fact.unit.clone(),
+        valid_from: fact.valid_from.text().to_owned(),
+        valid_to: fact.valid_to.as_ref().map(|to| to.text().to_owned()),
+        source: fact.source.clone(),
+        observed_at: timeline::rfc3339(fact.observed_at),
+        last_confirmed_at: timeline::rfc3339(fact.last_confirmed_at),
+    }
+}
+
+/// Dreaming's bookkeeping, over the same store the facts are in.
+#[async_trait::async_trait]
+impl Dreams for StoreFacts {
+    async fn candidates(
+        &self,
+        min_facts: usize,
+        limit: usize,
+    ) -> Result<Vec<DreamCandidate>, String> {
+        self.store
+            .dream_candidates(min_facts, limit)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn enqueue(&self, scope: &str, subject: &str, now: i64) -> Result<(), String> {
+        self.store
+            .dream_enqueue(scope, subject, now)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn queued(&self, limit: usize) -> Result<Vec<(String, String)>, String> {
+        self.store
+            .dream_queued(limit)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn claim(
+        &self,
+        scope: &str,
+        subject: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<bool, String> {
+        self.store
+            .dream_claim(scope, subject, now, lease_until)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn finish(
+        &self,
+        scope: &str,
+        subject: &str,
+        outcome: DreamFinish<'_>,
+        now: i64,
+    ) -> Result<(), String> {
+        self.store
+            .dream_finish(scope, subject, &outcome, now)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn log(&self, row: DreamDecisionRow<'_>) -> Result<(), String> {
+        self.store
+            .dream_log(&row)
+            .await
+            .map_err(|_| "store error".to_owned())
     }
 }
 

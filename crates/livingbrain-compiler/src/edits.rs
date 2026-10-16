@@ -55,6 +55,14 @@ struct RawEdit {
     edits: Option<Vec<Replace>>,
 }
 
+/// A fact the model says stopped being true, by the id it was shown.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EndedFact {
+    pub id: String,
+    /// The partial date it stopped at, as written (exclusive).
+    pub valid_to: String,
+}
+
 /// A parsed answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Output {
@@ -62,6 +70,9 @@ pub struct Output {
     pub pages: Vec<PageEdit>,
     /// The facts that passed the v1 schema.
     pub facts: Vec<Fact>,
+    /// Facts the model says ended (`"ended"`). Optional in the answer: an
+    /// answer without the member is an answer with none.
+    pub ended: Vec<EndedFact>,
     /// Edits and facts refused at parse time: over a cap, or failing the
     /// schema. Counted, never acted on.
     pub refused: u32,
@@ -77,6 +88,7 @@ struct Raw {
     summary: Option<String>,
     pages: Vec<Value>,
     facts: Vec<Value>,
+    ended: Vec<Value>,
 }
 
 /// Why an answer is not usable at all. Every message is the parser's own
@@ -168,6 +180,18 @@ pub fn schema() -> Value {
                     },
                     "required": ["subject", "attribute", "value"]
                 }
+            },
+            "ended": {
+                "type": "array",
+                "description": "Facts that stopped being true, by the id shown under EXISTING FACTS.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "valid_to": {"type": "string"}
+                    },
+                    "required": ["id", "valid_to"]
+                }
             }
         },
         "required": ["summary", "pages"]
@@ -215,10 +239,18 @@ pub fn parse(reply: &str) -> Result<Output, BadOutput> {
             _ => refused += 1,
         }
     }
+    let mut ended = Vec::new();
+    for value in raw.ended {
+        match serde_json::from_value::<EndedFact>(value) {
+            Ok(end) if ended.len() < MAX_FACTS && !end.id.is_empty() => ended.push(end),
+            _ => refused += 1,
+        }
+    }
     Ok(Output {
         summary: one_line(raw.summary.as_deref().unwrap_or(""), MAX_SUMMARY_CHARS),
         pages,
         facts: kept,
+        ended,
         refused,
         problems,
     })
@@ -343,15 +375,18 @@ fn shape(object: serde_json::Map<String, Value>) -> Result<Raw, String> {
     let mut summary = None;
     let mut pages = Vec::new();
     let mut facts = Vec::new();
+    let mut ended = Vec::new();
     for (key, value) in object {
         match (key.as_str(), value) {
             ("summary", Value::String(text)) => summary = Some(text),
-            ("summary", Value::Null) | ("pages" | "facts", Value::Null) => {}
+            ("summary", Value::Null) | ("pages" | "facts" | "ended", Value::Null) => {}
             ("summary", _) => return Err("`summary` is not a string".to_owned()),
             ("pages", Value::Array(list)) => pages = list,
             ("pages", _) => return Err("`pages` is not a list".to_owned()),
             ("facts", Value::Array(list)) => facts = list,
             ("facts", _) => return Err("`facts` is not a list".to_owned()),
+            ("ended", Value::Array(list)) => ended = list,
+            ("ended", _) => return Err("`ended` is not a list".to_owned()),
             _ => {}
         }
     }
@@ -359,6 +394,7 @@ fn shape(object: serde_json::Map<String, Value>) -> Result<Raw, String> {
         summary,
         pages,
         facts,
+        ended,
     })
 }
 
@@ -480,6 +516,26 @@ mod tests {
             parse("{not json}"),
             Err(BadOutput::Syntax { line: 1, .. })
         ));
+    }
+
+    #[test]
+    fn ended_is_optional_and_a_bad_end_is_refused_alone() {
+        let without = parse(r#"{"summary":"s","pages":[],"facts":[]}"#).expect("parses");
+        assert!(without.ended.is_empty());
+        let with = parse(
+            r#"{"summary":"s","pages":[],"facts":[],
+                "ended":[{"id":"fact-1","valid_to":"2026-10"},{"id":"","valid_to":"2026"},{"valid_to":"2026"}]}"#,
+        )
+        .expect("parses");
+        assert_eq!(
+            with.ended,
+            vec![EndedFact {
+                id: "fact-1".to_owned(),
+                valid_to: "2026-10".to_owned()
+            }]
+        );
+        assert_eq!(with.refused, 2);
+        assert!(parse(r#"{"summary":"s","pages":[],"ended":"fact-1"}"#).is_err());
     }
 
     #[test]

@@ -2273,7 +2273,7 @@ test("facts: a page with facts shows the card, and the as-of picker re-reads it"
 
   assert.equal(el("page-facts-card").hidden, false);
   const cells = () => walk(el("page-facts"), "td").map((n) => n.textContent);
-  assert.deepEqual(cells(), ["shoe_size", "41 EU", "2026 – now", "2026-10-15"]);
+  assert.deepEqual(cells(), ["shoe_size", "41 EU", "2026 – now", "2026-10-15", "2026-10-15"]);
   const history = walk(el("page-facts"), "li").map((n) => n.textContent);
   assert.equal(history.length, 2);
   assert.match(history[1], /2025 – 2026.*shoe_size = 40 EU.*superseded/);
@@ -2281,7 +2281,7 @@ test("facts: a page with facts shows the card, and the as-of picker re-reads it"
   el("page-facts-as-of").value = "2025-12-31";
   await el("page-facts-as-of").fire("change");
   await drain();
-  assert.deepEqual(cells(), ["shoe_size", "40 EU", "2025 – 2026", "2025-03-02"]);
+  assert.deepEqual(cells(), ["shoe_size", "40 EU", "2025 – 2026", "2025-03-02", "2025-03-02"]);
 });
 
 test("facts: a page without facts has no Facts card", async () => {
@@ -2319,6 +2319,11 @@ test("facts: ?view=facts lists every timeline, as of a date and back to now", as
   el("facts-as-of").value = "2025-06-01";
   await el("facts-as-of").fire("change");
   await drain();
+  // Confirmed 2025-03-02, so 91 days stale by 2025-06-01: hidden until asked for.
+  assert.deepEqual(first(), []);
+  assert.equal(el("facts-status").textContent, "As of 2025-06-01 · 1 stale fact hidden");
+  el("facts-show-stale").checked = true;
+  await el("facts-show-stale").fire("change");
   assert.deepEqual(first().slice(0, 2), ["shoe_size (person/ada)", "40 EU"]);
   assert.equal(el("facts-status").textContent, "As of 2025-06-01");
 

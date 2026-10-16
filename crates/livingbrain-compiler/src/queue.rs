@@ -762,6 +762,30 @@ impl Queue {
         Ok(rows.first().and_then(|row| row.get::<String>("updated_at")))
     }
 
+    /// The workspace and the member whose session most recently made a
+    /// compile job in `scope`: whose model and budget a dream of that scope
+    /// is spent from. `None` for a scope no job has been made in.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn scope_member(&self, scope: &str) -> Result<Option<(String, String)>, DbError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT workspace, owner FROM coding_agent_jobs WHERE scope = ? \
+                 ORDER BY queued_at DESC LIMIT 1",
+                vec![text(scope)],
+            ))
+            .await?;
+        Ok(rows.rows.first().map(|row| {
+            (
+                row.get::<String>("workspace").unwrap_or_default(),
+                row.get::<String>("owner").unwrap_or_default(),
+            )
+        }))
+    }
+
     /// Adds `tokens` to the workspace's compile spend for `now`'s UTC day.
     ///
     /// # Errors

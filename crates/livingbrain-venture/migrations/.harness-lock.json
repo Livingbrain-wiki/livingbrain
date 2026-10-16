@@ -162,5 +162,9 @@
   "coding-agents/0005": {
     "file": "0041_coding-agents_0005_requeue_bad_output.sql",
     "sha256": "fe2c0ed5118d0fc9aebd3cc18c4dc66120e462ac0f1f87451c5462a5692fa192"
+  },
+  "pages/0008": {
+    "file": "0042_pages_0008_dreaming.sql",
+    "sha256": "3f3048117a3c55f6ef0782ef5341c544094683c34ca13f6bfde473df1bdffc3c"
   }
 }

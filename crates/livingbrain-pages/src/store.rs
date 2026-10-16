@@ -1341,6 +1341,14 @@ impl PageStore {
                 Statement::with_values("DELETE FROM page_links WHERE scope = ?", vec![text(scope)]),
                 Statement::with_values("DELETE FROM sources WHERE scope = ?", vec![text(scope)]),
                 Statement::with_values("DELETE FROM facts WHERE scope = ?", vec![text(scope)]),
+                Statement::with_values(
+                    "DELETE FROM fact_dream_decisions WHERE scope = ?",
+                    vec![text(scope)],
+                ),
+                Statement::with_values(
+                    "DELETE FROM fact_dreams WHERE scope = ?",
+                    vec![text(scope)],
+                ),
             ])
             .await
             .map_err(PageError::Store)

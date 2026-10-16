@@ -348,3 +348,80 @@ the user id, lowercased, with anything outside `[a-z0-9-]` turned into `-`.)
    was my shoe size in 2025?") — the brief carries
    `shoe_size(person/u0nick) = 40 EU [valid 2025..2026, observed 2025-03-02, source F1] (later 41 EU 2026..now)`,
    so the answer is 40 EU.
+
+## 9. Freshness, reconciliation and dreaming
+
+A fact that nobody confirms goes stale, and an event (a cost, an outage, an
+incident) was never a fact at all. Three mechanisms keep the timelines honest:
+freshness shows what is still confirmed, reconciliation stops new duplicates
+at write time, and dreaming tidies the facts that were stored before either
+existed. The migration is `0042_pages_0008_dreaming`.
+
+### Freshness
+
+- `last_confirmed_at` is set to the observation time on insert. A write that
+  repeats a live fact (same subject, attribute, value and unit) is answered
+  with that fact and moves its `last_confirmed_at` forward, never back: no
+  second row is stored.
+- The Facts view shows the current facts confirmed within 90 days, measured
+  from the date being viewed. "Show stale" reveals the rest. History always
+  shows everything, since it is what was true before.
+
+### Source-dated facts (compiler)
+
+- A compiled fact is observed at its session's own time (never after the
+  compile), and valid from the day the model gave, else the session's day.
+- A session with no time at all yields undated facts, which are refused and
+  named in the log. A fact is never dated to the day it was compiled.
+
+### Reconciliation at write time (compiler)
+
+- Before a model call the compiler reads the current facts of the session's
+  project and agent subjects (newest 60) and shows them as EXISTING FACTS, by
+  id. The model reuses an existing attribute when the same property changes,
+  and ends a fact it no longer holds with `"ended": [{"id", "valid_to"}]`. An
+  answer without `ended` is an answer with none.
+- Facts are state, not events. The compiler refuses, with a logged reason:
+  an attribute with a number token (`issue_335_status`, `pr_12_state`: one
+  issue, not a shared key that would supersede every other issue), and an
+  attribute with an event word (`cost`, `outage`, `incident`, `error`,
+  `failure`, `recovery`, `limitation`, `crash`, `timeout`, `rate_limit`).
+
+### Dreaming
+
+Dreaming is the background pass over one subject's facts. It runs in the
+Worker's cron tick, after the compile drain.
+
+- **When.** A subject with at least 20 current facts is due when it has never
+  been tidied, when its last pass is 7 or more days old, or when 10 or more
+  facts were stored since its last pass. A failed or skipped pass is asked
+  again after 24 hours.
+- **Queue.** `fact_dreams` holds one row per (scope, subject): `queued`,
+  `running`, then `done`, `failed` or `skipped`, with the time of the last
+  completed pass (`dreamt_at`) and what it applied.
+- **Budget.** A pass is a model call and is spent from the same daily and
+  monthly compile budget as a compile (reserve, then settle). It stops as soon
+  as that budget is spent, leaves the subject queued, and a rate limit ends
+  the tick. At most two passes run per tick.
+- **Decisions.** The model sees every current fact of the one subject and may
+  return `supersede` (an older fact replaced by a newer one of the same
+  attribute), `end` (stopped at a date), `retract` (an event, or a duplicate)
+  or `rename` (move to the ordinary key). Ids must be ones it was shown. Each
+  decision goes through the store's own operations (`end`, `retract`,
+  `emit`), so history is kept: a superseded or ended fact stays, with the date
+  it stopped. A rename copies the fact under the new key and retracts the
+  original as a duplicate.
+- **Log.** Every decision is written to `fact_dream_decisions` whether or not
+  it was applied: the pass key, the op, the fact ids, the new end or key, the
+  reason (a short lowercase word), and the ids the model was shown as JSON.
+  That log is the record of why a fact changed, and training data for a later
+  model that learns ADD / UPDATE / DELETE / NOOP over facts. The `model`
+  column records the call's role (`dreaming`), not the model id.
+- **Read.** A timeline in `GET /v1/facts` carries `dream` (`at`,
+  `facts_seen`, `decisions`, `applied`) when it was tidied, and each fact a
+  decision applied to carries `dreamed` (`retract`, `end`, `supersede` or
+  `rename`). The web app shows these as "Last dreamt 2 days ago · 5 facts
+  updated" and "Ended while dreaming".
+- **Forgetting.** `forget_scope` deletes both tables' rows with the scope's
+  facts.
+

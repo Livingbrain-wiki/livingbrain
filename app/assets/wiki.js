@@ -32,7 +32,7 @@ import {
   isSafeHref,
 } from "./markdown.js";
 import { applyHeader, checkSession } from "./session.js";
-import { displayValue, factsDescription, factsPath } from "./facts.js";
+import { displayValue, factsDescription, factsPath, staleCount } from "./facts.js";
 import { pageCrumbs, transcriptCrumbs, askHref } from "./nav.js";
 import { icon } from "./shell.js";
 import {
@@ -1715,6 +1715,7 @@ export async function wikiPage(api) {
     pageFactsAsOf: $("#page-facts-as-of"),
     factsAsOf: $("#facts-as-of"),
     factsNow: $("#facts-now"),
+    factsShowStale: $("#facts-show-stale"),
     factsStatus: $("#facts-status"),
     factsList: $("#facts-list"),
     factsEmpty: $("#facts-empty"),
@@ -1777,6 +1778,11 @@ export async function wikiPage(api) {
   const state = {
     signedIn: false,
     session: null,
+    // The Facts view: the last keys read, and whether stale facts are shown
+    // (off by default: a fact nobody has confirmed in 90 days is hidden).
+    factsKeys: null,
+    factsAsOf: "",
+    factsShowStale: false,
     slug: startSlug,
     page: null,
     version: null,
@@ -3385,6 +3391,32 @@ export async function wikiPage(api) {
     }
   }
 
+  /** Paints the Facts view from the keys last read: the current facts the
+   * reader asked for (stale ones only with "Show stale"), and the note of
+   * how many stale ones that leaves out. */
+  function paintFacts() {
+    const keys = state.factsKeys || [];
+    // Staleness is measured from the date being viewed: a fact confirmed in
+    // 2025 is not stale when the view is as of June 2025.
+    const asOf = state.factsAsOf || "";
+    const reference = /^\d{4}-\d{2}-\d{2}$/.test(asOf)
+      ? Date.parse(`${asOf}T00:00:00Z`)
+      : Date.now();
+    const description = factsDescription(keys, {
+      showSubject: true,
+      showStale: state.factsShowStale,
+      now: reference,
+    });
+    renderInto(els.factsList, description);
+    els.factsList.hidden = description.length === 0;
+    els.factsEmpty.hidden = description.length !== 0;
+    const hidden = state.factsShowStale ? 0 : staleCount(keys, reference);
+    const when = asOf ? `As of ${asOf}` : "Now";
+    els.factsStatus.textContent = hidden
+      ? `${when} · ${hidden} stale fact${hidden === 1 ? "" : "s"} hidden`
+      : when;
+  }
+
   /** The Facts view: every timeline the reader may see, as of a date. */
   async function loadFacts(asOf = "") {
     showView("facts");
@@ -3399,12 +3431,9 @@ export async function wikiPage(api) {
     els.factsStatus.textContent = "Loading…";
     try {
       const data = await api(factsPath({ asOf }));
-      const keys = (data && data.keys) || [];
-      const description = factsDescription(keys, { showSubject: true });
-      renderInto(els.factsList, description);
-      els.factsList.hidden = description.length === 0;
-      els.factsEmpty.hidden = description.length !== 0;
-      els.factsStatus.textContent = asOf ? `As of ${asOf}` : "Now";
+      state.factsKeys = (data && data.keys) || [];
+      state.factsAsOf = asOf;
+      paintFacts();
     } catch (error) {
       els.factsStatus.textContent = "";
       if (error instanceof ApiError && error.status === 401) {
@@ -3892,6 +3921,12 @@ export async function wikiPage(api) {
     els.factsNow.addEventListener("click", () => {
       if (els.factsAsOf) els.factsAsOf.value = "";
       loadFacts("");
+    });
+  }
+  if (els.factsShowStale) {
+    els.factsShowStale.addEventListener("change", () => {
+      state.factsShowStale = Boolean(els.factsShowStale.checked);
+      if (state.factsKeys) paintFacts();
     });
   }
   if (els.sessionsMore) {
