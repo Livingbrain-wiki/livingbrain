@@ -54,13 +54,21 @@ pub(crate) const THEME_SCRIPT: &str = "\n      (function () {\n        try {\n  
 /// The harness stamps only `frame-ancestors` on `/v1`; a page that now
 /// loads a stylesheet and runs a script gets the same narrow policy the
 /// static app has in `app/_headers`: everything `'self'`, the one inline
-/// script by hash, nothing inline otherwise. `form-action 'self'` still
+/// script by hash, nothing inline otherwise. [`DEVICE_SCRIPT`] is a file on
+/// this origin and its workspace list and switch are same-origin fetches,
+/// so `script-src` and `connect-src` admit `'self'` and nothing more. `form-action 'self'` still
 /// admits the approve and deny posts and the code form's `GET`, and the
 /// `303` to `/index.html` an anonymous approver is sent on.
 pub(crate) const PAGE_CSP: &str = "default-src 'none'; \
-     script-src 'sha256-GsRRMiFErXfPA/V4np3z0CtFFGhxjhelBLl+TjY8sYA='; \
+     script-src 'self' 'sha256-GsRRMiFErXfPA/V4np3z0CtFFGhxjhelBLl+TjY8sYA='; \
+     connect-src 'self'; \
      style-src 'self'; font-src 'self'; img-src 'self' data:; \
      form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+/// The approval page's workspace picker (`app/assets/device.js`): a token
+/// is minted for the workspace the browser is signed in to, so the page
+/// names it and offers the others before Approve.
+pub(crate) const DEVICE_SCRIPT: &str = "/assets/device.js";
 
 /// The device grant's mount, as `cratefield-module-device-auth` 0.3.0
 /// routes it.
@@ -300,6 +308,8 @@ fn approval(
          <p class=\"lede\">Check that this code matches the one in your terminal.</p>\
          <p class=\"device__code\"><span class=\"sr\">Code: </span><code>{code}</code></p>\
          <dl class=\"facts device__facts\">{client_row}{device}\
+         <div><dt>Workspace</dt><dd id=\"device-workspace\">The one you are signed in to \
+         in this browser</dd></div>\
          <div><dt>Grants</dt><dd>{grant}</dd></div></dl>\
          <p class=\"muted\">You can revoke it at any time in Settings → API tokens. \
          If you did not just run <code>livingbrain login</code>, deny this.</p>\
@@ -351,7 +361,8 @@ fn shell(title: &str, card: &str) -> String {
          <meta name=\"theme-color\" media=\"(prefers-color-scheme: dark)\" content=\"#070f11\">\
          <meta name=\"theme-color\" media=\"(prefers-color-scheme: light)\" content=\"#f2f8f8\">\
          <link rel=\"icon\" href=\"/assets/favicon.svg\" type=\"image/svg+xml\">\
-         {stylesheets}<script>{THEME_SCRIPT}</script></head>\
+         {stylesheets}<script>{THEME_SCRIPT}</script>\
+         <script type=\"module\" src=\"{DEVICE_SCRIPT}\"></script></head>\
          <body data-page=\"device\">\
          <header class=\"hd\"><div class=\"wrap hd__in\">\
          <a class=\"brand\" href=\"/index.html\">\
@@ -621,7 +632,7 @@ mod tests {
         let index = include_str!("../../../app/index.html");
         assert!(index.contains(&format!("<script>{THEME_SCRIPT}</script>")));
         assert!(include_str!("../../../app/_headers").contains(&source));
-        for href in STYLESHEETS {
+        for href in STYLESHEETS.iter().chain([&DEVICE_SCRIPT]) {
             let file = href.trim_start_matches('/');
             assert!(
                 std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../app"))

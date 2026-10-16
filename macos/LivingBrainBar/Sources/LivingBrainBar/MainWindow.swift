@@ -100,8 +100,12 @@ struct MainWindow: View {
             }
         } detail: {
             detail
+                // Each workspace's views start afresh: nothing read with one
+                // token is shown under another.
+                .id(workspace.activeId ?? "")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .task(id: "\(workspace.activeId ?? "")|\(workspace.signedIn)") { await workspace.loadMe() }
         .tint(Theme.accent)
         .frame(minWidth: 900, minHeight: 560)
         .onAppear {
@@ -135,26 +139,73 @@ struct MainWindow: View {
     }
 }
 
-/// Who is signed in, under the sidebar.
+/// The workspace in use under the sidebar, and the switcher between the
+/// workspaces signed in on this Mac.
 struct AccountFooter: View {
     @ObservedObject var workspace: WorkspaceModel
     @ObservedObject var router: Router
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: workspace.signedIn ? "person.crop.circle.fill.badge.checkmark" : "person.crop.circle.badge.questionmark")
-                .foregroundStyle(workspace.signedIn ? Theme.accent : .secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(workspace.signedIn ? "Signed in" : "Not signed in").font(.caption.weight(.medium))
-                Text(workspace.baseURL.host ?? workspace.baseURL.absoluteString)
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+        if workspace.signedIn {
+            Menu {
+                WorkspaceMenuItems(workspace: workspace, router: router)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .foregroundStyle(Theme.accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(workspace.activeName ?? "Signed in").font(.caption.weight(.medium)).lineLimit(1)
+                        Text(workspace.baseURL.host ?? workspace.baseURL.absoluteString)
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
-            Spacer()
-            if !workspace.signedIn {
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("Switch workspace")
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Not signed in").font(.caption.weight(.medium))
+                    Text(workspace.baseURL.host ?? workspace.baseURL.absoluteString)
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
                 Button("Sign In") { router.destination = .settings; workspace.startSignIn() }
                     .controlSize(.small)
             }
         }
+    }
+}
+
+/// The switcher's items: every signed-in workspace (the one in use ticked),
+/// then adding another. Shared by the sidebar and the Workspace menu.
+struct WorkspaceMenuItems: View {
+    @ObservedObject var workspace: WorkspaceModel
+    @ObservedObject var router: Router
+
+    var body: some View {
+        ForEach(workspace.workspaces) { item in
+            Toggle(item.name.isEmpty ? item.id : item.name, isOn: Binding(
+                get: { item.id == workspace.activeId },
+                set: { if $0 { workspace.switchTo(item.id) } }
+            ))
+        }
+        if workspace.signedIn && workspace.activeId == nil {
+            Toggle(workspace.activeName ?? "Current workspace", isOn: .constant(true))
+        }
+        Divider()
+        Button("Add Workspace…") {
+            router.destination = .settings
+            workspace.startSignIn()
+        }
+        Button("Manage Workspaces…") { router.destination = .settings }
     }
 }
 
