@@ -28,6 +28,8 @@ final class WorkspaceModel: ObservableObject {
     /// The workspace in use; nil while the token's workspace is not known.
     /// Views key their state on it so switching starts them afresh.
     @Published private(set) var activeId: String?
+    /// The workspace whose token the CLI's default destination uses.
+    @Published private(set) var defaultId: String?
 
     let bar: BarModel
     private var token: String?
@@ -48,6 +50,8 @@ final class WorkspaceModel: ObservableObject {
             signedIn = true
         } else {
             reloadDirectory()
+            observeCLISignIn()
+            Task { await migrateCLISignInIfNeeded() }
         }
     }
 
@@ -63,9 +67,11 @@ final class WorkspaceModel: ObservableObject {
     private func reloadDirectory() {
         let directory = self.directory
         workspaces = directory.workspaces
+        defaultId = directory.defaultId
         activeId = directory.activeIsUnlabelled ? nil : directory.activeId
         token = directory.activeToken()
         signedIn = token != nil
+        NotificationCenter.default.post(name: .livingBrainWorkspacesChanged, object: nil)
     }
 
     /// The saved name of the workspace in use, before `/v1/me` answers.
@@ -101,6 +107,91 @@ final class WorkspaceModel: ObservableObject {
         me = nil
         workspaceId = nil
         reloadDirectory()
+        Task { await migrateCLISignInIfNeeded() }
+    }
+
+    /// What reading the CLI's sign-in found. `absent` and `denied` are definite
+    /// answers; `failed` (the server could not confirm it) is worth retrying.
+    enum CLIAdoption: Equatable {
+        case adopted, absent, denied, failed
+    }
+
+    /// A CLI `login` run from the app writes a new CLI sign-in: adopt it. A
+    /// default the user chose stays.
+    private func observeCLISignIn() {
+        NotificationCenter.default.addObserver(forName: .livingBrainCLISignedIn, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in _ = await self?.adoptCLISignIn(activate: false) }
+        }
+    }
+
+    /// First launch of this build for a server: adopt the CLI's sign-in as the
+    /// default, once. Reading the CLI's item may prompt. A definite answer (the
+    /// sign-in was adopted, is absent, or was refused) is final: a refusal is
+    /// not asked again, and Settings then picks the default. A failure to reach
+    /// the server is retried on the next launch.
+    func migrateCLISignInIfNeeded() async {
+        guard fixtures == nil else { return }
+        let directory = self.directory
+        guard !directory.cliSignInChecked else { return }
+        if directory.defaultId != nil {
+            directory.cliSignInChecked = true
+            return
+        }
+        let outcome = await adoptCLISignIn(activate: false)
+        if outcome != .failed {
+            directory.cliSignInChecked = true
+        }
+    }
+
+    /// Read the CLI's current sign-in and keep it under its workspace. It becomes
+    /// the default unless the user chose one. The new default is recorded in the
+    /// opt-in file too, so a terminal run agrees with the app.
+    @discardableResult
+    func adoptCLISignIn(activate: Bool) async -> CLIAdoption {
+        guard fixtures == nil else { return .absent }
+        let directory = self.directory
+        let cli = KeychainTokenStore(service: KeychainTokenStore.cliService, account: KeychainTokenStore.account(for: baseURL))
+        let cliToken: String?
+        do {
+            cliToken = try cli.read()
+        } catch KeychainError.status(let code) where [errSecAuthFailed, errSecUserCanceled, errSecInteractionNotAllowed].contains(code) {
+            return .denied
+        } catch {
+            return .failed
+        }
+        guard let cliToken else { return .absent }
+        let server = baseURL
+        do {
+            let adoption = try await CLISignInAdoption.adopt(token: cliToken, into: directory, activate: activate) { token in
+                let me = try await APIClient(baseURL: server, token: token).me()
+                return SavedWorkspace(id: me.workspace.id, name: me.workspace.name)
+            }
+            reloadDirectory()
+            guard let adoption else { return .failed }
+            if adoption.becameDefault {
+                await bar.recordDefaultWorkspace(adoption.workspace.id)
+            }
+            return .adopted
+        } catch {
+            reloadDirectory()
+            return .failed
+        }
+    }
+
+    /// The user picks the CLI's default workspace, or clears it. Changing it
+    /// re-routes the repositories that go to the default, so the user confirms
+    /// first (listing them), and the choice is recorded in the opt-in file.
+    func setDefault(_ id: String?) {
+        if let id, !workspaces.contains(where: { $0.id == id }) { return }
+        guard id != defaultId else { return }
+        guard bar.confirmDefaultChange(to: id) else {
+            reloadDirectory()
+            return
+        }
+        directory.defaultId = id
+        directory.defaultWasChosen = id != nil
+        reloadDirectory()
+        Task { await bar.recordDefaultWorkspace(id) }
     }
 
     // MARK: Workspaces
@@ -129,12 +220,16 @@ final class WorkspaceModel: ObservableObject {
     /// Keep a freshly issued token under the workspace it speaks for, and
     /// switch to it. When `/v1/me` cannot say which workspace that is, it is
     /// kept unlabelled and filed by the next `loadMe`.
-    private func adopt(_ newToken: String) async throws {
+    @discardableResult
+    private func adopt(_ newToken: String) async throws -> SavedWorkspace? {
         let probe = fixtures == nil ? APIClient(baseURL: baseURL, token: newToken) : client
+        var labelled: SavedWorkspace?
         if let who = try? await probe.me() {
-            try directory.save(token: newToken, for: SavedWorkspace(id: who.workspace.id, name: who.workspace.name))
+            let saved = SavedWorkspace(id: who.workspace.id, name: who.workspace.name)
+            try directory.save(token: newToken, for: saved)
             me = who
             workspaceId = who.workspace.id
+            labelled = saved
         } else {
             try directory.saveUnlabelled(token: newToken)
             me = nil
@@ -142,6 +237,7 @@ final class WorkspaceModel: ObservableObject {
         }
         authProblem = nil
         reloadDirectory()
+        return labelled
     }
 
     // MARK: Sign in
@@ -184,20 +280,21 @@ final class WorkspaceModel: ObservableObject {
         signIn = .idle
     }
 
-    /// Reuse the CLI's sign-in: copy its keychain token (macOS asks the
-    /// user to allow this app to read the CLI's item).
+    /// Reuse the CLI's sign-in: keep its token under its workspace and use that
+    /// workspace. macOS may ask once to let the app read the CLI's item.
     func importCLISignIn() {
-        let cli = KeychainTokenStore(service: KeychainTokenStore.cliService, account: KeychainTokenStore.account(for: baseURL))
         Task {
-            do {
-                guard let cliToken = try cli.read() else {
-                    signIn = .failed("The CLI has no sign-in saved for \(KeychainTokenStore.account(for: baseURL)). Run `livingbrain login`, or sign in here.")
-                    return
-                }
-                try await adopt(cliToken)
+            switch await adoptCLISignIn(activate: true) {
+            case .adopted:
+                me = nil
+                workspaceId = nil
                 signIn = .idle
-            } catch {
-                signIn = .failed(Scrub.text(error.localizedDescription))
+            case .absent:
+                signIn = .failed("The CLI has no sign-in saved for \(KeychainTokenStore.account(for: baseURL)). Run `livingbrain login`, or sign in here.")
+            case .denied:
+                signIn = .failed("Living Brain for Mac was not allowed to read the CLI's sign-in. Sign in here instead.")
+            case .failed:
+                signIn = .failed("Could not confirm the CLI's sign-in with the server. Try again.")
             }
         }
     }

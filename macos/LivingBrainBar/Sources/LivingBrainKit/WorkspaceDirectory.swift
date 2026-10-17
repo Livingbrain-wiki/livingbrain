@@ -33,6 +33,39 @@ public final class WorkspaceDirectory {
     private var base: String { KeychainTokenStore.account(for: baseURL) }
     private var listKey: String { "workspaces.\(base)" }
     private var activeKey: String { "workspaces.active.\(base)" }
+    private var defaultKey: String { "workspaces.default.\(base)" }
+    private var cliCheckedKey: String { "workspaces.cli-checked.\(base)" }
+    private var defaultChosenKey: String { "workspaces.default-chosen.\(base)" }
+
+    /// The workspace the CLI's default destination uses: its token is handed to
+    /// the CLI as `LIVINGBRAIN_TOKEN`. Set from the CLI's own sign-in when the
+    /// app adopts it; the user can pick another in Settings.
+    public var defaultId: String? {
+        get { defaults.string(forKey: defaultKey) }
+        set { defaults.set(newValue, forKey: defaultKey) }
+    }
+
+    /// The token of the default workspace, or nil when none is chosen or its
+    /// sign-in is gone.
+    public func defaultToken() -> String? {
+        guard let id = defaultId else { return nil }
+        return try? store(for: id).read()
+    }
+
+    /// Whether the user chose the default workspace (in Settings). A chosen
+    /// default is never replaced by a CLI sign-in adopted later.
+    public var defaultWasChosen: Bool {
+        get { defaults.bool(forKey: defaultChosenKey) }
+        set { defaults.set(newValue, forKey: defaultChosenKey) }
+    }
+
+    /// Whether the CLI's own sign-in has been looked at once for this server. The
+    /// app reads that item at most once (macOS may prompt), so a refusal is not
+    /// asked again; Settings then picks the default.
+    public var cliSignInChecked: Bool {
+        get { defaults.bool(forKey: cliCheckedKey) }
+        set { defaults.set(newValue, forKey: cliCheckedKey) }
+    }
 
     /// The keychain account a workspace's token is kept under.
     public static func account(baseURL: URL, workspaceId: String) -> String {
@@ -67,6 +100,15 @@ public final class WorkspaceDirectory {
         return try? legacy.read()
     }
 
+    /// Every signed-in workspace with its token, for the CLI's handoff. Only the
+    /// app's own items are read.
+    public func signedInTokens() -> [CLIWorkspaceToken] {
+        workspaces.compactMap { workspace in
+            guard let token = (try? store(for: workspace.id).read()) ?? nil else { return nil }
+            return CLIWorkspaceToken(id: workspace.id, token: token)
+        }
+    }
+
     /// Whether the token in use is the unlabelled one.
     public var activeIsUnlabelled: Bool {
         guard let id = activeId else { return true }
@@ -75,7 +117,7 @@ public final class WorkspaceDirectory {
 
     /// Keep `token` for `workspace` and make it the one in use. Signing in
     /// to a workspace already here replaces its token.
-    public func save(token: String, for workspace: SavedWorkspace) throws {
+    public func save(token: String, for workspace: SavedWorkspace, activate: Bool = true) throws {
         try store(for: workspace.id).write(token)
         var list = workspaces
         if let index = list.firstIndex(where: { $0.id == workspace.id }) {
@@ -84,7 +126,7 @@ public final class WorkspaceDirectory {
             list.append(workspace)
         }
         workspaces = list
-        activeId = workspace.id
+        if activate { activeId = workspace.id }
     }
 
     /// A token whose workspace is not known yet: kept unlabelled and used
@@ -135,6 +177,7 @@ public final class WorkspaceDirectory {
     public func remove(_ id: String) -> String? {
         try? store(for: id).delete()
         workspaces = workspaces.filter { $0.id != id }
+        if defaultId == id { defaultId = nil }
         if activeId == id {
             activeId = nil
             if let next = workspaces.first(where: { activate($0.id) }) { return next.id }

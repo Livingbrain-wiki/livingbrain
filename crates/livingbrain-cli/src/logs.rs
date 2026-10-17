@@ -43,7 +43,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::Client;
-use crate::{CliResult, Out, err};
+use crate::auth::Token;
+use crate::{CliError, CliResult, Out, err};
 use route::{Destination, Repos, Route};
 
 /// The version of the normalised session schema this build writes: adding a
@@ -104,7 +105,18 @@ const ROUTING_VERSION: u32 = 2;
 /// The top-level keys this build reads. Any other key is an error, not a
 /// silent default: a misspelled `routes` would otherwise send its repositories
 /// to the default workspace.
-const KNOWN_KEYS: [&str; 5] = ["version", "allowed", "detail", "workspace", "routes"];
+const KNOWN_KEYS: [&str; 6] = [
+    "version",
+    "allowed",
+    "detail",
+    "workspace",
+    "routes",
+    "default_workspace",
+];
+
+/// The environment variable the Mac app sets with its default workspace's
+/// token: the workspace the token must belong to (checked once per run).
+const DEFAULT_WORKSPACE_ENV: &str = "LIVINGBRAIN_DEFAULT_WORKSPACE";
 
 /// The agents this build reads. The name is the schema's `agent` value and
 /// half the source's title on the wire, so it is spelled once.
@@ -181,6 +193,13 @@ pub enum Command {
     /// Print which repositories are opted in, at what level and into which
     /// workspace, and the routes that send the rest
     Status,
+    /// Choose the default workspace: the one sessions with no workspace of
+    /// their own go to. Without an id, clears the choice (the default token is
+    /// then used as before)
+    DefaultWorkspace {
+        /// A workspace id, or nothing to clear
+        workspace: Option<String>,
+    },
     /// Read local agent session logs and upload the opted-in ones
     Sync {
         /// Read Claude Code sessions from here instead of ~/.claude/projects
@@ -222,6 +241,7 @@ pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
         Command::Deny { path } => deny(path.as_deref(), out),
         Command::Workspace { path, workspace } => set_workspace(path, workspace, out),
         Command::Status => status(out),
+        Command::DefaultWorkspace { workspace } => set_default_workspace(workspace.as_deref(), out),
         Command::Sync {
             claude_dir,
             codex_dir,
@@ -1047,6 +1067,13 @@ struct AllowlistFile {
     workspace: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     routes: Vec<Route>,
+    /// The workspace sessions with no workspace of their own go to: the one
+    /// whose token the default destination uses. Written by `logs
+    /// default-workspace` (the Mac app does this when the user chooses it), so
+    /// the app and a terminal agree on it. Absent: the default token is used
+    /// as it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_workspace: Option<String>,
 }
 
 impl AllowlistFile {
@@ -1066,6 +1093,9 @@ impl AllowlistFile {
     fn validate(&self) -> Result<(), String> {
         for (root, target) in &self.workspace {
             route::check_target(target).map_err(|error| format!("{root}: {error}"))?;
+        }
+        if let Some(id) = &self.default_workspace {
+            route::check_target(id).map_err(|error| format!("default_workspace: {error}"))?;
         }
         for route in &self.routes {
             route.validate()?;
@@ -1188,7 +1218,7 @@ fn parse_allowlist(bytes: &[u8]) -> Result<AllowlistFile, String> {
 /// The version a file is written as: 1 unless it names a workspace or a route,
 /// so a file an older build can still read stays readable by it.
 fn version_for(file: &AllowlistFile) -> u32 {
-    if file.workspace.is_empty() && file.routes.is_empty() {
+    if file.workspace.is_empty() && file.routes.is_empty() && file.default_workspace.is_none() {
         ALLOWLIST_VERSION
     } else {
         ROUTING_VERSION
@@ -1323,6 +1353,19 @@ fn detail_for(record: &SessionRecord, allowlist: &AllowlistFile) -> Detail {
         .unwrap_or(Detail::Full)
 }
 
+/// The environment hint the Mac app sets on every run when it holds a
+/// workspace sign-in: the app's keychain items cannot be listed from here, so
+/// the app says so.
+pub const MULTI_WORKSPACE_ENV: &str = "LIVINGBRAIN_MULTI_WORKSPACE";
+
+/// Whether this machine routes sessions among workspaces: the opt-in file
+/// names a workspace or a route, or the Mac app says it holds sign-ins.
+fn several_workspaces(allowlist: &AllowlistFile) -> bool {
+    !allowlist.workspace.is_empty()
+        || !allowlist.routes.is_empty()
+        || std::env::var_os(MULTI_WORKSPACE_ENV).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 /// `logs allow`: insert one path, at `detail` when given — a new path
 /// otherwise at `full`, an allowed one keeping its level. Idempotent, and it
 /// writes the file even when nothing changed, so the reader sees where the
@@ -1338,17 +1381,34 @@ fn allow(
     }
     let target = normalise_path(path.unwrap_or("."))?;
     let mut allowlist = read_allowlist()?;
+    // Without a workspace a new opt-in would take the default token, and on a
+    // machine that signs in to several workspaces that is the wrong one for
+    // most repositories. A checkout under a parent that names a workspace is
+    // the exception: it follows that parent (see `nearest_explicit`). Refuse
+    // before anything is written.
+    if workspace.is_none()
+        && several_workspaces(&allowlist)
+        && nearest_explicit(&allowlist, &target).is_none()
+    {
+        return Err(err(
+            "this machine signs in to several workspaces or routes sessions; name the workspace: `--workspace <id>`, or `--workspace default` for the default workspace",
+        ));
+    }
     let before = allowlist.level(&target);
     let before_workspace = allowlist.explicit_workspace(&target).map(str::to_owned);
+    // A bare nested checkout is written with its parent's workspace, so that
+    // later changes to the parent (deny, auto) cannot leave it unrouted: a
+    // nested checkout with no workspace of its own would fall to the default
+    // token.
+    let inherited = match workspace {
+        Some(_) => None,
+        None => nearest_explicit(&allowlist, &target).map(|(_, id)| id.to_owned()),
+    };
     let added = allowlist.allowed.insert(target.clone());
     let level = detail.unwrap_or(if added { Detail::Full } else { before });
     allowlist.detail.insert(target.clone(), level);
-    // A nested root takes its parent's choice by lookup (see `resolve`), not
-    // by copy: changing the parent later changes it too.
-    if let Some(workspace) = workspace {
-        allowlist
-            .workspace
-            .insert(target.clone(), workspace.to_owned());
+    if let Some(workspace) = workspace.map(str::to_owned).or(inherited) {
+        allowlist.workspace.insert(target.clone(), workspace);
     }
     let workspace_changed =
         allowlist.explicit_workspace(&target).map(str::to_owned) != before_workspace;
@@ -1383,6 +1443,7 @@ fn set_workspace(path: &str, workspace: &str, out: &Out) -> CliResult<()> {
     }
     let before = allowlist.explicit_workspace(&target).map(str::to_owned);
     let (changed, human) = if workspace == route::AUTO {
+        pin_nested_children(&mut allowlist, &target);
         allowlist.workspace.remove(&target);
         (
             before.is_some(),
@@ -1402,10 +1463,49 @@ fn set_workspace(path: &str, workspace: &str, out: &Out) -> CliResult<()> {
     Ok(())
 }
 
+/// Before a parent's workspace is removed or its opt-in dropped, write that
+/// workspace onto each nested checkout that inherits it by lookup, so the
+/// checkout keeps routing where it did. Checkouts that name their own
+/// workspace, or sit under another explicit root, are untouched.
+fn pin_nested_children(allowlist: &mut AllowlistFile, root: &str) {
+    let Some(workspace) = allowlist.explicit_workspace(root).map(str::to_owned) else {
+        return;
+    };
+    let children: Vec<String> = allowlist
+        .allowed
+        .iter()
+        .filter(|child| child.as_str() != root && is_inside(child, root))
+        .filter(|child| allowlist.explicit_workspace(child).is_none())
+        .filter(|child| nearest_explicit(allowlist, child).is_some_and(|(owner, _)| owner == root))
+        .cloned()
+        .collect();
+    for child in children {
+        allowlist.workspace.insert(child, workspace.clone());
+    }
+}
+
+/// `logs default-workspace [<id>]`: choose the workspace sessions with no
+/// workspace of their own go to, or clear the choice.
+fn set_default_workspace(workspace: Option<&str>, out: &Out) -> CliResult<()> {
+    if let Some(id) = workspace {
+        route::check_target(id).map_err(err)?;
+    }
+    let mut allowlist = read_allowlist()?;
+    let changed = allowlist.default_workspace.as_deref() != workspace;
+    allowlist.default_workspace = workspace.map(str::to_owned);
+    let file = write_allowlist(&mut allowlist)?;
+    print_allowlist(&allowlist, changed, &file, out, || match workspace {
+        Some(id) => println!("Default workspace is now {id}."),
+        None => println!("Default workspace cleared."),
+    });
+    Ok(())
+}
+
 /// `logs deny`: remove one path and its level. Idempotent.
 fn deny(path: Option<&str>, out: &Out) -> CliResult<()> {
     let target = normalise_path(path.unwrap_or("."))?;
     let mut allowlist = read_allowlist()?;
+    pin_nested_children(&mut allowlist, &target);
     let changed = allowlist.allowed.remove(&target);
     allowlist.detail.remove(&target);
     allowlist.workspace.remove(&target);
@@ -2072,10 +2172,12 @@ enum Lookup<T> {
     KeychainDenied,
 }
 
-/// Decide each group's token. The default workspace's own failure is the run's
-/// failure, as it always was; a routed workspace whose keychain item cannot be
-/// read holds only its own sessions (its error text is dropped, it may name
-/// the item but never a secret).
+/// Decide each group's token. With the keychain on, the default workspace's own
+/// failure is the run's failure, as it always was. With it off (the Mac app's
+/// runs) a missing default token is only a held group, decided in `upload`. A
+/// routed workspace whose keychain item cannot be read holds only its own
+/// sessions (its error text is dropped, it may name the item but never a
+/// secret).
 fn plan_tokens<T>(
     groups: BTreeMap<String, Vec<usize>>,
     mut lookup: impl FnMut(&str) -> CliResult<Option<T>>,
@@ -2097,10 +2199,13 @@ fn plan_tokens<T>(
 /// group goes with its own token. This is the command's first socket and its
 /// first read of any token; both sit after all the local work on purpose, and
 /// `--dry-run` never gets here at all. Every token is read before the first
-/// request, so a missing default sign-in fails the run before anything is
-/// sent, as it always has. A session whose workspace cannot be signed into is
-/// held (never sent to another workspace) and reported. Unroutable and mixed
-/// sessions are never grouped at all.
+/// request. With the keychain on, a missing default sign-in fails the run
+/// before anything is sent, as it always has; with it off (the Mac app's runs)
+/// only the default group is held. The default token must belong to the
+/// workspace the app or the opt-in file names, or that group is held too. A
+/// session whose workspace cannot be signed into is held (never sent to
+/// another workspace) and reported. Unroutable and mixed sessions are never
+/// grouped at all.
 fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<Vec<Held>> {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, session) in sessions.iter().enumerate() {
@@ -2120,9 +2225,20 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
     if dry_run || groups.is_empty() {
         return Ok(Vec::new());
     }
+    let from_env = std::env::var(DEFAULT_WORKSPACE_ENV)
+        .ok()
+        .filter(|id| !id.is_empty());
+    let expectation = default_expectation(from_env, &read_allowlist()?);
     let plan = plan_tokens(groups, |workspace| {
         if workspace == route::DEFAULT {
-            return crate::auth::token_for(api_url).map(Some);
+            return match crate::auth::token_for(api_url) {
+                Ok(token) => Ok(Some(token)),
+                // Keychain off: a run with no default sign-in holds that group.
+                Err(CliError::NotLoggedIn(_)) if crate::auth::keychain_gate_process().is_err() => {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            };
         }
         crate::auth::workspace_token(api_url, workspace)
     })?;
@@ -2149,12 +2265,61 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
                 continue;
             }
         };
+        if workspace == route::DEFAULT && default_unconfirmed(&expectation, api_url, &token) {
+            hold(sessions, &indices, "skipped_default_mismatch");
+            held.push(Held {
+                workspace,
+                sessions: indices.len(),
+                status: "skipped_default_mismatch",
+            });
+            continue;
+        }
         let client = Client::new(api_url).with_token(token);
         for index in indices {
             send(&client, &mut sessions[index])?;
         }
     }
     Ok(held)
+}
+
+/// What the default token must belong to in this run.
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultExpectation {
+    /// No default workspace is chosen: the default token is used as it always was.
+    Unset,
+    /// The default token must belong to this workspace.
+    Workspace(String),
+    /// The app and the opt-in file name different default workspaces.
+    Conflict,
+}
+
+/// The expectation from the app's `LIVINGBRAIN_DEFAULT_WORKSPACE` and the
+/// opt-in file's `default_workspace`, whichever the run has.
+fn default_expectation(from_env: Option<String>, file: &AllowlistFile) -> DefaultExpectation {
+    match (from_env, file.default_workspace.as_deref()) {
+        (None, None) => DefaultExpectation::Unset,
+        (Some(id), None) => DefaultExpectation::Workspace(id),
+        (None, Some(id)) => DefaultExpectation::Workspace(id.to_owned()),
+        (Some(env), Some(file)) if env == file => DefaultExpectation::Workspace(env),
+        _ => DefaultExpectation::Conflict,
+    }
+}
+
+/// Whether the default token may not be used for this run: the workspaces
+/// disagree, or `GET /v1/me` does not confirm that the token belongs to the
+/// expected workspace (asked once per run; a failed check holds the group).
+/// The token is never printed or logged.
+fn default_unconfirmed(expectation: &DefaultExpectation, api_url: &str, token: &Token) -> bool {
+    match expectation {
+        DefaultExpectation::Unset => false,
+        DefaultExpectation::Conflict => true,
+        DefaultExpectation::Workspace(id) => {
+            match Client::new(api_url).with_token(token.clone()).me() {
+                Ok(me) => me["workspace"]["id"].as_str() != Some(id.as_str()),
+                Err(_) => true,
+            }
+        }
+    }
 }
 
 /// Mark sessions as held at upload, with the status they report.
@@ -2304,6 +2469,12 @@ fn report(
                     destination.key()
                 ));
             }
+            ("skipped_default_mismatch", destination) => {
+                entry["reason"] = json!(format!(
+                    "the default sign-in is not confirmed as workspace {}",
+                    destination.key()
+                ));
+            }
             _ => {}
         }
         if let Some(id) = &session.uploaded {
@@ -2333,6 +2504,7 @@ fn report(
         "skipped_unroutable": unroutable,
         "skipped_no_token": held_list("skipped_no_token"),
         "skipped_keychain_denied": held_list("skipped_keychain_denied"),
+        "skipped_default_mismatch": held_list("skipped_default_mismatch"),
         "unreadable": unreadable,
         "unparsed": unparsed,
         "redacted": redacted_total,
@@ -2383,6 +2555,10 @@ fn report(
             match held.status {
                 "skipped_keychain_denied" => println!(
                     "  {} session(s) held: could not read workspace {}'s sign-in from the keychain; check Living Brain's keychain access.",
+                    held.sessions, held.workspace
+                ),
+                "skipped_default_mismatch" => println!(
+                    "  {} session(s) held: the default sign-in is not confirmed as workspace {}; choose the default workspace again in Living Brain for Mac (Settings → Workspace).",
                     held.sessions, held.workspace
                 ),
                 _ => println!(
@@ -2477,6 +2653,7 @@ fn human_line(session: &Prepared, status: &str) -> String {
         "skipped_unroutable" => "held: a route cannot read this repository",
         "skipped_no_token" => "held: not signed in to its workspace",
         "skipped_keychain_denied" => "held: keychain denied its sign-in",
+        "skipped_default_mismatch" => "held: default sign-in is not its workspace",
         "would_upload" => "would upload",
         "uploaded" => "uploaded",
         _ => "unchanged (already in the ledger)",
@@ -3808,5 +3985,34 @@ mod tests {
         );
         assert_eq!(status.nested.len(), 2, "{:?}", status.nested);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_default_expectation_is_the_app_id_or_the_file_id_and_a_disagreement_holds() {
+        let file = |default: Option<&str>| super::AllowlistFile {
+            version: 2,
+            default_workspace: default.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::default_expectation(None, &file(None)),
+            super::DefaultExpectation::Unset
+        );
+        assert_eq!(
+            super::default_expectation(Some("ws-a".into()), &file(None)),
+            super::DefaultExpectation::Workspace("ws-a".into())
+        );
+        assert_eq!(
+            super::default_expectation(None, &file(Some("ws-a"))),
+            super::DefaultExpectation::Workspace("ws-a".into())
+        );
+        assert_eq!(
+            super::default_expectation(Some("ws-a".into()), &file(Some("ws-a"))),
+            super::DefaultExpectation::Workspace("ws-a".into())
+        );
+        assert_eq!(
+            super::default_expectation(Some("ws-a".into()), &file(Some("ws-b"))),
+            super::DefaultExpectation::Conflict
+        );
     }
 }

@@ -109,14 +109,71 @@ final class BarModel: ObservableObject {
         return "CLI: " + SyncedProject(path: path).displayPath()
     }
 
+    /// This server's workspace directory, read from the app's own items.
+    private var directory: WorkspaceDirectory {
+        WorkspaceDirectory(baseURL: serverURL) {
+            KeychainTokenStore(service: KeychainTokenStore.appService, account: $0)
+        }
+    }
+
+    /// The tokens every CLI run is handed: the default workspace's as
+    /// `LIVINGBRAIN_TOKEN`, and each signed-in workspace's, all read from the
+    /// app's own items in-process (no prompt).
+    func cliTokenHandoff(defaultOnly: Bool = false) -> CLITokenHandoff {
+        defaultOnly ? CLITokenHandoff(defaultOnly: directory) : CLITokenHandoff(directory: directory)
+    }
+
+    /// Record the default workspace in the opt-in file (`logs default-workspace`),
+    /// so the Terminal CLI and the app agree. `nil` clears it.
+    func recordDefaultWorkspace(_ id: String?) async {
+        do {
+            let arguments = ["--json", "logs", "default-workspace"] + (id.map { [$0] } ?? [])
+            let result = try await runCLI(arguments)
+            if !result.succeeded {
+                projectsError = CLIOutput.firstErrorLine(result.stderr) ?? "livingbrain exited with status \(result.status)"
+            }
+        } catch {
+            projectsError = error.localizedDescription
+        }
+        await refreshProjects()
+    }
+
+    /// Ask before the default moves: every repository that sends to the default
+    /// is listed, since moving the default re-routes them. True to go ahead.
+    func confirmDefaultChange(to id: String?) -> Bool {
+        let affected = projects.filter { project in
+            project.explicit == nil || project.explicit == SyncedProject.defaultWorkspace
+                || project.effective == SyncedProject.defaultWorkspace
+        }
+        let target = id.map { "workspace \($0)" } ?? "no workspace (the default token is not set)"
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Change the default workspace to \(target)?"
+        let names = affected.prefix(20).map { SyncedProject(path: $0.path).displayPath() }
+        alert.informativeText = affected.isEmpty
+            ? "No repository currently sends to the default workspace."
+            : "These repositories send to the default workspace and will move with it:\n" + names.joined(separator: "\n")
+                + (affected.count > 20 ? "\n…and \(affected.count - 20) more." : "")
+        alert.addButton(withTitle: "Change Default")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Run the CLI. Every run but `login` gets the app's tokens in its
+    /// environment and the keychain switched off; `login` keeps the keychain,
+    /// because it saves the CLI's own sign-in there.
     func runCLI(_ arguments: [String], onStderrLine: (@Sendable (String) -> Void)? = nil,
-                handle: CLIProcess = CLIProcess()) async throws -> CLIResult
+                handle: CLIProcess = CLIProcess(), handoff: Bool = true) async throws -> CLIResult
     {
         guard let path = cliPath else { throw CLIRunError.notFound }
         return try await CLIRunner.run(
             executable: path,
             arguments: arguments,
-            environment: CLIEnvironment.make(base: ProcessInfo.processInfo.environment, apiURL: serverURL.absoluteString),
+            environment: CLIEnvironment.make(
+                base: ProcessInfo.processInfo.environment,
+                apiURL: serverURL.absoluteString,
+                handoff: handoff ? cliTokenHandoff() : nil
+            ),
             handle: handle,
             onStderrLine: onStderrLine
         )
@@ -283,19 +340,74 @@ final class BarModel: ObservableObject {
         panel.prompt = "Sync This Repo"
         panel.message = "Choose a repository whose agent sessions may sync to Living Brain."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        setAllowed(url.path, allow: true)
+        chooseAndAllow(url.path)
     }
 
     func removeProject(_ project: SyncedProject) {
         setAllowed(project.path, allow: false)
     }
 
-    func setAllowed(_ path: String, allow: Bool) {
+    /// Opt a repository in to a workspace. The workspace is the one in use, or
+    /// the only one signed in; with several signed in and none in use the user
+    /// picks. With none signed in nothing is opted in: a bare allow would take
+    /// the CLI's own token.
+    func chooseAndAllow(_ path: String) {
+        let signedIn = directory.workspaces
+        if let workspace = AllowCommand.defaultWorkspace(signedIn: signedIn) {
+            setAllowed(path, allow: true, workspace: workspace)
+            return
+        }
+        guard !signedIn.isEmpty else {
+            projectsError = "Sign in to a workspace before syncing a repository."
+            return
+        }
+        // Several signed in: always ask, with the one in use preselected.
+        let order = AllowCommand.pickerOrder(active: directory.activeId, signedIn: signedIn)
+        guard let picked = askWorkspace(for: path, among: order) else { return }
+        setAllowed(path, allow: true, workspace: picked)
+    }
+
+    /// Ask which signed-in workspace a repository syncs to. Nil on Cancel.
+    private func askWorkspace(for path: String, among workspaces: [SavedWorkspace]) -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Sync this repository to which workspace?"
+        alert.informativeText = "Agent sessions from \(SyncedProject(path: path).displayPath()) will go only to the workspace you choose."
+        for workspace in workspaces {
+            alert.addButton(withTitle: workspace.name)
+        }
+        alert.addButton(withTitle: "Cancel")
+        let response = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        guard response >= 0, response < workspaces.count else { return nil }
+        return workspaces[response].id
+    }
+
+    /// Opt a repository in or out. Opting in always names a workspace.
+    func setAllowed(_ path: String, allow: Bool, workspace: String? = nil) {
+        let arguments: [String]
+        do {
+            if allow {
+                guard let workspace else {
+                    projectsError = "Choose a workspace for this repository first."
+                    return
+                }
+                arguments = try AllowCommand.allowArguments(path: path, workspace: workspace)
+            } else {
+                arguments = AllowCommand.denyArguments(path: path)
+            }
+        } catch {
+            projectsError = error.localizedDescription
+            return
+        }
         Task {
             do {
-                let result = try await runCLI(["--json", "logs", allow ? "allow" : "deny", path])
+                let result = try await runCLI(arguments)
                 if result.succeeded {
                     await refreshProjects()
+                } else if allow, CLIOutput.isUnsupported(result.stderr) {
+                    // An older CLI does not know `--workspace`. Refuse; never
+                    // fall back to an allow that names no workspace.
+                    projectsError = "This CLI is too old to choose a workspace for a repository. Update the CLI; nothing was changed."
                 } else {
                     projectsError = CLIOutput.firstErrorLine(result.stderr) ?? "livingbrain exited with status \(result.status)"
                 }
@@ -371,7 +483,7 @@ final class BarModel: ObservableObject {
                         self.loginPrompt = prompt
                         if let url = prompt.openURL { NSWorkspace.shared.open(url) }
                     }
-                }, handle: handle)
+                }, handle: handle, handoff: false)
                 if result.succeeded {
                     state.signedIn()
                     NotificationCenter.default.post(name: .livingBrainCLISignedIn, object: nil)
@@ -444,4 +556,6 @@ extension Notification.Name {
     static let livingBrainSynced = Notification.Name("LivingBrainSynced")
     static let livingBrainProjectsChanged = Notification.Name("LivingBrainProjectsChanged")
     static let livingBrainCLISignedIn = Notification.Name("LivingBrainCLISignedIn")
+    /// The signed-in workspaces, the default, or the one in use changed.
+    static let livingBrainWorkspacesChanged = Notification.Name("LivingBrainWorkspacesChanged")
 }

@@ -144,8 +144,11 @@ struct ProjectsView: View {
             if let parent = project.inheritedFrom {
                 Text("Sent to \(project.effective) from \(parent).")
                     .font(.caption).foregroundStyle(.secondary)
+            } else if let reason = project.routeReason, !reason.isEmpty {
+                Text("Sent to \(project.effective) by route \(reason).")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("Sent to \(project.effective) by route \(project.routeReason ?? "").")
+                Text("No route matches: sessions go to the default workspace.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

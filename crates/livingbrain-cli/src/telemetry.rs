@@ -131,6 +131,7 @@ pub struct KeychainPreference;
 
 impl Preference for KeychainPreference {
     fn get(&self, name: &str) -> CliResult<Option<String>> {
+        crate::auth::keychain_gate_process()?;
         let entry = keyring::Entry::new(SERVICE, name)
             .map_err(|e| err(format!("the OS keychain is unavailable: {e}")))?;
         match entry.get_password() {
@@ -141,6 +142,7 @@ impl Preference for KeychainPreference {
     }
 
     fn set(&self, name: &str, value: &str) -> CliResult<()> {
+        crate::auth::keychain_gate_process()?;
         keyring::Entry::new(SERVICE, name)
             .map_err(|e| err(format!("the OS keychain is unavailable: {e}")))?
             .set_password(value)

@@ -62,6 +62,7 @@ final class RunnerModel: ObservableObject {
     private var restartTask: Task<Void, Never>?
     private var pausedSink: AnyCancellable?
     private var quitObserver: Any?
+    private var workspaceObserver: Any?
 
     init(bar: BarModel, workspace: WorkspaceModel) {
         self.bar = bar
@@ -72,6 +73,12 @@ final class RunnerModel: ObservableObject {
         self.enabled = defaults.bool(forKey: Keys.enabled)
         Task { await refreshAgents() }
         reconcile()
+        // A new default or a new sign-in changes what the child was handed: restart it.
+        workspaceObserver = NotificationCenter.default.addObserver(
+            forName: .livingBrainWorkspacesChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restart() }
+        }
         // Pause Syncing stops the child too; resuming starts it again.
         pausedSink = bar.$paused.dropFirst().removeDuplicates().sink { [weak self] _ in
             DispatchQueue.main.async { self?.reconcile() }
@@ -131,7 +138,8 @@ final class RunnerModel: ObservableObject {
                 executable: path,
                 arguments: JobsCommand.run(agent: agent),
                 environment: CLIEnvironment.make(base: ProcessInfo.processInfo.environment,
-                                                 apiURL: bar.serverURL.absoluteString),
+                                                 apiURL: bar.serverURL.absoluteString,
+                                                 handoff: bar.cliTokenHandoff(defaultOnly: true)),
                 onLine: { [weak self] line in
                     guard let event = RunnerEvent.parse(line) else { return }
                     Task { @MainActor in self?.activity.apply(event, at: Date()) }

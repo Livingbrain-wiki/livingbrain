@@ -89,6 +89,22 @@ struct SettingsView: View {
                     .foregroundStyle(workspace.me == nil ? .secondary : .primary)
                     .textSelection(.enabled)
             }
+            Picker("Default workspace", selection: Binding(
+                get: { workspace.defaultId ?? "" },
+                set: { workspace.setDefault($0.isEmpty ? nil : $0) }
+            )) {
+                Text("Not chosen").tag("")
+                ForEach(workspace.workspaces) { item in
+                    Text(item.name.isEmpty ? item.id : item.name).tag(item.id)
+                }
+            }
+            .help("Sessions with no workspace of their own, and the job runner, use this workspace's sign-in.")
+            if workspace.defaultId == nil {
+                Text(workspace.workspaces.isEmpty
+                     ? "Choose a default workspace: sign in to a workspace below first."
+                     : "Choose a default workspace. Until then, sessions with no workspace of their own are held.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             ForEach(workspace.workspaces) { item in
                 HStack {
                     Image(systemName: item.id == workspace.activeId ? "checkmark.circle.fill" : "circle")
@@ -104,7 +120,7 @@ struct SettingsView: View {
             LabeledContent("Add a workspace") {
                 SignInControls(workspace: workspace)
             }
-            Text("Each workspace has its own sign-in. Add Workspace opens the browser: pick the workspace on the approval page, then approve. Sync and the job runner use the CLI's sign-in.")
+            Text("Each workspace has its own sign-in. Add Workspace opens the browser: pick the workspace on the approval page, then approve. Sync and the job runner use the default workspace's sign-in; each repository syncs to the workspace it names.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

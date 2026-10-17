@@ -266,6 +266,16 @@ fn remote_of(top: &str) -> Result<Remote, String> {
 /// A `git` command for `cwd`: the repository overrides removed, no system
 /// configuration, and no filesystem monitor (which runs a configured program).
 fn git_command(cwd: &str, args: &[&str]) -> Command {
+    git_command_with(cwd, args, std::env::vars_os().map(|(key, _)| key))
+}
+
+/// [`git_command`] over the environment names it is given: every LivingBrain
+/// token variable among them is removed, so git never inherits one.
+fn git_command_with(
+    cwd: &str,
+    args: &[&str],
+    inherited: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Command {
     let mut command = Command::new("git");
     command
         .arg("-c")
@@ -280,6 +290,7 @@ fn git_command(cwd: &str, args: &[&str]) -> Command {
     for key in SCRUBBED_GIT_ENV {
         command.env_remove(key);
     }
+    crate::auth::scrub_token_vars(&mut command, inherited);
     command
 }
 
@@ -867,5 +878,27 @@ mod tests {
                 .any(|(k, v)| k.to_string_lossy() == "GIT_CONFIG_GLOBAL" && v.is_none()),
             "GIT_CONFIG_GLOBAL must be removed"
         );
+    }
+
+    /// The git probe never inherits a LivingBrain token: the default one or
+    /// any workspace's, however many the Mac app handed over.
+    #[test]
+    fn the_git_probe_has_no_livingbrain_token_in_its_environment() {
+        let inherited = [
+            "LIVINGBRAIN_TOKEN",
+            "LIVINGBRAIN_TOKEN_WS_CHI",
+            "LIVINGBRAIN_NO_KEYCHAIN",
+            "PATH",
+        ]
+        .map(std::ffi::OsString::from);
+        let command = super::git_command_with("/repo", &["status"], inherited);
+        let removed: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.contains(&"LIVINGBRAIN_TOKEN".to_owned()));
+        assert!(removed.contains(&"LIVINGBRAIN_TOKEN_WS_CHI".to_owned()));
+        assert!(!removed.contains(&"PATH".to_owned()));
     }
 }

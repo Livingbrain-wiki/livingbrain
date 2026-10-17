@@ -42,15 +42,121 @@ public enum CLILocator {
     }
 }
 
+/// One workspace's API token, as the app holds it in its own keychain items.
+public struct CLIWorkspaceToken: Sendable, Equatable {
+    public let id: String
+    public let token: String
+
+    public init(id: String, token: String) {
+        self.id = id
+        self.token = token
+    }
+}
+
+/// The tokens the app hands its CLI child, so the CLI never reads a keychain
+/// item that is not its own (every read from another app's item prompts).
+///
+/// They travel only in the child's environment (see [`CLIEnvironment.make`]),
+/// never in arguments, and this type never prints them: its descriptions show
+/// a count. Environment variables are readable only by the same user's
+/// processes, and the CLI scrubs them from every child it starts.
+public struct CLITokenHandoff: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    /// The default workspace's token (`LIVINGBRAIN_TOKEN`): the token the
+    /// default destination and `jobs run` use.
+    public let defaultToken: String?
+    /// The workspace that token must belong to (`LIVINGBRAIN_DEFAULT_WORKSPACE`);
+    /// the CLI confirms it once per run before using the token.
+    public let defaultWorkspaceId: String?
+    public let workspaces: [CLIWorkspaceToken]
+    /// The server the tokens belong to. Set over any inherited
+    /// `LIVINGBRAIN_API_URL`, so a token never meets another server.
+    public let apiURL: String?
+
+    public init(
+        defaultToken: String? = nil,
+        defaultWorkspaceId: String? = nil,
+        workspaces: [CLIWorkspaceToken] = [],
+        apiURL: String? = nil
+    ) {
+        self.defaultToken = defaultToken
+        self.defaultWorkspaceId = defaultWorkspaceId
+        self.workspaces = workspaces
+        self.apiURL = apiURL
+    }
+
+    /// The variables this handoff sets. Two workspace ids that normalise to the
+    /// same variable name would share it, so neither is handed over: the CLI
+    /// then holds sessions for both rather than send one into the other.
+    public var variables: [String: String] {
+        var env: [String: String] = [:]
+        if let defaultToken, !defaultToken.isEmpty {
+            env["LIVINGBRAIN_TOKEN"] = defaultToken
+            if let defaultWorkspaceId, !defaultWorkspaceId.isEmpty {
+                env["LIVINGBRAIN_DEFAULT_WORKSPACE"] = defaultWorkspaceId
+            }
+        }
+        let groups = Dictionary(grouping: workspaces, by: { CLIEnvironment.workspaceVariable($0.id) })
+        for (name, group) in groups where group.count == 1 && !group[0].token.isEmpty {
+            env[name] = group[0].token
+        }
+        return env
+    }
+
+    public var description: String {
+        "CLITokenHandoff(\(workspaces.count) workspace\(workspaces.count == 1 ? "" : "s"), tokens redacted)"
+    }
+
+    public var debugDescription: String { description }
+}
+
 public enum CLIEnvironment {
     public static let defaultAPIURL = "https://app.livingbrain.wiki"
+
+    /// Tells the CLI to leave the keychain alone for this run.
+    public static let noKeychainVariable = "LIVINGBRAIN_NO_KEYCHAIN"
+    /// Tells the CLI the machine signs in to workspaces, so a bare
+    /// `logs allow` is refused (see `logs allow` in the CLI).
+    public static let multiWorkspaceVariable = "LIVINGBRAIN_MULTI_WORKSPACE"
+
+    /// The environment variable for one workspace's token, spelled as the CLI's
+    /// `workspace_env_var`: the id upper-cased, every other character `_`.
+    public static func workspaceVariable(_ id: String) -> String {
+        let suffix = id.map { character -> Character in
+            character.isASCII && (character.isLetter || character.isNumber)
+                ? Character(character.uppercased())
+                : "_"
+        }
+        return "LIVINGBRAIN_TOKEN_" + String(suffix)
+    }
 
     /// The child's environment: ours, plus `LIVINGBRAIN_API_URL` when unset.
     /// An app started from Finder has a bare PATH, so the usual tool
     /// directories are appended for wrapper scripts.
-    public static func make(base: [String: String], apiURL: String = defaultAPIURL) -> [String: String] {
+    ///
+    /// With a `handoff`, every token variable inherited from our own
+    /// environment is dropped (the child sees exactly what the app decided),
+    /// the handed tokens are set, and the keychain is switched off for the run.
+    /// Without one, the environment is passed on as before (`login` needs the
+    /// keychain, to save the CLI's sign-in).
+    public static func make(
+        base: [String: String],
+        apiURL: String = defaultAPIURL,
+        handoff: CLITokenHandoff? = nil
+    ) -> [String: String] {
         var env = base
-        if (env["LIVINGBRAIN_API_URL"] ?? "").isEmpty {
+        if let handoff {
+            for key in env.keys.filter({ $0 == "LIVINGBRAIN_TOKEN" || $0.hasPrefix("LIVINGBRAIN_TOKEN_") }) {
+                env.removeValue(forKey: key)
+            }
+            env.merge(handoff.variables) { _, handed in handed }
+            env[noKeychainVariable] = "1"
+            if handoff.workspaces.isEmpty && handoff.defaultWorkspaceId == nil {
+                env.removeValue(forKey: multiWorkspaceVariable)
+            } else {
+                env[multiWorkspaceVariable] = "1"
+            }
+            env["LIVINGBRAIN_API_URL"] = handoff.apiURL ?? apiURL
+        } else if (env["LIVINGBRAIN_API_URL"] ?? "").isEmpty {
             env["LIVINGBRAIN_API_URL"] = apiURL
         }
         let extra = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
