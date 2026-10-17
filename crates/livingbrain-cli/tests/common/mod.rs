@@ -228,6 +228,10 @@ const SCRUBBED: &[&str] = &[
     // `LIVINGBRAIN_TELEMETRY=0` in the developer's shell failed two tests in
     // `tests/telemetry.rs` and `=1` failed a third.
     "LIVINGBRAIN_TELEMETRY",
+    // The Mac app's hints. A developer who runs the suite from the app's
+    // environment must not get the app's refusals or keychain switch.
+    "LIVINGBRAIN_NO_KEYCHAIN",
+    "LIVINGBRAIN_MULTI_WORKSPACE",
 ];
 
 /// Run the binary in `cwd` with an isolated `home`, the given environment and
@@ -261,6 +265,16 @@ pub fn run(
     // values still sets it explicitly — an inherited value can never win.
     for key in SCRUBBED {
         command.env_remove(key);
+    }
+    // Every token variable too (the default one and each workspace's), so a
+    // developer's or the Mac app's token never reaches a test.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|name| name.starts_with("LIVINGBRAIN_TOKEN"))
+        {
+            command.env_remove(key);
+        }
     }
     for (key, value) in envs {
         command.env(key, value);

@@ -131,7 +131,8 @@ final class RunnerModel: ObservableObject {
                 executable: path,
                 arguments: JobsCommand.run(agent: agent),
                 environment: CLIEnvironment.make(base: ProcessInfo.processInfo.environment,
-                                                 apiURL: bar.serverURL.absoluteString),
+                                                 apiURL: bar.serverURL.absoluteString,
+                                                 handoff: bar.cliTokenHandoff()),
                 onLine: { [weak self] line in
                     guard let event = RunnerEvent.parse(line) else { return }
                     Task { @MainActor in self?.activity.apply(event, at: Date()) }

@@ -139,8 +139,18 @@ and name only) is in user defaults. Tokens are never logged or shown, and a
 between every workspace signed in on this Mac; **Add Workspace…** runs the
 same device flow. A token is minted for the workspace the browser is signed
 in to, and the approval page has a workspace picker for choosing another
-before Approve. Switching starts the workspace views afresh. Sync and the
-job runner still use the CLI's sign-in.
+before Approve. Switching starts the workspace views afresh.
+
+**Sync and the CLI.** The app runs its bundled CLI with the keychain switched
+off (`LIVINGBRAIN_NO_KEYCHAIN=1`) and hands it the workspace tokens the app
+already holds, in that child process's environment only (`LIVINGBRAIN_TOKEN_<ID>`,
+never arguments or logs). So macOS does not prompt on every sync. The CLI
+passes those variables to no other child process. Anyone who can read this
+user's process environment can read them, the same as any environment secret.
+The CLI's own sign-in (`livingbrain login`) is not handed over, so a repository
+or job that uses the default token needs `LIVINGBRAIN_TOKEN` set in the
+environment or a terminal sign-in run outside the app. Opting a repository in
+always names its workspace; the app asks which one when several are signed in.
 
 - **Wiki** — the page list (`GET /v1/pages`), search with a project filter
   (`GET /v1/search`, ⌘K), pages rendered natively (headings, lists, quotes,

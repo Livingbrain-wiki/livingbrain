@@ -67,6 +67,15 @@ public final class WorkspaceDirectory {
         return try? legacy.read()
     }
 
+    /// Every signed-in workspace with its token, for the CLI's handoff. Only the
+    /// app's own items are read.
+    public func signedInTokens() -> [CLIWorkspaceToken] {
+        workspaces.compactMap { workspace in
+            guard let token = (try? store(for: workspace.id).read()) ?? nil else { return nil }
+            return CLIWorkspaceToken(id: workspace.id, token: token)
+        }
+    }
+
     /// Whether the token in use is the unlabelled one.
     public var activeIsUnlabelled: Bool {
         guard let id = activeId else { return true }

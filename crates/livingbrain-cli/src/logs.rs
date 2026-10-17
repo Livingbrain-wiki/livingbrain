@@ -1323,6 +1323,19 @@ fn detail_for(record: &SessionRecord, allowlist: &AllowlistFile) -> Detail {
         .unwrap_or(Detail::Full)
 }
 
+/// The environment hint the Mac app sets on every run when it holds a
+/// workspace sign-in: the app's keychain items cannot be listed from here, so
+/// the app says so.
+pub const MULTI_WORKSPACE_ENV: &str = "LIVINGBRAIN_MULTI_WORKSPACE";
+
+/// Whether this machine routes sessions among workspaces: the opt-in file
+/// names a workspace or a route, or the Mac app says it holds sign-ins.
+fn several_workspaces(allowlist: &AllowlistFile) -> bool {
+    !allowlist.workspace.is_empty()
+        || !allowlist.routes.is_empty()
+        || std::env::var_os(MULTI_WORKSPACE_ENV).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 /// `logs allow`: insert one path, at `detail` when given — a new path
 /// otherwise at `full`, an allowed one keeping its level. Idempotent, and it
 /// writes the file even when nothing changed, so the reader sees where the
@@ -1338,6 +1351,19 @@ fn allow(
     }
     let target = normalise_path(path.unwrap_or("."))?;
     let mut allowlist = read_allowlist()?;
+    // Without a workspace a new opt-in would take the default token, and on a
+    // machine that signs in to several workspaces that is the wrong one for
+    // most repositories. A checkout under a parent that names a workspace is
+    // the exception: it follows that parent (see `nearest_explicit`). Refuse
+    // before anything is written.
+    if workspace.is_none()
+        && several_workspaces(&allowlist)
+        && nearest_explicit(&allowlist, &target).is_none()
+    {
+        return Err(err(
+            "this machine signs in to several workspaces or routes sessions; name the workspace: `--workspace <id>`, or `--workspace default` for the default workspace",
+        ));
+    }
     let before = allowlist.level(&target);
     let before_workspace = allowlist.explicit_workspace(&target).map(str::to_owned);
     let added = allowlist.allowed.insert(target.clone());

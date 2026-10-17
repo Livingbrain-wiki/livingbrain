@@ -135,6 +135,10 @@ final class SessionsModel: ObservableObject {
     }
 
     func setOptIn(_ repo: RepoSummary, _ allow: Bool) {
-        bar.setAllowed(repo.path, allow: allow)
+        if allow {
+            bar.chooseAndAllow(repo.path)
+        } else {
+            bar.setAllowed(repo.path, allow: false)
+        }
     }
 }

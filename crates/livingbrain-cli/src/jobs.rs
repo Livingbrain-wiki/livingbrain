@@ -263,10 +263,9 @@ fn codex_login(path: &Path) -> (bool, String) {
 /// start or did not finish.
 fn capture(path: &Path, args: &[&str]) -> Option<(bool, String, String)> {
     let mut command = Process::new(path);
-    command
-        .args(args)
-        .env_remove("LIVINGBRAIN_TOKEN")
-        .stdin(Stdio::null());
+    command.args(args).stdin(Stdio::null());
+    // A probe of an agent CLI never needs, and never gets, a LivingBrain token.
+    auth::scrub_inherited_tokens(&mut command);
     let finished = execute(command, None, PROBE_TIMEOUT, 64 * 1024).ok()?;
     Some((
         finished.success,
@@ -931,11 +930,10 @@ impl Runner<'_> {
             return Err(Reason::CliError);
         }
         let mut command = Process::new(binary);
-        command
-            .args(&argv)
-            .current_dir(dir)
-            // The CLI signs in with its own credentials; it never needs ours.
-            .env_remove("LIVINGBRAIN_TOKEN");
+        command.args(&argv).current_dir(dir);
+        // The agent CLI signs in with its own credentials; it never needs ours,
+        // not the default token nor any workspace's handed over by the Mac app.
+        auth::scrub_inherited_tokens(&mut command);
         let finished = match execute(command, Some(stdin), self.timeout, MAX_STDOUT) {
             Ok(finished) => finished,
             Err(Stopped::Timeout) => return Err(Reason::Timeout),
