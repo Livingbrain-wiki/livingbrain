@@ -1258,6 +1258,9 @@ fn subagents_travel_nested_in_their_sessions() {
 /// `LIVINGBRAIN_TOKEN_<WORKSPACE>`.
 const WS_CHI_TOKEN: &str = "tok-ws-chi-0987654321abcdef";
 
+/// The token for the Colonizer-dev workspace, `ws-fz`.
+const WS_FZ_TOKEN: &str = "tok-ws-fz-1122334455667788";
+
 /// The opt-in file, written by hand the way an older or a hand-edited one is.
 fn write_allowlist_file(home: &Path, body: &str) {
     let dir = home.join("livingbrain");
@@ -2214,4 +2217,172 @@ fn opt_in_default(home: &Path) -> String {
         .expect("opt-in file");
     let value: Value = serde_json::from_str(&text).expect("json");
     value["default_workspace"].as_str().unwrap_or("").to_owned()
+}
+
+/// Plant a Colonizer tree under the test home: a registry naming four
+/// colonies' repositories, and one transcript per colony, written the way the
+/// guest wrote it (`/workspace`, with its own session id). The fourth colony's
+/// repository is never opted in, so its transcript must never be read.
+fn plant_colonies(home: &Path) -> PathBuf {
+    let dir = home.join(".local").join("share").join("colonizer");
+    let fixture = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/logs/claude/projects/-home-alice-code-demo")
+            .join(format!("{CLAUDE_SESSION}.jsonl")),
+    )
+    .expect("claude fixture");
+    let colonies = [
+        (
+            "c-chi",
+            "CHI-Ecosystem/chi-backend",
+            "5a1e0c10-0000-4000-8000-000000000001",
+        ),
+        (
+            "c-chi-lower",
+            "chi-ecosystem/chi-web",
+            "5a1e0c10-0000-4000-8000-000000000002",
+        ),
+        (
+            "c-fz",
+            "Colonizer-dev/tool",
+            "5a1e0c10-0000-4000-8000-000000000003",
+        ),
+        (
+            "c-other",
+            "someone/else",
+            "5a1e0c10-0000-4000-8000-000000000004",
+        ),
+    ];
+    let mut registry = Vec::new();
+    for (id, repo, session) in colonies {
+        let transcripts = dir
+            .join("sessions")
+            .join(id)
+            .join("transcripts")
+            .join("-workspace");
+        std::fs::create_dir_all(&transcripts).expect("transcripts dir");
+        let text = fixture
+            .replace(DEMO_REPO, "/workspace")
+            .replace(CLAUDE_SESSION, session);
+        std::fs::write(transcripts.join(format!("{session}.jsonl")), text).expect("transcript");
+        registry.push(json!({ "id": id, "repo": repo, "name": "ignored" }));
+    }
+    std::fs::write(
+        dir.join("sessions.json"),
+        Value::Array(registry).to_string(),
+    )
+    .expect("registry");
+    dir
+}
+
+/// Opt the two colony orgs in: CHI's org to `ws-chi` (the lower-case repo
+/// inherits it), Colonizer-dev to `ws-fz`. `someone/else` stays out.
+fn allow_colonies(home: &Path) {
+    for (root, workspace) in [
+        ("colonizer://CHI-Ecosystem", "ws-chi"),
+        ("colonizer://Colonizer-dev", "ws-fz"),
+    ] {
+        let out = run(
+            &temp_dir("logs-cwd"),
+            home,
+            &["logs", "allow", root, "--workspace", workspace, "--json"],
+            &[],
+            None,
+        );
+        assert!(out.status.success(), "stderr: {}", out.stderr);
+    }
+}
+
+/// (colonizer 1) A colony's transcript is routed by its repository, not its
+/// guest path: the org's workspace reaches both CHI spellings, each session is
+/// filed under its repo's basename, and a colony whose repo is not opted in is
+/// never read at all.
+#[test]
+fn colony_transcripts_route_by_their_repository() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant_colonies(&home);
+    allow_colonies(&home);
+
+    let output = sync(&home, &api_envs(&mock.base), &["--dry-run"]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(
+        report["scanned"], 3,
+        "the unopted colony was read: {report}"
+    );
+    assert_eq!(
+        report["projects"],
+        json!({
+            "ws-chi": { "chi-backend": 1, "chi-web": 1 },
+            "ws-fz": { "tool": 1 },
+        }),
+        "{report}"
+    );
+    let mut by_repo: HashMap<String, Value> = HashMap::new();
+    for session in report["sessions"].as_array().expect("sessions") {
+        by_repo.insert(
+            session["repo"].as_str().expect("repo").to_owned(),
+            session.clone(),
+        );
+    }
+    assert_eq!(
+        by_repo["colonizer://chi-ecosystem/chi-web"]["workspace"],
+        "ws-chi"
+    );
+    assert_eq!(
+        by_repo["colonizer://CHI-Ecosystem/chi-backend"]["workspace"],
+        "ws-chi"
+    );
+    assert_eq!(
+        by_repo["colonizer://Colonizer-dev/tool"]["workspace"],
+        "ws-fz"
+    );
+    assert!(
+        mock.requests().is_empty(),
+        "a dry run still touched the network"
+    );
+}
+
+/// (colonizer 2) `--max-sessions` takes the oldest new sessions and stops at
+/// the cap; a re-run skips what the ledger already has, so successive runs work
+/// through the backlog. Without a workspace token the routed colonies are held,
+/// never sent to the default workspace.
+#[test]
+fn colony_sync_is_capped_and_never_falls_back_to_the_default_token() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant_colonies(&home);
+    allow_colonies(&home);
+
+    let held = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(held.status.success(), "stderr: {}", held.stderr);
+    let report = json_of(&held);
+    assert_eq!(report["uploaded"], 0, "{report}");
+    assert!(
+        mock.requests().is_empty(),
+        "a colony without its workspace token reached the network"
+    );
+
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    envs.push(("LIVINGBRAIN_TOKEN_WS_FZ", WS_FZ_TOKEN));
+    let mut created = 0u64;
+    for run_index in 0..3 {
+        let output = sync(&home, &envs, &["--max-sessions", "1"]);
+        assert!(output.status.success(), "stderr: {}", output.stderr);
+        let report = json_of(&output);
+        let uploaded = report["uploaded"].as_u64().expect("uploaded");
+        assert_eq!(uploaded, 1, "run {run_index}: {report}");
+        created += uploaded;
+    }
+    assert_eq!(created, 3);
+    let mut origins: Vec<String> = source_bodies(&mock)
+        .iter()
+        .filter(|body| body["origin_ref"].is_string())
+        .map(|body| body["origin_ref"].as_str().expect("origin_ref").to_owned())
+        .collect();
+    origins.sort();
+    origins.dedup();
+    assert_eq!(origins, vec!["c-chi", "c-chi-lower", "c-fz"]);
 }
