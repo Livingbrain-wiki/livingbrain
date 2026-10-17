@@ -1249,3 +1249,301 @@ fn subagents_travel_nested_in_their_sessions() {
         "{text}"
     );
 }
+
+/// The token of the workspace `ws-chi`, handed over the way CI and tests do:
+/// `LIVINGBRAIN_TOKEN_<WORKSPACE>`.
+const WS_CHI_TOKEN: &str = "tok-ws-chi-0987654321abcdef";
+
+/// The opt-in file, written by hand the way an older or a hand-edited one is.
+fn write_allowlist_file(home: &Path, body: &str) {
+    let dir = home.join("livingbrain");
+    std::fs::create_dir_all(&dir).expect("config dir");
+    std::fs::write(dir.join("logs-allow.json"), body).expect("write allowlist");
+}
+
+/// The bearer token every `POST /v1/pages/sources` carried, in arrival order.
+fn source_bearers(mock: &Mock) -> Vec<Option<String>> {
+    mock.requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/pages/sources")
+        .map(|request| request.bearer())
+        .collect()
+}
+
+/// (k) A routed session whose workspace has no token is held: it is sent
+/// nowhere, the default token is not used for it, and the report says which
+/// workspace to sign in to and how many sessions wait on it.
+#[test]
+fn a_routed_session_without_its_token_is_held_never_sent_to_default() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &[
+            "logs",
+            "allow",
+            DEMO_REPO,
+            "--workspace",
+            "ws-chi",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    assert_eq!(json_of(&allowed)["workspace"][DEMO_REPO], "ws-chi");
+
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 0, "{report}");
+    assert_eq!(
+        report["skipped_no_token"],
+        json!([{"workspace": "ws-chi", "sessions": 2}])
+    );
+    assert!(
+        mock.requests().is_empty(),
+        "a held session must not reach the network under any token"
+    );
+    // The repo field is home-elided and redacted on the way out, so the
+    // sessions are picked by their destination, not their path.
+    let demo: Vec<&Value> = report["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter(|session| session["workspace"] == "ws-chi")
+        .collect();
+    assert_eq!(demo.len(), 2, "{report}");
+    for session in demo {
+        assert_eq!(session["status"], "skipped_no_token");
+        assert_eq!(session["workspace"], "ws-chi");
+        assert_eq!(session["reason"], "not signed in to workspace ws-chi");
+    }
+}
+
+/// (l) With the workspace's token in its environment variable, the routed
+/// sessions go out with that token and no other; the default token carries
+/// nothing for them. The status report carries each root's workspace.
+#[test]
+fn a_routed_session_uploads_with_its_workspace_token() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &[
+            "logs",
+            "allow",
+            DEMO_REPO,
+            "--workspace",
+            "ws-chi",
+            "--json",
+        ],
+        &[],
+        None,
+    );
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 2, "{report}");
+    assert_eq!(report["skipped_no_token"], json!([]));
+    let bearers = source_bearers(&mock);
+    assert_eq!(bearers.len(), 2, "{bearers:?}");
+    assert!(
+        bearers
+            .iter()
+            .all(|bearer| bearer.as_deref() == Some(WS_CHI_TOKEN)),
+        "{bearers:?}"
+    );
+
+    let status = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "status", "--json"],
+        &[],
+        None,
+    );
+    assert_eq!(json_of(&status)["workspace"][DEMO_REPO], "ws-chi");
+}
+
+/// (m) Routes place a repository that has no explicit workspace by its folder
+/// name; an explicit `default` beats a route; a route on the remote owner
+/// cannot match a path that is not a git checkout, so it falls to the default.
+/// Re-routing a session to the default workspace uploads it there once more,
+/// with the default token.
+#[test]
+fn routes_pick_a_workspace_and_an_explicit_workspace_beats_them() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    write_allowlist_file(
+        &home,
+        &json!({
+            "version": 1,
+            "allowed": [DEMO_REPO],
+            "routes": [
+                {"remote_owner": "CHI-Ecosystem", "workspace": "ws-owner"},
+                {"folder_glob": "dem*", "workspace": "ws-chi"}
+            ]
+        })
+        .to_string(),
+    );
+    let status = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "status", "--json"],
+        &[],
+        None,
+    );
+    assert!(status.status.success(), "stderr: {}", status.stderr);
+    let status = json_of(&status);
+    assert_eq!(
+        status["workspace"][DEMO_REPO], "default",
+        "no explicit workspace yet"
+    );
+    assert_eq!(status["routes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        status["routed"][DEMO_REPO], "ws-chi",
+        "the folder route is reported"
+    );
+
+    // The path is not a checkout here: no remote, so the owner route cannot
+    // match, and the folder route picks `demo` up.
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    let routed = sync(&home, &envs, &[]);
+    assert!(routed.status.success(), "stderr: {}", routed.stderr);
+    assert_eq!(json_of(&routed)["uploaded"], 2, "{}", routed.stdout);
+    assert!(
+        source_bearers(&mock)
+            .iter()
+            .all(|b| b.as_deref() == Some(WS_CHI_TOKEN))
+    );
+
+    let pinned = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "workspace", DEMO_REPO, "default", "--json"],
+        &[],
+        None,
+    );
+    assert!(pinned.status.success(), "stderr: {}", pinned.stderr);
+    assert_eq!(json_of(&pinned)["workspace"][DEMO_REPO], "default");
+
+    let before = mock.requests().len();
+    let back = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(back.status.success(), "stderr: {}", back.stderr);
+    // The mock's ledger is keyed by body, not by token, so the same bytes read
+    // back as unchanged; what matters is that they were sent with the default token.
+    assert_eq!(json_of(&back)["unchanged"], 2, "{}", back.stdout);
+    let after: Vec<Option<String>> = mock.requests()[before..]
+        .iter()
+        .filter(|request| request.path == "/v1/pages/sources")
+        .map(|request| request.bearer())
+        .collect();
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert!(
+        after.iter().all(|bearer| bearer.as_deref() == Some(TOKEN)),
+        "{after:?}"
+    );
+}
+
+/// (n) An owner route with no checkout to read matches nothing: the repository
+/// goes to the default workspace, never to the route's.
+#[test]
+fn an_unreadable_remote_matches_no_route() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    write_allowlist_file(
+        &home,
+        &json!({
+            "version": 1,
+            "allowed": [DEMO_REPO],
+            "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
+        })
+        .to_string(),
+    );
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert_eq!(json_of(&output)["uploaded"], 2, "{}", output.stdout);
+    assert!(
+        source_bearers(&mock)
+            .iter()
+            .all(|b| b.as_deref() == Some(TOKEN))
+    );
+}
+
+/// (o) A malformed route stops the whole command before any request: an
+/// unknown key would otherwise quietly send its repositories to the default.
+#[test]
+fn a_malformed_route_stops_the_sync_before_any_request() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    write_allowlist_file(
+        &home,
+        &json!({
+            "version": 1,
+            "allowed": [DEMO_REPO],
+            "routes": [{"folder-glob": "chi-*", "workspace": "ws-chi"}]
+        })
+        .to_string(),
+    );
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(
+        !output.status.success(),
+        "a malformed route must fail: {}",
+        output.stdout
+    );
+    assert!(mock.requests().is_empty());
+}
+
+/// (p) `logs workspace` will not invent a rule for a path that is not opted in,
+/// and rejects a workspace id that could not be stored.
+#[test]
+fn workspace_needs_an_opted_in_path_and_a_valid_id() {
+    let home = temp_dir("logs-home");
+    let cwd = temp_dir("logs-cwd");
+    let not_allowed = run(
+        &cwd,
+        &home,
+        &["logs", "workspace", DEMO_REPO, "ws-chi"],
+        &[],
+        None,
+    );
+    assert!(!not_allowed.status.success(), "{}", not_allowed.stdout);
+    assert!(
+        not_allowed.stderr.contains("logs allow"),
+        "{}",
+        not_allowed.stderr
+    );
+
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    let bad = run(
+        &cwd,
+        &home,
+        &["logs", "workspace", DEMO_REPO, "not valid"],
+        &[],
+        None,
+    );
+    assert!(!bad.status.success(), "{}", bad.stdout);
+    let bad_allow = run(
+        &cwd,
+        &home,
+        &["logs", "allow", DEMO_REPO, "--workspace", "a/b", "--json"],
+        &[],
+        None,
+    );
+    assert!(!bad_allow.status.success(), "{}", bad_allow.stdout);
+}

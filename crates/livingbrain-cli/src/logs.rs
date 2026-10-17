@@ -30,6 +30,7 @@ mod claude;
 mod clean;
 mod codex;
 mod note;
+mod route;
 mod tools;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +44,7 @@ use serde_json::{Value, json};
 
 use crate::api::Client;
 use crate::{CliResult, Out, err};
+use route::{Destination, RepoFacts, Route};
 
 /// The version of the normalised session schema this build writes: adding a
 /// field is a bump of this number, not an edit in place. 2: tool calls carry
@@ -148,13 +150,26 @@ pub enum Command {
         /// How much of each session to send (default for a new allow: full)
         #[arg(long, value_enum)]
         detail: Option<Detail>,
+        /// The workspace this repository's sessions go to: a workspace id, or
+        /// `default`. Without it, the routes decide (default: the default workspace)
+        #[arg(long, value_name = "ID")]
+        workspace: Option<String>,
     },
     /// Revoke a path `logs allow` added
     Deny {
         /// The repository to forget (default: the current directory)
         path: Option<String>,
     },
-    /// Print which repositories are opted in, and where that is recorded
+    /// Send an allowed repository's sessions to a workspace (`default` for the
+    /// default workspace, even when a route would pick another)
+    Workspace {
+        /// The allowed repository
+        path: String,
+        /// A workspace id, or `default`
+        workspace: String,
+    },
+    /// Print which repositories are opted in, at what level and into which
+    /// workspace, and the routes that send the rest
     Status,
     /// Read local agent session logs and upload the opted-in ones
     Sync {
@@ -189,8 +204,13 @@ pub enum Command {
 /// Run one `logs` subcommand.
 pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
     match command {
-        Command::Allow { path, detail } => allow(path.as_deref(), *detail, out),
+        Command::Allow {
+            path,
+            detail,
+            workspace,
+        } => allow(path.as_deref(), *detail, workspace.as_deref(), out),
         Command::Deny { path } => deny(path.as_deref(), out),
+        Command::Workspace { path, workspace } => set_workspace(path, workspace, out),
         Command::Status => status(out),
         Command::Sync {
             claude_dir,
@@ -1002,18 +1022,44 @@ fn prepare(
 /// reads back the same however many times `logs allow` ran, and each path's
 /// detail level beside it. A path with no level is `full`; a level this build
 /// does not know makes the file unreadable, never a guess.
+///
+/// `workspace` (each allowed root's workspace, `default` included) and
+/// `routes` are optional fields of version 1, like `detail` was: a build that
+/// predates them ignores them and sends everything to the default workspace,
+/// so upgrade every CLI that reads this file.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct AllowlistFile {
     version: u32,
     allowed: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     detail: BTreeMap<String, Detail>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<Route>,
 }
 
 impl AllowlistFile {
     /// The level an allowed root sends at.
     fn level(&self, root: &str) -> Detail {
         self.detail.get(root).copied().unwrap_or(Detail::Full)
+    }
+
+    /// The workspace an allowed root's sessions go to, `default` when it names
+    /// none. Only the explicit map is consulted; routes come after it.
+    fn explicit_workspace(&self, root: &str) -> Option<&str> {
+        self.workspace.get(root).map(String::as_str)
+    }
+
+    /// Whether every stored workspace and route is well formed.
+    fn validate(&self) -> Result<(), String> {
+        for (root, target) in &self.workspace {
+            route::check_target(target).map_err(|error| format!("{root}: {error}"))?;
+        }
+        for route in &self.routes {
+            route.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -1074,6 +1120,7 @@ fn parse_allowlist(bytes: &[u8]) -> Result<AllowlistFile, String> {
             file.version, ALLOWLIST_VERSION
         ));
     }
+    file.validate()?;
     Ok(file)
 }
 
@@ -1192,19 +1239,63 @@ fn detail_for(record: &SessionRecord, allowlist: &AllowlistFile) -> Detail {
 /// otherwise at `full`, an allowed one keeping its level. Idempotent, and it
 /// writes the file even when nothing changed, so the reader sees where the
 /// decision lives.
-fn allow(path: Option<&str>, detail: Option<Detail>, out: &Out) -> CliResult<()> {
+fn allow(
+    path: Option<&str>,
+    detail: Option<Detail>,
+    workspace: Option<&str>,
+    out: &Out,
+) -> CliResult<()> {
+    if let Some(workspace) = workspace {
+        route::check_target(workspace).map_err(err)?;
+    }
     let target = normalise_path(path.unwrap_or("."))?;
     let mut allowlist = read_allowlist()?;
     let before = allowlist.level(&target);
+    let before_workspace = allowlist.explicit_workspace(&target).map(str::to_owned);
     let added = allowlist.allowed.insert(target.clone());
     let level = detail.unwrap_or(if added { Detail::Full } else { before });
     allowlist.detail.insert(target.clone(), level);
-    let changed = added || level != before;
+    if let Some(workspace) = workspace {
+        allowlist
+            .workspace
+            .insert(target.clone(), workspace.to_owned());
+    }
+    let workspace_changed =
+        allowlist.explicit_workspace(&target).map(str::to_owned) != before_workspace;
+    let changed = added || level != before || workspace_changed;
     let file = write_allowlist(&allowlist)?;
-    print_allowlist(&allowlist, changed, &file, out, || match (added, changed) {
-        (true, _) => println!("Allowed {target} (detail: {}).", level.as_str()),
-        (false, true) => println!("Allowed {target}, now at detail {}.", level.as_str()),
-        (false, false) => println!("Already allowed: {target} (detail: {})", level.as_str()),
+    print_allowlist(&allowlist, changed, &file, out, || {
+        match (added, changed) {
+            (true, _) => println!("Allowed {target} (detail: {}).", level.as_str()),
+            (false, true) => println!("Allowed {target}, now at detail {}.", level.as_str()),
+            (false, false) => println!("Already allowed: {target} (detail: {})", level.as_str()),
+        }
+        if let Some(workspace) = workspace {
+            println!("Its sessions go to workspace {workspace}.");
+        }
+    });
+    Ok(())
+}
+
+/// `logs workspace <path> <id|default>`: send an allowed repository's sessions
+/// to one workspace. Refused for a path that is not opted in, so a typo cannot
+/// quietly create a rule for nothing.
+fn set_workspace(path: &str, workspace: &str, out: &Out) -> CliResult<()> {
+    route::check_target(workspace).map_err(err)?;
+    let target = normalise_path(path)?;
+    let mut allowlist = read_allowlist()?;
+    if !allowlist.allowed.contains(&target) {
+        return Err(err(format!(
+            "{target} is not opted in; run `livingbrain logs allow {path}` first"
+        )));
+    }
+    let changed = allowlist.explicit_workspace(&target) != Some(workspace);
+    allowlist
+        .workspace
+        .insert(target.clone(), workspace.to_owned());
+    let file = write_allowlist(&allowlist)?;
+    print_allowlist(&allowlist, changed, &file, out, || {
+        println!("{target} now sends to workspace {workspace}.");
     });
     Ok(())
 }
@@ -1215,6 +1306,7 @@ fn deny(path: Option<&str>, out: &Out) -> CliResult<()> {
     let mut allowlist = read_allowlist()?;
     let changed = allowlist.allowed.remove(&target);
     allowlist.detail.remove(&target);
+    allowlist.workspace.remove(&target);
     let file = write_allowlist(&allowlist)?;
     print_allowlist(&allowlist, changed, &file, out, || {
         if changed {
@@ -1240,6 +1332,7 @@ fn print_allowlist(
         &json!({
             "allowed": list,
             "detail": levels(allowlist),
+            "workspace": workspaces(allowlist),
             "changed": changed,
             "config": file.display().to_string(),
         }),
@@ -1259,14 +1352,51 @@ fn levels(allowlist: &AllowlistFile) -> BTreeMap<&str, &'static str> {
         .collect()
 }
 
+/// Every allowed path's workspace, `default` filled in where the file names
+/// none. A route may still send a root elsewhere; this is the explicit choice.
+fn workspaces(allowlist: &AllowlistFile) -> BTreeMap<&str, &str> {
+    allowlist
+        .allowed
+        .iter()
+        .map(|root| {
+            (
+                root.as_str(),
+                allowlist.explicit_workspace(root).unwrap_or(route::DEFAULT),
+            )
+        })
+        .collect()
+}
+
+/// The workspace a route sends each allowed root with no explicit workspace of
+/// its own, as the first matching route names it. Probes each such root's
+/// repository once, and only when there are routes to match.
+fn routed(allowlist: &AllowlistFile) -> BTreeMap<&str, &str> {
+    if allowlist.routes.is_empty() {
+        return BTreeMap::new();
+    }
+    allowlist
+        .allowed
+        .iter()
+        .filter(|root| allowlist.explicit_workspace(root).is_none())
+        .filter_map(|root| {
+            let facts = RepoFacts::probe(root);
+            route::first_match(&allowlist.routes, &facts).map(|target| (root.as_str(), target))
+        })
+        .collect()
+}
+
 fn status(out: &Out) -> CliResult<()> {
     let allowlist = read_allowlist()?;
     let file = allowlist_path()?;
     let list: Vec<&String> = allowlist.allowed.iter().collect();
+    let routed = routed(&allowlist);
     out.json_or(
         &json!({
             "allowed": list,
             "detail": levels(&allowlist),
+            "workspace": workspaces(&allowlist),
+            "routed": routed,
+            "routes": allowlist.routes,
             "config": file.display().to_string(),
         }),
         || {
@@ -1275,7 +1405,26 @@ fn status(out: &Out) -> CliResult<()> {
             } else {
                 println!("Opted in ({}):", list.len());
                 for path in &list {
-                    println!("  {path} (detail: {})", allowlist.level(path).as_str());
+                    let workspace = allowlist.explicit_workspace(path).unwrap_or(route::DEFAULT);
+                    let via = routed
+                        .get(path.as_str())
+                        .map(|target| format!(", routed to {target}"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {path} (detail: {}, workspace: {workspace}{via})",
+                        allowlist.level(path).as_str()
+                    );
+                }
+            }
+            if !allowlist.routes.is_empty() {
+                println!("Routes (first match wins; a root's own workspace comes first):");
+                for route in &allowlist.routes {
+                    let matcher = match (&route.remote_owner, &route.folder_glob) {
+                        (Some(owner), _) => format!("remote_owner {owner}"),
+                        (_, Some(glob)) => format!("folder_glob {glob}"),
+                        _ => "no matcher".to_owned(),
+                    };
+                    println!("  {matcher} → workspace {}", route.workspace);
                 }
             }
             println!("Opt-in file: {}", file.display());
@@ -1302,6 +1451,10 @@ struct Prepared {
     uploaded: Option<String>,
     /// Whether the upload created the row (201) or read one back (200).
     created: bool,
+    /// The workspace this session is sent to.
+    destination: Destination,
+    /// Set when its workspace had no token: held, and sent nowhere.
+    no_token: bool,
     /// The session's searchable note — planned for an opted-in session
     /// with a repo, written after its source upload succeeds.
     note: Option<note::Planned>,
@@ -1330,13 +1483,14 @@ fn sync(
         only.as_ref(),
         false,
     )?;
-    upload(&mut sessions, dry_run, api_url)?;
+    let held = upload(&mut sessions, dry_run, api_url)?;
     report(
         &sessions,
         unreadable,
         unparsed,
         dry_run,
         (&claude_dir, &codex_dir),
+        &held,
         out,
     );
     Ok(())
@@ -1436,6 +1590,48 @@ fn show(
 /// asks for every body; a session that is not opted in is shown at `full`. Returns the sessions plus two kinds of failure: `unreadable` files
 /// could not be read at all, `unparsed` ones were read but yielded no session
 /// (empty or foreign `.jsonl`).
+/// The most specific allowed root a working directory sits inside, raw or
+/// resolved, as [`detail_for`] reads it.
+fn root_of(cwd: &str, allowed: &BTreeSet<String>) -> Option<String> {
+    let resolved = std::fs::canonicalize(cwd)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    allowed
+        .iter()
+        .filter(|root| {
+            is_inside(cwd, root)
+                || resolved
+                    .as_deref()
+                    .is_some_and(|resolved| is_inside(resolved, root))
+        })
+        .max_by_key(|root| root.len())
+        .cloned()
+}
+
+/// Where an opted-in session goes. Each working directory resolves through its
+/// most specific allowed root: that root's explicit workspace, else the first
+/// matching route, else the default. `facts` caches one probe per root.
+fn destination_for(
+    record: &SessionRecord,
+    allowlist: &AllowlistFile,
+    facts: &mut BTreeMap<String, RepoFacts>,
+) -> Destination {
+    Destination::combine(record.cwds.iter().map(|cwd| {
+        let Some(root) = root_of(cwd, &allowlist.allowed) else {
+            return Destination::Default;
+        };
+        if let Some(target) = allowlist.explicit_workspace(&root) {
+            return Destination::of_target(target);
+        }
+        if allowlist.routes.is_empty() {
+            return Destination::Default;
+        }
+        let known = facts.entry(root).or_insert_with(|| RepoFacts::probe(cwd));
+        route::first_match(&allowlist.routes, known)
+            .map_or(Destination::Default, Destination::of_target)
+    }))
+}
+
 fn collect_sessions(
     claude_dir: &Path,
     codex_dir: &Path,
@@ -1450,6 +1646,9 @@ fn collect_sessions(
     // Codex writes a spawned agent's rollout as a file of its own; it is
     // read as part of the session that spawned it, not as one more.
     let spawns = CodexSpawns::index(codex_dir);
+    // One repository probe per allowed root for the whole run, and only when a
+    // route needs it.
+    let mut facts: BTreeMap<String, RepoFacts> = BTreeMap::new();
     for (agent, dir, levels) in [
         // Claude Code lays sessions out one directory per project — walk into
         // exactly that one level; Codex nests them by date, so its walk goes
@@ -1505,6 +1704,11 @@ fn collect_sessions(
             };
             let tool_calls = tool_call_count(&record);
             let planned_note = if opted { note::plan(&record) } else { None };
+            let destination = if opted {
+                destination_for(&record, allowlist, &mut facts)
+            } else {
+                Destination::Default
+            };
             sessions.push(Prepared {
                 record,
                 file,
@@ -1515,6 +1719,8 @@ fn collect_sessions(
                 uploaded: None,
                 created: false,
                 note: planned_note,
+                destination,
+                no_token: false,
             });
         }
     }
@@ -1605,43 +1811,85 @@ impl CodexSpawns {
     }
 }
 
-/// Upload the opted-in sessions, one POST each. This is the command's first
-/// socket and its first read of the token; both sit after all the local work
-/// on purpose, and `--dry-run` never gets here at all.
-fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<()> {
-    let sendable = sessions.iter().filter(|session| session.opted_in).count();
-    if dry_run || sendable == 0 {
-        return Ok(());
-    }
-    let client = Client::new(api_url).with_token(crate::auth::token_for(api_url)?);
-    for session in sessions.iter_mut().filter(|session| session.opted_in) {
-        let body = session
-            .body
-            .as_deref()
-            .expect("an opted-in session has a redacted body");
-        let title = format!(
-            "{} session {}",
-            session.record.agent, session.record.session_id
-        );
-        let project = project_of(&session.record.repo);
-        let value = client
-            .post_source(SOURCE_KIND, &title, body, SCOPE, project.as_deref())
-            .map_err(|error| err(format!("{title}: {error}")))?;
-        session.uploaded = Some(crate::text(&value, "id").to_owned());
-        session.created = value
-            .get("created")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        // Uploaded or already there, the source is in the ledger: now the
-        // page that makes it findable.
-        if let Some(planned) = session.note.as_mut() {
-            note::write(
-                &client,
-                &session.record,
-                planned,
-                session.uploaded.as_deref(),
-            );
+/// Upload the opted-in sessions, one POST each, grouped by workspace: each
+/// group goes with its own token. This is the command's first socket and its
+/// first read of any token; both sit after all the local work on purpose, and
+/// `--dry-run` never gets here at all. Every token is read before the first
+/// request, so a missing default sign-in fails the run before anything is
+/// sent, as it always has. A session whose workspace has no token is held
+/// (never sent to another workspace) and reported. Returns each held
+/// workspace with its session count.
+fn upload(
+    sessions: &mut [Prepared],
+    dry_run: bool,
+    api_url: &str,
+) -> CliResult<Vec<(String, usize)>> {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, session) in sessions.iter().enumerate() {
+        if session.opted_in && session.destination != Destination::Mixed {
+            groups
+                .entry(session.destination.key().to_owned())
+                .or_default()
+                .push(index);
         }
+    }
+    if dry_run || groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut plan = Vec::new();
+    for (workspace, indices) in groups {
+        let token = if workspace == route::DEFAULT {
+            Some(crate::auth::token_for(api_url)?)
+        } else {
+            crate::auth::workspace_token(api_url, &workspace)?
+        };
+        plan.push((workspace, token, indices));
+    }
+    let mut held = Vec::new();
+    for (workspace, token, indices) in plan {
+        let Some(token) = token else {
+            for &index in &indices {
+                sessions[index].no_token = true;
+            }
+            held.push((workspace, indices.len()));
+            continue;
+        };
+        let client = Client::new(api_url).with_token(token);
+        for index in indices {
+            send(&client, &mut sessions[index])?;
+        }
+    }
+    Ok(held)
+}
+
+/// POST one session's source, then its note.
+fn send(client: &Client, session: &mut Prepared) -> CliResult<()> {
+    let body = session
+        .body
+        .as_deref()
+        .expect("an opted-in session has a redacted body");
+    let title = format!(
+        "{} session {}",
+        session.record.agent, session.record.session_id
+    );
+    let project = project_of(&session.record.repo);
+    let value = client
+        .post_source(SOURCE_KIND, &title, body, SCOPE, project.as_deref())
+        .map_err(|error| err(format!("{title}: {error}")))?;
+    session.uploaded = Some(crate::text(&value, "id").to_owned());
+    session.created = value
+        .get("created")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Uploaded or already there, the source is in the ledger: now the
+    // page that makes it findable.
+    if let Some(planned) = session.note.as_mut() {
+        note::write(
+            client,
+            &session.record,
+            planned,
+            session.uploaded.as_deref(),
+        );
     }
     Ok(())
 }
@@ -1680,32 +1928,33 @@ fn report(
     unparsed: usize,
     dry_run: bool,
     dirs: (&Path, &Path),
+    held: &[(String, usize)],
     out: &Out,
 ) {
-    let (mut uploaded, mut unchanged, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut uploaded, mut unchanged, mut skipped, mut mixed) = (0usize, 0usize, 0usize, 0usize);
     let mut would_upload = 0usize;
     let mut redacted_total = 0usize;
     let mut notes: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     let mut entries = Vec::new();
     let mut lines = Vec::new();
     for session in sessions {
-        let status = match (session.opted_in, dry_run, session.created) {
-            (false, _, _) => {
-                skipped += 1;
-                "skipped"
-            }
-            (true, true, _) => {
-                would_upload += 1;
-                "would_upload"
-            }
-            (true, false, true) => {
-                uploaded += 1;
-                "uploaded"
-            }
-            (true, false, false) => {
-                unchanged += 1;
-                "unchanged"
-            }
+        let status = if !session.opted_in {
+            skipped += 1;
+            "skipped"
+        } else if session.destination == Destination::Mixed {
+            mixed += 1;
+            "skipped_mixed_workspace"
+        } else if session.no_token {
+            "skipped_no_token"
+        } else if dry_run {
+            would_upload += 1;
+            "would_upload"
+        } else if session.created {
+            uploaded += 1;
+            "uploaded"
+        } else {
+            unchanged += 1;
+            "unchanged"
         };
         redacted_total += session.redacted;
         let mut entry = json!({
@@ -1720,13 +1969,24 @@ fn report(
             "truncated": session.record.truncated,
             "detail": session.record.detail,
             "status": status,
+            "workspace": session.destination.key(),
             "branch": session.record.branch,
             "started_at": session.record.started_at,
             "ended_at": session.record.ended_at,
             "file": session.file.display().to_string(),
         });
-        if status == "skipped" {
-            entry["reason"] = json!("repo not opted in");
+        match status {
+            "skipped" => entry["reason"] = json!("repo not opted in"),
+            "skipped_mixed_workspace" => {
+                entry["reason"] = json!("its repositories belong to different workspaces");
+            }
+            "skipped_no_token" => {
+                entry["reason"] = json!(format!(
+                    "not signed in to workspace {}",
+                    session.destination.key()
+                ));
+            }
+            _ => {}
         }
         if let Some(id) = &session.uploaded {
             entry["id"] = json!(id);
@@ -1745,6 +2005,11 @@ fn report(
         "uploaded": uploaded,
         "unchanged": unchanged,
         "skipped": skipped,
+        "skipped_mixed_workspace": mixed,
+        "skipped_no_token": held
+            .iter()
+            .map(|(workspace, sessions)| json!({"workspace": workspace, "sessions": sessions}))
+            .collect::<Vec<Value>>(),
         "unreadable": unreadable,
         "unparsed": unparsed,
         "redacted": redacted_total,
@@ -1771,6 +2036,11 @@ fn report(
                 "{uploaded} uploaded, {unchanged} already in the ledger, {skipped} skipped: repo not opted in"
             )
         };
+        if mixed > 0 {
+            summary.push_str(&format!(
+                ", {mixed} skipped: repositories in different workspaces"
+            ));
+        }
         if unreadable > 0 {
             summary.push_str(&format!(", {unreadable} unreadable"));
         }
@@ -1783,6 +2053,11 @@ fn report(
             ));
         }
         println!("{summary}.");
+        for (workspace, count) in held {
+            println!(
+                "  {count} session(s) held: not signed in to workspace {workspace}; sign in to sync them."
+            );
+        }
         if !notes.is_empty() {
             let parts: Vec<String> = notes
                 .iter()
@@ -1865,6 +2140,8 @@ fn human_line(session: &Prepared, status: &str) -> String {
     };
     let status = match status {
         "skipped" => "skipped: repo not opted in",
+        "skipped_mixed_workspace" => "skipped: repositories in different workspaces",
+        "skipped_no_token" => "held: not signed in to its workspace",
         "would_upload" => "would upload",
         "uploaded" => "uploaded",
         _ => "unchanged (already in the ledger)",
@@ -2395,6 +2672,105 @@ mod tests {
             parse_allowlist(br#"{"version":1,"allowed":["/x"],"detail":{"/x":"everything"}}"#)
                 .is_err(),
             "an unknown level is refused"
+        );
+    }
+
+    /// The opt-in file written before routing reads back with every root on
+    /// the default workspace, and no routes; a routed file round-trips with
+    /// its workspaces and routes, and an empty one writes neither field.
+    #[test]
+    fn the_workspace_and_routes_are_optional_and_round_trip() {
+        let old = parse_allowlist(br#"{"version":1,"allowed":["/opt/work"]}"#).expect("parses");
+        assert!(old.workspace.is_empty() && old.routes.is_empty());
+        assert_eq!(old.explicit_workspace("/opt/work"), None);
+
+        let mut file = AllowlistFile {
+            version: super::ALLOWLIST_VERSION,
+            ..AllowlistFile::default()
+        };
+        let bare = serde_json::to_string(&file).expect("serialises");
+        assert!(
+            !bare.contains("workspace") && !bare.contains("routes"),
+            "{bare}"
+        );
+
+        file.allowed.insert("/opt/work".to_owned());
+        file.workspace
+            .insert("/opt/work".to_owned(), "ws-chi".to_owned());
+        file.routes = vec![super::Route {
+            remote_owner: Some("CHI-Ecosystem".to_owned()),
+            folder_glob: None,
+            workspace: "ws-chi".to_owned(),
+        }];
+        let body = serde_json::to_vec_pretty(&file).expect("serialises");
+        let parsed = parse_allowlist(&body).expect("parses");
+        assert_eq!(parsed.explicit_workspace("/opt/work"), Some("ws-chi"));
+        assert_eq!(parsed.routes, file.routes);
+    }
+
+    /// A misspelled route key is refused, not ignored: ignored, the route
+    /// would send its repositories to the default workspace without a word.
+    #[test]
+    fn a_malformed_route_refuses_the_whole_file() {
+        let typo =
+            br#"{"version":1,"allowed":[],"routes":[{"folder-glob":"chi-*","workspace":"ws"}]}"#;
+        assert!(parse_allowlist(typo).is_err());
+        let bad_target = br#"{"version":1,"allowed":["/x"],"workspace":{"/x":"not valid!"}}"#;
+        assert!(parse_allowlist(bad_target).is_err());
+        let no_matcher = br#"{"version":1,"allowed":[],"routes":[{"workspace":"ws"}]}"#;
+        assert!(parse_allowlist(no_matcher).is_err());
+    }
+
+    /// Explicit root workspace first, then the first route, then the default:
+    /// the explicit `default` beats a route that would pick another.
+    #[test]
+    fn explicit_workspace_beats_routes_and_routes_beat_the_default() {
+        use super::route::Destination;
+        let mut file = AllowlistFile {
+            version: super::ALLOWLIST_VERSION,
+            ..AllowlistFile::default()
+        };
+        // Paths that do not exist: no git, so the folder is the path's own name.
+        let demo = "/nonexistent-lb-routing/demo".to_owned();
+        let pinned = "/nonexistent-lb-routing/pinned".to_owned();
+        let other = "/nonexistent-lb-routing/other".to_owned();
+        for root in [&demo, &pinned, &other] {
+            file.allowed.insert(root.clone());
+        }
+        file.workspace.insert(pinned.clone(), "default".to_owned());
+        file.routes = vec![super::Route {
+            remote_owner: None,
+            folder_glob: Some("*".to_owned()),
+            workspace: "ws-all".to_owned(),
+        }];
+        let mut facts = std::collections::BTreeMap::new();
+        let record_in = |cwd: &str| {
+            let mut record = super::empty_record(Agent::Codex, 2);
+            record.cwds = vec![cwd.to_owned()];
+            record
+        };
+        assert_eq!(
+            super::destination_for(&record_in(&demo), &file, &mut facts),
+            Destination::Workspace("ws-all".to_owned()),
+            "a route picks it up"
+        );
+        assert_eq!(
+            super::destination_for(&record_in(&pinned), &file, &mut facts),
+            Destination::Default,
+            "an explicit default is not overridden by a route"
+        );
+        file.workspace.insert(demo.clone(), "ws-chi".to_owned());
+        assert_eq!(
+            super::destination_for(&record_in(&demo), &file, &mut facts),
+            Destination::Workspace("ws-chi".to_owned()),
+            "an explicit workspace beats a route"
+        );
+        let mut both = record_in(&demo);
+        both.cwds.push(other.clone());
+        assert_eq!(
+            super::destination_for(&both, &file, &mut facts),
+            Destination::Mixed,
+            "two directories resolving to different workspaces make the session mixed"
         );
     }
 

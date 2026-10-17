@@ -375,20 +375,32 @@ public struct SessionLedger: Codable, Equatable, Sendable {
 
     public init() {}
 
+    /// The key a session is synced under: per workspace, so a session that
+    /// moves to another workspace is pending there until it uploads. The
+    /// default workspace (and an older CLI's report) keeps the bare key that
+    /// earlier ledgers wrote.
+    public static func key(for session: SyncedSession) -> String {
+        guard let workspace = session.workspace,
+              workspace != SyncedProject.defaultWorkspace, workspace != "mixed"
+        else { return session.key }
+        return "\(session.key)@\(workspace)"
+    }
+
     /// Record a real (not dry-run) sync's outcome.
     public mutating func record(_ report: SyncReport, at date: Date) {
         guard !report.dryRun else { return }
         for session in report.sessions where session.status == "uploaded" || session.status == "unchanged" {
-            var entry = entries[session.key] ?? Entry(syncedAt: date)
+            let key = Self.key(for: session)
+            var entry = entries[key] ?? Entry(syncedAt: date)
             entry.syncedAt = date
             entry.sourceId = session.id ?? entry.sourceId
             entry.noteSlug = session.note?.slug ?? entry.noteSlug
             entry.noteURL = session.note?.url ?? entry.noteURL
-            entries[session.key] = entry
+            entries[key] = entry
         }
     }
 
-    public func entry(for session: SyncedSession) -> Entry? { entries[session.key] }
+    public func entry(for session: SyncedSession) -> Entry? { entries[Self.key(for: session)] }
 
     public static func load(from url: URL) -> SessionLedger {
         guard let data = try? Data(contentsOf: url) else { return SessionLedger() }

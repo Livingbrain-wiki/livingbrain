@@ -21,10 +21,21 @@ public enum AllowlistLocation {
 
 /// A project as the menu shows it.
 public struct SyncedProject: Identifiable, Equatable, Sendable {
+    /// The workspace `logs` sends the project's sessions to when it names none.
+    public static let defaultWorkspace = "default"
+
     public var path: String
+    /// `default`, or a workspace id.
+    public var workspace: String
+    /// The workspace a route sends the project to while it names none of its own.
+    public var routed: String?
     public var id: String { path }
 
-    public init(path: String) { self.path = path }
+    public init(path: String, workspace: String = SyncedProject.defaultWorkspace, routed: String? = nil) {
+        self.path = path
+        self.workspace = workspace
+        self.routed = routed
+    }
 
     /// The repo's folder name.
     public var name: String { (path as NSString).lastPathComponent }

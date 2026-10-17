@@ -4,6 +4,8 @@ import SwiftUI
 struct ProjectsView: View {
     @ObservedObject var bar: BarModel
     @ObservedObject var model: SessionsModel
+    /// The signed-in workspaces, for each project's picker.
+    @ObservedObject var accounts: WorkspaceModel
 
     var body: some View {
         Form {
@@ -35,19 +37,24 @@ struct ProjectsView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(model.repos) { repo in
-                    Toggle(isOn: Binding(get: { repo.optedIn }, set: { model.setOptIn(repo, $0) })) {
-                        HStack {
-                            Image(systemName: repo.optedIn ? "folder.fill" : "folder").foregroundStyle(repo.optedIn ? Theme.accent : .secondary)
-                            VStack(alignment: .leading) {
-                                Text(repo.name)
-                                Text(SyncedProject(path: repo.path).displayPath()).font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle(isOn: Binding(get: { repo.optedIn }, set: { model.setOptIn(repo, $0) })) {
+                            HStack {
+                                Image(systemName: repo.optedIn ? "folder.fill" : "folder").foregroundStyle(repo.optedIn ? Theme.accent : .secondary)
+                                VStack(alignment: .leading) {
+                                    Text(repo.name)
+                                    Text(SyncedProject(path: repo.path).displayPath()).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(repo.sessions) session\(repo.sessions == 1 ? "" : "s")")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                            Spacer()
-                            Text("\(repo.sessions) session\(repo.sessions == 1 ? "" : "s")")
-                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        .toggleStyle(.switch)
+                        if repo.optedIn, let project = bar.projects.first(where: { $0.path == repo.path }) {
+                            workspacePicker(for: project)
                         }
                     }
-                    .toggleStyle(.switch)
                 }
                 if let error = bar.projectsError {
                     Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
@@ -59,9 +66,52 @@ struct ProjectsView: View {
                 Text("Only sessions whose every working directory sits inside an opted-in repository upload. The CLI enforces this and redacts locally before anything leaves the Mac.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            if !bar.held.isEmpty {
+                Section {
+                    ForEach(bar.held, id: \.workspace) { held in
+                        HStack {
+                            Label(held.message, systemImage: "person.crop.circle.badge.exclamationmark")
+                            Spacer()
+                            Button("Sign In") { accounts.startSignIn() }
+                        }
+                    }
+                } header: {
+                    Text("Waiting for a sign-in")
+                } footer: {
+                    Text("These sessions stay on this Mac until their workspace is signed in. Pick that workspace on the page that opens. They are never sent to another workspace.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("Projects & Sync")
         .onAppear { if model.load == .idle { model.reload() } }
+    }
+
+    /// Where one opted-in project's sessions go. Default, then each signed-in
+    /// workspace; a workspace this Mac is not signed in to keeps its place so
+    /// the choice still reads.
+    @ViewBuilder
+    private func workspacePicker(for project: SyncedProject) -> some View {
+        Picker("Workspace", selection: Binding(
+            get: { project.workspace },
+            set: { bar.setWorkspace(project, to: $0) }
+        )) {
+            Text("Default").tag(SyncedProject.defaultWorkspace)
+            ForEach(accounts.workspaces) { item in
+                Text(item.name).tag(item.id)
+            }
+            if project.workspace != SyncedProject.defaultWorkspace,
+               !accounts.workspaces.contains(where: { $0.id == project.workspace }) {
+                Text("\(project.workspace) (not signed in)").tag(project.workspace)
+            }
+        }
+        .pickerStyle(.menu)
+        .font(.caption)
+        if let routed = project.routed, project.workspace == SyncedProject.defaultWorkspace {
+            Text("Routed to \(routed) by a rule in the opt-in file. Choose a workspace to override it.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }

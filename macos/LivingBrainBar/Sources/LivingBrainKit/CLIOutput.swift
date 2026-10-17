@@ -18,10 +18,13 @@ public struct SyncReport: Decodable, Equatable, Sendable {
     /// `would_write`, `not_written` (logs/note.rs, `report`).
     public var notes: [String: Int]
     public var sessions: [SyncedSession]
+    /// Sessions held back because their workspace has no sign-in on this Mac.
+    public var skippedNoToken: [HeldSessions]
 
     enum CodingKeys: String, CodingKey {
         case scanned, uploaded, unchanged, skipped, unreadable, unparsed, redacted, notes, sessions
         case dryRun = "dry_run"
+        case skippedNoToken = "skipped_no_token"
     }
 
     public init(from decoder: Decoder) throws {
@@ -36,12 +39,14 @@ public struct SyncReport: Decodable, Equatable, Sendable {
         dryRun = try c.decodeIfPresent(Bool.self, forKey: .dryRun) ?? false
         notes = try c.decodeIfPresent([String: Int].self, forKey: .notes) ?? [:]
         sessions = try c.decodeIfPresent([SyncedSession].self, forKey: .sessions) ?? []
+        skippedNoToken = try c.decodeIfPresent([HeldSessions].self, forKey: .skippedNoToken) ?? []
     }
 
     public init(
         scanned: Int = 0, uploaded: Int = 0, unchanged: Int = 0, skipped: Int = 0,
         unreadable: Int = 0, unparsed: Int = 0, redacted: Int = 0, dryRun: Bool = false,
-        notes: [String: Int] = [:], sessions: [SyncedSession] = []
+        notes: [String: Int] = [:], sessions: [SyncedSession] = [],
+        skippedNoToken: [HeldSessions] = []
     ) {
         self.scanned = scanned
         self.uploaded = uploaded
@@ -53,6 +58,7 @@ public struct SyncReport: Decodable, Equatable, Sendable {
         self.dryRun = dryRun
         self.notes = notes
         self.sessions = sessions
+        self.skippedNoToken = skippedNoToken
     }
 
     /// Notes the sync wrote (or, on a dry run, would write).
@@ -75,6 +81,23 @@ public struct SyncReport: Decodable, Equatable, Sendable {
     }
 }
 
+/// One entry of `SyncReport.skippedNoToken`: the sessions of a workspace this
+/// Mac is not signed in to. They wait there; nothing sends them elsewhere.
+public struct HeldSessions: Decodable, Equatable, Sendable {
+    public var workspace: String
+    public var sessions: Int
+
+    public init(workspace: String, sessions: Int) {
+        self.workspace = workspace
+        self.sessions = sessions
+    }
+
+    /// "Sign in to ws-chi to sync 2 sessions".
+    public var message: String {
+        "Sign in to \(workspace) to sync \(sessions) session\(sessions == 1 ? "" : "s")"
+    }
+}
+
 /// One entry of `SyncReport.sessions`.
 public struct SyncedSession: Decodable, Equatable, Sendable {
     public var agent: String
@@ -84,7 +107,8 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     public var turns: Int
     public var toolCalls: Int
     public var truncated: Bool
-    /// `uploaded`, `unchanged`, `skipped` or `would_upload`.
+    /// `uploaded`, `unchanged`, `skipped`, `would_upload`, `skipped_no_token`
+    /// or `skipped_mixed_workspace`.
     public var status: String
     public var id: String?
     public var totals: Totals?
@@ -95,6 +119,8 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     /// The local log file (never sent).
     public var file: String?
     public var note: Note?
+    /// The workspace the session goes to: `default`, a workspace id, or `mixed`.
+    public var workspace: String?
 
     /// The searchable note a synced session gets (logs/note.rs).
     public struct Note: Decodable, Equatable, Sendable {
@@ -155,7 +181,7 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case agent, repo, models, turns, truncated, status, id, totals, branch, file, note
+        case agent, repo, models, turns, truncated, status, id, totals, branch, file, note, workspace
         case sessionId = "session_id"
         case toolCalls = "tool_calls"
         case startedAt = "started_at"
@@ -179,6 +205,7 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
         endedAt = try c.decodeIfPresent(String.self, forKey: .endedAt)
         file = try c.decodeIfPresent(String.self, forKey: .file)
         note = try c.decodeIfPresent(Note.self, forKey: .note)
+        workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
     }
 }
 
@@ -186,15 +213,32 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
 /// `logs allow|deny --json`.
 public struct AllowStatus: Decodable, Equatable, Sendable {
     public var allowed: [String]
+    /// Each allowed path's workspace: its id, or `default`. Absent from older CLIs.
+    public var workspace: [String: String]?
+    /// For each allowed path with no workspace of its own, the workspace a
+    /// route sends it to. Only on `status`.
+    public var routed: [String: String]?
     /// The opt-in file's path.
     public var config: String?
     /// Only on `allow`/`deny`.
     public var changed: Bool?
 
-    public init(allowed: [String], config: String? = nil, changed: Bool? = nil) {
+    public init(
+        allowed: [String], workspace: [String: String]? = nil, routed: [String: String]? = nil,
+        config: String? = nil, changed: Bool? = nil
+    ) {
         self.allowed = allowed
+        self.workspace = workspace
+        self.routed = routed
         self.config = config
         self.changed = changed
+    }
+
+    /// The allowed repositories, each with its workspace.
+    public var projects: [SyncedProject] {
+        allowed.map { path in
+            SyncedProject(path: path, workspace: workspace?[path] ?? SyncedProject.defaultWorkspace, routed: routed?[path])
+        }
     }
 }
 
@@ -204,6 +248,9 @@ public struct AllowlistFile: Decodable, Equatable, Sendable {
     public static let supportedVersion = 1
     public var version: Int
     public var allowed: [String]
+    /// Each allowed path's workspace, when the file names one (optional; a
+    /// file from before routing has none).
+    public var workspace: [String: String]?
 }
 
 /// The device-flow prompt `livingbrain --json login` writes to stderr

@@ -2,6 +2,11 @@ import Foundation
 import XCTest
 @testable import LivingBrainKit
 
+/// The CLI prints one JSON object per line; a multi-line test literal is joined.
+func oneLine(_ text: String) -> Data {
+    Data(text.split(whereSeparator: \.isNewline).joined().utf8)
+}
+
 func fixture(_ name: String) throws -> Data {
     let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures"))
     return try Data(contentsOf: url)
@@ -52,6 +57,72 @@ final class CLIOutputTests: XCTestCase {
         XCTAssertNil(status.changed)
         let allow = try CLIOutput.allowStatus(fixture("logs-allow"))
         XCTAssertEqual(allow.changed, true)
+    }
+
+    /// A sync that held a session for a workspace this Mac is not signed in to
+    /// says so, and the message names the workspace and the count.
+    func testSkippedNoTokenDecodesAsHeldSessions() throws {
+        let json = #"""
+        {"scanned":3,"uploaded":0,"unchanged":0,"skipped":1,"dry_run":false,
+         "skipped_no_token":[{"workspace":"ws-chi","sessions":2}],
+         "sessions":[{"agent":"codex","session_id":"a1","repo":"~/code/chi-web","status":"skipped_no_token",
+                      "workspace":"ws-chi"}]}
+        """#
+        let report = try CLIOutput.syncReport(oneLine(json))
+        XCTAssertEqual(report.skippedNoToken, [HeldSessions(workspace: "ws-chi", sessions: 2)])
+        XCTAssertEqual(report.skippedNoToken.first?.message, "Sign in to ws-chi to sync 2 sessions")
+        XCTAssertEqual(HeldSessions(workspace: "ws-chi", sessions: 1).message, "Sign in to ws-chi to sync 1 session")
+        XCTAssertEqual(report.sessions.first?.workspace, "ws-chi")
+    }
+
+    /// A report from a CLI before routing has no held list and no workspace.
+    func testOlderReportsHaveNoHeldSessions() throws {
+        let report = try CLIOutput.syncReport(fixture("sync-uploaded"))
+        XCTAssertEqual(report.skippedNoToken, [])
+        XCTAssertNil(report.sessions.first?.workspace)
+    }
+
+    /// A session is synced per workspace: uploaded to one, it is still pending
+    /// in another, and the default workspace keeps the bare key.
+    func testLedgerIsKeyedByWorkspace() throws {
+        let report = try CLIOutput.syncReport(oneLine(#"{"sessions":[{"agent":"codex","session_id":"a1","repo":"~/code/chi-web","status":"uploaded","workspace":"ws-chi","id":"src-1"}]}"#))
+        var ledger = SessionLedger()
+        ledger.record(report, at: Date(timeIntervalSince1970: 0))
+        let routed = report.sessions[0]
+        XCTAssertNotNil(ledger.entry(for: routed))
+        var elsewhere = routed
+        elsewhere.workspace = "default"
+        XCTAssertNil(ledger.entry(for: elsewhere), "a re-routed session is pending in its new workspace")
+        XCTAssertEqual(SessionLedger.key(for: elsewhere), "codex/a1")
+    }
+
+    /// Each allowed project carries its workspace; a project with none is the
+    /// default, and a route's pick is shown as routed, never as its workspace.
+    func testStatusProjectsCarryTheirWorkspace() throws {
+        let json = #"""
+        {"allowed":["/Users/alice/code/atlas","/Users/alice/code/chi-web"],
+         "workspace":{"/Users/alice/code/atlas":"default","/Users/alice/code/chi-web":"ws-chi"},
+         "routed":{"/Users/alice/code/atlas":"ws-owner"},"config":"/x"}
+        """#
+        let status = try CLIOutput.allowStatus(oneLine(json))
+        XCTAssertEqual(status.projects, [
+            SyncedProject(path: "/Users/alice/code/atlas", workspace: "default", routed: "ws-owner"),
+            SyncedProject(path: "/Users/alice/code/chi-web", workspace: "ws-chi"),
+        ])
+        let older = try CLIOutput.allowStatus(fixture("logs-status"))
+        XCTAssertTrue(older.projects.allSatisfy { $0.workspace == SyncedProject.defaultWorkspace && $0.routed == nil })
+    }
+
+    /// The opt-in file may name each root's workspace; an older file names none.
+    func testAllowlistFileReadsWorkspaces() throws {
+        let file = try CLIOutput.allowlistFile(Data(#"""
+        {"version":1,"allowed":["/Users/alice/code/chi-web"],
+         "workspace":{"/Users/alice/code/chi-web":"ws-chi"},
+         "routes":[{"folder_glob":"chi-*","workspace":"ws-chi"}]}
+        """#.utf8))
+        XCTAssertEqual(file.workspace, ["/Users/alice/code/chi-web": "ws-chi"])
+        let older = try CLIOutput.allowlistFile(fixture("allowlist-file"))
+        XCTAssertNil(older.workspace)
     }
 
     func testAllowlistFile() throws {

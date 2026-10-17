@@ -22,9 +22,10 @@ livingbrain logs deny
 
 | command | what it does |
 |---|---|
-| `logs allow [path] [--detail full\|messages\|summary]` | allow sessions whose log records a working directory inside `path` (default: the current directory), at a detail level (default `full` for a new path; an allowed path keeps its level unless `--detail` names one) |
+| `logs allow [path] [--detail full\|messages\|summary] [--workspace <id>]` | allow sessions whose log records a working directory inside `path` (default: the current directory), at a detail level (default `full` for a new path; an allowed path keeps its level unless `--detail` names one). `--workspace` sends them to that workspace; see [Workspaces](#workspaces-one-mac-several-workspaces) |
 | `logs deny [path]` | revoke a path `logs allow` added |
-| `logs status` | print what is opted in, at which detail level, and where that is recorded |
+| `logs workspace <path> <id\|default>` | send an allowed path's sessions to a workspace, or `default` for the default workspace even when a route would pick another. Refused for a path that is not opted in |
+| `logs status` | print what is opted in, at which detail level, into which workspace, and the routes that send the rest |
 | `logs sync` | read both agents' logs and upload the opted-in sessions |
 | `logs show <file>` | print the redacted record `logs sync` would send for one session file, opted in or not; never touches the network. `--json` gives `{file, opted_in, redacted, body, record}`: `body` is the exact text, `record` its parse (`null` if redaction left it unparseable) |
 
@@ -36,12 +37,14 @@ livingbrain logs deny
 | `--session <file>` | `logs sync` only: scan just this session file (repeatable). It must sit under one of the two trees, and its repo must still be opted in |
 
 `--json` prints one object: `scanned`, `uploaded`, `unchanged`, `skipped`,
+`skipped_mixed_workspace`, `skipped_no_token` (see [Workspaces](#workspaces-one-mac-several-workspaces)),
 `unreadable` (a file that could not be read at all), `unparsed` (read, but no
 session in it), `redacted`, `dry_run` and a `sessions` array of
 `{agent, session_id, repo, models, turns, tool_calls, totals, truncated,
-detail, status, branch, started_at, ended_at, file, note?}` (`file` is the local path
+detail, status, workspace, branch, started_at, ended_at, file, note?}` (`file` is the local path
 of the log; it is printed, never sent) — the status one of `uploaded`, `unchanged`, `skipped`
-(`reason: "repo not opted in"`) or `would_upload` under `--dry-run`. Every
+(`reason: "repo not opted in"`), `skipped_no_token` (`reason: "not signed in to workspace <id>"`),
+`skipped_mixed_workspace`, or `would_upload` under `--dry-run`. Every
 opted-in session also carries `note`: `{slug, project, status, id?, url?,
 error?}`, the status one of `written`, `unchanged`, `failed` or `would_write`
 under `--dry-run` (`null` for a session that recorded no repository), and the
@@ -124,6 +127,80 @@ its outcome (`EarthOS.world · Colony a15fba01 · #123 Fix auth redirect`).
 Notes synced before this were decisions titled by id: the notes module's
 cron moves them to `session` and renames them, a batch every 5 minutes, and
 a session's next sync does the same for its own page.
+
+## Workspaces: one Mac, several workspaces
+
+A Mac can be signed in to several workspaces. By default every session goes to
+the default workspace (the one `livingbrain login` signs in to). To send a
+repository's sessions elsewhere, give it a workspace, or write a route that
+picks one by name:
+
+```sh
+livingbrain logs allow ~/Documents/GitHub/chi-web --workspace <chi-workspace-id>
+livingbrain logs workspace ~/Documents/GitHub/side-project default
+livingbrain logs status            # each root's workspace, and the routes
+```
+
+Each allowed root's workspace and the routes are kept in the same opt-in file:
+
+```json
+{
+  "version": 1,
+  "allowed": [
+    "/Users/nick/Documents/GitHub/chi-web",
+    "/Users/nick/Documents/GitHub/chi-backend",
+    "/Users/nick/Documents/GitHub/side-project"
+  ],
+  "workspace": {
+    "/Users/nick/Documents/GitHub/side-project": "default"
+  },
+  "routes": [
+    {"remote_owner": "CHI-Ecosystem", "workspace": "<chi-workspace-id>"},
+    {"folder_glob": "chi-*", "workspace": "<chi-workspace-id>"}
+  ]
+}
+```
+
+That is the example "CHI repos go to the CHI workspace": every repository whose
+`origin` is on GitHub under `CHI-Ecosystem`, or whose folder is `chi-*`, sends
+to the CHI workspace; `side-project` names `default` explicitly, so the routes
+do not apply to it. Routes are edited in the file (there is no command for
+them yet); `logs status` shows each one and which roots it currently routes.
+
+The order for each session:
+
+1. the workspace of its allowed root, if the root names one (`default` counts:
+   it stops the routes);
+2. otherwise the **first** route that matches. `remote_owner` compares the
+   GitHub owner of `origin` (https, ssh and scp-style URLs, case-insensitively);
+   `folder_glob` matches the repository's folder name with `*` and `?`. A
+   repository whose remote or folder cannot be read matches nothing;
+3. otherwise the default workspace.
+
+A session whose working directories resolve to different workspaces is never
+sent: it is reported as `skipped_mixed_workspace`.
+
+**Tokens.** Each workspace is signed in separately. The CLI reads a routed
+workspace's token from the same keychain item the Mac app writes for it: service
+`wiki.livingbrain.mac`, account `<API URL>#<workspace id>` (the API URL without a
+trailing slash). For tests and CI, `LIVINGBRAIN_TOKEN_<WORKSPACE>` (the id upper-cased,
+other characters as `_`) takes its place. The default workspace keeps using the
+CLI's own token, as before.
+
+**Missing sign-in.** A routed session whose workspace has no token is held: it is
+not uploaded, it is not sent under any other token, and it is not marked as
+synced, so it goes up on the first sync after the sign-in. The report says so:
+
+```json
+"skipped_no_token": [{"workspace": "<chi-workspace-id>", "sessions": 2}]
+```
+
+The Mac app shows this as "Sign in to <workspace> to sync 2 sessions".
+
+**Already synced.** The server's ledger is per workspace: every upload carries
+its workspace's token, so a session that moves to another workspace is written
+there once, and its earlier copy stays where it was. The Mac app's local
+record of what it synced is keyed the same way, per (session, workspace).
 
 ## Opt-in is per repository
 

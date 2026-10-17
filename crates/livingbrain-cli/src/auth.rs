@@ -16,6 +16,12 @@ use crate::{CliError, CliResult, Out, err};
 /// The keychain service name; the user is the API base URL.
 const SERVICE: &str = "wiki.livingbrain.cli";
 
+/// The Mac app's keychain service (`KeychainTokenStore.appService` in
+/// macos/LivingBrainBar). It keeps one token per workspace under the account
+/// `<api base URL>#<workspace id>` (`WorkspaceDirectory`), and routed
+/// `logs sync` uploads read those same items.
+pub const APP_SERVICE: &str = "wiki.livingbrain.mac";
+
 /// The longest we will wait for device approval, whatever `expires_in` claims.
 const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -55,13 +61,21 @@ impl KeyringStore {
     }
 }
 
+/// Read one generic-password item by service and account. `None` when there is
+/// no such item; a keychain that cannot be read is an error, never "no token".
+fn keychain_get(service: &str, user: &str) -> CliResult<Option<String>> {
+    let entry = keyring::Entry::new(service, user)
+        .map_err(|e| err(format!("the OS keychain is unavailable: {e}")))?;
+    match entry.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(err(format!("could not read the OS keychain: {e}"))),
+    }
+}
+
 impl TokenStore for KeyringStore {
     fn get(&self, user: &str) -> CliResult<Option<String>> {
-        match Self::entry(user)?.get_password() {
-            Ok(token) => Ok(Some(token)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(err(format!("could not read the OS keychain: {e}"))),
-        }
+        keychain_get(SERVICE, user)
     }
 
     fn set(&self, user: &str, token: &str) -> CliResult<()> {
@@ -108,6 +122,42 @@ pub fn token_for(api_url: &str) -> CliResult<Token> {
             "not logged in — run `livingbrain login`".into(),
         )),
     }
+}
+
+/// The keychain account the Mac app keeps a workspace's token under.
+pub fn workspace_account(api_url: &str, workspace: &str) -> String {
+    format!("{}#{workspace}", user_key(api_url))
+}
+
+/// The environment variable that overrides one workspace's token, for tests
+/// and CI: `LIVINGBRAIN_TOKEN_<WORKSPACE>`, the id upper-cased with every
+/// character that is not a letter or digit made `_`.
+pub fn workspace_env_var(workspace: &str) -> String {
+    let suffix: String = workspace
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("LIVINGBRAIN_TOKEN_{suffix}")
+}
+
+/// The token for one workspace, for a session routed there: its
+/// [`workspace_env_var`] first, else the Mac app's keychain item. `None` when
+/// neither holds one. The caller must not fall back to another workspace's
+/// token: a routed session stays unsynced rather than land in the wrong one.
+pub fn workspace_token(api_url: &str, workspace: &str) -> CliResult<Option<Token>> {
+    if let Some(token) = std::env::var_os(workspace_env_var(workspace)) {
+        let token = token.to_string_lossy().into_owned();
+        if !token.is_empty() {
+            return Ok(Some(Token(token)));
+        }
+    }
+    Ok(keychain_get(APP_SERVICE, &workspace_account(api_url, workspace))?.map(Token))
 }
 
 /// Seconds between token polls: the server's `interval`, never below the RFC

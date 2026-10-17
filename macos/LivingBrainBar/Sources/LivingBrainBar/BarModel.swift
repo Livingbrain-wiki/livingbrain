@@ -20,6 +20,8 @@ final class BarModel: ObservableObject {
     @Published private(set) var state = SyncState()
     @Published private(set) var projects: [SyncedProject] = []
     @Published private(set) var projectsError: String?
+    /// Sessions the last sync held because their workspace is not signed in.
+    @Published private(set) var held: [HeldSessions] = []
     @Published private(set) var loginPrompt: LoginPrompt?
     @Published private(set) var signingIn = false
     @Published private(set) var launchAtLogin = false
@@ -145,6 +147,7 @@ final class BarModel: ObservableObject {
                     do {
                         let report = try CLIOutput.syncReport(result.stdout)
                         state.succeed(report, at: Date())
+                        held = report.skippedNoToken
                         ledger.record(report, at: Date())
                         try? ledger.save(to: Self.ledgerURL)
                         notifyUploads(report)
@@ -255,7 +258,7 @@ final class BarModel: ObservableObject {
         do {
             let result = try await runCLI(["--json", "logs", "status"])
             if result.succeeded, let status = try? CLIOutput.allowStatus(result.stdout) {
-                projects = status.allowed.map(SyncedProject.init)
+                projects = status.projects
                 projectsError = nil
                 return
             }
@@ -264,7 +267,7 @@ final class BarModel: ObservableObject {
         }
         let path = AllowlistLocation.path(environment: ProcessInfo.processInfo.environment, home: NSHomeDirectory())
         do {
-            projects = try AllowlistLocation.read(path: path).map(SyncedProject.init)
+            projects = try AllowlistLocation.read(path: path).map { SyncedProject(path: $0) }
             projectsError = nil
         } catch {
             projectsError = "Could not read the opt-in file"
@@ -291,10 +294,27 @@ final class BarModel: ObservableObject {
         Task {
             do {
                 let result = try await runCLI(["--json", "logs", allow ? "allow" : "deny", path])
-                if result.succeeded, let status = try? CLIOutput.allowStatus(result.stdout) {
-                    projects = status.allowed.map(SyncedProject.init)
-                    projectsError = nil
-                } else if !result.succeeded {
+                if result.succeeded {
+                    await refreshProjects()
+                } else {
+                    projectsError = CLIOutput.firstErrorLine(result.stderr) ?? "livingbrain exited with status \(result.status)"
+                }
+            } catch {
+                projectsError = error.localizedDescription
+            }
+            NotificationCenter.default.post(name: .livingBrainProjectsChanged, object: nil)
+        }
+    }
+
+    /// `logs workspace <path> <id|default>`: send an allowed project's sessions
+    /// to another workspace. The CLI refuses a project that is not opted in.
+    func setWorkspace(_ project: SyncedProject, to workspace: String) {
+        Task {
+            do {
+                let result = try await runCLI(["--json", "logs", "workspace", project.path, workspace])
+                if result.succeeded {
+                    await refreshProjects()
+                } else {
                     projectsError = CLIOutput.firstErrorLine(result.stderr) ?? "livingbrain exited with status \(result.status)"
                 }
             } catch {
