@@ -127,3 +127,98 @@ final class SignedInTokensTests: XCTestCase {
         XCTAssertEqual(directory.signedInTokens(), [CLIWorkspaceToken(id: "ws_a", token: "tok-a")])
     }
 }
+
+final class DefaultWorkspaceHandoffTests: XCTestCase {
+    private let base = URL(string: "https://app.livingbrain.wiki/")!
+    private var defaults: UserDefaults!
+    private var items: [String: MemoryTokenStore] = [:]
+
+    override func setUp() {
+        defaults = UserDefaults(suiteName: "DefaultWorkspaceHandoffTests.\(UUID().uuidString)")!
+        items = [:]
+    }
+
+    private func directory() -> WorkspaceDirectory {
+        WorkspaceDirectory(baseURL: base, defaults: defaults) { account in
+            if let store = self.items[account] { return store }
+            let store = MemoryTokenStore()
+            self.items[account] = store
+            return store
+        }
+    }
+
+    func testTheDefaultWorkspacesTokenIsTheCLIsLoginToken() throws {
+        let dir = directory()
+        try dir.save(token: "tok-earth-DEFAULT", for: SavedWorkspace(id: "ws_earth", name: "EarthOS"), activate: false)
+        try dir.save(token: "tok-chi", for: SavedWorkspace(id: "ws_chi", name: "CHI"))
+        dir.defaultId = "ws_earth"
+
+        let env = CLIEnvironment.make(base: [:], handoff: CLITokenHandoff(directory: dir))
+        XCTAssertEqual(env["LIVINGBRAIN_TOKEN"], "tok-earth-DEFAULT")
+        XCTAssertEqual(env["LIVINGBRAIN_TOKEN_WS_CHI"], "tok-chi")
+        XCTAssertEqual(dir.activeId, "ws_chi", "adopting a default never switches the workspace in use")
+    }
+
+    func testWithoutADefaultTheCLIGetsNoDefaultToken() throws {
+        let dir = directory()
+        try dir.save(token: "tok-chi", for: SavedWorkspace(id: "ws_chi", name: "CHI"))
+        let env = CLIEnvironment.make(base: [:], handoff: CLITokenHandoff(directory: dir))
+        XCTAssertNil(env["LIVINGBRAIN_TOKEN"], "the CLI then reports NotLoggedIn for the default destination")
+        XCTAssertEqual(env["LIVINGBRAIN_TOKEN_WS_CHI"], "tok-chi", "routed groups still work")
+    }
+
+    func testADefaultWhoseSignInIsGoneGetsNoDefaultToken() throws {
+        let dir = directory()
+        try dir.save(token: "tok-earth", for: SavedWorkspace(id: "ws_earth", name: "EarthOS"))
+        dir.defaultId = "ws_earth"
+        try items[WorkspaceDirectory.account(baseURL: base, workspaceId: "ws_earth")]?.delete()
+        XCTAssertNil(CLITokenHandoff(directory: dir).variables["LIVINGBRAIN_TOKEN"])
+    }
+
+    func testRemovingTheDefaultWorkspaceClearsTheDefault() throws {
+        let dir = directory()
+        try dir.save(token: "tok-earth", for: SavedWorkspace(id: "ws_earth", name: "EarthOS"))
+        dir.defaultId = "ws_earth"
+        dir.remove("ws_earth")
+        XCTAssertNil(dir.defaultId)
+    }
+}
+
+final class CLISignInAdoptionTests: XCTestCase {
+    private let base = URL(string: "https://app.livingbrain.wiki/")!
+
+    private func directory(_ defaults: UserDefaults, _ items: @escaping (String) -> TokenStore) -> WorkspaceDirectory {
+        WorkspaceDirectory(baseURL: base, defaults: defaults, tokenStore: items)
+    }
+
+    func testTheCLISignInBecomesAnAppOwnedItemAndTheDefault() async throws {
+        let defaults = UserDefaults(suiteName: "CLISignInAdoptionTests.\(UUID().uuidString)")!
+        var items: [String: MemoryTokenStore] = [:]
+        let dir = directory(defaults) { account in
+            if let store = items[account] { return store }
+            let store = MemoryTokenStore()
+            items[account] = store
+            return store
+        }
+        try dir.save(token: "tok-chi", for: SavedWorkspace(id: "ws_chi", name: "CHI"))
+
+        let adopted = try await CLISignInAdoption.adopt(token: "tok-cli", into: dir, activate: false) { token in
+            XCTAssertEqual(token, "tok-cli")
+            return SavedWorkspace(id: "ws_earth", name: "EarthOS")
+        }
+
+        XCTAssertEqual(adopted, SavedWorkspace(id: "ws_earth", name: "EarthOS"))
+        XCTAssertEqual(dir.defaultId, "ws_earth")
+        XCTAssertEqual(dir.defaultToken(), "tok-cli")
+        XCTAssertEqual(dir.activeId, "ws_chi", "activation is left as it was")
+    }
+
+    func testAnUnnamedCLISignInChangesNothing() async throws {
+        let defaults = UserDefaults(suiteName: "CLISignInAdoptionTests.\(UUID().uuidString)")!
+        let dir = directory(defaults) { _ in MemoryTokenStore() }
+        let adopted = try await CLISignInAdoption.adopt(token: "tok-cli", into: dir, activate: true) { _ in nil }
+        XCTAssertNil(adopted)
+        XCTAssertNil(dir.defaultId)
+        XCTAssertTrue(dir.workspaces.isEmpty)
+    }
+}

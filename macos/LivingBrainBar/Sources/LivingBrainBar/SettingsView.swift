@@ -89,6 +89,18 @@ struct SettingsView: View {
                     .foregroundStyle(workspace.me == nil ? .secondary : .primary)
                     .textSelection(.enabled)
             }
+            if !workspace.workspaces.isEmpty {
+                Picker("Default workspace", selection: Binding(
+                    get: { workspace.defaultId ?? "" },
+                    set: { workspace.setDefault($0) }
+                )) {
+                    Text("Not chosen").tag("")
+                    ForEach(workspace.workspaces) { item in
+                        Text(item.name.isEmpty ? item.id : item.name).tag(item.id)
+                    }
+                }
+                .help("The CLI's default destination (sessions without a repository workspace) uses this workspace's sign-in.")
+            }
             ForEach(workspace.workspaces) { item in
                 HStack {
                     Image(systemName: item.id == workspace.activeId ? "checkmark.circle.fill" : "circle")
@@ -104,7 +116,7 @@ struct SettingsView: View {
             LabeledContent("Add a workspace") {
                 SignInControls(workspace: workspace)
             }
-            Text("Each workspace has its own sign-in. Add Workspace opens the browser: pick the workspace on the approval page, then approve. Sync and the job runner use the CLI's sign-in.")
+            Text("Each workspace has its own sign-in. Add Workspace opens the browser: pick the workspace on the approval page, then approve. Sync and the job runner use the default workspace's sign-in; each repository syncs to the workspace it names.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

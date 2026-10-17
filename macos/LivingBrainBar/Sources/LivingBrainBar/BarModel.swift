@@ -116,11 +116,11 @@ final class BarModel: ObservableObject {
         }
     }
 
-    /// The tokens every CLI run is handed: the app's own workspace sign-ins,
-    /// read in-process (no prompt). The CLI's own sign-in is not held here, so
-    /// the default token is not handed over (see `CLITokenHandoff`).
+    /// The tokens every CLI run is handed: the default workspace's as
+    /// `LIVINGBRAIN_TOKEN`, and each signed-in workspace's, all read from the
+    /// app's own items in-process (no prompt).
     func cliTokenHandoff() -> CLITokenHandoff {
-        CLITokenHandoff(defaultToken: nil, workspaces: directory.signedInTokens())
+        CLITokenHandoff(directory: directory)
     }
 
     /// Run the CLI. Every run but `login` gets the app's tokens in its

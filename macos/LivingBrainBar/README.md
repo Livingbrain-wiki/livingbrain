@@ -147,9 +147,12 @@ already holds, in that child process's environment only (`LIVINGBRAIN_TOKEN_<ID>
 never arguments or logs). So macOS does not prompt on every sync. The CLI
 passes those variables to no other child process. Anyone who can read this
 user's process environment can read them, the same as any environment secret.
-The CLI's own sign-in (`livingbrain login`) is not handed over, so a repository
-or job that uses the default token needs `LIVINGBRAIN_TOKEN` set in the
-environment or a terminal sign-in run outside the app. Opting a repository in
+The default destination (sessions in a repository with no workspace, and
+`livingbrain jobs run`) uses the **default workspace**'s token, handed over as
+`LIVINGBRAIN_TOKEN`. The default workspace is the CLI's own sign-in, adopted
+once into the app's items on first launch of this build (macOS may ask once to
+let the app read the CLI's item; if you refuse, pick the default in Settings →
+Workspace). A CLI `login` run from the app re-adopts it. Opting a repository in
 always names its workspace; the app asks which one when several are signed in.
 
 - **Wiki** — the page list (`GET /v1/pages`), search with a project filter
