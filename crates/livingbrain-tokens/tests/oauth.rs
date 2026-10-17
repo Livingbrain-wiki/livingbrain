@@ -7,9 +7,18 @@
 
 mod support;
 
-use cratefield_core::Statement;
-use cratefield_core::axum::http::StatusCode;
-use livingbrain_tokens::{Authenticated, authenticate, authenticate_mcp};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use cratefield_core::axum::body::Bytes;
+use cratefield_core::axum::http::{Request, Response, StatusCode, header};
+use cratefield_core::{Decision, HttpClient, HttpError, MapConfig, Module, Statement};
+use cratefield_testing::FakeRateLimiter;
+use livingbrain_tokens::{
+    Authenticated, OAuth, authenticate, authenticate_actions, authenticate_mcp,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use support::{
@@ -530,28 +539,41 @@ async fn authorize_shows_the_consent_to_a_signed_in_person() {
 }
 
 #[pollster::test]
-async fn a_verified_claude_host_shows_no_unverified_warning() {
+async fn a_verified_connector_host_shows_no_unverified_warning() {
     let kit = support::signed_in().await;
+    // Both platforms Living Brain vouches for: Claude's connector redirect
+    // and ChatGPT's (the platform one and a Custom GPT's Actions callback).
+    let verified = [
+        VERIFIED_REDIRECT,
+        "https://chatgpt.com/connector_platform_oauth_redirect",
+        "https://chat.openai.com/aip/g-docapp/oauth/callback",
+    ];
     let made = post_json(
         &kit,
         "/v1/oauth/register",
-        &json!({ "client_name": "Claude", "redirect_uris": [VERIFIED_REDIRECT] }),
+        &json!({ "client_name": "Claude", "redirect_uris": verified }),
         &Caller::Anonymous,
     )
     .await;
     let client_id = made.json()["client_id"].as_str().unwrap().to_owned();
-    let shown = get(
-        &kit,
-        &format!(
-            "/v1/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}\
-             &code_challenge={CHALLENGE}&code_challenge_method=S256&state=s1",
-            enc(VERIFIED_REDIRECT)
-        ),
-        &kit.owner(),
-    )
-    .await;
-    assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
-    assert!(!shown.text().contains("Unverified app"), "{}", shown.text());
+    for redirect in verified {
+        let shown = get(
+            &kit,
+            &format!(
+                "/v1/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}\
+                 &code_challenge={CHALLENGE}&code_challenge_method=S256&state=s1",
+                enc(redirect)
+            ),
+            &kit.owner(),
+        )
+        .await;
+        assert_eq!(shown.status, StatusCode::OK, "{redirect}: {}", shown.text());
+        assert!(
+            !shown.text().contains("Unverified app"),
+            "{redirect}: {}",
+            shown.text()
+        );
+    }
 }
 
 #[pollster::test]
@@ -1338,7 +1360,15 @@ async fn the_connector_label_follows_the_redirect_the_code_was_issued_for() {
     let made = post_json(
         &kit,
         "/v1/oauth/register",
-        &json!({ "client_name": CLIENT_NAME, "redirect_uris": [VERIFIED_REDIRECT, "https://evil.example/cb"] }),
+        &json!({
+            "client_name": CLIENT_NAME,
+            "redirect_uris": [
+                VERIFIED_REDIRECT,
+                "https://chatgpt.com/connector_platform_oauth_redirect",
+                "https://chat.openai.com/aip/g-docapp/oauth/callback",
+                "https://evil.example/cb",
+            ],
+        }),
         &Caller::Anonymous,
     )
     .await;
@@ -1378,4 +1408,1255 @@ async fn the_connector_label_follows_the_redirect_the_code_was_issued_for() {
         claude_row["name"],
         json!(format!("Claude connector · {CLIENT_NAME}"))
     );
+
+    // Both ChatGPT hosts — the platform redirect and a Custom GPT's Actions
+    // callback — carry their own label, under the same rule.
+    for redirect in [
+        "https://chatgpt.com/connector_platform_oauth_redirect",
+        "https://chat.openai.com/aip/g-docapp/oauth/callback",
+    ] {
+        let via = approve_to(&kit, &client_id, redirect, &kit.owner()).await;
+        let redeemed = redeem_at(&kit, &via, &client_id, redirect).await;
+        assert_eq!(
+            redeemed.status,
+            StatusCode::OK,
+            "{redirect}: {}",
+            redeemed.text()
+        );
+        let access = redeemed.json()["access_token"].as_str().unwrap().to_owned();
+        let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+        let row = listed.json()["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["prefix"] == json!(prefix_of(&access)))
+            .expect("listed")
+            .clone();
+        assert_eq!(
+            row["name"],
+            json!(format!("ChatGPT connector · {CLIENT_NAME}")),
+            "{redirect}"
+        );
+        assert_eq!(row["connector"], json!(true), "{redirect}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Client ID Metadata Document clients (issue #234)
+
+/// A client_id that is a Client ID Metadata Document URL: the app never
+/// registers, the server fetches and validates the document itself before a
+/// consent page is ever shown.
+const CIMD_ID: &str = "https://cimd.example/client.json";
+/// The one redirect the test document names: ChatGPT's own, so this path
+/// exercises the verified-host rules at the same time.
+const CIMD_REDIRECT: &str = "https://chatgpt.com/connector_platform_oauth_redirect";
+const CIMD_NAME: &str = "A document app";
+
+/// The document a test serves at a client_id URL.
+fn cimd_document(client_id: &str, name: &str, redirects: &[&str]) -> String {
+    json!({
+        "client_id": client_id,
+        "client_name": name,
+        "redirect_uris": redirects,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    })
+    .to_string()
+}
+
+/// The authorize path naming a document client by its URL, in the shape the
+/// grant reads.
+fn cimd_path(client_id: &str, redirect: &str) -> String {
+    format!(
+        "/v1/oauth/authorize?response_type=code&client_id={}&redirect_uri={}\
+         &code_challenge={CHALLENGE}&code_challenge_method=S256&state=s1",
+        enc(client_id),
+        enc(redirect)
+    )
+}
+
+/// One served document: the URL it answers at, a status, a body, and the
+/// Cache-Control the cache expiry is taken from.
+type Served = (String, u16, String, Option<String>);
+
+/// The stub `HttpClient` behind every document test: it answers the DNS
+/// resolutions the SSRF guard makes with the address a test scripts (a
+/// public one by default), serves the documents a test registers by exact
+/// URL, and counts the document fetches — DNS aside — so a test can tell a
+/// cache hit from a refetch. Nothing else is reachable.
+#[derive(Clone)]
+struct StubHttp {
+    documents: Arc<Mutex<Vec<Served>>>,
+    dns: Arc<Mutex<IpAddr>>,
+    fetches: Arc<AtomicUsize>,
+}
+
+impl StubHttp {
+    /// One good document at `url`.
+    fn serving(url: &str, body: &str) -> Self {
+        Self::default().with_document(url, 200, body, None)
+    }
+
+    /// Adds an exact answer at `url`: a status, a body, and the
+    /// Cache-Control the expiry is taken from.
+    fn with_document(
+        self,
+        url: &str,
+        status: u16,
+        body: &str,
+        cache_control: Option<&str>,
+    ) -> Self {
+        self.documents.lock().expect("the documents").push((
+            url.to_owned(),
+            status,
+            body.to_owned(),
+            cache_control.map(str::to_owned),
+        ));
+        self
+    }
+
+    /// Replaces the body at `url`, so a refetch sees a new document.
+    fn replace(&self, url: &str, body: &str) {
+        let mut documents = self.documents.lock().expect("the documents");
+        let slot = documents
+            .iter_mut()
+            .find(|(at, ..)| at == url)
+            .expect("a served document");
+        slot.2 = body.to_owned();
+    }
+
+    /// Makes every document host resolve to `address`.
+    fn resolving_to(&self, address: IpAddr) {
+        *self.dns.lock().expect("the resolver") = address;
+    }
+
+    /// How many document (not DNS) fetches were made.
+    fn fetches(&self) -> usize {
+        self.fetches.load(Ordering::SeqCst)
+    }
+
+    fn answer(&self, status: u16, body: &str, cache_control: Option<&str>) -> Response<Bytes> {
+        let mut page = Response::builder().status(status);
+        if let Some(raw) = cache_control {
+            page = page.header(header::CACHE_CONTROL, raw);
+        }
+        page.body(Bytes::from(body.to_owned())).expect("a document")
+    }
+}
+
+impl Default for StubHttp {
+    fn default() -> Self {
+        Self {
+            documents: Arc::new(Mutex::new(Vec::new())),
+            // A public address (example.com's), so the guard lets a fetch
+            // through unless a test points the name somewhere it must not.
+            dns: Arc::new(Mutex::new(IpAddr::from([93, 184, 216, 34]))),
+            fetches: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl HttpClient for StubHttp {
+    async fn send(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
+        let uri = request.uri().to_string();
+        if uri.starts_with("https://cloudflare-dns.com/dns-query") {
+            // One A record for the name asked about, holding the address the
+            // test scripted; the AAAA answer comes back empty, which the
+            // guard accepts — one public address is enough.
+            let body = json!({
+                "Status": 0,
+                "Answer": [
+                    {
+                        "name": param(&uri, "name").unwrap_or_default(),
+                        "type": 1,
+                        "TTL": 60,
+                        "data": self.dns.lock().expect("the resolver").to_string(),
+                    }
+                ],
+            })
+            .to_string();
+            return Ok(self.answer(200, &body, None));
+        }
+        let served = self
+            .documents
+            .lock()
+            .expect("the documents")
+            .iter()
+            .find(|(at, ..)| *at == uri)
+            .cloned()
+            .unwrap_or((uri, 404, String::new(), None));
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        Ok(self.answer(served.1, &served.2, served.3.as_deref()))
+    }
+}
+
+/// A kit that fetches documents through `http`, with the always-allowing
+/// limiter every other kit carries.
+async fn cimd_kit(http: &StubHttp) -> Kit {
+    support::signed_in_with(
+        Some(Arc::new(http.clone())),
+        Some(Arc::new(FakeRateLimiter::always_allow())),
+    )
+    .await
+}
+
+/// The token exchange naming a document client by its URL client_id.
+async fn redeem_cimd(kit: &Kit, code: &str, redirect: &str) -> support::Res {
+    post_form(
+        kit,
+        "/v1/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}\
+             &client_id={}&code_verifier={VERIFIER}",
+            enc(redirect),
+            enc(CIMD_ID)
+        ),
+        &Caller::Anonymous,
+    )
+    .await
+}
+
+/// The server metadata says a client_id URL is supported — and keeps saying
+/// registration is, so both ways of being a client stand beside each other.
+#[pollster::test]
+async fn the_metadata_advertises_document_clients_and_the_iss_parameter() {
+    let kit = support::signed_in().await;
+    let metadata = get(
+        &kit,
+        "/.well-known/oauth-authorization-server",
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(metadata.status, StatusCode::OK, "{}", metadata.text());
+    let body = metadata.json();
+    assert_eq!(body["client_id_metadata_document_supported"], json!(true));
+    assert_eq!(
+        body["authorization_response_iss_parameter_supported"],
+        json!(true)
+    );
+    assert_eq!(
+        body["registration_endpoint"],
+        json!(format!("{API_BASE}/v1/oauth/register"))
+    );
+}
+
+/// The whole grant over a document client: the document is fetched and
+/// validated, the consent names the app (verified, ChatGPT's redirect), the
+/// code is exchanged and renewed with the URL client_id, and the cached row
+/// carries the expiry the cache is served from.
+#[pollster::test]
+async fn a_document_client_connects_without_registering() {
+    let stub = StubHttp::serving(
+        CIMD_ID,
+        &cimd_document(CIMD_ID, CIMD_NAME, &[CIMD_REDIRECT]),
+    );
+    let kit = cimd_kit(&stub).await;
+
+    let shown = get(&kit, &cimd_path(CIMD_ID, CIMD_REDIRECT), &kit.owner()).await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
+    let page = shown.text();
+    assert!(
+        page.contains(CIMD_NAME),
+        "the document names the app: {page}"
+    );
+    assert!(page.contains("chatgpt.com"), "{page}");
+    assert!(!page.contains("Unverified app"), "{page}");
+    assert_eq!(stub.fetches(), 1, "one authorization, one fetch");
+
+    // The approval resolves the client again from the cached row: no second
+    // fetch, and the code is issued to the redirect the document named.
+    let form = format!(
+        "request={}&decision=approve&workspace_id={WORKSPACE}",
+        enc(&consent_request(&page))
+    );
+    let approved = post_form(&kit, "/v1/oauth/authorize", &form, &kit.owner()).await;
+    assert_eq!(
+        approved.status,
+        StatusCode::SEE_OTHER,
+        "{}",
+        approved.text()
+    );
+    let location = approved.location().expect("the approval redirects");
+    assert!(location.starts_with(CIMD_REDIRECT), "{location}");
+    let code = param(&location, "code").expect("the redirect carries the code");
+
+    let granted = redeem_cimd(&kit, &code, CIMD_REDIRECT).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+    let body = granted.json();
+    let access = body["access_token"].as_str().unwrap().to_owned();
+    let refresh = body["refresh_token"].as_str().unwrap().to_owned();
+
+    // The connector label follows the redirect the document named.
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    let row = listed.json()["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["prefix"] == json!(prefix_of(&access)))
+        .expect("listed")
+        .clone();
+    assert_eq!(
+        row["name"],
+        json!(format!("ChatGPT connector · {CIMD_NAME}"))
+    );
+
+    // A renewal names the URL client_id too; the token endpoint reads the
+    // stored row and never fetches.
+    let rotated = post_form(
+        &kit,
+        "/v1/oauth/token",
+        &format!(
+            "grant_type=refresh_token&refresh_token={refresh}&client_id={}",
+            enc(CIMD_ID)
+        ),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.text());
+    assert_eq!(stub.fetches(), 1, "the token endpoint never fetches");
+
+    // The client lives as a row keyed by its URL, with an expiry set — the
+    // cache every later authorization is served from.
+    let cached = kit
+        .harness
+        .db
+        .query(&Statement::with_values(
+            "SELECT 1 FROM oauth_clients WHERE client_id = ? AND metadata_expires_at IS NOT NULL",
+            vec![support::text(CIMD_ID)],
+        ))
+        .await
+        .expect("the cached client reads");
+    assert_eq!(cached.rows.len(), 1, "the document is cached under its URL");
+}
+
+/// A document client that never registered spends no registration: the
+/// dynamic registration this crate has always had keeps working beside it.
+#[pollster::test]
+async fn registration_keeps_working_beside_document_clients() {
+    let kit = cimd_kit(&StubHttp::serving(
+        CIMD_ID,
+        &cimd_document(CIMD_ID, CIMD_NAME, &[CIMD_REDIRECT]),
+    ))
+    .await;
+    let client_id = register(&kit).await;
+    let code = approve(&kit, &client_id, &kit.owner()).await;
+    let granted = redeem(&kit, &code, &client_id, VERIFIER).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+}
+
+/// A client_id URL whose host the server must not reach — a private or
+/// link-local or loopback address, an internal or single-label name, or a
+/// name that resolves into a private range — is refused with the
+/// unknown-client page, and the document is never fetched.
+#[pollster::test]
+async fn a_document_host_the_server_must_not_reach_is_never_fetched() {
+    let stub = StubHttp::serving(
+        CIMD_ID,
+        &cimd_document(CIMD_ID, CIMD_NAME, &[CIMD_REDIRECT]),
+    );
+    let kit = cimd_kit(&stub).await;
+    for refused in [
+        "https://10.0.0.1/client.json",
+        "https://169.254.169.254/client.json",
+        "https://127.0.0.1/client.json",
+        "https://localhost/client.json",
+        "https://docs.internal/client.json",
+        "https://intranet/client.json",
+        "https://cimd.example/../client.json",
+    ] {
+        let answer = get(&kit, &cimd_path(refused, CIMD_REDIRECT), &kit.owner()).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::BAD_REQUEST,
+            "{refused}: {}",
+            answer.text()
+        );
+        assert!(answer.location().is_none(), "{refused}: never a redirect");
+    }
+    // A name that resolves into a private range is refused the same way,
+    // before any document is fetched — the DNS check is not decorative.
+    stub.resolving_to(IpAddr::from([10, 0, 0, 7]));
+    let answer = get(&kit, &cimd_path(CIMD_ID, CIMD_REDIRECT), &kit.owner()).await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.text());
+    assert_eq!(
+        stub.fetches(),
+        0,
+        "no document was fetched from any of them"
+    );
+}
+
+/// A document that breaks a rule — unreachable, a redirect, oversized,
+/// another client's, or declaring a shared secret — gets the unknown-client
+/// page, and nothing of it is ever cached.
+#[pollster::test]
+async fn a_document_that_breaks_a_rule_is_refused_and_never_cached() {
+    let cases: Vec<(&str, StubHttp)> = vec![
+        (
+            "a 404",
+            StubHttp::default().with_document(CIMD_ID, 404, "gone", None),
+        ),
+        (
+            "a redirect",
+            StubHttp::default().with_document(CIMD_ID, 302, "{}", None),
+        ),
+        (
+            "an oversize body",
+            StubHttp::default().with_document(
+                CIMD_ID,
+                200,
+                &format!(
+                    "{{\"client_id\": \"{CIMD_ID}\", \"padding\": \"{}\"}}",
+                    "x".repeat(6 * 1024)
+                ),
+                None,
+            ),
+        ),
+        (
+            "another client's document",
+            StubHttp::serving(
+                CIMD_ID,
+                &cimd_document(
+                    "https://other.example/client.json",
+                    CIMD_NAME,
+                    &[CIMD_REDIRECT],
+                ),
+            ),
+        ),
+        (
+            "a shared-secret client",
+            StubHttp::serving(
+                CIMD_ID,
+                &format!(
+                    "{{\"client_id\": \"{CIMD_ID}\", \"client_name\": \"{CIMD_NAME}\", \
+                     \"redirect_uris\": [\"{CIMD_REDIRECT}\"], \
+                     \"token_endpoint_auth_method\": \"client_secret_basic\"}}"
+                ),
+            ),
+        ),
+    ];
+    for (why, stub) in cases {
+        let kit = cimd_kit(&stub).await;
+        let answer = get(&kit, &cimd_path(CIMD_ID, CIMD_REDIRECT), &kit.owner()).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::BAD_REQUEST,
+            "{why}: {}",
+            answer.text()
+        );
+        assert!(answer.location().is_none(), "{why}: never a redirect");
+        assert_eq!(
+            rows(&kit, "oauth_clients").await,
+            0,
+            "{why}: a refused document is never cached"
+        );
+    }
+}
+
+/// A redirect the document does not name is refused with a page, never a
+/// redirect: the fetch and validation vouch for nothing else.
+#[pollster::test]
+async fn a_redirect_the_document_does_not_name_gets_a_page_never_a_redirect() {
+    let kit = cimd_kit(&StubHttp::serving(
+        CIMD_ID,
+        &cimd_document(CIMD_ID, CIMD_NAME, &[CIMD_REDIRECT]),
+    ))
+    .await;
+    let elsewhere = get(
+        &kit,
+        &cimd_path(CIMD_ID, "https://chatgpt.com/not-the-registered-one"),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(
+        elsewhere.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        elsewhere.text()
+    );
+    assert!(elsewhere.location().is_none());
+}
+
+/// A cached document is served until its expiry passes, then fetched again —
+/// and what the new document says is what is served, both the name and the
+/// redirect set.
+#[pollster::test]
+async fn a_cached_document_is_served_until_it_expires_then_fetched_again() {
+    let stub = StubHttp::serving(
+        CIMD_ID,
+        &cimd_document(CIMD_ID, "First name", &[CIMD_REDIRECT]),
+    );
+    let kit = cimd_kit(&stub).await;
+
+    let first = get(&kit, &cimd_path(CIMD_ID, CIMD_REDIRECT), &kit.owner()).await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.text());
+    assert!(first.text().contains("First name"));
+    assert_eq!(stub.fetches(), 1);
+
+    // Within the cache window nothing is fetched again.
+    let again = get(&kit, &cimd_path(CIMD_ID, CIMD_REDIRECT), &kit.owner()).await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.text());
+    assert_eq!(stub.fetches(), 1, "a cache hit costs no fetch");
+
+    // Past the window the document is fetched again, and the new document —
+    // a new name, a new redirect — is what the consent is built from.
+    kit.harness
+        .db
+        .execute(&Statement::with_values(
+            "UPDATE oauth_clients SET metadata_expires_at = '2020-01-01T00:00:00Z' \
+             WHERE client_id = ?",
+            vec![support::text(CIMD_ID)],
+        ))
+        .await
+        .expect("the cached client ages");
+    let moved = "https://chatgpt.com/connector/oauth/callback-2";
+    stub.replace(CIMD_ID, &cimd_document(CIMD_ID, "Second name", &[moved]));
+    let refreshed = get(&kit, &cimd_path(CIMD_ID, moved), &kit.owner()).await;
+    assert_eq!(refreshed.status, StatusCode::OK, "{}", refreshed.text());
+    assert!(
+        refreshed.text().contains("Second name"),
+        "the refetch is served"
+    );
+    assert_eq!(stub.fetches(), 2);
+
+    // The old redirect left with the old document: a page, not a redirect.
+    let stale = get(&kit, &cimd_path(CIMD_ID, CIMD_REDIRECT), &kit.owner()).await;
+    assert_eq!(stale.status, StatusCode::BAD_REQUEST, "{}", stale.text());
+    assert!(stale.location().is_none());
+}
+
+/// Every document fetch — first or refresh — is rate-limited per calling
+/// address, and the limit fails closed: no limiter bound or no `HttpClient`
+/// port means the client_id is refused outright, at a cost of no fetch, while
+/// everything else (registration included) keeps working.
+#[pollster::test]
+async fn document_fetches_are_rate_limited_and_fail_closed_without_a_limiter() {
+    let stub = StubHttp::serving(
+        CIMD_ID,
+        &cimd_document(CIMD_ID, CIMD_NAME, &[CIMD_REDIRECT]),
+    );
+
+    // No limiter bound: refuse, and never fetch.
+    let bare = support::signed_in_with(Some(Arc::new(stub.clone())), None).await;
+    let answer = get(&bare, &cimd_path(CIMD_ID, CIMD_REDIRECT), &bare.owner()).await;
+    assert_eq!(
+        answer.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        answer.text()
+    );
+    assert!(
+        answer.text().contains("cannot be checked"),
+        "{}",
+        answer.text()
+    );
+    assert_eq!(stub.fetches(), 0, "nothing was fetched");
+
+    // No `HttpClient` port: the same refusal, in a deployment that has a
+    // limiter but no egress — where registration still works.
+    let grounded = support::signed_in().await;
+    let answer = get(
+        &grounded,
+        &cimd_path(CIMD_ID, CIMD_REDIRECT),
+        &grounded.owner(),
+    )
+    .await;
+    assert_eq!(
+        answer.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        answer.text()
+    );
+    assert!(
+        register(&grounded).await.starts_with("lbc_"),
+        "registration is unaffected"
+    );
+
+    // A limiter that says no: the 429 every other limited route answers.
+    let denied = Decision {
+        ok: false,
+        retry_after: Some(std::time::Duration::from_secs(60)),
+        quota: None,
+    };
+    let throttled = support::signed_in_with(
+        Some(Arc::new(stub.clone())),
+        Some(Arc::new(FakeRateLimiter::scripted(
+            vec![denied.clone()],
+            denied,
+        ))),
+    )
+    .await;
+    let answer = get(
+        &throttled,
+        &cimd_path(CIMD_ID, CIMD_REDIRECT),
+        &throttled.owner(),
+    )
+    .await;
+    assert_eq!(
+        answer.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{}",
+        answer.text()
+    );
+    assert_eq!(stub.fetches(), 0, "a denied fetch is never made");
+}
+
+// ---------------------------------------------------------------------------
+// The predefined Actions client (issue #234): a confidential client
+// configured out of band, whose Custom GPT Actions send no PKCE and
+// authenticate by a client secret instead.
+
+/// The id a test configures — deliberately neither an `lbc_` one nor a URL,
+/// the two shapes this server generates itself, so it can be no registered
+/// client's.
+const ACTIONS_ID: &str = "livingbrain-gpt-actions";
+const ACTIONS_SECRET: &str = "a secret the operator set";
+/// A custom GPT's Actions callback, on a host Living Brain recognises.
+const ACTIONS_REDIRECT: &str = "https://chat.openai.com/aip/g-9f8e7d/oauth/callback";
+/// A second callback the operator may list beside the first.
+const ACTIONS_OTHER_REDIRECT: &str = "https://chatgpt.com/aip/g-9f8e7d/oauth/callback";
+
+/// The kit with the Actions client configured, plus any extra config pairs a
+/// test varies.
+async fn actions_kit(extra: &[(&str, &str)]) -> Kit {
+    let mut pairs: Vec<(&str, String)> = vec![
+        ("OAUTH_ACTIONS_CLIENT_ID", ACTIONS_ID.to_owned()),
+        (
+            "OAUTH_ACTIONS_CLIENT_SECRET_SHA256",
+            sha256_hex(ACTIONS_SECRET),
+        ),
+        (
+            "OAUTH_ACTIONS_REDIRECT_URIS",
+            format!("{ACTIONS_REDIRECT} {ACTIONS_OTHER_REDIRECT}"),
+        ),
+    ];
+    pairs.extend(extra.iter().map(|(key, value)| (*key, (*value).to_owned())));
+    let pairs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    support::signed_in_with_config(&pairs).await
+}
+
+/// The authorize request a GPT's Actions send: no code_challenge, which is
+/// the point of the confidential client. A redirect is named by choice.
+fn actions_authorize_path(redirect: &str) -> String {
+    format!(
+        "/v1/oauth/authorize?response_type=code&client_id={ACTIONS_ID}&redirect_uri={}&state=s1",
+        enc(redirect)
+    )
+}
+
+/// The approval of an Actions redirect, which yields the code.
+async fn approve_actions(kit: &Kit, redirect: &str) -> String {
+    let shown = get(kit, &actions_authorize_path(redirect), &kit.owner()).await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
+    assert!(!shown.text().contains("Unverified app"), "{}", shown.text());
+    let form = format!(
+        "request={}&decision=approve&workspace_id={WORKSPACE}",
+        enc(&consent_request(&shown.text()))
+    );
+    let approved = post_form(kit, "/v1/oauth/authorize", &form, &kit.owner()).await;
+    assert_eq!(
+        approved.status,
+        StatusCode::SEE_OTHER,
+        "{}",
+        approved.text()
+    );
+    param(
+        &approved.location().expect("the approval redirects"),
+        "code",
+    )
+    .expect("the redirect carries the code")
+}
+
+/// Standard base64 with padding — the test's only encoder need, for the
+/// Basic credentials `client_secret_basic` sends (RFC 6749 §2.3.1).
+fn basic_header(id: &str, secret: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let raw = format!("{id}:{secret}");
+    let mut out = String::from("Basic ");
+    for chunk in raw.as_bytes().chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for shift in [18, 12, 6, 0] {
+            out.push(char::from(ALPHABET[(n >> shift) as usize & 63]));
+        }
+    }
+    match raw.len() % 3 {
+        1 => {
+            out.truncate(out.len() - 2);
+            out.push_str("==");
+        }
+        2 => {
+            out.truncate(out.len() - 1);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+/// A token request naming the Actions client, with whichever client
+/// authentication the caller picks: the secret in the form
+/// (`client_secret_post`), in the Authorization header
+/// (`client_secret_basic`), or neither.
+async fn actions_token(
+    kit: &Kit,
+    form: &str,
+    form_secret: Option<&str>,
+    header_secret: Option<&str>,
+) -> support::Res {
+    let mut form = form.to_owned();
+    if let Some(secret) = form_secret {
+        form.push_str(&format!("&client_secret={}", enc(secret)));
+    }
+    match header_secret {
+        Some(secret) => {
+            let header = basic_header(ACTIONS_ID, secret);
+            support::post_form_authorized(kit, "/v1/oauth/token", &form, &header).await
+        }
+        None => post_form(kit, "/v1/oauth/token", &form, &Caller::Anonymous).await,
+    }
+}
+
+/// One authorization-code exchange for the Actions client.
+async fn actions_exchange(
+    kit: &Kit,
+    code: &str,
+    form_secret: Option<&str>,
+    header_secret: Option<&str>,
+) -> support::Res {
+    actions_token(
+        kit,
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={ACTIONS_ID}",
+            enc(ACTIONS_REDIRECT)
+        ),
+        form_secret,
+        header_secret,
+    )
+    .await
+}
+
+/// One renewal for the Actions client.
+async fn actions_refresh(
+    kit: &Kit,
+    refresh: &str,
+    form_secret: Option<&str>,
+    header_secret: Option<&str>,
+) -> support::Res {
+    actions_token(
+        kit,
+        &format!("grant_type=refresh_token&refresh_token={refresh}&client_id={ACTIONS_ID}"),
+        form_secret,
+        header_secret,
+    )
+    .await
+}
+
+/// The whole grant for the predefined client, which no registration and no
+/// PKCE ever touched: the consent, the code, and an actions token minted by
+/// `client_secret_post` — read-only, never an admin, refused by the MCP
+/// endpoint and the general resolver, listed under the ChatGPT label with
+/// the configured default name.
+#[pollster::test]
+async fn the_actions_client_connects_without_pkce_by_client_secret_post() {
+    let kit = actions_kit(&[]).await;
+    let code = approve_actions(&kit, ACTIONS_REDIRECT).await;
+
+    let granted = actions_exchange(&kit, &code, Some(ACTIONS_SECRET), None).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+    let body = granted.json();
+    let access = body["access_token"].as_str().unwrap().to_owned();
+    assert!(access.starts_with("lbp_"), "{access}");
+    assert!(
+        body["refresh_token"].as_str().unwrap().starts_with("lbr_"),
+        "{}",
+        granted.text()
+    );
+    assert_eq!(
+        body["scope"],
+        json!(format!("read:shared read:user:{OWNER}")),
+        "the response names the read-only subset it minted"
+    );
+
+    // An actions token, exactly as the four REST routes resolve it — and as
+    // every other surface refuses it.
+    let headers = Caller::Token(access.clone()).headers();
+    let Ok(Authenticated::Member(member)) = authenticate_actions(&kit.ports, &headers).await else {
+        panic!("the actions surface accepts the token");
+    };
+    assert_eq!(member.user_id, OWNER);
+    assert_eq!(member.workspace_id, WORKSPACE);
+    assert!(!member.is_admin, "an actions token is never an admin");
+    assert_eq!(
+        member.scopes,
+        Some(vec!["read:shared".to_owned(), format!("read:user:{OWNER}")])
+    );
+    assert!(
+        authenticate_mcp(&kit.ports, &headers).await.is_err(),
+        "the MCP endpoint refuses it"
+    );
+    assert!(
+        authenticate(&kit.ports, &headers).await.is_err(),
+        "and so does every surface but the four routes"
+    );
+
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    let row = listed.json()["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|token| token["prefix"] == json!(prefix_of(&access)))
+        .expect("the connection is listed")
+        .clone();
+    assert_eq!(row["name"], json!("ChatGPT connector · Living Brain GPT"));
+    assert_eq!(row["connector"], json!(true));
+}
+
+/// `client_secret_basic` is accepted beside the form secret, a wrong or
+/// missing secret is the RFC 6749 §5.2 401 (with `WWW-Authenticate` when the
+/// attempt came by the header), and neither failed guess spends the code.
+#[pollster::test]
+async fn the_actions_client_authenticates_by_basic_and_a_wrong_secret_is_a_401() {
+    let kit = actions_kit(&[("OAUTH_ACTIONS_CLIENT_NAME", "Team brain")]).await;
+    let code = approve_actions(&kit, ACTIONS_REDIRECT).await;
+
+    let missing = actions_exchange(&kit, &code, None, None).await;
+    assert_eq!(
+        missing.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        missing.text()
+    );
+    assert_eq!(error_of(&missing), "invalid_client");
+
+    let wrong = actions_exchange(&kit, &code, Some("not the secret"), None).await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED, "{}", wrong.text());
+    assert_eq!(error_of(&wrong), "invalid_client");
+    assert!(
+        wrong.headers.get("www-authenticate").is_none(),
+        "no Basic attempt, no Basic challenge"
+    );
+
+    let wrong_basic = actions_exchange(&kit, &code, None, Some("not the secret")).await;
+    assert_eq!(error_of(&wrong_basic), "invalid_client");
+    assert_eq!(
+        wrong_basic
+            .headers
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some("Basic realm=\"livingbrain\", charset=\"UTF-8\""),
+        "{}",
+        wrong_basic.text()
+    );
+
+    // The code survived every failed guess: authentication precedes it.
+    let granted = actions_exchange(&kit, &code, None, Some(ACTIONS_SECRET)).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+    let access = granted.json()["access_token"].as_str().unwrap().to_owned();
+    let refresh = granted.json()["refresh_token"].as_str().unwrap().to_owned();
+    assert!(
+        authenticate_actions(&kit.ports, &Caller::Token(access.clone()).headers())
+            .await
+            .is_ok()
+    );
+
+    // The configured name carries into the label.
+    let listed = get(&kit, "/v1/tokens", &kit.owner()).await;
+    let row = listed.json()["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|token| token["prefix"] == json!(prefix_of(&access)))
+        .expect("listed")
+        .clone();
+    assert_eq!(row["name"], json!("ChatGPT connector · Team brain"));
+
+    // A renewal may come by Basic as well.
+    let rotated = actions_refresh(&kit, &refresh, None, Some(ACTIONS_SECRET)).await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.text());
+}
+
+/// A renewal for the confidential client needs the secret, and rotates
+/// within the `actions` audience: the successor is an actions token, and the
+/// access token it replaced is refused.
+#[pollster::test]
+async fn an_actions_renewal_requires_the_secret_and_rotates_within_the_audience() {
+    let kit = actions_kit(&[]).await;
+    let code = approve_actions(&kit, ACTIONS_REDIRECT).await;
+    let granted = actions_exchange(&kit, &code, Some(ACTIONS_SECRET), None).await;
+    let body = granted.json();
+    let access = body["access_token"].as_str().unwrap().to_owned();
+    let refresh = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let bare = actions_refresh(&kit, &refresh, None, None).await;
+    assert_eq!(error_of(&bare), "invalid_client", "{}", bare.text());
+    let wrong = actions_refresh(&kit, &refresh, Some("nope"), None).await;
+    assert_eq!(error_of(&wrong), "invalid_client");
+
+    let rotated = actions_refresh(&kit, &refresh, Some(ACTIONS_SECRET), None).await;
+    assert_eq!(rotated.status, StatusCode::OK, "{}", rotated.text());
+    let body = rotated.json();
+    let next_access = body["access_token"].as_str().unwrap().to_owned();
+    let next_refresh = body["refresh_token"].as_str().unwrap().to_owned();
+    assert_ne!(next_access, access);
+    assert_ne!(next_refresh, refresh);
+    assert_eq!(
+        body["scope"],
+        json!(format!("read:shared read:user:{OWNER}")),
+        "the successor keeps the read-only subset"
+    );
+
+    assert!(
+        authenticate_actions(&kit.ports, &Caller::Token(next_access.clone()).headers())
+            .await
+            .is_ok(),
+        "the successor is an actions token"
+    );
+    assert!(
+        authenticate_mcp(&kit.ports, &Caller::Token(next_access.clone()).headers())
+            .await
+            .is_err(),
+        "within the actions audience alone"
+    );
+    assert!(
+        authenticate_actions(&kit.ports, &Caller::Token(access.clone()).headers())
+            .await
+            .is_err(),
+        "the token rotation retired is refused"
+    );
+
+    // The chain still ends as any connection's does: a replayed spent
+    // refresh token revokes the family.
+    let replay = actions_refresh(&kit, &refresh, Some(ACTIONS_SECRET), None).await;
+    assert_eq!(error_of(&replay), "invalid_grant", "{}", replay.text());
+    assert!(
+        authenticate_actions(&kit.ports, &Caller::Token(next_access).headers())
+            .await
+            .is_err(),
+        "the replay ended the connection"
+    );
+}
+
+/// A code the Actions client asked for with a challenge is bound by it:
+/// redemption without a verifier, or with the wrong one, is refused — the
+/// secret alone does not open a code PKCE sealed.
+#[pollster::test]
+async fn a_challenge_the_actions_client_sends_is_enforced_at_redemption() {
+    let kit = actions_kit(&[]).await;
+    let path = format!(
+        "{}&code_challenge={CHALLENGE}&code_challenge_method=S256",
+        actions_authorize_path(ACTIONS_REDIRECT)
+    );
+
+    // `plain` is refused exactly as a public client's request is.
+    let plain = get(
+        &kit,
+        &format!(
+            "/v1/oauth/authorize?response_type=code&client_id={ACTIONS_ID}&redirect_uri={}\
+             &code_challenge={CHALLENGE}&code_challenge_method=plain&state=s1",
+            enc(ACTIONS_REDIRECT)
+        ),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(plain.status, StatusCode::FOUND, "{}", plain.text());
+    let location = plain.location().expect("redirected back");
+    assert_eq!(
+        param(&location, "error").as_deref(),
+        Some("invalid_request"),
+        "{location}"
+    );
+
+    let shown = get(&kit, &path, &kit.owner()).await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.text());
+    let form = format!(
+        "request={}&decision=approve&workspace_id={WORKSPACE}",
+        enc(&consent_request(&shown.text()))
+    );
+    let approved = post_form(&kit, "/v1/oauth/authorize", &form, &kit.owner()).await;
+    let code = param(&approved.location().unwrap(), "code").unwrap();
+
+    let bare = actions_exchange(&kit, &code, Some(ACTIONS_SECRET), None).await;
+    assert_eq!(error_of(&bare), "invalid_grant", "{}", bare.text());
+    assert!(
+        bare.text().contains("code does not match"),
+        "{}",
+        bare.text()
+    );
+
+    // The right verifier redeems a fresh code.
+    let shown = get(&kit, &path, &kit.owner()).await;
+    let form = format!(
+        "request={}&decision=approve&workspace_id={WORKSPACE}",
+        enc(&consent_request(&shown.text()))
+    );
+    let approved = post_form(&kit, "/v1/oauth/authorize", &form, &kit.owner()).await;
+    let code = param(&approved.location().unwrap(), "code").unwrap();
+    let granted = actions_token(
+        &kit,
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={ACTIONS_ID}\
+             &code_verifier={VERIFIER}",
+            enc(ACTIONS_REDIRECT)
+        ),
+        Some(ACTIONS_SECRET),
+        None,
+    )
+    .await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+}
+
+/// The public clients keep every rule the confidential client is excused
+/// from: PKCE stays mandatory, and a secret presented for one is refused —
+/// before its code is spent.
+#[pollster::test]
+async fn a_public_client_still_needs_pkce_and_may_not_present_a_secret() {
+    let kit = actions_kit(&[]).await;
+    let client_id = register(&kit).await;
+
+    let no_pkce = get(
+        &kit,
+        &format!(
+            "/v1/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}\
+             &state=s1",
+            enc(REDIRECT)
+        ),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(no_pkce.status, StatusCode::FOUND, "{}", no_pkce.text());
+    let location = no_pkce.location().expect("redirected back");
+    assert_eq!(
+        param(&location, "error").as_deref(),
+        Some("invalid_request"),
+        "{location}"
+    );
+    assert!(param(&location, "code").is_none(), "{location}");
+
+    // A secret in the form, or by Basic — neither reaches the code.
+    let code = approve(&kit, &client_id, &kit.owner()).await;
+    let via_form = post_form(
+        &kit,
+        "/v1/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}\
+             &code_verifier={VERIFIER}&client_secret=whatever",
+            enc(REDIRECT)
+        ),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(
+        via_form.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        via_form.text()
+    );
+    assert_eq!(error_of(&via_form), "invalid_client");
+
+    let via_basic = support::post_form_authorized(
+        &kit,
+        "/v1/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}\
+             &code_verifier={VERIFIER}",
+            enc(REDIRECT)
+        ),
+        &basic_header(&client_id, "whatever"),
+    )
+    .await;
+    assert_eq!(
+        error_of(&via_basic),
+        "invalid_client",
+        "{}",
+        via_basic.text()
+    );
+    assert_eq!(
+        via_basic
+            .headers
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some("Basic realm=\"livingbrain\", charset=\"UTF-8\"")
+    );
+
+    // The refused attempts spent nothing: the plain exchange still works.
+    let granted = redeem(&kit, &code, &client_id, VERIFIER).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.text());
+}
+
+/// A code belongs to the client it was issued to: the Actions client's code
+/// is not a registered app's, and a registered app's code does not open by
+/// the Actions secret.
+#[pollster::test]
+async fn codes_never_cross_between_the_actions_client_and_registered_ones() {
+    let kit = actions_kit(&[]).await;
+    let client_id = register(&kit).await;
+
+    let code = approve_actions(&kit, ACTIONS_REDIRECT).await;
+    let as_public = post_form(
+        &kit,
+        "/v1/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}\
+             &code_verifier={VERIFIER}",
+            enc(ACTIONS_REDIRECT)
+        ),
+        &Caller::Anonymous,
+    )
+    .await;
+    assert_eq!(
+        error_of(&as_public),
+        "invalid_grant",
+        "{}",
+        as_public.text()
+    );
+
+    let code = approve(&kit, &client_id, &kit.owner()).await;
+    let as_actions = actions_token(
+        &kit,
+        &format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={ACTIONS_ID}\
+             &code_verifier={VERIFIER}",
+            enc(REDIRECT)
+        ),
+        Some(ACTIONS_SECRET),
+        None,
+    )
+    .await;
+    assert_eq!(
+        error_of(&as_actions),
+        "invalid_grant",
+        "the secret authenticates the client, not the code: {}",
+        as_actions.text()
+    );
+}
+
+/// A redirect the operator did not list gets the same page an unregistered
+/// redirect always gets: no code, no redirect, nothing sent.
+#[pollster::test]
+async fn a_redirect_the_actions_client_does_not_list_gets_a_page_never_a_redirect() {
+    let kit = actions_kit(&[]).await;
+    let elsewhere = get(
+        &kit,
+        &actions_authorize_path("https://chatgpt.com/connector_platform_oauth_redirect"),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(
+        elsewhere.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        elsewhere.text()
+    );
+    assert!(elsewhere.location().is_none());
+}
+
+/// None of the three keys set leaves the feature off: the id is simply
+/// another unknown client, at both endpoints.
+#[pollster::test]
+async fn the_actions_client_is_off_when_unconfigured() {
+    let kit = support::signed_in().await;
+    let answer = get(
+        &kit,
+        &actions_authorize_path(ACTIONS_REDIRECT),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.text());
+    assert!(
+        answer.text().contains("not registered"),
+        "{}",
+        answer.text()
+    );
+    assert!(answer.location().is_none());
+
+    let token = actions_exchange(&kit, "any-code", Some(ACTIONS_SECRET), None).await;
+    assert_eq!(error_of(&token), "invalid_client", "{}", token.text());
+}
+
+/// A partial or malformed configuration fails closed: `validate_config`
+/// names what is wrong, and the routes that meet the configured id refuse
+/// with a clear page rather than approving under half the checks.
+#[pollster::test]
+async fn a_partial_or_malformed_actions_config_fails_closed() {
+    let working = |pairs: &[(&str, &str)]| MapConfig::from_pairs(pairs.to_vec());
+    let hash = sha256_hex(ACTIONS_SECRET);
+    let upper_hash = hash.to_uppercase();
+    let (id, hash, redirects) = (
+        ("OAUTH_ACTIONS_CLIENT_ID", ACTIONS_ID),
+        ("OAUTH_ACTIONS_CLIENT_SECRET_SHA256", hash.as_str()),
+        ("OAUTH_ACTIONS_REDIRECT_URIS", ACTIONS_REDIRECT),
+    );
+    OAuth::new()
+        .validate_config(&working(&[]))
+        .expect("unset is off, which is fine");
+    OAuth::new()
+        .validate_config(&working(&[id, hash, redirects]))
+        .expect("the three keys together make a client");
+
+    let broken = [
+        vec![id],
+        vec![hash],
+        vec![id, hash],
+        vec![("OAUTH_ACTIONS_CLIENT_ID", "lbc_someones"), hash, redirects],
+        vec![
+            (
+                "OAUTH_ACTIONS_CLIENT_ID",
+                "https://chat.example/client.json",
+            ),
+            hash,
+            redirects,
+        ],
+        vec![
+            id,
+            ("OAUTH_ACTIONS_CLIENT_SECRET_SHA256", "not-hex"),
+            redirects,
+        ],
+        vec![
+            id,
+            ("OAUTH_ACTIONS_CLIENT_SECRET_SHA256", upper_hash.as_str()),
+            redirects,
+        ],
+        vec![
+            id,
+            hash,
+            (
+                "OAUTH_ACTIONS_REDIRECT_URIS",
+                "https://ok.example/cb http://evil.example/cb",
+            ),
+        ],
+    ];
+    for pairs in &broken {
+        let error = OAuth::new()
+            .validate_config(&working(pairs))
+            .expect_err("a broken configuration is refused");
+        assert!(
+            error.to_string().contains("OAUTH_ACTIONS"),
+            "{pairs:?}: {error}"
+        );
+    }
+
+    // Over the wire, the misconfigured id answers a clear page, and the
+    // token endpoint a clear error — never a code, never a token.
+    let kit = support::signed_in_with_config(&[("OAUTH_ACTIONS_CLIENT_ID", ACTIONS_ID)]).await;
+    let answer = get(
+        &kit,
+        &actions_authorize_path(ACTIONS_REDIRECT),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(answer.text().contains("misconfigured"), "{}", answer.text());
+    assert!(answer.location().is_none());
+    let token = actions_exchange(&kit, "any-code", Some(ACTIONS_SECRET), None).await;
+    assert_eq!(token.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(token.text().contains("misconfigured"), "{}", token.text());
 }

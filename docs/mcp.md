@@ -1,6 +1,6 @@
 # MCP
 
-One endpoint, four tools, and every read scoped to the person asking.
+One endpoint, seven tools, and every read scoped to the person asking.
 
 **`https://mcp.livingbrain.wiki/v1/pages/mcp`** — Streamable HTTP, POST only,
 no trailing slash.
@@ -33,15 +33,18 @@ custom connector, with no token to copy:
    the one you want from the menu first.
 4. Claude returns to the conversation with the connector connected.
 
-An app whose address Living Brain does not recognise as Claude is shown on the
-Approve page as **unverified**, with its address in full, and it can only reach
-the MCP tools. A connected app can never change settings, manage tokens or
-reach the write routes.
+An app whose address Living Brain does not recognise as Claude or ChatGPT is
+shown on the Approve page as **unverified**, with its address in full, and it
+can only reach the MCP tools. A connected app can never change settings,
+manage tokens or reach the write routes.
 
 The connection is listed in **Settings → API tokens** as
-`Claude connector · <name>` (or `Connected app · <name>` when unverified). Revoking it there disconnects Claude at once: its
+`Claude connector · <name>` or `ChatGPT connector · <name>` (or
+`Connected app · <name>` when unverified). Revoking it there disconnects Claude at once: its
 access and its renewal both stop. It also renews itself while Claude uses it,
 and ends after 30 days without use.
+
+ChatGPT connects the same endpoint the same way: [chatgpt.md](chatgpt.md).
 
 ## Tools
 
@@ -52,6 +55,8 @@ and ends after 30 days without use.
 | `brain_context_for(repo, task)` | a brief: the pages that mention the task, full text, cited |
 | `brain_note(text, title?, facts?)` | writes to your own private memory, redacted first; `facts` are temporal facts the note states ([format](temporal-facts.md)) |
 | `brain_facts(subject?, attribute?, as_of?)` | what is true about an entity now, or as of a date, with the history of earlier values ([format](temporal-facts.md)) |
+| `search(query)` | `brain_search`'s read in the shape ChatGPT's deep research expects: `{results: [{id, title, url}]}` rows to hand to `fetch` |
+| `fetch(id)` | one page's Markdown by a `search` result's `<scope>:<slug>` id: `{id, title, text, url, metadata}` |
 
 Every page a tool quotes comes back as a numbered citation — title, `scope/slug`
 ref and URL — and `initialize` tells the model to cite the `[n]` markers.
@@ -85,7 +90,7 @@ A client that reads the metadata finds both halves itself:
 authorization server, and `/.well-known/oauth-authorization-server` names the
 device and token endpoints. The 401's RFC 9728 challenge points at the first.
 
-**Not implemented yet:** the browser authorization-code + PKCE flow, with
-dynamic client registration, that `claude mcp add` uses for zero-config OAuth.
-The metadata advertises the `device_code` grant only, so a client that only
-speaks the redirect flow will not complete a login on its own.
+The browser authorization-code + PKCE flow, with dynamic client registration
+(the zero-config OAuth `claude mcp add` and the connectors above use), runs on
+this same authorization server; the metadata advertises it beside the
+`device_code` grant.

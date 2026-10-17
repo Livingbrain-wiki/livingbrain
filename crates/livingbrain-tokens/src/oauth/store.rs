@@ -31,12 +31,18 @@ pub(crate) fn hash(value: &str) -> String {
     out
 }
 
-/// A registered public client, as the grants read it.
+/// A registered public client, as the grants read it. A client whose id is
+/// the https URL of its own Client ID Metadata Document carries the expiry
+/// of the cached document in `metadata_expires_at`; a dynamically
+/// registered client has none (it never expires).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Client {
     pub(crate) client_id: String,
     pub(crate) client_name: String,
     pub(crate) redirect_uris: Vec<String>,
+    /// When the cached metadata document must be fetched again, if this row
+    /// is a document client.
+    pub(crate) metadata_expires_at: Option<String>,
 }
 
 /// An authorization code row. `used` changes after creation; everything else
@@ -137,7 +143,9 @@ impl OAuthStore {
     /// A client already registered with this exact name and redirect set, if
     /// any. Re-registering the same app returns its existing identity instead
     /// of a new row, so an app that registers again (or a retry) does not use
-    /// the day's allowance. `redirect_uris` is the sorted JSON array.
+    /// the day's allowance. `redirect_uris` is the sorted JSON array. Only
+    /// dynamically registered rows match: a document client's row belongs to
+    /// its URL, not to a registration, and is never handed back as one.
     pub(crate) async fn client_with_registration(
         &self,
         client_name: &str,
@@ -147,7 +155,7 @@ impl OAuthStore {
             .db
             .query(&Statement::with_values(
                 "SELECT client_id, client_name, redirect_uris FROM oauth_clients \
-                 WHERE client_name = ? AND redirect_uris = ?",
+                 WHERE client_name = ? AND redirect_uris = ? AND metadata_expires_at IS NULL",
                 vec![text(client_name), text(redirect_uris)],
             ))
             .await?;
@@ -160,6 +168,7 @@ impl OAuthStore {
             redirect_uris: field(row, "redirect_uris")
                 .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
                 .unwrap_or_default(),
+            metadata_expires_at: None,
         }))
     }
 
@@ -227,8 +236,8 @@ impl OAuthStore {
         let rows = self
             .db
             .query(&Statement::with_values(
-                "SELECT client_id, client_name, redirect_uris FROM oauth_clients \
-                 WHERE client_id = ?",
+                "SELECT client_id, client_name, redirect_uris, metadata_expires_at \
+                 FROM oauth_clients WHERE client_id = ?",
                 vec![text(client_id)],
             ))
             .await?;
@@ -242,7 +251,47 @@ impl OAuthStore {
             client_id: field(row, "client_id").unwrap_or_default(),
             client_name: field(row, "client_name").unwrap_or_default(),
             redirect_uris,
+            metadata_expires_at: field(row, "metadata_expires_at"),
         }))
+    }
+
+    /// Writes a Client ID Metadata Document client, or refreshes the one
+    /// already cached for that URL: a refetch updates the name, the redirect
+    /// set and the expiry, and leaves the row's creation alone (retention is
+    /// about how long an unused client lingers, not how often a used one
+    /// renews its document). The client's `metadata_expires_at` is the
+    /// document's cache expiry, so it must be set.
+    pub(crate) async fn upsert_metadata_client(
+        &self,
+        client: &Client,
+        created_at: &str,
+        ip_hash: &str,
+        unverified: bool,
+    ) -> Result<(), DbError> {
+        let uris = serde_json::to_string(&client.redirect_uris)
+            .map_err(|err| DbError::Execute(err.to_string()))?;
+        self.db
+            .execute(&Statement::with_values(
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at, \
+                     ip_hash, unverified, metadata_expires_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (client_id) DO UPDATE SET \
+                     client_name = excluded.client_name, \
+                     redirect_uris = excluded.redirect_uris, \
+                     unverified = excluded.unverified, \
+                     metadata_expires_at = excluded.metadata_expires_at",
+                vec![
+                    text(&client.client_id),
+                    text(&client.client_name),
+                    text(&uris),
+                    text(created_at),
+                    text(ip_hash),
+                    Value::BigInt(Some(i64::from(unverified))),
+                    text(client.metadata_expires_at.as_deref().unwrap_or_default()),
+                ],
+            ))
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn insert_code(

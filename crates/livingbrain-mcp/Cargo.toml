@@ -1,6 +1,6 @@
 [package]
 name = "livingbrain-mcp"
-description = "Living Brain: the remote MCP server — brain_search, brain_page, brain_context_for and brain_note, every read scoped to the asker"
+description = "Living Brain: the remote MCP server — the brain_* tools and their ChatGPT-shaped search/fetch pair, every read scoped to the asker"
 publish = false
 version.workspace = true
 edition.workspace = true

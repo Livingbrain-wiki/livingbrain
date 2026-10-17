@@ -96,7 +96,14 @@ npx wrangler secret put OWLPOST_API_KEY --env production                  # send
 npx wrangler secret put TURNSTILE_SECRET --env production                 # captcha gate; absent = joins refused, fail-closed
 npx wrangler secret put ADMIN_TOKEN --env production                      # the waitlist CSV export
 npx wrangler secret put TYPESAFE_API_KEY --env production                 # optional: Jev triage for the coding-agents compiler
+npx wrangler secret put OAUTH_ACTIONS_CLIENT_ID --env production            # the predefined Custom GPT Actions client (docs/chatgpt.md)
+npx wrangler secret put OAUTH_ACTIONS_CLIENT_SECRET_SHA256 --env production # hex SHA-256 of that client's secret; the secret itself is never stored
+npx wrangler secret put OAUTH_ACTIONS_REDIRECT_URIS --env production        # space-separated GPT OAuth callback URLs the client accepts
 ```
+
+The Actions client's display name is the optional `OAUTH_ACTIONS_CLIENT_NAME`
+var, default `Living Brain GPT`. Without those three secrets the Custom GPT
+path in [docs/chatgpt.md](chatgpt.md) is off; the connectors are not.
 
 The shared GitHub App's six secrets (`GITHUB_APP_ID`, `GITHUB_APP_SLUG`,
 `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`,

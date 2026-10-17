@@ -80,6 +80,14 @@ pub const MCP_PATH: &str = "/v1/pages/mcp";
 /// `register` and `token` hang off it, and the discovery document names them.
 pub const OAUTH_PATH: &str = "/v1/oauth";
 
+/// The audience an actions token carries (issue #234): the expiring,
+/// read-only token a ChatGPT custom GPT's Actions hold. The venture admits
+/// it on four REST routes alone — `GET /v1/search`, `GET /v1/pages/{slug}`,
+/// `GET /v1/facts` and `POST /v1/ask` — through
+/// [`authenticate_actions`]; every other surface answers it as an unknown
+/// token, exactly as each answers a connector token.
+pub const ACTIONS_AUDIENCE: &str = "actions";
+
 // ---------------------------------------------------------------------------
 // The caller
 
@@ -178,17 +186,25 @@ fn database(_error: DbError) -> AuthError {
 /// the session cookie. The bearer is checked first: a request that presents
 /// one has said what it wants to be.
 ///
-/// A connector token (issue #72, audience `mcp`) is refused here: every
-/// surface except the MCP endpoint answers it as an unknown token, so an app
-/// connected through Claude reaches nothing but the MCP tools.
+/// A token that carries an audience — a connector token (issue #72, audience
+/// `mcp`) or an actions token (issue #234, audience `actions`) — is refused
+/// here: every surface that takes no audience answers it as an unknown
+/// token, so an app connected through Claude reaches nothing but the MCP
+/// tools, and a ChatGPT GPT's Actions reach nothing but their four routes.
 pub async fn authenticate(ports: &Ports, headers: &HeaderMap) -> Result<Member, AuthError> {
-    authenticate_member(ports, headers, false).await
+    authenticate_member(ports, headers, None).await
 }
 
+/// `admits` is the one audience-carrying token this surface takes, beside
+/// the ordinary credentials: `Some("mcp")` for the MCP endpoint,
+/// `Some("actions")` for the four routes [`authenticate_actions`] serves,
+/// `None` for every surface that takes none. A token carrying any other
+/// audience is refused as an unknown one, so each kind reaches only the
+/// surface that names it.
 async fn authenticate_member(
     ports: &Ports,
     headers: &HeaderMap,
-    connectors: bool,
+    admits: Option<&str>,
 ) -> Result<Member, AuthError> {
     let db = port(ports.db.clone())?;
     if let Some(token) = cratefield_core::bearer_token(headers) {
@@ -200,7 +216,11 @@ async fn authenticate_member(
         else {
             return Err(AuthError);
         };
-        if principal.audience.is_some() && !connectors {
+        if principal
+            .audience
+            .as_deref()
+            .is_some_and(|audience| Some(audience) != admits)
+        {
             return Err(AuthError);
         }
         return member_for(db, principal).await;
@@ -263,23 +283,64 @@ pub async fn authenticate_any(
     ports: &Ports,
     headers: &HeaderMap,
 ) -> Result<Authenticated, AuthError> {
-    authenticate_any_for(ports, headers, false).await
+    authenticate_any_for(ports, headers, None).await
 }
 
 /// [`authenticate_any`] for the MCP endpoint, which also accepts a connector
-/// token (issue #72). Nothing else calls it, so a connector token reaches the
-/// MCP tools and no other route.
+/// token (issue #72) — and only that audience: an actions token is refused
+/// here as it is everywhere outside the four routes that name it. Nothing
+/// else calls this, so a connector token reaches the MCP tools and no other
+/// route.
 pub async fn authenticate_mcp(
     ports: &Ports,
     headers: &HeaderMap,
 ) -> Result<Authenticated, AuthError> {
-    authenticate_any_for(ports, headers, true).await
+    authenticate_any_for(ports, headers, Some(store::MCP_AUDIENCE)).await
+}
+
+/// [`authenticate_any`] for the four REST routes an actions token may call
+/// (issue #234, a ChatGPT custom GPT's Actions): `GET /v1/search`,
+/// `GET /v1/pages/{slug}`, `GET /v1/facts` and `POST /v1/ask`. It also
+/// accepts an actions token — the audience [`ACTIONS_AUDIENCE`] names, whose
+/// scope subset is minted `read:`-only and non-empty, so it is read-only and
+/// never admin by construction — and nothing else changes: an ordinary
+/// token, an agent key and the session cookie answer exactly as they do
+/// everywhere else, and a connector token is refused here as it is outside
+/// the MCP endpoint.
+///
+/// Which *routes* of the four modules an actions token may touch is the
+/// venture's to decide, the one place that sees the request: it builds these
+/// routes with its actions bearer and refuses the token on every route of
+/// them but the allowed ones.
+pub async fn authenticate_actions(
+    ports: &Ports,
+    headers: &HeaderMap,
+) -> Result<Authenticated, AuthError> {
+    authenticate_any_for(ports, headers, Some(ACTIONS_AUDIENCE)).await
+}
+
+/// The audience a bearer token carries — `Some("mcp")`, `Some("actions")`,
+/// or `None` for an ordinary token — without resolving the member behind
+/// it. This is for a surface that takes an audience-carrying token on
+/// *some* of its routes and not others (the pages routes, which take an
+/// actions token on one page and not on the list): there, the question a
+/// route-level refusal needs of the token is only which kind it is. A `None`
+/// answer — no token, or one that verifies against nothing — passes the
+/// decision back to the surface's own refusal.
+pub async fn bearer_audience(ports: &Ports, token: &str) -> Option<String> {
+    let db = port(ports.db.clone()).ok()?;
+    let clock = port(ports.clock.clone()).ok()?;
+    store::Store::new(db, clock)
+        .verify(token)
+        .await
+        .ok()?
+        .and_then(|principal| principal.audience)
 }
 
 async fn authenticate_any_for(
     ports: &Ports,
     headers: &HeaderMap,
-    connectors: bool,
+    admits: Option<&str>,
 ) -> Result<Authenticated, AuthError> {
     if let Some(token) = cratefield_core::bearer_token(headers)
         && token.starts_with(&format!("{AGENT_KEY_BRAND}_"))
@@ -308,7 +369,7 @@ async fn authenticate_any_for(
             credential: key.prefix,
         }));
     }
-    authenticate_member(ports, headers, connectors)
+    authenticate_member(ports, headers, admits)
         .await
         .map(Authenticated::Member)
 }

@@ -5,8 +5,10 @@
 //! public `prefix` is the lookup key, so a revoke is one indexed read.
 //!
 //! A token may carry an expiry and an audience (issue #72). An audience of
-//! `mcp` marks a connector token, which only the MCP endpoint accepts; the
-//! refusal lives in `lib.rs`, where each surface picks what it takes.
+//! `mcp` marks a connector token, which only the MCP endpoint accepts, and
+//! `actions` an actions token (issue #234), which only four read-only REST
+//! routes accept; the refusal lives in `lib.rs`, where each surface picks
+//! what it takes.
 
 use std::sync::Arc;
 
@@ -78,8 +80,10 @@ pub(crate) struct Summary {
     pub(crate) name: String,
     pub(crate) scopes: Option<Vec<String>>,
     pub(crate) created_at: String,
-    /// `true` for a connector token (the Claude connector sign-in), so the
-    /// settings list can label it as a connected app.
+    /// `true` for a token that carries an audience — a connector token (the
+    /// Claude connector sign-in) or an actions token (a ChatGPT custom GPT,
+    /// issue #234) — so the settings list can label either as a connected
+    /// app and revoke it with its label.
     pub(crate) connector: bool,
 }
 
@@ -91,7 +95,8 @@ pub(crate) struct Principal {
     pub(crate) workspace_id: String,
     pub(crate) user_id: String,
     pub(crate) scopes: Option<Vec<String>>,
-    /// `Some("mcp")` for a connector token, `None` for an ordinary one.
+    /// `Some("mcp")` for a connector token, `Some("actions")` for an actions
+    /// token, `None` for an ordinary one.
     pub(crate) audience: Option<String>,
 }
 
@@ -155,6 +160,61 @@ impl Store {
             Some(MCP_AUDIENCE),
         )
         .await
+    }
+
+    /// An actions token (issue #234, a ChatGPT custom GPT's Actions):
+    /// expiring, and accepted by the four read-only REST routes the venture
+    /// names — nothing else. Its `scopes` are forced `read:`-only here, the
+    /// access model's own vocabulary, so every write handler refuses the
+    /// token no matter which route it reaches; an empty `scopes` is an
+    /// error, so the token always names a subset and is never an admin
+    /// credential ([`crate::Member::is_admin`] is false for any token cut
+    /// down to a subset).
+    ///
+    /// The OAuth grant mints through this for its one confidential client,
+    /// the predefined Actions client, exactly as it mints a connector token
+    /// through [`Store::mint_connector`] for every public one.
+    pub(crate) async fn mint_actions(
+        &self,
+        workspace_id: &str,
+        user_id: &str,
+        name: &str,
+        scopes: &[String],
+        expires_at: OffsetDateTime,
+    ) -> Result<Minted, DbError> {
+        let scopes = Self::read_only(scopes)?;
+        self.insert(
+            workspace_id,
+            user_id,
+            name,
+            &scopes,
+            Some(expires_at),
+            Some(crate::ACTIONS_AUDIENCE),
+        )
+        .await
+    }
+
+    /// A scope list as an actions token carries it: every entry
+    /// `read:`-prefixed (an entry that already carries the prefix stays), so
+    /// the access model reads the subset as read-only reach and no write
+    /// handler can open to it. An empty list is an error: an actions token
+    /// must name a subset, or it would be a full credential on four routes.
+    pub(crate) fn read_only(scopes: &[String]) -> Result<Vec<String>, DbError> {
+        if scopes.is_empty() {
+            return Err(DbError::Execute(
+                "an actions token must name a non-empty scope subset".to_owned(),
+            ));
+        }
+        Ok(scopes
+            .iter()
+            .map(|scope| {
+                if scope.starts_with("read:") {
+                    scope.clone()
+                } else {
+                    format!("read:{scope}")
+                }
+            })
+            .collect())
     }
 
     async fn insert(
@@ -297,7 +357,10 @@ impl Store {
             .filter_map(|row| {
                 let field = |name: &str| row.get::<Option<String>>(name).flatten();
                 let prefix = field("prefix").unwrap_or_default();
-                let connector = field("audience").as_deref() == Some(MCP_AUDIENCE);
+                let connector = matches!(
+                    field("audience").as_deref(),
+                    Some(MCP_AUDIENCE) | Some(crate::ACTIONS_AUDIENCE)
+                );
                 let live = field("expires_at").is_none_or(|expiry| live_at(&expiry, now));
                 let renewing = connector && renewable.contains(&prefix);
                 (live || renewing).then(|| Summary {
@@ -435,5 +498,102 @@ mod tests {
         ] {
             assert!(split(&token).is_none(), "{token:?} parsed");
         }
+    }
+
+    /// An actions token's scopes are minted read-only: every entry gains the
+    /// access model's `read:` prefix (an entry that already carries it
+    /// stays), and an empty list is refused — no actions token without a
+    /// subset, which would be a full credential on its four routes.
+    #[test]
+    fn an_actions_token_is_minted_read_only() {
+        let scopes = Store::read_only(&["shared".to_owned(), "read:user:U0ALICE".to_owned()])
+            .expect("a subset mints");
+        assert_eq!(scopes, ["read:shared", "read:user:U0ALICE"]);
+        assert!(
+            Store::read_only(&[]).is_err(),
+            "an empty subset is a full credential, not a narrow one"
+        );
+    }
+
+    /// The mint itself: the row a GPT's Actions hold, exactly as the OAuth
+    /// grant will write it, verified through the entry point the four
+    /// read-only routes resolve with — its member, never an admin, carrying
+    /// the `read:`-only subset — and refused everywhere else.
+    #[pollster::test]
+    async fn a_minted_actions_token_carries_its_audience_and_read_only_scopes() {
+        use cratefield_core::Ports;
+        use cratefield_testing::TestHarness;
+        use std::sync::{Arc, Mutex};
+
+        const WORKSPACE: &str = "T0ACTIONS";
+        const OWNER: &str = "U0GPT";
+
+        let captured: Arc<Mutex<Option<Ports>>> = Arc::new(Mutex::new(None));
+        let patch = captured.clone();
+        let harness = TestHarness::with_ports(
+            vec![
+                Box::new(livingbrain_workspaces::Workspaces::new()),
+                Box::new(crate::Tokens::new()),
+            ],
+            move |ports| {
+                let mut copy = Ports::empty();
+                copy.db = ports.db.clone();
+                copy.clock = ports.clock.clone();
+                *patch.lock().expect("lock") = Some(copy);
+            },
+        );
+        for row in [
+            Statement::with_values(
+                "INSERT INTO workspaces (id, name, owner_id, created_at) \
+                 VALUES (?, 'A workspace', ?, '2026-01-01T00:00:00Z')",
+                vec![text(WORKSPACE), text(OWNER)],
+            ),
+            Statement::with_values(
+                "INSERT INTO workspace_members (workspace_id, user_id, name, timezone, \
+                 is_admin, updated_at) VALUES (?, ?, 'A member', NULL, 1, \
+                 '2026-01-01T00:00:00Z')",
+                vec![text(WORKSPACE), text(OWNER)],
+            ),
+        ] {
+            harness.db.execute(&row).await.expect("the row seeds");
+        }
+        let ports = captured.lock().expect("lock").take().expect("ports");
+        let (db, clock) = (
+            ports.db.clone().expect("db"),
+            ports.clock.clone().expect("clock"),
+        );
+
+        let minted = Store::new(db, clock.clone())
+            .mint_actions(
+                WORKSPACE,
+                OWNER,
+                "ChatGPT",
+                &["shared".to_owned()],
+                clock.now() + time::Duration::days(30),
+            )
+            .await
+            .expect("the actions token mints");
+        let value =
+            cratefield_core::axum::http::HeaderValue::from_str(&format!("Bearer {}", minted.token))
+                .expect("a header value");
+        let mut headers = cratefield_core::axum::http::HeaderMap::new();
+        headers.insert(cratefield_core::axum::http::header::AUTHORIZATION, value);
+
+        let Ok(crate::Authenticated::Member(member)) =
+            crate::authenticate_actions(&ports, &headers).await
+        else {
+            panic!("the actions surface resolves the minted token");
+        };
+        assert_eq!(member.user_id, OWNER);
+        assert!(!member.is_admin, "an actions token is never an admin");
+        assert_eq!(
+            member.scopes.as_deref(),
+            Some(&["read:shared".to_owned()][..]),
+            "the subset is stored read-only"
+        );
+        assert!(
+            crate::authenticate_mcp(&ports, &headers).await.is_err(),
+            "the MCP endpoint refuses it, as every surface but its four routes"
+        );
     }
 }
