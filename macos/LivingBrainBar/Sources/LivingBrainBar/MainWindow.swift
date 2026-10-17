@@ -122,7 +122,7 @@ struct MainWindow: View {
     @ViewBuilder private var detail: some View {
         switch router.destination {
         case .sessions: SessionsView(model: sessions)
-        case .projects: ProjectsView(bar: bar, model: sessions)
+        case .projects: ProjectsView(bar: bar, model: sessions, accounts: workspace)
         case .settings: SettingsView(workspace: workspace, bar: bar, runner: runner, router: router, updates: updates)
         case .wiki, .ask, .timeline, .usage:
             if workspace.signedIn {

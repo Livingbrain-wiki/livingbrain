@@ -18,10 +18,20 @@ public struct SyncReport: Decodable, Equatable, Sendable {
     /// `would_write`, `not_written` (logs/note.rs, `report`).
     public var notes: [String: Int]
     public var sessions: [SyncedSession]
+    /// Sessions held back because their workspace has no sign-in on this Mac.
+    public var skippedNoToken: [HeldSessions]
+    /// Sessions held back because the keychain would not give up their
+    /// workspace's sign-in (kept apart so the message can say so).
+    public var skippedKeychainDenied: [HeldSessions]
+    /// Sessions a route could not decide: held, sent nowhere.
+    public var skippedUnroutable: Int
 
     enum CodingKeys: String, CodingKey {
         case scanned, uploaded, unchanged, skipped, unreadable, unparsed, redacted, notes, sessions
         case dryRun = "dry_run"
+        case skippedNoToken = "skipped_no_token"
+        case skippedKeychainDenied = "skipped_keychain_denied"
+        case skippedUnroutable = "skipped_unroutable"
     }
 
     public init(from decoder: Decoder) throws {
@@ -36,12 +46,18 @@ public struct SyncReport: Decodable, Equatable, Sendable {
         dryRun = try c.decodeIfPresent(Bool.self, forKey: .dryRun) ?? false
         notes = try c.decodeIfPresent([String: Int].self, forKey: .notes) ?? [:]
         sessions = try c.decodeIfPresent([SyncedSession].self, forKey: .sessions) ?? []
+        skippedNoToken = try c.decodeIfPresent([HeldSessions].self, forKey: .skippedNoToken) ?? []
+        skippedKeychainDenied = (try c.decodeIfPresent([HeldSessions].self, forKey: .skippedKeychainDenied) ?? [])
+            .map { HeldSessions(workspace: $0.workspace, sessions: $0.sessions, denied: true) }
+        skippedUnroutable = try c.decodeIfPresent(Int.self, forKey: .skippedUnroutable) ?? 0
     }
 
     public init(
         scanned: Int = 0, uploaded: Int = 0, unchanged: Int = 0, skipped: Int = 0,
         unreadable: Int = 0, unparsed: Int = 0, redacted: Int = 0, dryRun: Bool = false,
-        notes: [String: Int] = [:], sessions: [SyncedSession] = []
+        notes: [String: Int] = [:], sessions: [SyncedSession] = [],
+        skippedNoToken: [HeldSessions] = [], skippedKeychainDenied: [HeldSessions] = [],
+        skippedUnroutable: Int = 0
     ) {
         self.scanned = scanned
         self.uploaded = uploaded
@@ -53,7 +69,13 @@ public struct SyncReport: Decodable, Equatable, Sendable {
         self.dryRun = dryRun
         self.notes = notes
         self.sessions = sessions
+        self.skippedNoToken = skippedNoToken
+        self.skippedKeychainDenied = skippedKeychainDenied
+        self.skippedUnroutable = skippedUnroutable
     }
+
+    /// Every held workspace, sign-in and keychain alike, for the menu.
+    public var held: [HeldSessions] { skippedNoToken + skippedKeychainDenied }
 
     /// Notes the sync wrote (or, on a dry run, would write).
     public var notesWritten: Int {
@@ -75,6 +97,41 @@ public struct SyncReport: Decodable, Equatable, Sendable {
     }
 }
 
+/// Sessions a sync held back for one workspace: no sign-in on this Mac
+/// (`denied` false), or the keychain would not give up its sign-in (`denied`
+/// true). Either way they wait there; nothing sends them elsewhere.
+public struct HeldSessions: Decodable, Equatable, Hashable, Sendable {
+    public var workspace: String
+    public var sessions: Int
+    public var denied: Bool
+
+    public init(workspace: String, sessions: Int, denied: Bool = false) {
+        self.workspace = workspace
+        self.sessions = sessions
+        self.denied = denied
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case workspace, sessions, denied
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        workspace = try c.decode(String.self, forKey: .workspace)
+        sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
+        denied = try c.decodeIfPresent(Bool.self, forKey: .denied) ?? false
+    }
+
+    /// "Sign in to ws-chi to sync 2 sessions", or the keychain's refusal.
+    public var message: String {
+        let count = "\(sessions) session\(sessions == 1 ? "" : "s")"
+        if denied {
+            return "Living Brain could not read the sign-in for \(workspace) from the Keychain; \(count) held."
+        }
+        return "Sign in to \(workspace) to sync \(count)"
+    }
+}
+
 /// One entry of `SyncReport.sessions`.
 public struct SyncedSession: Decodable, Equatable, Sendable {
     public var agent: String
@@ -84,7 +141,8 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     public var turns: Int
     public var toolCalls: Int
     public var truncated: Bool
-    /// `uploaded`, `unchanged`, `skipped` or `would_upload`.
+    /// `uploaded`, `unchanged`, `skipped`, `would_upload`, `skipped_no_token`
+    /// or `skipped_mixed_workspace`.
     public var status: String
     public var id: String?
     public var totals: Totals?
@@ -95,6 +153,8 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     /// The local log file (never sent).
     public var file: String?
     public var note: Note?
+    /// The workspace the session goes to: `default`, a workspace id, or `mixed`.
+    public var workspace: String?
 
     /// The searchable note a synced session gets (logs/note.rs).
     public struct Note: Decodable, Equatable, Sendable {
@@ -155,7 +215,7 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case agent, repo, models, turns, truncated, status, id, totals, branch, file, note
+        case agent, repo, models, turns, truncated, status, id, totals, branch, file, note, workspace
         case sessionId = "session_id"
         case toolCalls = "tool_calls"
         case startedAt = "started_at"
@@ -179,6 +239,7 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
         endedAt = try c.decodeIfPresent(String.self, forKey: .endedAt)
         file = try c.decodeIfPresent(String.self, forKey: .file)
         note = try c.decodeIfPresent(Note.self, forKey: .note)
+        workspace = try c.decodeIfPresent(String.self, forKey: .workspace)
     }
 }
 
@@ -186,24 +247,88 @@ public struct SyncedSession: Decodable, Equatable, Sendable {
 /// `logs allow|deny --json`.
 public struct AllowStatus: Decodable, Equatable, Sendable {
     public var allowed: [String]
+    /// Each allowed path's workspace as stored, `default` where it names none
+    /// (absent from older CLIs).
+    public var workspace: [String: String]?
+    /// Each allowed path's explicit choice: a workspace id, `default`, or `nil`
+    /// (no choice: its routes decide). Absent from older CLIs.
+    public var workspaceExplicit: [String: String?]?
+    /// Where each allowed path's sessions go now: a workspace id, `default`, or
+    /// `unroutable`.
+    public var workspaceEffective: [String: String]?
+    /// What decided the effective workspace, when a route did (or could not).
+    public var routeReason: [String: String?]?
+    /// The parent folder whose explicit choice each root follows.
+    public var explicitFrom: [String: String?]?
+    /// Each root's own repository top level, when one was read.
+    public var repoTop: [String: String?]?
+    /// For a folder that holds checkouts: each checkout's own answer.
+    public var repos: [String: [NestedRepo]]?
+    /// Each allowed path's detail level.
+    public var detail: [String: String]?
     /// The opt-in file's path.
     public var config: String?
     /// Only on `allow`/`deny`.
     public var changed: Bool?
 
-    public init(allowed: [String], config: String? = nil, changed: Bool? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case allowed, workspace, config, changed
+        case workspaceExplicit = "workspace_explicit"
+        case workspaceEffective = "workspace_effective"
+        case routeReason = "route_reason"
+        case explicitFrom = "explicit_from"
+        case repoTop = "repo_top"
+        case repos, detail
+    }
+
+    public init(
+        allowed: [String], workspace: [String: String]? = nil,
+        workspaceExplicit: [String: String?]? = nil, workspaceEffective: [String: String]? = nil,
+        routeReason: [String: String?]? = nil, config: String? = nil, changed: Bool? = nil
+    ) {
         self.allowed = allowed
+        self.workspace = workspace
+        self.workspaceExplicit = workspaceExplicit
+        self.workspaceEffective = workspaceEffective
+        self.routeReason = routeReason
         self.config = config
         self.changed = changed
+    }
+
+    /// The allowed repositories, each with its explicit choice, its effective
+    /// destination and the route that chose it. An older CLI names none of
+    /// these, so its repositories are automatic and go to the default.
+    public var projects: [SyncedProject] {
+        allowed.map { path in
+            var explicit: String?
+            if let entry = workspaceExplicit?[path] { explicit = entry }
+            var reason: String?
+            if let entry = routeReason?[path] { reason = entry }
+            var from: String?
+            if let entry = explicitFrom?[path] { from = entry }
+            var top: String?
+            if let entry = repoTop?[path] { top = entry }
+            let effective = workspaceEffective?[path] ?? explicit ?? SyncedProject.defaultWorkspace
+            return SyncedProject(
+                path: path, explicit: explicit, effective: effective, routeReason: reason,
+                inheritedFrom: from, repoTop: top, nested: repos?[path] ?? [],
+                detail: detail?[path]
+            )
+        }
     }
 }
 
 /// The opt-in file itself, `~/.config/livingbrain/logs-allow.json`
 /// (logs.rs, `AllowlistFile`): `{"version":1,"allowed":["/abs/path", …]}`.
 public struct AllowlistFile: Decodable, Equatable, Sendable {
-    public static let supportedVersion = 1
+    /// 1: the plain file. 2: a file that names workspaces or routes; a build
+    /// that predates routing refuses it rather than guessing.
+    public static let supportedVersions: Set<Int> = [1, 2]
     public var version: Int
     public var allowed: [String]
+    /// Each allowed path's workspace, when the file names one (optional; a
+    /// file from before routing has none).
+    public var workspace: [String: String]?
 }
 
 /// The device-flow prompt `livingbrain --json login` writes to stderr
@@ -269,7 +394,7 @@ public enum CLIOutput {
     /// A version this app does not know is refused, as the CLI refuses it.
     public static func allowlistFile(_ data: Data) throws -> AllowlistFile {
         let file = try decoder.decode(AllowlistFile.self, from: data)
-        guard file.version == AllowlistFile.supportedVersion else {
+        guard AllowlistFile.supportedVersions.contains(file.version) else {
             throw CLIOutputError.unsupportedAllowlistVersion(file.version)
         }
         return file

@@ -22,9 +22,10 @@ livingbrain logs deny
 
 | command | what it does |
 |---|---|
-| `logs allow [path] [--detail full\|messages\|summary]` | allow sessions whose log records a working directory inside `path` (default: the current directory), at a detail level (default `full` for a new path; an allowed path keeps its level unless `--detail` names one) |
+| `logs allow [path] [--detail full\|messages\|summary] [--workspace <id>]` | allow sessions whose log records a working directory inside `path` (default: the current directory), at a detail level (default `full` for a new path; an allowed path keeps its level unless `--detail` names one). `--workspace` sends them to that workspace; see [Workspaces](#workspaces-one-mac-several-workspaces) |
 | `logs deny [path]` | revoke a path `logs allow` added |
-| `logs status` | print what is opted in, at which detail level, and where that is recorded |
+| `logs workspace <path> <id\|default\|auto>` | send an allowed path's sessions to a workspace; `default` for the default workspace even when a route would pick another; `auto` to clear the choice so the routes decide. Refused for a path that is not opted in |
+| `logs status` | print what is opted in, at which detail level, into which workspace, and the routes that send the rest |
 | `logs sync` | read both agents' logs and upload the opted-in sessions |
 | `logs show <file>` | print the redacted record `logs sync` would send for one session file, opted in or not; never touches the network. `--json` gives `{file, opted_in, redacted, body, record}`: `body` is the exact text, `record` its parse (`null` if redaction left it unparseable) |
 
@@ -36,12 +37,14 @@ livingbrain logs deny
 | `--session <file>` | `logs sync` only: scan just this session file (repeatable). It must sit under one of the two trees, and its repo must still be opted in |
 
 `--json` prints one object: `scanned`, `uploaded`, `unchanged`, `skipped`,
+`skipped_mixed_workspace`, `skipped_no_token` (see [Workspaces](#workspaces-one-mac-several-workspaces)),
 `unreadable` (a file that could not be read at all), `unparsed` (read, but no
 session in it), `redacted`, `dry_run` and a `sessions` array of
 `{agent, session_id, repo, models, turns, tool_calls, totals, truncated,
-detail, status, branch, started_at, ended_at, file, note?}` (`file` is the local path
+detail, status, workspace, branch, started_at, ended_at, file, note?}` (`file` is the local path
 of the log; it is printed, never sent) — the status one of `uploaded`, `unchanged`, `skipped`
-(`reason: "repo not opted in"`) or `would_upload` under `--dry-run`. Every
+(`reason: "repo not opted in"`), `skipped_no_token` (`reason: "not signed in to workspace <id>"`),
+`skipped_mixed_workspace`, `skipped_unroutable`, `skipped_keychain_denied`, or `would_upload` under `--dry-run`. Every
 opted-in session also carries `note`: `{slug, project, status, id?, url?,
 error?}`, the status one of `written`, `unchanged`, `failed` or `would_write`
 under `--dry-run` (`null` for a session that recorded no repository), and the
@@ -124,6 +127,125 @@ its outcome (`EarthOS.world · Colony a15fba01 · #123 Fix auth redirect`).
 Notes synced before this were decisions titled by id: the notes module's
 cron moves them to `session` and renames them, a batch every 5 minutes, and
 a session's next sync does the same for its own page.
+
+## Workspaces: one Mac, several workspaces
+
+A Mac can be signed in to several workspaces. By default every session goes to
+the default workspace (the one `livingbrain login` signs in to). To send a
+repository's sessions elsewhere, give its root a workspace, or write a route
+that picks one by the repository's name or remote:
+
+```sh
+livingbrain logs allow ~/Documents/GitHub/chi-web --workspace <chi-workspace-id>
+livingbrain logs workspace ~/Documents/GitHub/side-project default
+livingbrain logs workspace ~/Documents/GitHub/chi-web auto   # back to the routes
+livingbrain logs status            # each root's explicit choice and where it sends
+```
+
+The choices and the routes live in the same opt-in file:
+
+```json
+{
+  "version": 2,
+  "allowed": [
+    "/Users/nick/Documents/GitHub/chi-web",
+    "/Users/nick/Documents/GitHub/chi-backend",
+    "/Users/nick/Documents/GitHub/side-project"
+  ],
+  "workspace": {
+    "/Users/nick/Documents/GitHub/side-project": "default"
+  },
+  "routes": [
+    {"remote_owner": "CHI-Ecosystem", "workspace": "<chi-workspace-id>"},
+    {"folder_glob": "chi-*", "workspace": "<chi-workspace-id>"}
+  ]
+}
+```
+
+That is the example "CHI repos go to the CHI workspace". `side-project` names
+`default` explicitly, so no route applies to it. Routes are edited in the file
+(there is no command for them yet). `logs status` shows each route, each root's
+explicit choice, where its sessions currently go, and why.
+
+**Version.** A file that names a workspace or a route is written as `"version": 2`;
+a file without routing stays `"version": 1`, and a version-1 file that names a
+workspace or a route is refused. Two configured workspace ids that would share a
+`LIVINGBRAIN_TOKEN_*` variable (`a-b` and `a_b`, say) are refused, and never saved. Every CLI that reads the file must be
+at least this version: an older build refuses a version-2 file outright rather
+than sending everything to the default. Unknown top-level keys are refused in
+either version, so a misspelt `routes` is an error, not a silent default.
+
+**Precedence.** For each session's working directory, in order:
+
+1. the workspace of the nearest enclosing allowed root that names one (`default`
+   counts, and stops the routes). A nested checkout follows its parent by
+   lookup, not by copy: changing the parent's workspace moves every checkout
+   inside it that names none of its own;
+   after `logs deny <parent>`, a nested root that names none of its own falls
+   back to routes or the default, again by lookup;
+2. otherwise the **first** matching route, judged on that repository's own facts:
+   its git top level, folder name (`folder_glob`, with `*` and `?`) and `origin`
+   remote (`remote_owner`). `origin` is used; with no `origin`, the only remote.
+   The URL is read as configured (`git config --get`), so an `insteadOf` rule
+   cannot change the owner or host a route sees. The owner comparison is
+   case-insensitive. A `remote_owner` route reads
+   `github.com` unless it names a `host` (for GitHub Enterprise); a remote on any
+   other host is not decided by that route;
+3. otherwise the default workspace.
+
+**Folders of checkouts.** `status` judges each allowed root as the sessions under
+it will be judged. A root that is not itself a checkout, or that holds checkouts,
+has no single answer: it reports `route_reason: "per-repository"`, lists each
+checkout inside with its own workspace (`repos`), and warns that pinning the
+folder would override every route inside it. An explicit choice on the folder
+still covers everything inside, and is reported as such.
+
+**Held, never defaulted.** When routes exist and a route needs a fact that cannot
+be read, the session is **held**, not sent to the default. The facts that cannot be
+read: the directory is not a git checkout (or no longer exists), git fails or
+refuses the repository (its own safety checks are not weakened), the repository
+has no remote or several remotes with no `origin`, or the remote is on a host
+the route does not name (an ssh alias, a GitLab remote, another GHE host). Each
+such session reports `skipped_unroutable` with the reason:
+
+```json
+"skipped_unroutable": 2
+```
+
+Git is asked read-only, with the caller's repository and config overrides
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL` and the like)
+removed and a five-second limit per call; a call that times out is an unknown
+fact. A repository is probed once per run, per working directory.
+
+A session whose working directories resolve to different workspaces is never
+sent: it is reported as `skipped_mixed_workspace`. A session with any held
+directory is held as a whole.
+
+**Tokens.** Each workspace is signed in separately. The CLI reads a routed
+workspace's token from the same keychain item the Mac app writes for it: service
+`wiki.livingbrain.mac`, account `<API URL>#<workspace id>` (the API URL without a
+trailing slash). For tests and CI, `LIVINGBRAIN_TOKEN_<WORKSPACE>` (the id
+upper-cased, other characters as `_`) takes its place, unless two configured
+workspaces would share that variable name, in which case neither uses it. The
+default workspace keeps using the CLI's own token, as before.
+
+**Missing sign-in or keychain refusal.** A routed session whose workspace has no
+token is held: not uploaded, never sent under another token, and not marked as
+synced, so it goes up on the first sync after the sign-in. A workspace whose
+keychain item cannot be read is held the same way, and only its own sessions:
+
+```json
+"skipped_no_token": [{"workspace": "<chi-workspace-id>", "sessions": 2}],
+"skipped_keychain_denied": [{"workspace": "<other-id>", "sessions": 1}]
+```
+
+The Mac app shows these as "Sign in to <workspace> to sync 2 sessions", and as a
+Keychain message for the denied case. Other workspaces keep syncing.
+
+**Already synced.** The server's ledger is per workspace: every upload carries
+its workspace's token, so a session that moves to another workspace is written
+there once, and its earlier copy stays where it was. The Mac app's local record
+of what it synced is keyed the same way, per (session, workspace).
 
 ## Opt-in is per repository
 

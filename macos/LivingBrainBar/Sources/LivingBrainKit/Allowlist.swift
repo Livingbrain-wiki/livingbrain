@@ -21,10 +21,63 @@ public enum AllowlistLocation {
 
 /// A project as the menu shows it.
 public struct SyncedProject: Identifiable, Equatable, Sendable {
+    /// The workspace the default (`login`'s) token names.
+    public static let defaultWorkspace = "default"
+    /// The picker's word for "no explicit choice: the routes decide".
+    public static let automaticWorkspace = "auto"
+
     public var path: String
+    /// The explicit choice: a workspace id, `default`, or nil for automatic.
+    public var explicit: String?
+    /// Where the sessions go now: a workspace id, `default`, or `unroutable`.
+    public var effective: String
+    /// The route that chose `effective`, or why no route could decide.
+    public var routeReason: String?
+    /// The parent folder whose explicit choice this project follows, when it
+    /// names none of its own.
+    public var inheritedFrom: String?
+    /// The repository's own top level, when git could read one: what a
+    /// "Pin This Repository" action pins.
+    public var repoTop: String?
+    /// For a folder that holds checkouts: each one's own answer.
+    public var nested: [NestedRepo]
+    /// The detail level the allowed path sends at (`summary`, `messages`, `full`).
+    public var detail: String?
     public var id: String { path }
 
-    public init(path: String) { self.path = path }
+    /// What "pin a checkout" may do without widening what the opt-in covers.
+    public enum PinAction: Equatable, Sendable {
+        /// The checkout is the allowed path itself: set its workspace.
+        case allowedRoot
+        /// A checkout inside the allowed path: add it at the same detail level.
+        case nestedCheckout
+        /// A parent of the allowed path, or an unrelated path: never pinned.
+        case refused
+    }
+
+    /// The pin action for one checkout. Consent covers the allowed path and
+    /// everything under it, so only those can be pinned; a checkout above the
+    /// allowed path would widen what syncs, and is refused.
+    public func pinAction(for checkout: String) -> PinAction {
+        if checkout == path { return .allowedRoot }
+        if checkout.hasPrefix(path + "/") { return .nestedCheckout }
+        return .refused
+    }
+
+    public init(
+        path: String, explicit: String? = nil, effective: String = SyncedProject.defaultWorkspace,
+        routeReason: String? = nil, inheritedFrom: String? = nil, repoTop: String? = nil,
+        nested: [NestedRepo] = [], detail: String? = nil
+    ) {
+        self.path = path
+        self.explicit = explicit
+        self.effective = effective
+        self.routeReason = routeReason
+        self.inheritedFrom = inheritedFrom
+        self.repoTop = repoTop
+        self.nested = nested
+        self.detail = detail
+    }
 
     /// The repo's folder name.
     public var name: String { (path as NSString).lastPathComponent }
@@ -34,5 +87,25 @@ public struct SyncedProject: Identifiable, Equatable, Sendable {
         if path == home { return "~" }
         if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
         return path
+    }
+}
+
+/// A checkout inside an allowed folder, with the workspace it sends to.
+public struct NestedRepo: Decodable, Identifiable, Equatable, Sendable {
+    public var path: String
+    public var effective: String
+    public var routeReason: String?
+
+    public var id: String { path }
+
+    enum CodingKeys: String, CodingKey {
+        case path, effective
+        case routeReason = "route_reason"
+    }
+
+    public init(path: String, effective: String, routeReason: String? = nil) {
+        self.path = path
+        self.effective = effective
+        self.routeReason = routeReason
     }
 }

@@ -25,6 +25,10 @@ token in the keychain (see below); no token is ever logged or shown.
 - **Synced Projects (n)** — the repositories in the CLI's opt-in list
   (`logs status --json`, falling back to `~/.config/livingbrain/logs-allow.json`),
   each with **Reveal in Finder** and **Remove** (`logs deny`).
+- **Waiting for a sign-in** — when a sync held sessions because their workspace
+  is not signed in on this Mac, "Sign in to <workspace> to sync N sessions",
+  with **Sign In** (the browser device flow). A workspace whose Keychain item
+  cannot be read says so instead. Held sessions are never sent to another workspace.
 - **Add Project…** — a folder picker, then `logs allow <path>`.
 - **Run Brain Jobs with My Subscription** — see [Brain jobs on this Mac](#brain-jobs-on-this-mac).
   While on, the lines under it say what the runner is doing ("Running a
@@ -109,7 +113,14 @@ the next one), and the same error at most once every 30 minutes.
   or the project's session list), Sync This Session, Reveal Log in Finder.
 - **Projects & Sync** — every repository your sessions ran in, with an
   opt-in switch each (`logs allow` / `logs deny`), plus the pause, live-sync,
-  schedule and notification switches.
+  schedule and notification switches. An opted-in repository also has a
+  **Workspace** picker: **Automatic** (the routes decide; the row says where its
+  sessions go and from where: a route, a parent folder's choice, or held).
+  A held repository offers **Pin This Repository** on its own top level (never
+  a parent folder). A folder of checkouts is marked per-repository, and pinning
+  it would override every route inside. **Default** pins to the default, even
+  over a route; a signed-in workspace pins there (`logs workspace`/`logs allow
+  --workspace`). See [Workspaces](../../docs/logs.md#workspaces-one-mac-several-workspaces).
 
 ### Workspace (signed in)
 
