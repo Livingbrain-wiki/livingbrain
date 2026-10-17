@@ -4,6 +4,20 @@
 //! (RFC 6749 §6), and the issuer identifier on every authorization response
 //! (RFC 9207).
 //!
+//! A client may also identify itself by a Client ID Metadata Document
+//! (draft-ietf-oauth-client-id-metadata-document, issue #234): a client_id
+//! that is an `https` URL names a document this server fetches, validates
+//! and caches — see [`cimd`] — so a platform like ChatGPT needs no
+//! registration to connect.
+//!
+//! Beside those public clients, a deployment may name one **predefined
+//! confidential client** for a ChatGPT custom GPT's Actions (issue #234):
+//! three `OAUTH_ACTIONS_*` keys describe it out of band, because a GPT's
+//! Actions cannot register — the operator pastes a client id and secret into
+//! the GPT's OAuth settings. Its secret, compared as a SHA-256 and never
+//! configured whole, binds its codes where a public client's PKCE would, and
+//! its tokens mint with the `actions` audience instead of `mcp`.
+//!
 //! The access token it mints is a **connector** personal access token: scoped
 //! to the workspace, the member, and a non-admin subset of their scopes, and
 //! accepted by the MCP endpoint alone. It appears in Settings → API tokens
@@ -15,6 +29,7 @@
 //! there with the same path and query, plus a signed token naming the host it
 //! came in on, so the response's `iss` is the issuer the client was given.
 
+mod cimd;
 mod consent;
 mod store;
 
@@ -29,8 +44,8 @@ use cratefield_core::axum::{self, Form, Json};
 use cratefield_core::{
     AnyError, BoxFuture, Clock, Config, ConfigError, DataKind, Database, DbError, Disposition, Kid,
     Migrations, Module, ModuleContext, PersonalDataSet, Port, Problem, ProblemDef, RateLimit,
-    RateLimitFailure, RateLimiter, Signer, SqlMigration, check_rate_limit, client_ip, origin_of,
-    rate_limit_keys,
+    RateLimitFailure, RateLimiter, Signer, SqlMigration, check_rate_limit, client_ip,
+    constant_time_eq, origin_of, rate_limit_keys,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -40,8 +55,8 @@ use time::{Duration, OffsetDateTime};
 use crate::store::Store as TokenStore;
 use crate::{MCP_PATH, OAUTH_PATH, origin_of_request, same_origin};
 use consent::{
-    Choice, Consent, S256, base64url, clean_name, consent_csp, consent_page, html, origin_of_uri,
-    redirect_host, valid_challenge, valid_redirect_uri, verified_host, verifier_matches,
+    Choice, Consent, S256, base64url, clean_name, connector_vendor, consent_csp, consent_page,
+    html, origin_of_uri, redirect_host, valid_challenge, valid_redirect_uri, verifier_matches,
     with_params,
 };
 use store::{CLIENTS, CODES, Client, CodeRow, OAuthStore, REFRESH, RefreshRow, hash};
@@ -60,9 +75,39 @@ const MIGRATION_INIT_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../../migrations/oauth/postgres/0001_init.sql"),
 );
 
+/// The Client ID Metadata Document cache (issue #234): when a cached
+/// document must be fetched again.
+const MIGRATION_METADATA_EXPIRY: SqlMigration = SqlMigration::new(
+    "0002",
+    "metadata_expiry",
+    include_str!("../../migrations/oauth/sqlite/0002_metadata_expiry.sql"),
+);
+
+/// The same column for Postgres (ADR 0004), applied by the parity job.
+const MIGRATION_METADATA_EXPIRY_POSTGRES: SqlMigration = SqlMigration::new(
+    "0002",
+    "metadata_expiry",
+    include_str!("../../migrations/oauth/postgres/0002_metadata_expiry.sql"),
+);
+
 /// The app's public origin: the same config key `livingbrain-pages` reads for
 /// its links. Unset, the module answers on whichever host the request reached.
 const APP_BASE_KEY: &str = "WORKSPACES_REDIRECT_BASE";
+
+/// The predefined Actions client's id (issue #234): the operator pastes it
+/// into the GPT's OAuth settings, so it comes from config, not registration.
+const ACTIONS_ID_KEY: &str = "OAUTH_ACTIONS_CLIENT_ID";
+/// The lowercase-hex SHA-256 of that client's secret. The secret itself is
+/// never configured — only its hash, so a deployment's config holds nothing
+/// a copy of would let its holder back in.
+const ACTIONS_SECRET_KEY: &str = "OAUTH_ACTIONS_CLIENT_SECRET_SHA256";
+/// The client's redirect URIs, space-separated: the GPT callback URLs the
+/// operator copied out of ChatGPT.
+const ACTIONS_REDIRECTS_KEY: &str = "OAUTH_ACTIONS_REDIRECT_URIS";
+/// The client's display name, optional.
+const ACTIONS_NAME_KEY: &str = "OAUTH_ACTIONS_CLIENT_NAME";
+/// [`ACTIONS_NAME_KEY`]'s value when the operator sets none.
+const DEFAULT_ACTIONS_NAME: &str = "Living Brain GPT";
 
 /// A connector's access token lives an hour; its refresh token thirty days.
 const ACCESS_TTL: Duration = Duration::hours(1);
@@ -146,8 +191,12 @@ impl Module for OAuth {
         &[Port::Db, Port::Signer, Port::Clock]
     }
 
+    /// The `HttpClient` a Client ID Metadata Document client is fetched
+    /// through ([`cimd`]): without one a client_id that is a URL is refused
+    /// with a clear error and every other route — registration included —
+    /// is unaffected.
     fn optional(&self) -> &'static [Port] {
-        &[Port::RateLimiter]
+        &[Port::RateLimiter, Port::HttpClient]
     }
 
     fn tables(&self) -> &'static [&'static str] {
@@ -182,14 +231,25 @@ impl Module for OAuth {
         SETS
     }
 
-    fn validate_config(&self, _cfg: &dyn Config) -> Result<(), ConfigError> {
-        Ok(())
+    /// The predefined Actions client's keys (issue #234): unset is off, all
+    /// three set is on, and anything between or malformed is refused here —
+    /// the Cloudflare runtime runs this once per isolate at cold start and
+    /// logs the failure loudly, and each route that meets the configured id
+    /// refuses on it too (see [`actions_config`]), so existing deployments
+    /// and every other client are unaffected either way.
+    fn validate_config(&self, cfg: &dyn Config) -> Result<(), ConfigError> {
+        let mut errors = ConfigError::new();
+        if let ActionsConfig::Broken { reason, .. } = actions_config(cfg) {
+            errors.push(reason);
+        }
+        errors.into_result()
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 1] = [MIGRATION_INIT];
+        const MIGRATIONS: [SqlMigration; 2] = [MIGRATION_INIT, MIGRATION_METADATA_EXPIRY];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS);
-        const MIGRATIONS_POSTGRES: [SqlMigration; 1] = [MIGRATION_INIT_POSTGRES];
+        const MIGRATIONS_POSTGRES: [SqlMigration; 2] =
+            [MIGRATION_INIT_POSTGRES, MIGRATION_METADATA_EXPIRY_POSTGRES];
         const _: () = cratefield_core::assert_migration_set(&MIGRATIONS_POSTGRES);
         Migrations {
             sqlite: &MIGRATIONS,
@@ -214,6 +274,7 @@ impl Module for OAuth {
             clock,
             signer,
             limiter: ctx.ports.rate_limiter.clone(),
+            http: ctx.ports.http.clone(),
             config: ctx.config.clone(),
         });
         axum::Router::new()
@@ -249,7 +310,8 @@ impl Module for OAuth {
 }
 
 /// What every handler needs: the grant's tables, the personal access token
-/// store it mints through, and the ports the consent reads.
+/// store it mints through, and the ports the consent reads. `http` is the
+/// optional port a Client ID Metadata Document client is fetched through.
 pub(crate) struct OAuthState {
     store: OAuthStore,
     tokens: TokenStore,
@@ -257,6 +319,7 @@ pub(crate) struct OAuthState {
     clock: Arc<dyn Clock>,
     signer: Arc<dyn Signer>,
     limiter: Option<Arc<dyn RateLimiter>>,
+    http: Option<Arc<dyn cratefield_core::HttpClient>>,
     config: Arc<dyn Config>,
 }
 
@@ -295,6 +358,152 @@ fn app_origin(config: &dyn Config) -> Option<String> {
         .filter(|base| base.starts_with("https://") || base.starts_with("http://"))
         .filter(|base| !base.contains(['?', '#']))
         .and_then(|base| origin_of(&base).ok())
+}
+
+// ---------------------------------------------------------------------------
+// The predefined Actions client (issue #234)
+
+/// The configured Actions client: the client synthesized from config — never
+/// a stored row — plus the SHA-256 its secret is compared against.
+struct ActionsClient {
+    client: Client,
+    secret_sha256: String,
+}
+
+/// What the `OAUTH_ACTIONS_*` keys say. All three required keys set makes a
+/// client; none set leaves the feature off; anything between — or a value
+/// that breaks a rule — is [`ActionsConfig::Broken`], which
+/// [`Module::validate_config`] reports at cold start and every route that
+/// meets the configured id refuses on, so a half-configured deployment
+/// approves nothing rather than something half-checked.
+enum ActionsConfig {
+    Off,
+    Broken {
+        /// The configured id, when one was set: the id whose requests the
+        /// `reason` refuses.
+        id: Option<String>,
+        reason: String,
+    },
+    On(ActionsClient),
+}
+
+/// Reads the predefined Actions client out of config. Cheap enough to call
+/// per request, and per request is the point: nothing is cached across a
+/// config change.
+fn actions_config(config: &dyn Config) -> ActionsConfig {
+    let key = |name: &str| {
+        config
+            .get(name)
+            .map(|raw| raw.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    };
+    let (id, secret_hash, redirects) = (
+        key(ACTIONS_ID_KEY),
+        key(ACTIONS_SECRET_KEY),
+        key(ACTIONS_REDIRECTS_KEY),
+    );
+    if id.is_none() && secret_hash.is_none() && redirects.is_none() {
+        return ActionsConfig::Off;
+    }
+    let broken = |id: &Option<String>, reason: String| ActionsConfig::Broken {
+        id: id.clone(),
+        reason: format!(
+            "oauth: the predefined Actions client is misconfigured ({reason}); set \
+             {ACTIONS_ID_KEY}, {ACTIONS_SECRET_KEY} and {ACTIONS_REDIRECTS_KEY} together, \
+             or none of them"
+        ),
+    };
+    let Some(id) = id else {
+        return broken(
+            &None,
+            format!("{ACTIONS_ID_KEY} is unset while the other keys are set"),
+        );
+    };
+    if secret_hash.is_none() || redirects.is_none() {
+        return broken(
+            &Some(id),
+            "every key of the three is required once any is set".to_owned(),
+        );
+    }
+    let (secret_hash, redirects) = (secret_hash.expect("checked"), redirects.expect("checked"));
+    if id.starts_with("lbc_") || id.starts_with("https://") {
+        let reason = format!(
+            "the client_id must not look like a dynamically registered (`lbc_…`) or a \
+             document (`https://…`) one: {id:?}"
+        );
+        return broken(&Some(id), reason);
+    }
+    if id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return broken(
+            &Some(id),
+            "the client_id must be 1 to 128 printable ASCII characters".to_owned(),
+        );
+    }
+    if secret_hash.len() != 64
+        || !secret_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return broken(
+            &Some(id),
+            format!(
+                "{ACTIONS_SECRET_KEY} must be the 64-character lowercase-hex SHA-256 of \
+                 the client secret"
+            ),
+        );
+    }
+    let uris: Vec<String> = redirects.split_whitespace().map(str::to_owned).collect();
+    if uris.is_empty() {
+        return broken(
+            &Some(id),
+            format!("{ACTIONS_REDIRECTS_KEY} names no redirect URI"),
+        );
+    }
+    if uris.len() > MAX_REDIRECT_URIS || uris.iter().any(|uri| !valid_redirect_uri(uri)) {
+        return broken(
+            &Some(id),
+            format!(
+                "each of at most {MAX_REDIRECT_URIS} {ACTIONS_REDIRECTS_KEY} must be https \
+                 (or http to localhost), ASCII, plain-host and fragment-free"
+            ),
+        );
+    }
+    let mut name = clean_name(config.get(ACTIONS_NAME_KEY).as_deref().unwrap_or_default())
+        .chars()
+        .take(MAX_CLIENT_NAME_CHARS)
+        .collect::<String>();
+    if name.is_empty() {
+        name = DEFAULT_ACTIONS_NAME.to_owned();
+    }
+    ActionsConfig::On(ActionsClient {
+        client: Client {
+            client_id: id,
+            client_name: name,
+            redirect_uris: uris,
+            metadata_expires_at: None,
+        },
+        secret_sha256: secret_hash,
+    })
+}
+
+/// Whether `client_id` is this deployment's predefined Actions client: the
+/// one client PKCE is optional for at `/authorize` and a secret is required
+/// of at `/token`.
+fn is_actions_client(st: &OAuthState, client_id: &str) -> bool {
+    matches!(actions_config(&*st.config), ActionsConfig::On(actions) if actions.client.client_id == client_id)
+}
+
+/// The page every route answers on when the configured id is met but the
+/// configuration is broken (see [`actions_config`]): fail closed, exactly as
+/// a deployment with no limiter refuses CIMD clients, and say who can fix it.
+fn actions_misconfigured_page() -> Response {
+    error_page(
+        500,
+        "The Custom GPT Actions client is misconfigured",
+        "This deployment's OAUTH_ACTIONS_* keys are set but do not make a usable \
+         client, so nothing was approved or sent. The operator will find the \
+         reason in the Worker's logs at startup.",
+    )
 }
 
 /// The request's path and query, which always begins with `/`, so it can be
@@ -397,10 +606,12 @@ fn granted_scopes(user_id: &str) -> Vec<String> {
 }
 
 /// The name a connector's token carries in Settings → API tokens, decided by
-/// the redirect URI the code is being issued for: a Claude host gets the
-/// "Claude connector" label, any other host keeps only the name the app
-/// registered. Stored with the code, so the token and any renewal carry the
-/// label of the redirect that was actually approved.
+/// the redirect URI the code is being issued for: a host Living Brain
+/// recognises as a connector platform gets the platform's label ("Claude
+/// connector", "ChatGPT connector" — see [`connector_vendor`]), any other
+/// host keeps only the name the app registered. Stored with the code, so the
+/// token and any renewal carry the label of the redirect that was actually
+/// approved.
 fn connector_label(client_name: &str, redirect_uri: &str) -> String {
     let registered = clean_name(client_name);
     let name = if registered.is_empty() {
@@ -408,11 +619,12 @@ fn connector_label(client_name: &str, redirect_uri: &str) -> String {
     } else {
         registered
     };
-    let verified = redirect_host(redirect_uri).is_some_and(|host| verified_host(&host));
-    let label = if verified {
-        format!("Claude connector · {name}")
-    } else {
-        name
+    let label = match redirect_host(redirect_uri)
+        .as_deref()
+        .and_then(connector_vendor)
+    {
+        Some(vendor) => format!("{} connector · {name}", vendor.label()),
+        None => name,
     };
     label.chars().take(64).collect()
 }
@@ -509,6 +721,141 @@ fn open_issuer(st: &OAuthState, token: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// The client an authorization names
+
+/// The 400 page every unknown or unfetchable client gets. A Client ID
+/// Metadata Document that cannot be fetched or validated is indistinguishable
+/// from an unknown client from the outside, and neither ever redirects:
+/// there is no validated redirect URI to send anything to.
+fn unknown_client_page() -> Response {
+    error_page(
+        400,
+        "Unknown app",
+        "This app is not registered with Living Brain. Add it again from the app.",
+    )
+}
+
+/// The page a client_id that is a document URL gets when this deployment
+/// cannot check one at all: no rate limiter bound (the same fail-closed
+/// posture registration has) or no `HttpClient` port. Everything else —
+/// registration included — keeps working.
+fn cimd_unavailable_page() -> Response {
+    error_page(
+        503,
+        "This app cannot be checked",
+        "This deployment cannot check an app that identifies itself by its own \
+         document, so nothing was approved or sent. Try again later.",
+    )
+}
+
+/// The client an authorization request names: the predefined Actions client
+/// synthesized from config (issue #234) — never a stored row, so nothing can
+/// shadow it and no purge can drop it — the registered row, which, for a
+/// client_id that is a URL, is the cached Client ID Metadata Document, or a
+/// freshly fetched document. A cached document past its expiry is fetched
+/// again before the consent page is shown and before an approval is acted
+/// on, so neither ever vouches for stale metadata; the token endpoint reads
+/// the row alone and never fetches.
+async fn client_for_authorize(
+    st: &OAuthState,
+    client_id: &str,
+    headers: &HeaderMap,
+) -> Result<Client, Box<Response>> {
+    match actions_config(&*st.config) {
+        ActionsConfig::On(actions) if actions.client.client_id == client_id => {
+            return Ok(actions.client);
+        }
+        ActionsConfig::Broken { id: Some(id), .. } if id == client_id => {
+            return Err(Box::new(actions_misconfigured_page()));
+        }
+        _ => {}
+    }
+    match st.store.client(client_id).await {
+        Ok(Some(client)) => {
+            let expired = client
+                .metadata_expires_at
+                .as_deref()
+                .is_some_and(|expiry| !live_at(expiry, st.clock.now()));
+            if expired {
+                cimd_client(st, client_id, headers).await
+            } else {
+                Ok(client)
+            }
+        }
+        Ok(None) => {
+            // Only a client_id that is the shape of a document URL starts a
+            // fetch; anything else is simply unknown.
+            if cimd::validate_client_id(client_id).is_ok() {
+                cimd_client(st, client_id, headers).await
+            } else {
+                Err(Box::new(unknown_client_page()))
+            }
+        }
+        Err(_) => Err(Box::new(server_error_page())),
+    }
+}
+
+/// Fetches, validates and caches the document a client_id URL names. Every
+/// fetch — first or refresh — is rate-limited per calling address exactly as
+/// registration is, and refuses outright with no limiter or no `HttpClient`
+/// port, because it is an unauthenticated `/authorize` that triggers it; a
+/// cache hit never reaches here, so browsing apps costs no allowance.
+/// Failures are never cached: the caller gets the unknown-client page and
+/// the next request starts the fetch over.
+async fn cimd_client(
+    st: &OAuthState,
+    client_id: &str,
+    headers: &HeaderMap,
+) -> Result<Client, Box<Response>> {
+    let Some(limiter) = st.limiter.as_ref() else {
+        return Err(Box::new(cimd_unavailable_page()));
+    };
+    let keys: Vec<String> = rate_limit_keys(client_ip(headers).as_deref(), None)
+        .into_iter()
+        .map(|key| format!("oauth-cimd:{key}"))
+        .collect();
+    if let RateLimit::Denied { decision } =
+        check_rate_limit(Some(limiter), &keys, RateLimitFailure::FailClosed).await
+    {
+        return Err(Box::new(cratefield_core::rate_limited(&decision)));
+    }
+    let Some(http) = st.http.as_ref() else {
+        return Err(Box::new(cimd_unavailable_page()));
+    };
+    let metadata = match cimd::fetch(http.as_ref(), client_id).await {
+        Ok(metadata) => metadata,
+        Err(_) => return Err(Box::new(unknown_client_page())),
+    };
+    let now = st.clock.now();
+    let ttl = i64::try_from(metadata.cache_secs).unwrap_or(3600);
+    let client = Client {
+        client_id: client_id.to_owned(),
+        client_name: metadata.client_name,
+        redirect_uris: metadata.redirect_uris,
+        metadata_expires_at: Some(stamp(now + Duration::seconds(ttl))),
+    };
+    // The row's `unverified` flag follows the same host mapping a
+    // registration's does; the daily cap it feeds is a registration limit,
+    // so a document client never spends it — the fetch limit above is what
+    // bounds this path.
+    let unverified = client
+        .redirect_uris
+        .iter()
+        .filter_map(|uri| redirect_host(uri))
+        .any(|host| connector_vendor(&host).is_none());
+    let address = hash(client_ip(headers).as_deref().unwrap_or("unknown"));
+    if st
+        .store
+        .upsert_metadata_client(&client, &stamp(now), &address, unverified)
+        .await
+        .is_err()
+    {
+        return Err(Box::new(server_error_page()));
+    }
+    Ok(client)
+}
+
+// ---------------------------------------------------------------------------
 // GET /v1/oauth/authorize
 
 #[derive(Debug, Deserialize)]
@@ -544,16 +891,9 @@ async fn authorize_get(
             "The app did not say which client is asking.",
         );
     };
-    let client = match st.store.client(client_id).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return error_page(
-                400,
-                "Unknown app",
-                "This app is not registered with Living Brain. Add it again from the app.",
-            );
-        }
-        Err(_) => return error_page(500, "Something went wrong", "Try again in a moment."),
+    let client = match client_for_authorize(&st, client_id, &headers).await {
+        Ok(client) => client,
+        Err(page) => return *page,
     };
     let Some(redirect_uri) = query
         .redirect_uri
@@ -597,30 +937,50 @@ async fn authorize_get(
             "only the code response is supported",
         );
     }
-    let Some(challenge) = query
-        .code_challenge
-        .as_deref()
-        .filter(|c| valid_challenge(c))
-    else {
-        return authorize_error(
-            StatusCode::FOUND,
-            redirect_uri,
-            state,
-            &issuer,
-            "invalid_request",
-            "a code_challenge is required",
-        );
+    // PKCE S256 binds every public client's code (OAuth 2.1 has no `plain`).
+    // The one confidential client — the predefined Actions client, whose
+    // Custom GPT Actions cannot send a challenge — may ask without one: its
+    // secret binds the code instead, checked at the token endpoint. A
+    // challenge it *does* send must be S256 and is enforced there against
+    // the stored value; the empty marker a challenge-less request seals is
+    // redeemable by that client alone (see `exchange_code`), so no public
+    // client can ever take the no-PKCE path.
+    let challenge = match query.code_challenge.as_deref() {
+        Some(challenge) if valid_challenge(challenge) => {
+            if query.code_challenge_method.as_deref() != Some(S256) {
+                return authorize_error(
+                    StatusCode::FOUND,
+                    redirect_uri,
+                    state,
+                    &issuer,
+                    "invalid_request",
+                    "code_challenge_method must be S256",
+                );
+            }
+            challenge.to_owned()
+        }
+        Some(_) => {
+            return authorize_error(
+                StatusCode::FOUND,
+                redirect_uri,
+                state,
+                &issuer,
+                "invalid_request",
+                "a valid code_challenge is required",
+            );
+        }
+        None if is_actions_client(&st, client_id) => String::new(),
+        None => {
+            return authorize_error(
+                StatusCode::FOUND,
+                redirect_uri,
+                state,
+                &issuer,
+                "invalid_request",
+                "a code_challenge is required",
+            );
+        }
     };
-    if query.code_challenge_method.as_deref() != Some(S256) {
-        return authorize_error(
-            StatusCode::FOUND,
-            redirect_uri,
-            state,
-            &issuer,
-            "invalid_request",
-            "code_challenge_method must be S256",
-        );
-    }
     if query
         .resource
         .as_deref()
@@ -666,7 +1026,7 @@ async fn authorize_get(
     let sealed = Sealed {
         client_id: client.client_id.clone(),
         redirect_uri: redirect_uri.to_owned(),
-        code_challenge: challenge.to_owned(),
+        code_challenge: challenge,
         state: query.state.clone(),
         issuer: issuer.clone(),
         workspace_id: caller.workspace_id.clone(),
@@ -684,7 +1044,7 @@ async fn authorize_get(
     let page = consent_page(&Consent {
         client_name: &name,
         host: &host,
-        verified: verified_host(&host),
+        verified: connector_vendor(&host).is_some(),
         request: &request,
         choices: &choice_views,
     });
@@ -748,12 +1108,13 @@ async fn authorize_post(
         }
         _ => return problem(&NOT_SIGNED_IN),
     };
-    let Ok(Some(client)) = st.store.client(&sealed.client_id).await else {
-        return error_page(
-            400,
-            "Unknown app",
-            "This app is not registered with Living Brain.",
-        );
+    // The client is resolved again, not trusted from the seal: a cached
+    // document past its expiry is refetched here, so an approval acts on
+    // current metadata or none. A refusal is the page the GET would have
+    // given, never a redirect to an unvalidated URI.
+    let client = match client_for_authorize(&st, &sealed.client_id, &headers).await {
+        Ok(client) => client,
+        Err(page) => return *page,
     };
     if !client.redirect_uris.contains(&sealed.redirect_uri) {
         return error_page(
@@ -861,9 +1222,10 @@ async fn issue_code(
 /// existing identity (no row, no allowance spent); one registering address may
 /// create [`MAX_REGISTRATIONS_PER_IP_HOUR`] clients an hour, so one machine
 /// cannot exhaust the rest; and the day's cap of
-/// [`MAX_UNVERIFIED_REGISTRATIONS_PER_DAY`] counts only apps whose redirect is
-/// not a Claude host, so a crowd of unverified apps cannot close registration
-/// for everyone. Refuses outright when no rate limiter is bound.
+/// [`MAX_UNVERIFIED_REGISTRATIONS_PER_DAY`] counts only apps whose redirect
+/// host is not one Living Brain recognises as a connector platform (see
+/// [`connector_vendor`]), so a crowd of unverified apps cannot close
+/// registration for everyone. Refuses outright when no rate limiter is bound.
 async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: Bytes) -> Response {
     let Some(limiter) = st.limiter.as_ref() else {
         return token_error(
@@ -977,7 +1339,7 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
     let unverified = uris
         .iter()
         .filter_map(|uri| redirect_host(uri))
-        .any(|host| !verified_host(&host));
+        .any(|host| connector_vendor(&host).is_none());
     let address = hash(client_ip(&headers).as_deref().unwrap_or("unknown"));
     let hour_ago = now - Duration::hours(1);
     match st
@@ -1017,6 +1379,7 @@ async fn register(State(st): State<Arc<OAuthState>>, headers: HeaderMap, body: B
         client_id: format!("lbc_{id}"),
         client_name,
         redirect_uris: uris,
+        metadata_expires_at: None,
     };
     if st
         .store
@@ -1056,6 +1419,9 @@ struct TokenForm {
     code: Option<String>,
     redirect_uri: Option<String>,
     client_id: Option<String>,
+    /// `client_secret_post`: the confidential client's secret in the form
+    /// body. Refused for every public client (see [`token_client`]).
+    client_secret: Option<String>,
     code_verifier: Option<String>,
     refresh_token: Option<String>,
 }
@@ -1065,10 +1431,14 @@ struct TokenForm {
 /// before it reaches this module, so one advertised `token_endpoint` serves
 /// every grant a client may use. A device poll that does arrive here is named
 /// as unsupported rather than mis-answered.
-async fn token(State(st): State<Arc<OAuthState>>, Form(form): Form<TokenForm>) -> Response {
+async fn token(
+    State(st): State<Arc<OAuthState>>,
+    headers: HeaderMap,
+    Form(form): Form<TokenForm>,
+) -> Response {
     match form.grant_type.as_deref() {
-        Some("authorization_code") => exchange_code(&st, &form).await,
-        Some("refresh_token") => rotate_refresh(&st, &form).await,
+        Some("authorization_code") => exchange_code(&st, &form, &headers).await,
+        Some("refresh_token") => rotate_refresh(&st, &form, &headers).await,
         Some("urn:ietf:params:oauth:grant-type:device_code") => token_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
@@ -1082,24 +1452,167 @@ async fn token(State(st): State<Arc<OAuthState>>, Form(form): Form<TokenForm>) -
     }
 }
 
-/// The client a token request names, which must be registered: a public
-/// client is identified by its id alone.
-async fn named_client(st: &OAuthState, client_id: Option<&str>) -> Result<Client, Box<Response>> {
-    let Some(client_id) = client_id.filter(|id| !id.is_empty()) else {
+/// The `Authorization: Basic` credentials a token request may carry (RFC
+/// 6749 §2.3.1: standard base64 over the form-urlencoded id, a colon and the
+/// form-urlencoded secret — see [`consent::basic_credentials`]). `Absent` for
+/// a header that is not Basic auth; `Malformed` for a Basic payload that does
+/// not decode, which every client that presents it is refused on.
+enum BasicAuth {
+    Absent,
+    Malformed,
+    Credentials { id: String, secret: String },
+}
+
+impl BasicAuth {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Self::Credentials { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The secret half, when Basic carried a non-empty one.
+    fn secret(&self) -> Option<&str> {
+        match self {
+            Self::Credentials { secret, .. } if !secret.is_empty() => Some(secret),
+            _ => None,
+        }
+    }
+
+    fn is_present(&self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+}
+
+fn basic_auth(headers: &HeaderMap) -> BasicAuth {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return BasicAuth::Absent;
+    };
+    let mut parts = value.splitn(2, ' ');
+    let (scheme, payload) = (
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+    );
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return BasicAuth::Absent;
+    }
+    consent::basic_credentials(payload.as_bytes()).map_or(BasicAuth::Malformed, |(id, secret)| {
+        BasicAuth::Credentials { id, secret }
+    })
+}
+
+/// RFC 6749 §5.2's `invalid_client` — and, when the attempt came by the
+/// `Authorization` header, the `WWW-Authenticate: Basic` a 401 must carry.
+fn invalid_client(basic_used: bool, description: &str) -> Response {
+    let mut response = token_error(StatusCode::UNAUTHORIZED, "invalid_client", description);
+    if basic_used {
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=\"livingbrain\", charset=\"UTF-8\""),
+        );
+    }
+    response
+}
+
+/// The client a token request names, with its authentication settled. Every
+/// client this server registers — dynamically or by its document — is
+/// public: PKCE and the client_id bind its codes, and a secret presented for
+/// one is refused, so the Actions secret is never a way to pass as an app
+/// someone else registered. The one confidential client is the predefined
+/// Actions client (issue #234), which must present its secret, as
+/// `client_secret_post` or `client_secret_basic`, before anything of its own
+/// is read: the SHA-256 of what it presented is compared with the configured
+/// hash in constant time.
+struct TokenClient {
+    client: Client,
+    /// The predefined Actions client: confidential, so its tokens mint with
+    /// the `actions` audience and a no-PKCE code of its own is redeemable.
+    actions: bool,
+}
+
+async fn token_client(
+    st: &OAuthState,
+    form: &TokenForm,
+    headers: &HeaderMap,
+) -> Result<TokenClient, Box<Response>> {
+    let basic = basic_auth(headers);
+    let client_id = form
+        .client_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .or_else(|| basic.id().filter(|id| !id.is_empty()).map(str::to_owned));
+    let Some(client_id) = client_id else {
         return Err(Box::new(token_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "client_id is required",
         )));
     };
-    match st.store.client(client_id).await {
-        Ok(Some(client)) => Ok(client),
-        Ok(None) => Err(Box::new(token_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_client",
-            "the client is not registered",
-        ))),
-        Err(_) => Err(Box::new(server_error())),
+    // A Basic credential's id must agree with the client the form names.
+    if let Some(basic_id) = basic.id()
+        && basic_id != client_id
+    {
+        return Err(Box::new(invalid_client(
+            true,
+            "the Basic credentials name a different client",
+        )));
+    }
+    let form_secret = form
+        .client_secret
+        .as_deref()
+        .filter(|secret| !secret.is_empty());
+    match actions_config(&*st.config) {
+        ActionsConfig::On(actions) if actions.client.client_id == client_id => {
+            // The form parameter first, the Basic header as the other way
+            // round; either alone is what each method's client sends.
+            let Some(presented) = form_secret.or(basic.secret()) else {
+                return Err(Box::new(invalid_client(
+                    basic.is_present(),
+                    "this client requires its client secret",
+                )));
+            };
+            if !constant_time_eq(hash(presented).as_bytes(), actions.secret_sha256.as_bytes()) {
+                return Err(Box::new(invalid_client(
+                    basic.is_present(),
+                    "the client secret is not recognised",
+                )));
+            }
+            Ok(TokenClient {
+                client: actions.client,
+                actions: true,
+            })
+        }
+        ActionsConfig::Broken { id: Some(id), .. } if id == client_id => {
+            Err(Box::new(token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "the predefined Actions client is misconfigured on this deployment; \
+                 nothing was issued",
+            )))
+        }
+        _ => {
+            if form_secret.is_some() || basic.secret().is_some() || basic.is_present() {
+                return Err(Box::new(invalid_client(
+                    basic.is_present(),
+                    "this client authenticates with no secret",
+                )));
+            }
+            match st.store.client(&client_id).await {
+                Ok(Some(client)) => Ok(TokenClient {
+                    client,
+                    actions: false,
+                }),
+                Ok(None) => Err(Box::new(invalid_client(
+                    false,
+                    "the client is not registered",
+                ))),
+                Err(_) => Err(Box::new(server_error())),
+            }
+        }
     }
 }
 
@@ -1119,8 +1632,8 @@ async fn revoke_family(st: &OAuthState, family: &str) {
     }
 }
 
-async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
-    let client = match named_client(st, form.client_id.as_deref()).await {
+async fn exchange_code(st: &OAuthState, form: &TokenForm, headers: &HeaderMap) -> Response {
+    let client = match token_client(st, form, headers).await {
         Ok(client) => client,
         Err(response) => return *response,
     };
@@ -1170,10 +1683,19 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
     // The code is spent whatever the checks below say: a wrong verifier or a
     // different client is one guess, not a retry.
     let verifier = form.code_verifier.as_deref().unwrap_or_default();
-    let bound = row.client_id == client.client_id
+    // A challenge the code carries is enforced, whichever client redeems it.
+    // The empty marker is the confidential Actions client's challenge-less
+    // code (Custom GPT Actions send no PKCE), and only that client — which
+    // authenticated by its secret above — may redeem one.
+    let pkce_bound = if row.code_challenge.is_empty() {
+        client.actions
+    } else {
+        verifier_matches(verifier, &row.code_challenge)
+    };
+    let bound = row.client_id == client.client.client_id
         && form.redirect_uri.as_deref() == Some(row.redirect_uri.as_str())
         && live_at(&row.expires_at, now)
-        && verifier_matches(verifier, &row.code_challenge);
+        && pkce_bound;
     if !bound {
         return token_error(
             StatusCode::BAD_REQUEST,
@@ -1192,28 +1714,18 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
         }
         Err(_) => return server_error(),
     }
-    let granted = granted_scopes(&row.user_id);
-    let access = match st
-        .tokens
-        .mint_connector(
-            &row.workspace_id,
-            &row.user_id,
-            &row.name,
-            &granted,
-            now + ACCESS_TTL,
-        )
-        .await
-    {
-        Ok(access) => access,
-        Err(_) => return server_error(),
-    };
+    let access =
+        match mint_access(st, &client, &row.workspace_id, &row.user_id, &row.name, now).await {
+            Ok(access) => access,
+            Err(_) => return server_error(),
+        };
     let Ok(refresh) = issue_refresh(
         st,
         &Issued {
             name: &row.name,
             family: &row.family,
-            prefix: &access.prefix,
-            client_id: &client.client_id,
+            prefix: &access.minted.prefix,
+            client_id: &client.client.client_id,
             workspace_id: &row.workspace_id,
             user_id: &row.user_id,
         },
@@ -1223,7 +1735,46 @@ async fn exchange_code(st: &OAuthState, form: &TokenForm) -> Response {
     else {
         return server_error();
     };
-    token_response(&access.token, &refresh, &row.scope)
+    token_response(&access.minted.token, &refresh, &access.scope)
+}
+
+/// A connection's freshly minted access token, and the scope list it
+/// actually carries — what the response echoes, so an actions token's
+/// `read:`-only subset is named as it is, not as the grant asked.
+struct MintedAccess {
+    minted: crate::store::Minted,
+    scope: String,
+}
+
+/// Mints the connection's access token: an actions token for the predefined
+/// Actions client (audience `actions`, scopes forced `read:`-only), a
+/// connector token for every public one. The same mint serves the code
+/// exchange and every rotation of its renewal, so a connection's tokens
+/// never change kind partway through.
+async fn mint_access(
+    st: &OAuthState,
+    client: &TokenClient,
+    workspace_id: &str,
+    user_id: &str,
+    name: &str,
+    now: OffsetDateTime,
+) -> Result<MintedAccess, DbError> {
+    let granted = granted_scopes(user_id);
+    if client.actions {
+        let scope = TokenStore::read_only(&granted)?.join(" ");
+        let minted = st
+            .tokens
+            .mint_actions(workspace_id, user_id, name, &granted, now + ACCESS_TTL)
+            .await?;
+        Ok(MintedAccess { minted, scope })
+    } else {
+        let scope = granted.join(" ");
+        let minted = st
+            .tokens
+            .mint_connector(workspace_id, user_id, name, &granted, now + ACCESS_TTL)
+            .await?;
+        Ok(MintedAccess { minted, scope })
+    }
 }
 
 /// What a renewal token is issued for: the connection it opens and the access
@@ -1259,8 +1810,8 @@ async fn issue_refresh(
     Ok(token)
 }
 
-async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
-    let client = match named_client(st, form.client_id.as_deref()).await {
+async fn rotate_refresh(st: &OAuthState, form: &TokenForm, headers: &HeaderMap) -> Response {
+    let client = match token_client(st, form, headers).await {
         Ok(client) => client,
         Err(response) => return *response,
     };
@@ -1288,7 +1839,7 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
         Err(_) => return server_error(),
     };
     let now = st.clock.now();
-    if row.client_id != client.client_id || !live_at(&row.expires_at, now) {
+    if row.client_id != client.client.client_id || !live_at(&row.expires_at, now) {
         return token_error(
             StatusCode::BAD_REQUEST,
             "invalid_grant",
@@ -1347,28 +1898,18 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
         .tokens
         .revoke(&row.workspace_id, &row.user_id, &row.prefix)
         .await;
-    let granted = granted_scopes(&row.user_id);
-    let access = match st
-        .tokens
-        .mint_connector(
-            &row.workspace_id,
-            &row.user_id,
-            &row.name,
-            &granted,
-            now + ACCESS_TTL,
-        )
-        .await
-    {
-        Ok(access) => access,
-        Err(_) => return server_error(),
-    };
+    let access =
+        match mint_access(st, &client, &row.workspace_id, &row.user_id, &row.name, now).await {
+            Ok(access) => access,
+            Err(_) => return server_error(),
+        };
     let Ok(refresh) = issue_refresh(
         st,
         &Issued {
             name: &row.name,
             family: &row.family,
-            prefix: &access.prefix,
-            client_id: &client.client_id,
+            prefix: &access.minted.prefix,
+            client_id: &client.client.client_id,
             workspace_id: &row.workspace_id,
             user_id: &row.user_id,
         },
@@ -1378,5 +1919,5 @@ async fn rotate_refresh(st: &OAuthState, form: &TokenForm) -> Response {
     else {
         return server_error();
     };
-    token_response(&access.token, &refresh, &granted.join(" "))
+    token_response(&access.minted.token, &refresh, &access.scope)
 }

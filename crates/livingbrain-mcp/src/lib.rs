@@ -1,8 +1,10 @@
 //! `livingbrain-mcp`: the remote MCP server (issue #24) and the source import
 //! endpoint (issue #81).
 //!
-//! Four tools over `livingbrain-pages` — `brain_search`, `brain_page`,
-//! `brain_context_for`, `brain_note` — on stateless Streamable HTTP, plus one
+//! Seven tools over `livingbrain-pages` — `brain_search`, `brain_page`,
+//! `brain_context_for`, `brain_note`, `brain_facts`, and the `search` and
+//! `fetch` pair that gives ChatGPT's deep research the same reads in its own
+//! shape — on stateless Streamable HTTP, plus one
 //! `POST /v1/pages/sources` for a file that arrived from outside. Both are
 //! mounted *inside* the pages module: the harness scopes `Blob` per module
 //! name, so a sibling module could never open a body this one writes.

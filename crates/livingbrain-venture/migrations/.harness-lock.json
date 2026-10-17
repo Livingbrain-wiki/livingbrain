@@ -202,5 +202,9 @@
   "pages/0011": {
     "file": "0051_pages_0011_activity.sql",
     "sha256": "961da0889149174c1a12b3a79d51eaf48b6e42f5a9247d45300d489538cdaa5b"
+  },
+  "oauth/0002": {
+    "file": "0052_oauth_0002_metadata_expiry.sql",
+    "sha256": "9d8925bdf22ba1867116e233cd06958565a7e92c21540a44f54e9e36c5492181"
   }
 }

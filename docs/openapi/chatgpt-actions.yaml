@@ -1,0 +1,170 @@
+# The Custom GPT Actions API (docs/chatgpt.md): the four reads a Living
+# Brain deployment offers a GPT on a plan without custom connectors. A GPT
+# imports this file under Actions and authenticates with the deployment's
+# predefined Actions client. Descriptions stay under 300 characters, which
+# is OpenAI's limit on them.
+openapi: 3.1.0
+info:
+  title: Living Brain
+  summary: Read-only access to one workspace's pages, facts and answers.
+  version: 1.0.0
+servers: [{ url: https://app.livingbrain.wiki }]
+security: [{ oauth: [] }]
+paths:
+  /v1/search:
+    get:
+      operationId: searchBrain
+      summary: Search pages
+      description: >-
+        Pages the signed-in person may read whose body holds every word of
+        the query, best match first, each with its title, citation URL and
+        a snippet, plus the temporal facts the query is about.
+      parameters:
+        - { name: q, in: query, required: true, description: "Every word of it must appear in a page for it to match.", schema: { type: string } }
+        - { name: limit, in: query, description: "Hits to return; above 25 is clamped to 25.", schema: { type: integer, minimum: 1, maximum: 25, default: 10 } }
+        - { name: project, in: query, description: "Keep only pages whose frontmatter names this project.", schema: { type: string } }
+      responses:
+        "200":
+          description: The hits, and the facts the query is about.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, facts]
+                properties:
+                  results: { type: array, items: { type: object, required: [title, url, snippet], properties: { title: { type: string }, url: { type: string, format: uri }, snippet: { type: string } } } }
+                  facts: { type: array, items: { $ref: "#/components/schemas/Timeline" } }
+  /v1/pages/{slug}:
+    get:
+      operationId: getPage
+      summary: Read one page
+      description: >-
+        One page by slug, from the scopes the signed-in person may read:
+        its Markdown, title, version, backlinks, citations and the temporal
+        facts about it.
+      parameters:
+        - { name: slug, in: path, required: true, description: "The page's slug.", schema: { type: string } }
+      responses:
+        "200":
+          description: The page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slug, title, markdown, url, version, entity_type, backlinks, citations, subject, facts, facts_markdown]
+                properties:
+                  slug: { type: string }
+                  title: { type: string }
+                  markdown: { type: string }
+                  url: { type: string, format: uri }
+                  version: { type: integer }
+                  entity_type: { type: string }
+                  backlinks: { type: array, items: { type: string } }
+                  citations: { type: array, items: { type: object, properties: { title: { type: string }, url: { type: string } } } }
+                  subject: { type: string }
+                  facts: { type: array, items: { $ref: "#/components/schemas/Timeline" } }
+                  facts_markdown: { type: string }
+  /v1/facts:
+    get:
+      operationId: getFacts
+      summary: Read temporal facts
+      description: >-
+        The timelines the signed-in person may read: what holds now, or as
+        of a date, with the history of earlier values and one rendered line
+        per timeline.
+      parameters:
+        - { name: subject, in: query, description: "One entity's timelines; \"me\" is the caller.", schema: { type: string } }
+        - { name: attribute, in: query, description: "One attribute key, such as \"timezone\".", schema: { type: string } }
+        - { name: as_of, in: query, description: "A partial date (2026, 2026-03, 2026-03-08); absent is today.", schema: { type: string } }
+      responses:
+        "200":
+          description: The timelines.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [as_of, as_of_instant, keys]
+                properties:
+                  as_of: { type: string }
+                  as_of_instant: { type: string, format: date-time }
+                  keys: { type: array, items: { $ref: "#/components/schemas/Timeline" } }
+  /v1/ask:
+    post:
+      operationId: askBrain
+      summary: Ask the brain
+      description: >-
+        The workspace's own connected model answers the question from the
+        pages and facts the asker may read, every claim cited. When their
+        own device runner takes the job, the answer is a 202 to poll.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, maxLength: 4000 }
+                project: { type: string }
+                as_of: { type: string }
+      responses:
+        "200":
+          description: The answer with its sources.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [answer, citations, facts, as_of, mode]
+                properties:
+                  answer: { type: string }
+                  citations: { type: array, items: { type: object, properties: { title: { type: string }, url: { type: string }, quote: { type: string } } } }
+                  facts: { type: array, items: { type: object, properties: { subject: { type: string }, attribute: { type: string }, line: { type: string } } } }
+                  as_of: { type: string }
+                  mode: { type: string }
+        "202":
+          description: The asker's own device runner has the job; poll, then ask again.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [pending] }
+                  poll: { type: string }
+                  job: { type: string }
+                  retry_after: { type: integer }
+components:
+  securitySchemes:
+    oauth:
+      type: oauth2
+      description: The deployment's predefined Actions client (docs/chatgpt.md).
+      flows:
+        authorizationCode:
+          authorizationUrl: https://app.livingbrain.wiki/v1/oauth/authorize
+          tokenUrl: https://app.livingbrain.wiki/v1/oauth/token
+          scopes: {}
+  schemas:
+    Fact:
+      type: object
+      description: One recorded fact; loosely typed on purpose.
+      additionalProperties: true
+      properties:
+        id: { type: string }
+        subject: { type: string }
+        attribute: { type: string }
+        value: { type: string }
+        valid_from: { type: string }
+        status: { type: string }
+        source: { type: [string, "null"] }
+        quote: { type: [string, "null"] }
+    Timeline:
+      type: object
+      description: One entity-attribute pair's facts at a moment.
+      required: [subject, attribute, scope, cardinality, current, history, line]
+      properties:
+        subject: { type: string }
+        attribute: { type: string }
+        scope: { type: string }
+        cardinality: { type: string }
+        current: { type: array, items: { $ref: "#/components/schemas/Fact" } }
+        history: { type: array, items: { $ref: "#/components/schemas/Fact" } }
+        line: { type: string }

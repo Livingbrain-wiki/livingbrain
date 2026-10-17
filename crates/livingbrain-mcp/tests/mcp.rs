@@ -339,12 +339,23 @@ fn the_transport_and_the_method_table_behave_as_the_specification_says() {
             "brain_page",
             "brain_context_for",
             "brain_note",
-            "brain_facts"
+            "brain_facts",
+            "search",
+            "fetch"
         ]
     );
     for tool in listed {
+        let name = tool["name"].as_str().unwrap();
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
         assert!(!tool["description"].as_str().unwrap().is_empty(), "{tool}");
+        // Every tool but the one writer says it reads only; the writer
+        // carries no annotations at all.
+        let expected = (name != "brain_note").then_some(true);
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"].as_bool(),
+            expected,
+            "{name}"
+        );
     }
 
     // A notification is acknowledged and never answered; the server's own
@@ -772,6 +783,147 @@ fn an_empty_search_lists_the_pages_the_asker_can_read() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The ChatGPT-shaped pair: search and fetch (deep research connectors)
+
+/// `search` answers in the shape deep research's contract names — exactly
+/// `id`/`title`/`url` rows, the one text item the JSON of that same object —
+/// and through the same access plan as `brain_search`.
+#[test]
+fn search_answers_in_the_shape_chatgpt_deep_research_reads() {
+    let fixture = world();
+    seed(&fixture, "ws-one", &user("u-a"), "kestrel", KESTREL);
+    seed(&fixture, "ws-one", &user("u-b"), "tamar", TAMAR);
+    seed(&fixture, "ws-one", &Scope::Shared, "zephyrmoor", ZEPHYRMOOR);
+    seed(&fixture, "ws-two", &user("u-a"), "atlas", ATLAS);
+
+    let response = post(
+        &fixture,
+        "token-a",
+        call("search", json!({ "query": "ledger reconciliation" })),
+    );
+    let result = result_of(&response);
+    let rows = result["structuredContent"]["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a results array: {result}"))
+        .clone();
+    let all = Value::Array(rows.clone()).to_string();
+    for row in &rows {
+        let keys: Vec<&str> = row
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["id", "title", "url"], "{row}");
+    }
+    let scope = page_scope("ws-one", &user("u-a"));
+    let mine = rows
+        .iter()
+        .find(|row| row["title"] == "Kestrel reconciliation")
+        .unwrap_or_else(|| panic!("the caller's own page is a result: {all}"));
+    assert_eq!(mine["id"], format!("{scope}:kestrel"));
+    assert_eq!(
+        mine["url"],
+        livingbrain_pages::page_url("https://app.brain.test", &scope, "kestrel")
+    );
+    assert!(
+        mine["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://app.brain.test/wiki?slug=kestrel&scope="),
+        "{mine}"
+    );
+    // One text item, and it is that same object as a JSON string.
+    let content = result["content"].as_array().expect("one content item");
+    assert_eq!(content.len(), 1, "{result}");
+    assert_eq!(content[0]["type"], "text", "{result}");
+    assert_eq!(text_of(&response), result["structuredContent"].to_string());
+    // The same plan as brain_search: B's page and the other workspace's are
+    // nowhere in it, not even as an id.
+    assert!(!all.contains("Bergen") && !all.contains("Atlas"), "{all}");
+}
+
+/// `fetch` reads by the id a `search` result named, in the shape deep
+/// research reads. A page outside the caller's access — or an id that is not
+/// one — never says a page exists.
+#[test]
+fn fetch_reads_by_id_and_says_nothing_about_pages_it_may_not_read() {
+    let fixture = world();
+    seed(&fixture, "ws-one", &user("u-a"), "kestrel", KESTREL);
+    seed(&fixture, "ws-one", &user("u-b"), "tamar", TAMAR);
+    seed(&fixture, "ws-one", &Scope::Shared, "zephyrmoor", ZEPHYRMOOR);
+
+    let scope = page_scope("ws-one", &Scope::Shared);
+    let id = format!("{scope}:zephyrmoor");
+    let response = post(&fixture, "token-a", call("fetch", json!({ "id": id })));
+    let result = result_of(&response);
+    let structured = &result["structuredContent"];
+    let keys: Vec<&str> = structured
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["id", "title", "text", "url", "metadata"],
+        "{structured}"
+    );
+    let meta_keys: Vec<&str> = structured["metadata"]
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(meta_keys, ["scope", "slug", "version"], "{structured}");
+    assert_eq!(structured["id"], id);
+    assert_eq!(structured["title"], "Platform reconciliation");
+    assert!(
+        structured["text"]
+            .as_str()
+            .unwrap()
+            .contains("owned by the platform team"),
+        "{structured}"
+    );
+    assert_eq!(structured["metadata"]["scope"], scope);
+    assert_eq!(structured["metadata"]["slug"], "zephyrmoor");
+    assert_eq!(structured["metadata"]["version"], 1);
+    assert_eq!(
+        structured["url"],
+        livingbrain_pages::page_url("https://app.brain.test", &scope, "zephyrmoor")
+    );
+    let content = result["content"].as_array().expect("one content item");
+    assert_eq!(content.len(), 1, "{result}");
+    assert_eq!(text_of(&response), structured.to_string());
+
+    // B's page, by the very id that names it: the same not-found answer
+    // brain_page gives, never "it exists" and never "it is somebody else's".
+    let theirs = format!("{}:tamar", page_scope("ws-one", &user("u-b")));
+    let refused = post(&fixture, "token-a", call("fetch", json!({ "id": theirs })));
+    assert_eq!(refused.status, StatusCode::OK, "a tool error is not a 500");
+    assert_eq!(refused.json()["result"]["isError"], true);
+    let said = text_of(&refused);
+    assert!(said.starts_with("no page"), "{said}");
+    assert!(!said.contains("Bergen"), "{said}");
+
+    // An id that is not `<scope>:<slug>` is the caller's syntax, not the
+    // tool's answer.
+    for id in [
+        "zephyrmoor",
+        "shared-abc:",
+        ":zephyrmoor",
+        "shared-abc:a:b",
+        "shared-abc:Not A Slug",
+        "",
+    ] {
+        let response = post(&fixture, "token-a", call("fetch", json!({ "id": id })));
+        assert_eq!(code_of(&response), -32602, "{id}");
+    }
+    let nameless = post(&fixture, "token-a", call("fetch", json!({})));
+    assert_eq!(code_of(&nameless), -32602);
+}
+
 /// The challenge names the metadata on the host the request itself reached,
 /// not a compiled-in one: one Worker fronts staging, production and `mcp.`,
 /// and a client that followed a challenge across to another host would end
@@ -937,6 +1089,30 @@ fn an_agent_account_reads_exactly_its_folder_through_the_tools() {
         call("brain_page", json!({"slug": "coding-agents--codex--y"})),
     );
     assert!(text_of(&refused).starts_with("no page"));
+    // The ChatGPT-shaped pair answers through the same grants: the folder's
+    // pages, and nothing beside them.
+    let rows = text_of(&post(
+        &fixture,
+        "agent",
+        call("search", json!({"query": "marigold"})),
+    ));
+    assert!(rows.contains("Claude page"), "{rows}");
+    for leaked in ["Codex page", "Diary", "Handbook"] {
+        assert!(!rows.contains(leaked), "{leaked}: {rows}");
+    }
+    let inside = format!(
+        "{}:coding-agents--claude--x",
+        page_scope("ws", &user("u-a"))
+    );
+    let fetched = text_of(&post(
+        &fixture,
+        "agent",
+        call("fetch", json!({"id": inside})),
+    ));
+    assert!(fetched.contains("Claude page"), "{fetched}");
+    let outside = format!("{}:coding-agents--codex--y", page_scope("ws", &user("u-a")));
+    let refused = post(&fixture, "agent", call("fetch", json!({"id": outside})));
+    assert!(text_of(&refused).starts_with("no page"));
     // Read is not write: a note is refused.
     let note = post(
         &fixture,
@@ -977,6 +1153,23 @@ fn a_tool_read_lands_on_the_live_feed_of_its_own_workspace_only() {
         call("brain_search", json!({ "query": "reykjavik" })),
     );
     assert_eq!(search.status, StatusCode::OK);
+    // The ChatGPT-shaped tools land on the same feed, their `scope:slug` ids
+    // read back as scope and slug.
+    let chat_read = post(
+        &fixture,
+        "token-a",
+        call(
+            "fetch",
+            json!({ "id": format!("{}:kestrel", page_scope("ws-one", &user("u-a"))) }),
+        ),
+    );
+    assert_eq!(chat_read.status, StatusCode::OK);
+    let chat_search = post(
+        &fixture,
+        "token-a",
+        call("search", json!({ "query": "reykjavik" })),
+    );
+    assert_eq!(chat_search.status, StatusCode::OK);
 
     let feed = |workspace: &str| {
         pollster::block_on(livingbrain_pages::activity_rows(
@@ -999,6 +1192,20 @@ fn a_tool_read_lands_on_the_live_feed_of_its_own_workspace_only() {
         mine.iter()
             .any(|(kind, slug, _)| kind == "search" && slug == "kestrel"),
         "a search that finds the page is on the feed: {mine:?}"
+    );
+    assert_eq!(
+        mine.iter()
+            .filter(|(kind, slug, _)| kind == "read" && slug == "kestrel")
+            .count(),
+        2,
+        "a fetch is a read on the feed, its id read as scope and slug: {mine:?}"
+    );
+    assert_eq!(
+        mine.iter()
+            .filter(|(kind, slug, _)| kind == "search" && slug == "kestrel")
+            .count(),
+        2,
+        "the ChatGPT-shaped search records like brain_search: {mine:?}"
     );
     assert!(
         feed("ws-two").is_empty(),

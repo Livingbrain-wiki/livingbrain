@@ -784,6 +784,56 @@
                   </div>
                 </li>
               </ol>
+
+              <!-- Chat apps add the same endpoint as a custom connector.
+                   Each button copies it and reveals that app's steps
+                   (docs/chatgpt.md, docs/mcp.md); the steps are static
+                   here, only ever toggled with `hidden`. -->
+              <h3>Chat apps</h3>
+              <div class="form-actions">
+                <button type="button" id="add-chatgpt">Add to ChatGPT</button>
+                <button type="button" id="add-claude">Add to Claude</button>
+              </div>
+              <p class="hint">
+                Each copies the endpoint above, ready to paste, and opens
+                its steps. You sign in to Living Brain to approve it; no
+                token to copy.
+              </p>
+
+              <div id="steps-chatgpt" hidden>
+                <h3>ChatGPT</h3>
+                <ol>
+                  <li>
+                    In ChatGPT, open <strong>Settings → Apps → Connectors</strong>
+                    (older UI: <strong>Settings → Connectors → Advanced</strong>,
+                    with <strong>Developer mode</strong> on) and add a custom
+                    MCP server.
+                  </li>
+                  <li>Paste the endpoint, set authentication to <strong>OAuth</strong>, and create it.</li>
+                  <li>
+                    ChatGPT opens Living Brain in your browser: sign in, pick
+                    the workspace, <strong>Approve</strong>.
+                  </li>
+                </ol>
+                <p class="hint">
+                  Custom connectors are a Business, Enterprise or Edu
+                  feature; on Pro, deep research still reads through them.
+                  A workspace admin may first have to allow them under
+                  Workspace settings → Apps.
+                </p>
+              </div>
+
+              <div id="steps-claude" hidden>
+                <h3>Claude</h3>
+                <ol>
+                  <li>In Claude, open <strong>Settings → Connectors → Add custom connector</strong>.</li>
+                  <li>Paste the endpoint and add it.</li>
+                  <li>
+                    Claude opens Living Brain in your browser: sign in, pick
+                    the workspace, <strong>Approve</strong>.
+                  </li>
+                </ol>
+              </div>
             </section>
 
             <!-- GitHub: the connection (docs/github.md). Under Integrations.

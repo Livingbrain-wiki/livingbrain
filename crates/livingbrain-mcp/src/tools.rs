@@ -1,9 +1,11 @@
-//! The five tools, and the citations they answer with.
+//! The seven tools, and the citations they answer with.
 //!
-//! Every tool reads through the scopes the caller was granted and none takes
-//! a scope argument. A page the asker was not granted is not refused loudly —
-//! it is not found, because answering "you do not have access to this" is
-//! itself an answer about somebody else's page.
+//! Five `brain_*` tools, plus `search` and `fetch`: the same reads in the
+//! shape ChatGPT's deep research expects, so a connector there answers from
+//! these pages too. Every tool reads through the scopes the caller was
+//! granted and none takes a scope argument. A page the asker was not granted
+//! is not refused loudly — it is not found, because answering "you do not
+//! have access to this" is itself an answer about somebody else's page.
 
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_pages::access::{
@@ -11,8 +13,8 @@ use livingbrain_pages::access::{
 };
 use livingbrain_pages::{
     Author, EntityType, FactError, FactInput, FactStore, Frontmatter, Page, PageError, PageStore,
-    PageWrite, Timeline, brief_lines, brief_section, fact_json, page_url, parse_frontmatter,
-    person_subject, reference_url, relevant_where,
+    PageWrite, Timeline, brief_lines, brief_section, fact_json, is_slug, page_url,
+    parse_frontmatter, person_subject, reference_url, relevant_where,
 };
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
@@ -37,8 +39,17 @@ const SLUG_HEX: usize = 12;
 
 /// The tools as `tools/list` returns them.
 pub(crate) fn descriptors() -> Value {
-    fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
-        json!({
+    /// `read_only` says whether the tool changes nothing, as the `readOnlyHint`
+    /// annotation every read-only tool carries (the one writer, `brain_note`,
+    /// carries none).
+    fn tool(
+        name: &str,
+        description: &str,
+        properties: Value,
+        required: &[&str],
+        read_only: bool,
+    ) -> Value {
+        let mut tool = json!({
             "name": name,
             "description": description,
             "inputSchema": {
@@ -46,7 +57,11 @@ pub(crate) fn descriptors() -> Value {
                 "properties": properties,
                 "required": required,
             },
-        })
+        });
+        if read_only {
+            tool["annotations"] = json!({ "readOnlyHint": true });
+        }
+        tool
     }
     json!([
         tool(
@@ -65,12 +80,14 @@ pub(crate) fn descriptors() -> Value {
                            "description": "How many pages to return." },
             }),
             &[],
+            true,
         ),
         tool(
             "brain_page",
             "Read one page's Markdown by slug, from the pages you are allowed to read.",
             json!({ "slug": { "type": "string", "description": "The page's slug." } }),
             &["slug"],
+            true,
         ),
         tool(
             "brain_context_for",
@@ -81,6 +98,7 @@ pub(crate) fn descriptors() -> Value {
                 "task": { "type": "string", "description": "What you are about to do, in words." },
             }),
             &["repo", "task"],
+            true,
         ),
         tool(
             "brain_note",
@@ -115,6 +133,7 @@ pub(crate) fn descriptors() -> Value {
                 },
             }),
             &["text"],
+            false,
         ),
         tool(
             "brain_facts",
@@ -127,6 +146,32 @@ pub(crate) fn descriptors() -> Value {
                 "as_of": { "type": "string", "description": "A partial date; the end of that period is used." },
             }),
             &[],
+            true,
+        ),
+        tool(
+            "search",
+            "For ChatGPT deep research: search the pages the person you act for is \
+             allowed to read — the same search `brain_search` runs, best match first — \
+             answered as `id`/`title`/`url` rows. Hand an `id` to `fetch` for the page \
+             behind a row.",
+            json!({
+                "query": { "type": "string",
+                           "description": "The words or question to look for." },
+            }),
+            &["query"],
+            true,
+        ),
+        tool(
+            "fetch",
+            "For ChatGPT deep research: one page's Markdown, by the `id` a `search` \
+             result named (`<scope>:<slug>`) — the same read `brain_page` does, over \
+             the pages the person you act for is allowed to read.",
+            json!({
+                "id": { "type": "string",
+                        "description": "The page's id, as the `search` result named it." },
+            }),
+            &["id"],
+            true,
         ),
     ])
 }
@@ -159,6 +204,18 @@ pub(crate) enum Call {
         subject: Option<String>,
         attribute: Option<String>,
         as_of: Option<String>,
+    },
+    /// `search`: [`Call::Search`]'s read in the shape ChatGPT's deep
+    /// research reads.
+    ChatSearch {
+        query: String,
+    },
+    /// `fetch`: [`Call::Page`]'s read in the same shape, by the `scope:slug`
+    /// id a `search` result named. The halves, already split: a malformed id
+    /// is refused at parse time, like any other malformed argument.
+    ChatFetch {
+        scope: String,
+        slug: String,
     },
 }
 
@@ -204,6 +261,24 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
             attribute: optional(arguments, "attribute")?.map(str::to_owned),
             as_of: optional(arguments, "as_of")?.map(str::to_owned),
         }),
+        "search" => Ok(Call::ChatSearch {
+            query: required(arguments, "query")?.to_owned(),
+        }),
+        "fetch" => {
+            let id = required(arguments, "id")?;
+            // The id is `<scope>:<slug>`, and both halves are the slug rule
+            // (`[a-z0-9-]`, `is_slug`) — so neither can hold a `:`, and
+            // splitting at the first one is unambiguous. Anything else is
+            // the caller's syntax, not a page that was not found.
+            let (scope, slug) = id.split_once(':').ok_or("`id` must be `<scope>:<slug>`")?;
+            if !is_slug(scope) || !is_slug(slug) {
+                return Err("`id` must be `<scope>:<slug>`".to_owned());
+            }
+            Ok(Call::ChatFetch {
+                scope: scope.to_owned(),
+                slug: slug.to_owned(),
+            })
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -223,8 +298,11 @@ pub(crate) async fn run(
     // What the live feed calls this read (`GET /v1/graph/activity`); facts
     // are not pages, so they record nothing.
     let feed = match &call {
-        Call::Search { .. } | Call::Recent { .. } | Call::ContextFor { .. } => "search",
-        Call::Page { .. } => "read",
+        Call::Search { .. }
+        | Call::Recent { .. }
+        | Call::ContextFor { .. }
+        | Call::ChatSearch { .. } => "search",
+        Call::Page { .. } | Call::ChatFetch { .. } => "read",
         Call::Note { .. } => "write",
         Call::Facts { .. } => "",
     };
@@ -232,6 +310,8 @@ pub(crate) async fn run(
         Call::Search { query, limit } => search(store, base, &filters, &query, limit).await,
         Call::Recent { limit } => recent(store, base, &filters, limit).await,
         Call::Page { slug } => page(store, base, &filters, &slug).await,
+        Call::ChatSearch { query } => chat_search(store, base, &filters, &query).await,
+        Call::ChatFetch { scope, slug } => chat_fetch(store, base, &filters, &scope, &slug).await,
         Call::ContextFor { repo, task } => {
             context_for(store, facts, base, asker, plan, &repo, &task).await
         }
@@ -276,20 +356,29 @@ async fn record_feed(store: &PageStore, workspace: &str, kind: &str, value: &Val
         return;
     }
     let structured = value.get("structuredContent").unwrap_or(value);
+    // A brain tool names a page by its `ref`; the ChatGPT-shaped tools name
+    // it by its `id`. Both are read here, so those tools land on the feed
+    // exactly as the ones beside them.
+    fn named(row: &Value) -> Option<&str> {
+        row.get("ref")
+            .or_else(|| row.get("id"))
+            .and_then(Value::as_str)
+    }
     let mut refs: Vec<&str> = structured
         .get("results")
         .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.get("ref").and_then(Value::as_str))
-                .collect()
-        })
+        .map(|rows| rows.iter().filter_map(named).collect())
         .unwrap_or_default();
-    if let Some(one) = structured.get("ref").and_then(Value::as_str) {
+    if let Some(one) = named(structured) {
         refs.push(one);
     }
     for reference in refs.into_iter().take(5) {
-        if let Some((scope, slug)) = reference.rsplit_once('/') {
+        // `scope/slug` or `scope:slug`: a scope and a slug are both the slug
+        // rule, so neither half can hold either separator.
+        if let Some((scope, slug)) = reference
+            .split_once('/')
+            .or_else(|| reference.split_once(':'))
+        {
             store
                 .record_activity(workspace, scope, slug, kind, "Claude")
                 .await;
@@ -342,7 +431,7 @@ fn pages_answer(found: &[Found], empty: &str) -> Value {
             "[{}] {} — {}\n    {}\n",
             index + 1,
             page.title,
-            page.reference,
+            page.reference(),
             snippet(&page.body),
         ));
     }
@@ -354,7 +443,7 @@ fn pages_answer(found: &[Found], empty: &str) -> Value {
         json!({
             "results": found.iter().map(|page| json!({
                 "title": page.title,
-                "ref": page.reference,
+                "ref": page.reference(),
                 "url": page.url,
                 "snippet": snippet(&page.body),
             })).collect::<Vec<_>>(),
@@ -379,40 +468,108 @@ async fn search(
     ))
 }
 
-/// `brain_page`: the asker's own page of that slug, else the shared one.
+/// The read behind `brain_page` and `fetch`: the first of the asker's scopes
+/// that holds the slug — only the scope an id names, when it names one — at
+/// the version the read saw. `None` when no readable scope holds it.
 ///
 /// A direct read rather than a search on the slug: search matches a body's
 /// words, and a page named `retry-policy` need not contain the word "retry".
-async fn page(
+async fn read_page(
     store: &PageStore,
     base: &str,
     filters: &[ScopeFilter],
+    only: Option<&str>,
     slug: &str,
-) -> Result<Value, String> {
+) -> Option<(Found, u32)> {
     for filter in filters {
         // A slug outside the grant is not looked up at all: no read, no
-        // timing, no "it exists".
-        if !filter.matches(slug) {
+        // timing, no "it exists". Nor is a scope the asker holds no filter
+        // for, however the id names one.
+        if only.is_some_and(|scope| scope != filter.scope) || !filter.matches(slug) {
             continue;
         }
         let Ok(Some(hit)) = store.read(&filter.scope, slug).await else {
             continue;
         };
         let found = Found::new(base, &filter.scope, slug, &hit);
-        return Ok(answer(
-            format!("# {}\n\n{}", found.title, found.body),
-            json!({
-                "title": found.title,
-                "ref": found.reference,
-                "url": found.url,
-                "version": hit.version,
-            }),
-        ));
+        return Some((found, hit.version));
     }
-    Err(format!(
-        "no page `{slug}` in the pages you can read. It may not exist, or it may \
+    None
+}
+
+/// The not-found answer `brain_page` and `fetch` give: it does not say which
+/// of "no such page" and "not yours" it was, because saying which would be an
+/// answer about somebody else's page.
+fn not_found(named: &str) -> String {
+    format!(
+        "no page `{named}` in the pages you can read. It may not exist, or it may \
          belong to somebody else — this server does not say which."
+    )
+}
+
+/// `brain_page`: the asker's own page of that slug, else the shared one.
+async fn page(
+    store: &PageStore,
+    base: &str,
+    filters: &[ScopeFilter],
+    slug: &str,
+) -> Result<Value, String> {
+    let Some((found, version)) = read_page(store, base, filters, None, slug).await else {
+        return Err(not_found(slug));
+    };
+    Ok(answer(
+        format!("# {}\n\n{}", found.title, found.body),
+        json!({
+            "title": found.title,
+            "ref": found.reference(),
+            "url": found.url,
+            "version": version,
+        }),
     ))
+}
+
+/// `search`: `brain_search`'s query over the same filters, in the shape
+/// ChatGPT's deep research reads — `id` rows it hands to `fetch`.
+async fn chat_search(
+    store: &PageStore,
+    base: &str,
+    filters: &[ScopeFilter],
+    query: &str,
+) -> Result<Value, String> {
+    let found = find(store, base, filters, query, DEFAULT_LIMIT).await?;
+    Ok(json_answer(json!({
+        "results": found.iter().map(|page| json!({
+            "id": page.id(),
+            "title": page.title,
+            "url": page.url,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// `fetch`: [`page`]'s read by the `scope:slug` id a `search` result named,
+/// in the shape deep research reads. A scope the asker was not granted is the
+/// same not-found answer, never a page that "exists".
+async fn chat_fetch(
+    store: &PageStore,
+    base: &str,
+    filters: &[ScopeFilter],
+    scope: &str,
+    slug: &str,
+) -> Result<Value, String> {
+    let Some((found, version)) = read_page(store, base, filters, Some(scope), slug).await else {
+        return Err(not_found(&format!("{scope}:{slug}")));
+    };
+    Ok(json_answer(json!({
+        "id": found.id(),
+        "title": found.title,
+        "text": format!("# {}\n\n{}", found.title, found.body),
+        "url": found.url,
+        "metadata": {
+            "scope": found.scope,
+            "slug": found.slug,
+            "version": version,
+        },
+    })))
 }
 
 /// `brain_context_for`: a brief for a task, out of the asker's own pages.
@@ -459,7 +616,7 @@ async fn context_for(
             "\n[{}] {} — {}\n\n{}\n",
             index + 1,
             page.title,
-            page.reference,
+            page.reference(),
             page.body.trim(),
         ));
     }
@@ -472,7 +629,7 @@ async fn context_for(
     }
     let pages = found
         .iter()
-        .map(|page| json!({ "title": page.title, "ref": page.reference, "url": page.url }))
+        .map(|page| json!({ "title": page.title, "ref": page.reference(), "url": page.url }))
         .collect::<Vec<_>>();
     Ok(answer(
         append_citations(&text, &found),
@@ -741,14 +898,14 @@ fn facts_failed(error: FactError) -> String {
 #[derive(PartialEq, Eq)]
 struct Found {
     title: String,
-    reference: String,
+    scope: String,
+    slug: String,
     url: String,
     body: String,
 }
 
 impl Found {
     fn new(base: &str, scope: &str, slug: &str, page: &Page) -> Self {
-        let reference = format!("{scope}/{slug}");
         let (_, body) = parse_frontmatter(&page.markdown, page.entity_type)
             .unwrap_or_else(|_| (Frontmatter::default(), page.markdown.clone()));
         // The page's title is whichever key its entity type requires; the
@@ -764,10 +921,23 @@ impl Found {
             .to_owned();
         Self {
             title,
-            reference: reference.clone(),
+            scope: scope.to_owned(),
+            slug: slug.to_owned(),
             url: page_url(base, scope, slug),
             body,
         }
+    }
+
+    /// `scope/slug`: the ref a citation names.
+    fn reference(&self) -> String {
+        format!("{}/{}", self.scope, self.slug)
+    }
+
+    /// `scope:slug`: the id a `search` result names and a `fetch` takes. A
+    /// scope and a slug are both the slug rule, so neither holds the `:` —
+    /// the one separator there can be.
+    fn id(&self) -> String {
+        format!("{}:{}", self.scope, self.slug)
     }
 }
 
@@ -857,6 +1027,14 @@ fn answer(text: String, structured: Value) -> Value {
         "content": [{ "type": "text", "text": text }],
         "structuredContent": structured,
     })
+}
+
+/// A tool result for a caller that reads JSON, not prose (ChatGPT's deep
+/// research): the one text item is the structured content itself as a JSON
+/// string, which is the shape that caller's spec asks for.
+fn json_answer(structured: Value) -> Value {
+    let text = structured.to_string();
+    answer(text, structured)
 }
 
 /// `text` followed by the numbered citations its `[n]` markers resolve to.

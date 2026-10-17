@@ -60,13 +60,34 @@ pub struct Kit {
 
 /// The kit, with [`OWNER`] and [`OTHER`] seeded.
 pub async fn signed_in() -> Kit {
-    seeded(kit(true)).await
+    seeded(kit(None, Some(always_allowing_limiter()), &[])).await
 }
 
 /// The kit with no rate limiter bound: the composition a deployment without
 /// one gets, in which client registration must refuse (issue #72).
 pub async fn signed_in_without_limiter() -> Kit {
-    seeded(kit(false)).await
+    seeded(kit(None, None, &[])).await
+}
+
+/// The kit with an `HttpClient` bound and a limiter of the caller's choosing
+/// (`None` binds none): the composition a deployment that can fetch Client
+/// ID Metadata Documents gets (issue #234).
+pub async fn signed_in_with(
+    http: Option<Arc<dyn cratefield_core::HttpClient>>,
+    limiter: Option<Arc<dyn cratefield_core::RateLimiter>>,
+) -> Kit {
+    seeded(kit(http, limiter, &[])).await
+}
+
+/// The kit with extra config pairs set, beside the app origin every kit
+/// carries: the composition a deployment that configures the predefined
+/// Actions client gets (issue #234).
+pub async fn signed_in_with_config(pairs: &[(&str, &str)]) -> Kit {
+    seeded(kit(None, Some(always_allowing_limiter()), pairs)).await
+}
+
+fn always_allowing_limiter() -> Arc<dyn cratefield_core::RateLimiter> {
+    Arc::new(FakeRateLimiter::always_allow())
 }
 
 async fn seeded(kit: Kit) -> Kit {
@@ -104,7 +125,11 @@ async fn seeded(kit: Kit) -> Kit {
     kit
 }
 
-fn kit(limiter: bool) -> Kit {
+fn kit(
+    http: Option<Arc<dyn cratefield_core::HttpClient>>,
+    limiter: Option<Arc<dyn cratefield_core::RateLimiter>>,
+    config: &[(&str, &str)],
+) -> Kit {
     let device = DevicePorts::new();
     let grant = device.clone();
     let captured: Arc<Mutex<Option<Ports>>> = Arc::new(Mutex::new(None));
@@ -137,14 +162,14 @@ fn kit(limiter: bool) -> Kit {
         // The deployment's app origin, where the connector sign-in consent
         // lives (issue #72). Set to this kit's own host, so requests here are
         // already on it and nothing is sent elsewhere.
-        // The harness binds a limiter by default; the no-limiter kit clears it.
-        ports.rate_limiter = limiter.then(|| {
-            Arc::new(FakeRateLimiter::always_allow()) as Arc<dyn cratefield_core::RateLimiter>
-        });
-        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs([(
-            "WORKSPACES_REDIRECT_BASE",
-            API_BASE,
-        )]));
+        // The harness binds a limiter by default; a kit that passes `None`
+        // clears it, and one that passes an `HttpClient` binds the port the
+        // Client ID Metadata Document fetches go through (issue #234).
+        ports.rate_limiter = limiter.clone();
+        ports.http = http.clone();
+        let mut pairs = vec![("WORKSPACES_REDIRECT_BASE", API_BASE)];
+        pairs.extend(config.iter().copied());
+        ports.config = Arc::new(cratefield_core::MapConfig::from_pairs(pairs));
         let mut copy = Ports::empty();
         copy.config = ports.config.clone();
         copy.db = ports.db.clone();
@@ -297,6 +322,16 @@ pub async fn get_at(kit: &Kit, path: &str, host: &str, proto: Option<&str>) -> R
 pub async fn post_form(kit: &Kit, path: &str, form: &str, who: &Caller) -> Res {
     let body = ("application/x-www-form-urlencoded", form.to_owned());
     send(kit, Method::POST, path, Some(body), &who.headers()).await
+}
+
+/// A form post carrying an `Authorization` header of the caller's choosing:
+/// the shape a confidential OAuth client's token requests arrive in, as
+/// `client_secret_basic` sends them (issue #234).
+pub async fn post_form_authorized(kit: &Kit, path: &str, form: &str, authorization: &str) -> Res {
+    let mut headers = Caller::Anonymous.headers();
+    headers.insert(header::AUTHORIZATION, value(authorization));
+    let body = ("application/x-www-form-urlencoded", form.to_owned());
+    send(kit, Method::POST, path, Some(body), &headers).await
 }
 
 /// A JSON post from one address, as the registration limit reads it.

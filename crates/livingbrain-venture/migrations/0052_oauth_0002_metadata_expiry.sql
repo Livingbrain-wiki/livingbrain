@@ -1,0 +1,11 @@
+-- Client ID Metadata Document clients (issue #234,
+-- draft-ietf-oauth-client-id-metadata-document, as the MCP authorization
+-- spec's 2026-07-28 revision profiles it): a client whose client_id is the
+-- https URL of its own metadata document is fetched, validated and cached as
+-- an ordinary row keyed by that URL, so every route that reads a registered
+-- client serves it unchanged.
+--
+-- `metadata_expires_at` is when the cached document must be fetched again:
+-- the document's Cache-Control max-age, bounded. NULL is a dynamically
+-- registered client, which has no document and never expires.
+ALTER TABLE oauth_clients ADD COLUMN metadata_expires_at TEXT;
