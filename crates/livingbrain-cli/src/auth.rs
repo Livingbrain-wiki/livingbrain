@@ -147,15 +147,19 @@ pub fn workspace_env_var(workspace: &str) -> String {
 }
 
 /// The token for one workspace, for a session routed there: its
-/// [`workspace_env_var`] first, else the Mac app's keychain item. `None` when
-/// neither holds one. The caller must not fall back to another workspace's
-/// token: a routed session stays unsynced rather than land in the wrong one.
-pub fn workspace_token(api_url: &str, workspace: &str) -> CliResult<Option<Token>> {
-    if let Some(token) = std::env::var_os(workspace_env_var(workspace)) {
-        let token = token.to_string_lossy().into_owned();
-        if !token.is_empty() {
-            return Ok(Some(Token(token)));
-        }
+/// [`workspace_env_var`] first (when `use_env`, i.e. no other configured
+/// workspace normalises to the same variable), else the Mac app's keychain
+/// item. `None` when neither holds one. The caller must not fall back to
+/// another workspace's token: a routed session stays unsynced rather than
+/// land in the wrong one.
+pub fn workspace_token(api_url: &str, workspace: &str, use_env: bool) -> CliResult<Option<Token>> {
+    let from_env = use_env
+        .then(|| std::env::var_os(workspace_env_var(workspace)))
+        .flatten()
+        .map(|token| token.to_string_lossy().into_owned())
+        .filter(|token| !token.is_empty());
+    if let Some(token) = from_env {
+        return Ok(Some(Token(token)));
     }
     Ok(keychain_get(APP_SERVICE, &workspace_account(api_url, workspace))?.map(Token))
 }

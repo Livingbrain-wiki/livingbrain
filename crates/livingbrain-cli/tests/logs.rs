@@ -1373,116 +1373,6 @@ fn a_routed_session_uploads_with_its_workspace_token() {
     assert_eq!(json_of(&status)["workspace"][DEMO_REPO], "ws-chi");
 }
 
-/// (m) Routes place a repository that has no explicit workspace by its folder
-/// name; an explicit `default` beats a route; a route on the remote owner
-/// cannot match a path that is not a git checkout, so it falls to the default.
-/// Re-routing a session to the default workspace uploads it there once more,
-/// with the default token.
-#[test]
-fn routes_pick_a_workspace_and_an_explicit_workspace_beats_them() {
-    let mock = sources_mock();
-    let home = temp_dir("logs-home");
-    plant(&home);
-    write_allowlist_file(
-        &home,
-        &json!({
-            "version": 1,
-            "allowed": [DEMO_REPO],
-            "routes": [
-                {"remote_owner": "CHI-Ecosystem", "workspace": "ws-owner"},
-                {"folder_glob": "dem*", "workspace": "ws-chi"}
-            ]
-        })
-        .to_string(),
-    );
-    let status = run(
-        &temp_dir("logs-cwd"),
-        &home,
-        &["logs", "status", "--json"],
-        &[],
-        None,
-    );
-    assert!(status.status.success(), "stderr: {}", status.stderr);
-    let status = json_of(&status);
-    assert_eq!(
-        status["workspace"][DEMO_REPO], "default",
-        "no explicit workspace yet"
-    );
-    assert_eq!(status["routes"].as_array().map(Vec::len), Some(2));
-    assert_eq!(
-        status["routed"][DEMO_REPO], "ws-chi",
-        "the folder route is reported"
-    );
-
-    // The path is not a checkout here: no remote, so the owner route cannot
-    // match, and the folder route picks `demo` up.
-    let mut envs = api_envs(&mock.base);
-    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
-    let routed = sync(&home, &envs, &[]);
-    assert!(routed.status.success(), "stderr: {}", routed.stderr);
-    assert_eq!(json_of(&routed)["uploaded"], 2, "{}", routed.stdout);
-    assert!(
-        source_bearers(&mock)
-            .iter()
-            .all(|b| b.as_deref() == Some(WS_CHI_TOKEN))
-    );
-
-    let pinned = run(
-        &temp_dir("logs-cwd"),
-        &home,
-        &["logs", "workspace", DEMO_REPO, "default", "--json"],
-        &[],
-        None,
-    );
-    assert!(pinned.status.success(), "stderr: {}", pinned.stderr);
-    assert_eq!(json_of(&pinned)["workspace"][DEMO_REPO], "default");
-
-    let before = mock.requests().len();
-    let back = sync(&home, &api_envs(&mock.base), &[]);
-    assert!(back.status.success(), "stderr: {}", back.stderr);
-    // The mock's ledger is keyed by body, not by token, so the same bytes read
-    // back as unchanged; what matters is that they were sent with the default token.
-    assert_eq!(json_of(&back)["unchanged"], 2, "{}", back.stdout);
-    let after: Vec<Option<String>> = mock.requests()[before..]
-        .iter()
-        .filter(|request| request.path == "/v1/pages/sources")
-        .map(|request| request.bearer())
-        .collect();
-    assert_eq!(after.len(), 2, "{after:?}");
-    assert!(
-        after.iter().all(|bearer| bearer.as_deref() == Some(TOKEN)),
-        "{after:?}"
-    );
-}
-
-/// (n) An owner route with no checkout to read matches nothing: the repository
-/// goes to the default workspace, never to the route's.
-#[test]
-fn an_unreadable_remote_matches_no_route() {
-    let mock = sources_mock();
-    let home = temp_dir("logs-home");
-    plant(&home);
-    write_allowlist_file(
-        &home,
-        &json!({
-            "version": 1,
-            "allowed": [DEMO_REPO],
-            "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
-        })
-        .to_string(),
-    );
-    let mut envs = api_envs(&mock.base);
-    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
-    let output = sync(&home, &envs, &[]);
-    assert!(output.status.success(), "stderr: {}", output.stderr);
-    assert_eq!(json_of(&output)["uploaded"], 2, "{}", output.stdout);
-    assert!(
-        source_bearers(&mock)
-            .iter()
-            .all(|b| b.as_deref() == Some(TOKEN))
-    );
-}
-
 /// (o) A malformed route stops the whole command before any request: an
 /// unknown key would otherwise quietly send its repositories to the default.
 #[test]
@@ -1546,4 +1436,312 @@ fn workspace_needs_an_opted_in_path_and_a_valid_id() {
         None,
     );
     assert!(!bad_allow.status.success(), "{}", bad_allow.stdout);
+}
+
+/// A real git checkout at `<tmp>/demo`, with `origin` set when given, and the
+/// fixture sessions planted with their working directory pointed at it.
+fn plant_repo(home: &Path, origin: Option<&str>) -> String {
+    let repo = temp_dir("logs-repo").join("demo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    git(&repo, &["init", "-q"]);
+    if let Some(url) = origin {
+        git(&repo, &["remote", "add", "origin", url]);
+    }
+    let canonical = std::fs::canonicalize(&repo).expect("canonical repo");
+    let canonical = canonical.to_string_lossy().into_owned();
+    plant(home);
+    rewrite_tree(&home.join(".claude"), DEMO_REPO, &canonical);
+    rewrite_tree(&home.join(".codex"), DEMO_REPO, &canonical);
+    canonical
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .status()
+        .expect("git is installed");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Replace every occurrence of `from` with `to` in the files under `dir`.
+fn rewrite_tree(dir: &Path, from: &str, to: &str) {
+    for entry in std::fs::read_dir(dir).expect("read dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rewrite_tree(&path, from, to);
+        } else {
+            let text = std::fs::read_to_string(&path).expect("read fixture");
+            std::fs::write(&path, text.replace(from, to)).expect("rewrite fixture");
+        }
+    }
+}
+
+/// Write the opt-in file as a routing build would.
+fn allowlist_json(home: &Path, body: Value) {
+    write_allowlist_file(home, &body.to_string());
+}
+
+fn status_json(home: &Path) -> Value {
+    let status = run(
+        &temp_dir("logs-cwd"),
+        home,
+        &["logs", "status", "--json"],
+        &[],
+        None,
+    );
+    assert!(status.status.success(), "stderr: {}", status.stderr);
+    json_of(&status)
+}
+
+/// (q) Two repositories under one allowed parent, with different owners, each
+/// go where their own remote says — the answer does not depend on which one
+/// was probed first (the reproduced leak).
+#[test]
+fn routes_judge_each_repository_on_its_own_remote() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    let repo = plant_repo(&home, Some("https://github.com/CHI-Ecosystem/demo.git"));
+    let parent = Path::new(&repo)
+        .parent()
+        .expect("parent")
+        .to_string_lossy()
+        .into_owned();
+    allowlist_json(
+        &home,
+        json!({
+            "version": 2,
+            "allowed": [parent],
+            "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
+        }),
+    );
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert_eq!(json_of(&output)["uploaded"], 2, "{}", output.stdout);
+    assert!(
+        source_bearers(&mock)
+            .iter()
+            .all(|b| b.as_deref() == Some(WS_CHI_TOKEN))
+    );
+}
+
+/// (r) A route cannot read a repository that has no remote, a remote on a host
+/// the route does not name, or no checkout at all: the sessions are held and
+/// nothing is sent, never sent to the default.
+#[test]
+fn an_undecidable_route_holds_the_session_never_defaults() {
+    for origin in [None, Some("https://gitlab.com/CHI-Ecosystem/demo.git")] {
+        let mock = sources_mock();
+        let home = temp_dir("logs-home");
+        let repo = plant_repo(&home, origin);
+        allowlist_json(
+            &home,
+            json!({
+                "version": 2,
+                "allowed": [repo],
+                "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
+            }),
+        );
+        let output = sync(&home, &api_envs(&mock.base), &[]);
+        assert!(output.status.success(), "stderr: {}", output.stderr);
+        let report = json_of(&output);
+        assert_eq!(report["uploaded"], 0, "{report}");
+        assert_eq!(report["skipped_unroutable"], 2, "{report}");
+        assert!(
+            mock.requests().is_empty(),
+            "a held session reached the network: {origin:?}"
+        );
+    }
+
+    // No checkout at all: the folder route cannot decide either.
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    allowlist_json(
+        &home,
+        json!({"version": 2, "allowed": [DEMO_REPO], "routes": [{"folder_glob": "*", "workspace": "ws-any"}]}),
+    );
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    let report = json_of(&output);
+    assert_eq!(report["skipped_unroutable"], 2, "{report}");
+    assert!(mock.requests().is_empty());
+    let session = report["sessions"].as_array().expect("sessions")[0].clone();
+    assert!(
+        session["reason"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("cannot route"),
+        "{session}"
+    );
+}
+
+/// (s) An inherited `GIT_DIR` cannot redirect the probe: the checkout the
+/// session ran in still decides, by its own origin.
+#[test]
+fn an_inherited_git_dir_does_not_redirect_the_probe() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    let repo = plant_repo(&home, Some("https://github.com/CHI-Ecosystem/demo.git"));
+    let other = temp_dir("logs-other").join("other");
+    std::fs::create_dir_all(&other).expect("other");
+    git(&other, &["init", "-q"]);
+    git(
+        &other,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/someone/else.git",
+        ],
+    );
+    allowlist_json(
+        &home,
+        json!({
+            "version": 2,
+            "allowed": [repo],
+            "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
+        }),
+    );
+    let other_git = other.join(".git").to_string_lossy().into_owned();
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    envs.push(("GIT_DIR", other_git.as_str()));
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert_eq!(json_of(&output)["uploaded"], 2, "{}", output.stdout);
+    assert!(
+        source_bearers(&mock)
+            .iter()
+            .all(|b| b.as_deref() == Some(WS_CHI_TOKEN))
+    );
+}
+
+/// (t) `status` reports the explicit choice and the effective destination
+/// separately; `auto` clears the explicit choice so the routes decide again.
+#[test]
+fn status_separates_the_explicit_choice_from_the_effective_one() {
+    let home = temp_dir("logs-home");
+    let repo = plant_repo(&home, Some("https://github.com/CHI-Ecosystem/demo.git"));
+    allowlist_json(
+        &home,
+        json!({
+            "version": 2,
+            "allowed": [repo],
+            "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
+        }),
+    );
+    let before = status_json(&home);
+    assert_eq!(before["workspace_explicit"][&repo], Value::Null);
+    assert_eq!(before["workspace_effective"][&repo], "ws-chi");
+    assert!(
+        before["route_reason"][&repo]
+            .as_str()
+            .unwrap_or("")
+            .contains("remote_owner CHI-Ecosystem")
+    );
+
+    let pinned = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "workspace", &repo, "default", "--json"],
+        &[],
+        None,
+    );
+    assert!(pinned.status.success(), "stderr: {}", pinned.stderr);
+    let after = status_json(&home);
+    assert_eq!(after["workspace_explicit"][&repo], "default");
+    assert_eq!(
+        after["workspace_effective"][&repo], "default",
+        "an explicit default beats the route"
+    );
+
+    let auto = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "workspace", &repo, "auto", "--json"],
+        &[],
+        None,
+    );
+    assert!(auto.status.success(), "stderr: {}", auto.stderr);
+    assert_eq!(status_json(&home)["workspace_effective"][&repo], "ws-chi");
+    let reserved = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "allow", &repo, "--workspace", "auto"],
+        &[],
+        None,
+    );
+    assert!(!reserved.status.success(), "`auto` is not a workspace id");
+}
+
+/// (u) A nested checkout allowed under a parent with a workspace takes the
+/// parent's workspace, as `status` reports it.
+#[test]
+fn a_nested_checkout_inherits_its_parents_workspace() {
+    let home = temp_dir("logs-home");
+    let cwd = temp_dir("logs-cwd");
+    let parent = "/nonexistent-lb-parent/work";
+    let child = "/nonexistent-lb-parent/work/app";
+    let parented = run(
+        &cwd,
+        &home,
+        &["logs", "allow", parent, "--workspace", "ws-chi", "--json"],
+        &[],
+        None,
+    );
+    assert!(parented.status.success(), "stderr: {}", parented.stderr);
+    let nested = run(&cwd, &home, &["logs", "allow", child, "--json"], &[], None);
+    assert!(nested.status.success(), "stderr: {}", nested.stderr);
+    assert_eq!(status_json(&home)["workspace_explicit"][child], "ws-chi");
+}
+
+/// (v) A file a routing build writes is version 2; a file with no routing stays
+/// version 1, so an older build can still read it.
+#[test]
+fn only_routing_writes_version_two() {
+    let home = temp_dir("logs-home");
+    let cwd = temp_dir("logs-cwd");
+    let file = home.join("livingbrain").join("logs-allow.json");
+    assert!(
+        run(
+            &cwd,
+            &home,
+            &["logs", "allow", DEMO_REPO, "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let plain: Value = serde_json::from_slice(&std::fs::read(&file).expect("file")).expect("json");
+    assert_eq!(plain["version"], 1);
+    assert!(
+        run(
+            &cwd,
+            &home,
+            &["logs", "workspace", DEMO_REPO, "ws-chi", "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let routed: Value = serde_json::from_slice(&std::fs::read(&file).expect("file")).expect("json");
+    assert_eq!(routed["version"], 2);
+}
+
+/// (w) A session that is not opted in reports no workspace at all.
+#[test]
+fn a_session_not_opted_in_has_no_workspace() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    let report = json_of(&output);
+    for session in report["sessions"].as_array().expect("sessions") {
+        assert_eq!(session["workspace"], Value::Null, "{session}");
+    }
 }

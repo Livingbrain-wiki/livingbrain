@@ -147,7 +147,7 @@ final class BarModel: ObservableObject {
                     do {
                         let report = try CLIOutput.syncReport(result.stdout)
                         state.succeed(report, at: Date())
-                        held = report.skippedNoToken
+                        held = report.held
                         ledger.record(report, at: Date())
                         try? ledger.save(to: Self.ledgerURL)
                         notifyUploads(report)

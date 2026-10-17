@@ -69,11 +69,11 @@ struct ProjectsView: View {
 
             if !bar.held.isEmpty {
                 Section {
-                    ForEach(bar.held, id: \.workspace) { held in
+                    ForEach(bar.held, id: \.self) { held in
                         HStack {
-                            Label(held.message, systemImage: "person.crop.circle.badge.exclamationmark")
+                            Label(held.message, systemImage: held.denied ? "exclamationmark.triangle" : "person.crop.circle.badge.exclamationmark")
                             Spacer()
-                            Button("Sign In") { accounts.startSignIn() }
+                            if !held.denied { Button("Sign In") { accounts.startSignIn() } }
                         }
                     }
                 } header: {
@@ -89,29 +89,35 @@ struct ProjectsView: View {
         .onAppear { if model.load == .idle { model.reload() } }
     }
 
-    /// Where one opted-in project's sessions go. Default, then each signed-in
-    /// workspace; a workspace this Mac is not signed in to keeps its place so
-    /// the choice still reads.
+    /// Where one opted-in project's sessions go: Automatic (the routes decide),
+    /// Default (pinned to the default, even over a route), or a signed-in
+    /// workspace. A workspace this Mac is not signed in to keeps its place.
     @ViewBuilder
     private func workspacePicker(for project: SyncedProject) -> some View {
         Picker("Workspace", selection: Binding(
-            get: { project.workspace },
+            get: { project.explicit ?? SyncedProject.automaticWorkspace },
             set: { bar.setWorkspace(project, to: $0) }
         )) {
+            Text("Automatic").tag(SyncedProject.automaticWorkspace)
             Text("Default").tag(SyncedProject.defaultWorkspace)
             ForEach(accounts.workspaces) { item in
                 Text(item.name).tag(item.id)
             }
-            if project.workspace != SyncedProject.defaultWorkspace,
-               !accounts.workspaces.contains(where: { $0.id == project.workspace }) {
-                Text("\(project.workspace) (not signed in)").tag(project.workspace)
+            if let explicit = project.explicit, explicit != SyncedProject.defaultWorkspace,
+               !accounts.workspaces.contains(where: { $0.id == explicit }) {
+                Text("\(explicit) (not signed in)").tag(explicit)
             }
         }
         .pickerStyle(.menu)
         .font(.caption)
-        if let routed = project.routed, project.workspace == SyncedProject.defaultWorkspace {
-            Text("Routed to \(routed) by a rule in the opt-in file. Choose a workspace to override it.")
-                .font(.caption).foregroundStyle(.secondary)
+        if project.explicit == nil {
+            if project.effective == "unroutable" {
+                Text("Held: \(project.routeReason ?? "a route cannot read this repository"). Pick a workspace to send it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if project.effective != SyncedProject.defaultWorkspace {
+                Text("Sent to \(project.effective) by \(project.routeReason ?? "a route").")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }

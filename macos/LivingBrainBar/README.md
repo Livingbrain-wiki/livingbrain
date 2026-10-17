@@ -27,8 +27,8 @@ token in the keychain (see below); no token is ever logged or shown.
   each with **Reveal in Finder** and **Remove** (`logs deny`).
 - **Waiting for a sign-in** — when a sync held sessions because their workspace
   is not signed in on this Mac, "Sign in to <workspace> to sync N sessions",
-  with **Sign In** (the browser device flow). Held sessions are never sent to
-  another workspace.
+  with **Sign In** (the browser device flow). A workspace whose Keychain item
+  cannot be read says so instead. Held sessions are never sent to another workspace.
 - **Add Project…** — a folder picker, then `logs allow <path>`.
 - **Run Brain Jobs with My Subscription** — see [Brain jobs on this Mac](#brain-jobs-on-this-mac).
   While on, the lines under it say what the runner is doing ("Running a
@@ -114,9 +114,9 @@ the next one), and the same error at most once every 30 minutes.
 - **Projects & Sync** — every repository your sessions ran in, with an
   opt-in switch each (`logs allow` / `logs deny`), plus the pause, live-sync,
   schedule and notification switches. An opted-in repository also has a
-  **Workspace** picker (Default, then each signed-in workspace; `logs workspace`).
-  A repository a route in the opt-in file sends elsewhere says so beneath its
-  row. See [Workspaces](../../docs/logs.md#workspaces-one-mac-several-workspaces).
+  **Workspace** picker: **Automatic** (the routes decide; the row says where its
+  sessions go and why, or that they are held), **Default** (pinned to the default,
+  even over a route), or a signed-in workspace (`logs workspace`). See [Workspaces](../../docs/logs.md#workspaces-one-mac-several-workspaces).
 
 ### Workspace (signed in)
 

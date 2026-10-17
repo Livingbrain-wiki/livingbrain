@@ -94,23 +94,58 @@ final class CLIOutputTests: XCTestCase {
         elsewhere.workspace = "default"
         XCTAssertNil(ledger.entry(for: elsewhere), "a re-routed session is pending in its new workspace")
         XCTAssertEqual(SessionLedger.key(for: elsewhere), "codex/a1")
+        // A held (mixed or unroutable) session never shares the bare default key.
+        var mixed = routed
+        mixed.workspace = "mixed"
+        XCTAssertNotEqual(SessionLedger.key(for: mixed), "codex/a1")
+        XCTAssertNil(ledger.entry(for: mixed))
     }
 
-    /// Each allowed project carries its workspace; a project with none is the
-    /// default, and a route's pick is shown as routed, never as its workspace.
-    func testStatusProjectsCarryTheirWorkspace() throws {
+    /// Each allowed project carries its explicit choice (nil when automatic)
+    /// and its effective destination, with the route that chose it.
+    func testStatusProjectsCarryExplicitAndEffective() throws {
         let json = #"""
-        {"allowed":["/Users/alice/code/atlas","/Users/alice/code/chi-web"],
-         "workspace":{"/Users/alice/code/atlas":"default","/Users/alice/code/chi-web":"ws-chi"},
-         "routed":{"/Users/alice/code/atlas":"ws-owner"},"config":"/x"}
+        {"allowed":["/Users/alice/code/atlas","/Users/alice/code/chi-web","/Users/alice/code/pinned"],
+         "workspace":{"/Users/alice/code/atlas":"default","/Users/alice/code/chi-web":"default","/Users/alice/code/pinned":"default"},
+         "workspace_explicit":{"/Users/alice/code/atlas":null,"/Users/alice/code/chi-web":null,"/Users/alice/code/pinned":"default"},
+         "workspace_effective":{"/Users/alice/code/atlas":"ws-owner","/Users/alice/code/chi-web":"unroutable","/Users/alice/code/pinned":"default"},
+         "route_reason":{"/Users/alice/code/atlas":"remote_owner CHI-Ecosystem on github.com","/Users/alice/code/chi-web":"the remote is on gitlab.com","/Users/alice/code/pinned":null},
+         "config":"/x"}
         """#
         let status = try CLIOutput.allowStatus(oneLine(json))
         XCTAssertEqual(status.projects, [
-            SyncedProject(path: "/Users/alice/code/atlas", workspace: "default", routed: "ws-owner"),
-            SyncedProject(path: "/Users/alice/code/chi-web", workspace: "ws-chi"),
+            SyncedProject(path: "/Users/alice/code/atlas", explicit: nil, effective: "ws-owner",
+                          routeReason: "remote_owner CHI-Ecosystem on github.com"),
+            SyncedProject(path: "/Users/alice/code/chi-web", explicit: nil, effective: "unroutable",
+                          routeReason: "the remote is on gitlab.com"),
+            SyncedProject(path: "/Users/alice/code/pinned", explicit: "default", effective: "default"),
         ])
+        // An older CLI names no explicit choices: every project is automatic and default.
         let older = try CLIOutput.allowStatus(fixture("logs-status"))
-        XCTAssertTrue(older.projects.allSatisfy { $0.workspace == SyncedProject.defaultWorkspace && $0.routed == nil })
+        XCTAssertTrue(older.projects.allSatisfy { $0.explicit == nil && $0.effective == SyncedProject.defaultWorkspace })
+    }
+
+    /// A version-2 file (routing) is read; a version this build does not know is not.
+    func testAllowlistFileAcceptsVersionTwo() throws {
+        let file = try CLIOutput.allowlistFile(Data(#"{"version":2,"allowed":["/x"],"routes":[]}"#.utf8))
+        XCTAssertEqual(file.version, 2)
+        XCTAssertThrowsError(try CLIOutput.allowlistFile(Data(#"{"version":3,"allowed":[]}"#.utf8)))
+    }
+
+    /// A keychain refusal is reported apart from a missing sign-in, and the
+    /// sessions it holds are not offered a sign-in button.
+    func testKeychainDeniedIsReportedApart() throws {
+        let json = #"""
+        {"skipped_no_token":[{"workspace":"ws-a","sessions":1}],
+         "skipped_keychain_denied":[{"workspace":"ws-b","sessions":3}],
+         "skipped_unroutable":2,"sessions":[]}
+        """#
+        let report = try CLIOutput.syncReport(oneLine(json))
+        XCTAssertEqual(report.skippedNoToken, [HeldSessions(workspace: "ws-a", sessions: 1)])
+        XCTAssertEqual(report.skippedKeychainDenied, [HeldSessions(workspace: "ws-b", sessions: 3, denied: true)])
+        XCTAssertEqual(report.skippedUnroutable, 2)
+        XCTAssertEqual(report.held.count, 2)
+        XCTAssertTrue(report.held[1].message.contains("Keychain"), report.held[1].message)
     }
 
     /// The opt-in file may name each root's workspace; an older file names none.
@@ -127,8 +162,8 @@ final class CLIOutputTests: XCTestCase {
 
     func testAllowlistFile() throws {
         XCTAssertEqual(try CLIOutput.allowlistFile(fixture("allowlist-file")).allowed, ["/Users/alice/code/atlas"])
-        XCTAssertThrowsError(try CLIOutput.allowlistFile(Data(#"{"version":2,"allowed":[]}"#.utf8))) { error in
-            XCTAssertEqual(error as? CLIOutputError, .unsupportedAllowlistVersion(2))
+        XCTAssertThrowsError(try CLIOutput.allowlistFile(Data(#"{"version":3,"allowed":[]}"#.utf8))) { error in
+            XCTAssertEqual(error as? CLIOutputError, .unsupportedAllowlistVersion(3))
         }
     }
 

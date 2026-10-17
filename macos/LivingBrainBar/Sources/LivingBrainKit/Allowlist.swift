@@ -21,20 +21,25 @@ public enum AllowlistLocation {
 
 /// A project as the menu shows it.
 public struct SyncedProject: Identifiable, Equatable, Sendable {
-    /// The workspace `logs` sends the project's sessions to when it names none.
+    /// The workspace the default (`login`'s) token names.
     public static let defaultWorkspace = "default"
+    /// The picker's word for "no explicit choice: the routes decide".
+    public static let automaticWorkspace = "auto"
 
     public var path: String
-    /// `default`, or a workspace id.
-    public var workspace: String
-    /// The workspace a route sends the project to while it names none of its own.
-    public var routed: String?
+    /// The explicit choice: a workspace id, `default`, or nil for automatic.
+    public var explicit: String?
+    /// Where the sessions go now: a workspace id, `default`, or `unroutable`.
+    public var effective: String
+    /// The route that chose `effective`, or why no route could decide.
+    public var routeReason: String?
     public var id: String { path }
 
-    public init(path: String, workspace: String = SyncedProject.defaultWorkspace, routed: String? = nil) {
+    public init(path: String, explicit: String? = nil, effective: String = SyncedProject.defaultWorkspace, routeReason: String? = nil) {
         self.path = path
-        self.workspace = workspace
-        self.routed = routed
+        self.explicit = explicit
+        self.effective = effective
+        self.routeReason = routeReason
     }
 
     /// The repo's folder name.

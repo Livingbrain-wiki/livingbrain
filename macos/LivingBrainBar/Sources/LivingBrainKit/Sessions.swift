@@ -380,9 +380,10 @@ public struct SessionLedger: Codable, Equatable, Sendable {
     /// default workspace (and an older CLI's report) keeps the bare key that
     /// earlier ledgers wrote.
     public static func key(for session: SyncedSession) -> String {
-        guard let workspace = session.workspace,
-              workspace != SyncedProject.defaultWorkspace, workspace != "mixed"
-        else { return session.key }
+        guard let workspace = session.workspace, workspace != SyncedProject.defaultWorkspace else {
+            return session.key
+        }
+        // Any other destination (a workspace id, `mixed`, `unroutable`) is its own key.
         return "\(session.key)@\(workspace)"
     }
 
