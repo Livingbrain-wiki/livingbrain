@@ -17,6 +17,9 @@ opencode mcp add livingbrain --url https://mcp.livingbrain.wiki/v1/pages/mcp
 Then ask it something about a repository. `claude` calls `brain_context_for`
 and answers with a cited brief.
 
+Setting up a whole team (workspace, GitHub, Mac sync, connectors, imports)?
+The agent skill in [`skills/livingbrain-setup/`](../skills/livingbrain-setup/SKILL.md) walks through it.
+
 ## Connect from Claude (connectors)
 
 Claude on the web and Claude Desktop connect to the same endpoint through a
