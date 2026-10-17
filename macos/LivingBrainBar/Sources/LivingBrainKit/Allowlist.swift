@@ -33,13 +33,28 @@ public struct SyncedProject: Identifiable, Equatable, Sendable {
     public var effective: String
     /// The route that chose `effective`, or why no route could decide.
     public var routeReason: String?
+    /// The parent folder whose explicit choice this project follows, when it
+    /// names none of its own.
+    public var inheritedFrom: String?
+    /// The repository's own top level, when git could read one: what a
+    /// "Pin This Repository" action pins.
+    public var repoTop: String?
+    /// For a folder that holds checkouts: each one's own answer.
+    public var nested: [NestedRepo]
     public var id: String { path }
 
-    public init(path: String, explicit: String? = nil, effective: String = SyncedProject.defaultWorkspace, routeReason: String? = nil) {
+    public init(
+        path: String, explicit: String? = nil, effective: String = SyncedProject.defaultWorkspace,
+        routeReason: String? = nil, inheritedFrom: String? = nil, repoTop: String? = nil,
+        nested: [NestedRepo] = []
+    ) {
         self.path = path
         self.explicit = explicit
         self.effective = effective
         self.routeReason = routeReason
+        self.inheritedFrom = inheritedFrom
+        self.repoTop = repoTop
+        self.nested = nested
     }
 
     /// The repo's folder name.
@@ -50,5 +65,25 @@ public struct SyncedProject: Identifiable, Equatable, Sendable {
         if path == home { return "~" }
         if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
         return path
+    }
+}
+
+/// A checkout inside an allowed folder, with the workspace it sends to.
+public struct NestedRepo: Decodable, Identifiable, Equatable, Sendable {
+    public var path: String
+    public var effective: String
+    public var routeReason: String?
+
+    public var id: String { path }
+
+    enum CodingKeys: String, CodingKey {
+        case path, effective
+        case routeReason = "route_reason"
+    }
+
+    public init(path: String, effective: String, routeReason: String? = nil) {
+        self.path = path
+        self.effective = effective
+        self.routeReason = routeReason
     }
 }

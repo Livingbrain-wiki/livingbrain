@@ -111,11 +111,44 @@ struct ProjectsView: View {
         .pickerStyle(.menu)
         .font(.caption)
         if project.explicit == nil {
-            if project.effective == "unroutable" {
-                Text("Held: \(project.routeReason ?? "a route cannot read this repository"). Pick a workspace to send it.")
+            hint(for: project)
+        }
+    }
+
+    /// What decides an automatic project's sessions, and the action that fits.
+    /// A parent's explicit choice is named as the parent. A repository held by
+    /// its route is offered "Pin This Repository" on its own top level. A folder
+    /// of checkouts is warned that pinning it would override every route inside.
+    @ViewBuilder
+    private func hint(for project: SyncedProject) -> some View {
+        switch project.effective {
+        case SyncedProject.defaultWorkspace:
+            EmptyView()
+        case "per-repository":
+            Text("Each repository inside this folder follows its own route. Pinning this folder would override every one of them.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(project.nested) { nested in
+                Text("\((nested.path as NSString).lastPathComponent) → \(nested.effective)")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        case "unroutable":
+            Text("Held: \(project.routeReason ?? "a route cannot read this repository").")
+                .font(.caption).foregroundStyle(.secondary)
+            if let top = project.repoTop {
+                Menu("Pin This Repository") {
+                    Button("Default") { bar.pinRepository(top: top, to: SyncedProject.defaultWorkspace) }
+                    ForEach(accounts.workspaces) { item in
+                        Button(item.name) { bar.pinRepository(top: top, to: item.id) }
+                    }
+                }
+                .font(.caption)
+            }
+        default:
+            if let parent = project.inheritedFrom {
+                Text("Sent to \(project.effective) from \(parent).")
                     .font(.caption).foregroundStyle(.secondary)
-            } else if project.effective != SyncedProject.defaultWorkspace {
-                Text("Sent to \(project.effective) by \(project.routeReason ?? "a route").")
+            } else {
+                Text("Sent to \(project.effective) by route \(project.routeReason ?? "").")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

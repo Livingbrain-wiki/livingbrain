@@ -115,8 +115,12 @@ the next one), and the same error at most once every 30 minutes.
   opt-in switch each (`logs allow` / `logs deny`), plus the pause, live-sync,
   schedule and notification switches. An opted-in repository also has a
   **Workspace** picker: **Automatic** (the routes decide; the row says where its
-  sessions go and why, or that they are held), **Default** (pinned to the default,
-  even over a route), or a signed-in workspace (`logs workspace`). See [Workspaces](../../docs/logs.md#workspaces-one-mac-several-workspaces).
+  sessions go and from where: a route, a parent folder's choice, or held).
+  A held repository offers **Pin This Repository** on its own top level (never
+  a parent folder). A folder of checkouts is marked per-repository, and pinning
+  it would override every route inside. **Default** pins to the default, even
+  over a route; a signed-in workspace pins there (`logs workspace`/`logs allow
+  --workspace`). See [Workspaces](../../docs/logs.md#workspaces-one-mac-several-workspaces).
 
 ### Workspace (signed in)
 

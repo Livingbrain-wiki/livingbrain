@@ -49,6 +49,7 @@ const SCRUBBED_GIT_ENV: &[&str] = &[
     "GIT_COMMON_DIR",
     "GIT_INDEX_FILE",
     "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
     "GIT_CEILING_DIRECTORIES",
@@ -155,27 +156,71 @@ pub struct Remote {
     pub owner: String,
 }
 
-/// The repositories a run has probed, one probe per top level. A session's
-/// working directories all go through here, so the probe of one repository
-/// decides only for that repository, whatever order they arrive in.
+/// The repositories a run has probed. Probed once per working directory and
+/// once per top level: a session's directories all go through here, so one
+/// repository's probe decides only for that repository, in any order.
 #[derive(Default)]
 pub struct Repos {
+    by_cwd: BTreeMap<String, Result<Repo, String>>,
     by_top: BTreeMap<String, Result<Repo, String>>,
 }
 
 impl Repos {
-    /// The repository `cwd` is in, probed once per top level.
-    pub fn of(&mut self, cwd: &str) -> Result<&Repo, String> {
-        let top = git(cwd, &["rev-parse", "--show-toplevel"])
-            .map(|out| out.trim().to_owned())
-            .filter(|top| !top.is_empty())
-            .ok_or_else(|| format!("{cwd} is not a readable git checkout"))?;
-        self.by_top
-            .entry(top.clone())
-            .or_insert_with(|| probe_top(&top))
-            .as_ref()
-            .map_err(Clone::clone)
+    /// The repository `cwd` is in.
+    pub fn of(&mut self, cwd: &str) -> Result<Repo, String> {
+        if let Some(known) = self.by_cwd.get(cwd) {
+            return known.clone();
+        }
+        let result = match toplevel(cwd) {
+            Some(top) => self
+                .by_top
+                .entry(top.clone())
+                .or_insert_with(|| probe_top(&top))
+                .clone(),
+            None => Err(format!("{cwd} is not a readable git checkout")),
+        };
+        self.by_cwd.insert(cwd.to_owned(), result.clone());
+        result
     }
+}
+
+/// The canonical top level of the checkout `cwd` is in, `None` when git does not say.
+fn toplevel(cwd: &str) -> Option<String> {
+    git(cwd, &["rev-parse", "--show-toplevel"])
+        .map(|out| out.trim().to_owned())
+        .filter(|top| !top.is_empty())
+}
+
+/// The checkouts strictly inside `root` (not `root` itself), found by their
+/// `.git` entry, to a bounded depth and count, skipping hidden directories.
+/// Used for display: a session is always judged on the checkout it ran in.
+pub fn nested_checkouts(root: &str) -> Vec<String> {
+    const MAX_DEPTH: usize = 3;
+    const MAX_FOUND: usize = 200;
+    let mut found = Vec::new();
+    let mut queue: Vec<(std::path::PathBuf, usize)> = vec![(std::path::PathBuf::from(root), 0)];
+    while let Some((dir, depth)) = queue.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') || !path.is_dir() {
+                continue;
+            }
+            if path.join(".git").exists() {
+                found.push(path.to_string_lossy().into_owned());
+                if found.len() >= MAX_FOUND {
+                    return found;
+                }
+            } else if depth + 1 < MAX_DEPTH {
+                queue.push((path, depth + 1));
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Probe a repository by its top level.
@@ -193,7 +238,9 @@ fn probe_top(top: &str) -> Result<Repo, String> {
 }
 
 /// The remote a route reads: `origin` when there is one, else the only
-/// remote; several remotes with no `origin` is unknown.
+/// remote; several remotes with no `origin` is unknown. The URL is read as
+/// configured (`git config --get`), not as git would rewrite it for a fetch:
+/// an `insteadOf` rule must not change which owner or host a route sees.
 fn remote_of(top: &str) -> Result<Remote, String> {
     let names = git(top, &["remote"]).unwrap_or_default();
     let names: Vec<&str> = names
@@ -210,7 +257,8 @@ fn remote_of(top: &str) -> Result<Remote, String> {
             _ => return Err("several remotes and no origin".to_owned()),
         }
     };
-    let url = git(top, &["remote", "get-url", name])
+    let key = format!("remote.{name}.url");
+    let url = git(top, &["config", "--get", key.as_str()])
         .ok_or_else(|| format!("could not read remote {name}"))?;
     parse_remote(url.trim()).ok_or_else(|| format!("remote {name} is not a recognised URL"))
 }
@@ -727,5 +775,97 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A scratch directory unique to one test, removed by the caller.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("lb-route-{name}-{}", std::process::id()))
+    }
+
+    /// Run `git -C dir args`, returning whether it succeeded; `false` when git
+    /// is not installed (the test then has nothing to probe and returns).
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// The remote is read as configured: an `insteadOf` rule that rewrites
+    /// github.com to another host must not change the owner or host a route
+    /// sees (the rewrite is what `git remote get-url` would show).
+    #[test]
+    fn a_remote_is_read_as_configured_not_as_rewritten() {
+        let dir = scratch("insteadof");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let ok = git_ok(&dir, &["init", "-q"])
+            && git_ok(
+                &dir,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/CHI-Ecosystem/x.git",
+                ],
+            )
+            && git_ok(
+                &dir,
+                &[
+                    "config",
+                    "url.https://mirror.example.invalid/.insteadOf",
+                    "https://github.com/",
+                ],
+            );
+        if !ok {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let mut repos = Repos::default();
+        let repo = repos.of(&dir.to_string_lossy()).expect("a checkout");
+        assert_eq!(
+            repo.remote,
+            Ok(Remote {
+                host: "github.com".into(),
+                owner: "CHI-Ecosystem".into(),
+            })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Checkouts inside a plain folder are found; the folder itself and hidden
+    /// directories are not reported.
+    #[test]
+    fn nested_checkouts_are_found_inside_a_plain_folder() {
+        let root = scratch("nested");
+        let chi = root.join("chi-web");
+        let notes = root.join("team").join("notes");
+        for dir in [&chi, &notes] {
+            std::fs::create_dir_all(dir.join(".git")).expect("git marker");
+        }
+        std::fs::create_dir_all(root.join(".hidden").join("deep").join(".git")).expect("hidden");
+        let found = super::nested_checkouts(&root.to_string_lossy());
+        assert_eq!(
+            found,
+            vec![
+                chi.to_string_lossy().into_owned(),
+                notes.to_string_lossy().into_owned(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The probes start from a clean git environment: a config file or repository
+    /// override inherited from the caller is removed, not inherited.
+    #[test]
+    fn git_drops_the_global_config_override_too() {
+        let command = super::git_command("/code/x", &["config", "--get", "remote.origin.url"]);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(k, v)| k.to_string_lossy() == "GIT_CONFIG_GLOBAL" && v.is_none()),
+            "GIT_CONFIG_GLOBAL must be removed"
+        );
     }
 }

@@ -1061,13 +1061,35 @@ impl AllowlistFile {
         self.workspace.get(root).map(String::as_str)
     }
 
-    /// Whether every stored workspace and route is well formed.
+    /// Whether every stored workspace and route is well formed, and no two
+    /// configured workspace ids would share an environment-variable name.
     fn validate(&self) -> Result<(), String> {
         for (root, target) in &self.workspace {
             route::check_target(target).map_err(|error| format!("{root}: {error}"))?;
         }
         for route in &self.routes {
             route.validate()?;
+        }
+        let mut names: BTreeMap<String, &str> = BTreeMap::new();
+        let configured = self
+            .workspace
+            .values()
+            .map(String::as_str)
+            .chain(self.routes.iter().map(|route| route.workspace.as_str()))
+            .filter(|id| *id != route::DEFAULT);
+        for id in configured {
+            let name = crate::auth::workspace_env_var(id);
+            match names.get(&name) {
+                Some(other) if *other != id => {
+                    return Err(format!(
+                        "workspace ids `{other}` and `{id}` would share the environment variable {name}; rename one"
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    names.insert(name, id);
+                }
+            }
         }
         Ok(())
     }
@@ -1133,6 +1155,21 @@ fn parse_allowlist(bytes: &[u8]) -> Result<AllowlistFile, String> {
             "opt-in file version {version} is not {ALLOWLIST_VERSION} or {ROUTING_VERSION} (this build's); upgrade the CLI or fix the file"
         ));
     }
+    if version == u64::from(ALLOWLIST_VERSION) {
+        let names_routing = value
+            .get("workspace")
+            .and_then(Value::as_object)
+            .is_some_and(|map| !map.is_empty())
+            || value
+                .get("routes")
+                .and_then(Value::as_array)
+                .is_some_and(|routes| !routes.is_empty());
+        if names_routing {
+            return Err(format!(
+                "opt-in file version {ALLOWLIST_VERSION} cannot name workspaces or routes; it needs version {ROUTING_VERSION} (upgrade the CLI or fix the file)"
+            ));
+        }
+    }
     if let Some(key) = value.as_object().and_then(|object| {
         object
             .keys()
@@ -1162,6 +1199,9 @@ fn version_for(file: &AllowlistFile) -> u32 {
 /// first thing the CLI has ever persisted there. Returns the path, for the
 /// report.
 fn write_allowlist(file: &mut AllowlistFile) -> CliResult<PathBuf> {
+    // Refuse to save a config that would not read back, or that two workspaces
+    // would share a token variable in.
+    file.validate().map_err(err)?;
     // Version 1 unless the file uses routing: a file an older build can still
     // read stays readable by it.
     file.version = version_for(file);
@@ -1303,15 +1343,12 @@ fn allow(
     let added = allowlist.allowed.insert(target.clone());
     let level = detail.unwrap_or(if added { Detail::Full } else { before });
     allowlist.detail.insert(target.clone(), level);
-    // A new root inside an opted-in parent keeps the parent's explicit choice
-    // (unless it names its own).
-    let inherited = if added && workspace.is_none() {
-        nearest_explicit(&allowlist, &target).map(str::to_owned)
-    } else {
-        None
-    };
-    if let Some(workspace) = workspace.map(str::to_owned).or(inherited) {
-        allowlist.workspace.insert(target.clone(), workspace);
+    // A nested root takes its parent's choice by lookup (see `resolve`), not
+    // by copy: changing the parent later changes it too.
+    if let Some(workspace) = workspace {
+        allowlist
+            .workspace
+            .insert(target.clone(), workspace.to_owned());
     }
     let workspace_changed =
         allowlist.explicit_workspace(&target).map(str::to_owned) != before_workspace;
@@ -1432,14 +1469,74 @@ fn workspaces(allowlist: &AllowlistFile) -> BTreeMap<&str, &str> {
         .collect()
 }
 
+/// What `logs status` shows for one allowed root.
+struct RootStatus {
+    /// Where the root's own sessions go: a workspace id, `default`,
+    /// `unroutable`, or `per-repository` (each checkout inside decides).
+    effective: String,
+    reason: Option<String>,
+    /// The parent root whose explicit workspace this root follows.
+    explicit_from: Option<String>,
+    repo_top: Option<String>,
+    /// Checkouts inside a folder that decide for themselves: path, effective, reason.
+    nested: Vec<(String, String, Option<String>)>,
+}
+
+/// The status word for a root whose checkouts each decide for themselves.
+const PER_REPOSITORY: &str = "per-repository";
+
+/// Judge one allowed root for display. Sync judges each session on the
+/// checkout it ran in, so a root that is not itself a checkout, or that holds
+/// checkouts, has no single answer: it is reported as `per-repository` and its
+/// checkouts are listed with their own answers. An explicit choice still
+/// covers everything inside, and is reported as such.
+fn root_status(root: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> RootStatus {
+    let res = resolve(root, allowlist, repos);
+    let explicit_from = res.explicit_root.clone().filter(|parent| parent != root);
+    let own = |res: Resolution| RootStatus {
+        effective: res.destination.key().to_owned(),
+        reason: res.route_reason,
+        explicit_from: explicit_from.clone(),
+        repo_top: res.repo_top,
+        nested: Vec::new(),
+    };
+    if res.explicit_root.is_some() || allowlist.routes.is_empty() {
+        return own(res);
+    }
+    let inside = route::nested_checkouts(root);
+    if inside.is_empty() {
+        // Either the root is its own checkout, or it is not one and nothing
+        // inside is either: git's reason stands.
+        return own(res);
+    }
+    let nested = inside
+        .into_iter()
+        .map(|path| {
+            let judged = resolve(&path, allowlist, repos);
+            (
+                path,
+                judged.destination.key().to_owned(),
+                judged.route_reason,
+            )
+        })
+        .collect();
+    RootStatus {
+        effective: PER_REPOSITORY.to_owned(),
+        reason: Some(PER_REPOSITORY.to_owned()),
+        explicit_from: None,
+        repo_top: res.repo_top,
+        nested,
+    }
+}
+
 fn status(out: &Out) -> CliResult<()> {
     let allowlist = read_allowlist()?;
     let file = allowlist_path()?;
     let list: Vec<&String> = allowlist.allowed.iter().collect();
     let mut repos = Repos::default();
-    let mut effective = BTreeMap::new();
+    let mut rows = BTreeMap::new();
     for root in &allowlist.allowed {
-        effective.insert(root.as_str(), resolve(root, &allowlist, &mut repos));
+        rows.insert(root.as_str(), root_status(root, &allowlist, &mut repos));
     }
     let explicit: BTreeMap<&str, Option<&str>> = allowlist
         .allowed
@@ -1452,14 +1549,13 @@ fn status(out: &Out) -> CliResult<()> {
             "detail": levels(&allowlist),
             "workspace": workspaces(&allowlist),
             "workspace_explicit": explicit,
-            "workspace_effective": effective
-                .iter()
-                .map(|(root, res)| (*root, res.destination.key().to_owned()))
-                .collect::<BTreeMap<_, _>>(),
-            "route_reason": effective
-                .iter()
-                .map(|(root, res)| (*root, res.route_reason.clone()))
-                .collect::<BTreeMap<_, _>>(),
+            "workspace_effective": rows.iter().map(|(r, row)| (*r, row.effective.clone())).collect::<BTreeMap<_, _>>(),
+            "route_reason": rows.iter().map(|(r, row)| (*r, row.reason.clone())).collect::<BTreeMap<_, _>>(),
+            "explicit_from": rows.iter().map(|(r, row)| (*r, row.explicit_from.clone())).collect::<BTreeMap<_, _>>(),
+            "repo_top": rows.iter().map(|(r, row)| (*r, row.repo_top.clone())).collect::<BTreeMap<_, _>>(),
+            "repos": rows.iter().map(|(r, row)| (*r, row.nested.iter().map(|(path, effective, reason)| json!({
+                "path": path, "effective": effective, "route_reason": reason,
+            })).collect::<Vec<Value>>())).collect::<BTreeMap<_, _>>(),
             "routes": allowlist.routes,
             "config": file.display().to_string(),
         }),
@@ -1469,18 +1565,22 @@ fn status(out: &Out) -> CliResult<()> {
             } else {
                 println!("Opted in ({}):", list.len());
                 for path in &list {
+                    let row = &rows[path.as_str()];
                     let explicit = allowlist.explicit_workspace(path).unwrap_or("auto");
-                    let res = &effective[path.as_str()];
-                    let why = res
-                        .route_reason
-                        .as_deref()
-                        .map(|why| format!(" — {why}"))
-                        .unwrap_or_default();
+                    let why = match (&row.explicit_from, &row.reason) {
+                        (Some(parent), _) => format!(" — from {parent}"),
+                        (None, Some(why)) => format!(" — {why}"),
+                        (None, None) => String::new(),
+                    };
                     println!(
                         "  {path} (detail: {}, workspace: {explicit}, sends to: {}{why})",
                         allowlist.level(path).as_str(),
-                        res.destination.key(),
+                        row.effective,
                     );
+                    for (nested, effective, reason) in &row.nested {
+                        let why = reason.as_deref().map(|r| format!(" — {r}")).unwrap_or_default();
+                        println!("      {nested} → {effective}{why}");
+                    }
                 }
             }
             if !allowlist.routes.is_empty() {
@@ -1670,10 +1770,14 @@ fn enclosing_roots<'a>(cwd: &str, allowlist: &'a AllowlistFile) -> Vec<&'a str> 
 
 /// The explicit workspace of the nearest enclosing allowed root that names
 /// one. A nested checkout inherits its parent's choice this way.
-fn nearest_explicit<'a>(allowlist: &'a AllowlistFile, cwd: &str) -> Option<&'a str> {
+fn nearest_explicit<'a>(allowlist: &'a AllowlistFile, cwd: &str) -> Option<(&'a str, &'a str)> {
     enclosing_roots(cwd, allowlist)
         .into_iter()
-        .find_map(|root| allowlist.explicit_workspace(root))
+        .find_map(|root| {
+            allowlist
+                .explicit_workspace(root)
+                .map(|target| (root, target))
+        })
 }
 
 /// Where one working directory's session goes, and what decided it.
@@ -1682,44 +1786,64 @@ struct Resolution {
     /// The matched route, or the reason a route could not decide. `None` for
     /// an explicit workspace or a plain default.
     route_reason: Option<String>,
+    /// The allowed root whose explicit workspace decided, when one did.
+    explicit_root: Option<String>,
+    /// The canonical top level of the checkout, when one was read.
+    repo_top: Option<String>,
 }
 
-/// Resolve a working directory: the nearest explicit workspace of an enclosing
-/// root first; else, when routes exist, the first matching route judged on the
-/// repository's own facts; else the default. A route that cannot decide holds
-/// the directory.
-fn resolve(cwd: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> Resolution {
-    if let Some(target) = nearest_explicit(allowlist, cwd) {
-        return Resolution {
-            destination: Destination::of_target(target),
+impl Resolution {
+    fn plain(destination: Destination) -> Self {
+        Self {
+            destination,
             route_reason: None,
+            explicit_root: None,
+            repo_top: None,
+        }
+    }
+}
+
+/// Resolve a working directory: the nearest enclosing root's explicit
+/// workspace first; else, when routes exist, the first matching route judged
+/// on the repository's own facts; else the default. A route that cannot decide
+/// holds the directory.
+fn resolve(cwd: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> Resolution {
+    if let Some((root, target)) = nearest_explicit(allowlist, cwd) {
+        return Resolution {
+            explicit_root: Some(root.to_owned()),
+            ..Resolution::plain(Destination::of_target(target))
         };
     }
     if allowlist.routes.is_empty() {
-        return Resolution {
-            destination: Destination::Default,
-            route_reason: None,
-        };
+        return Resolution::plain(Destination::Default);
     }
     match repos.of(cwd) {
         Err(reason) => Resolution {
             destination: Destination::Unroutable(reason.clone()),
             route_reason: Some(reason),
+            ..Resolution::plain(Destination::Default)
         },
-        Ok(repo) => match route::first_match(&allowlist.routes, repo) {
-            Err(reason) => Resolution {
-                destination: Destination::Unroutable(reason.clone()),
-                route_reason: Some(reason),
-            },
-            Ok(Some((target, why))) => Resolution {
-                destination: Destination::of_target(target),
-                route_reason: Some(why),
-            },
-            Ok(None) => Resolution {
-                destination: Destination::Default,
-                route_reason: None,
-            },
-        },
+        Ok(repo) => {
+            let repo_top = Some(repo.top.clone());
+            match route::first_match(&allowlist.routes, &repo) {
+                Err(reason) => Resolution {
+                    destination: Destination::Unroutable(reason.clone()),
+                    route_reason: Some(reason),
+                    repo_top,
+                    ..Resolution::plain(Destination::Default)
+                },
+                Ok(Some((target, why))) => Resolution {
+                    destination: Destination::of_target(target),
+                    route_reason: Some(why),
+                    repo_top,
+                    ..Resolution::plain(Destination::Default)
+                },
+                Ok(None) => Resolution {
+                    repo_top,
+                    ..Resolution::plain(Destination::Default)
+                },
+            }
+        }
     }
 }
 
@@ -1989,20 +2113,11 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
     if dry_run || groups.is_empty() {
         return Ok(Vec::new());
     }
-    // An environment override is honoured only when no other configured
-    // workspace normalises to the same variable name.
-    let mut env_names: BTreeMap<String, usize> = BTreeMap::new();
-    for workspace in groups.keys().filter(|w| w.as_str() != route::DEFAULT) {
-        *env_names
-            .entry(crate::auth::workspace_env_var(workspace))
-            .or_default() += 1;
-    }
     let plan = plan_tokens(groups, |workspace| {
         if workspace == route::DEFAULT {
             return crate::auth::token_for(api_url).map(Some);
         }
-        let unique = env_names.get(&crate::auth::workspace_env_var(workspace)) == Some(&1);
-        crate::auth::workspace_token(api_url, workspace, unique)
+        crate::auth::workspace_token(api_url, workspace)
     })?;
     let mut held = Vec::new();
     for (workspace, outcome, indices) in plan {
@@ -2898,7 +3013,7 @@ mod tests {
         assert_eq!(old.explicit_workspace("/opt/work"), None);
 
         let mut file = AllowlistFile {
-            version: super::ALLOWLIST_VERSION,
+            version: super::ROUTING_VERSION,
             ..AllowlistFile::default()
         };
         let bare = serde_json::to_string(&file).expect("serialises");
@@ -3010,7 +3125,7 @@ mod tests {
             workspace: "ws-route".to_owned(),
         }];
         assert_eq!(
-            super::nearest_explicit(&file, "/opt/work/team/app/src"),
+            super::nearest_explicit(&file, "/opt/work/team/app/src").map(|(_, t)| t),
             Some("ws-parent")
         );
         let mut repos = super::Repos::default();
@@ -3483,5 +3598,163 @@ mod tests {
             .map(|turn| turn.model.as_deref())
             .collect();
         assert_eq!(models, [Some("a"), Some("b"), None, Some("a")]);
+    }
+
+    /// A version-1 file cannot name routes or workspaces: an older-format reader
+    /// would drop them and send everything to the default, so the file is refused.
+    #[test]
+    fn version_one_refuses_routing_keys() {
+        for body in [
+            r#"{"version":1,"allowed":["/x"],"routes":[{"folder_glob":"a","workspace":"ws"}]}"#,
+            r#"{"version":1,"allowed":["/x"],"workspace":{"/x":"ws"}}"#,
+        ] {
+            let error = parse_allowlist(body.as_bytes()).expect_err("refused");
+            assert!(error.contains("needs version 2"), "{error}");
+        }
+        assert!(
+            parse_allowlist(br#"{"version":1,"allowed":["/x"],"routes":[],"workspace":{}}"#)
+                .is_ok()
+        );
+    }
+
+    /// Two configured ids that normalise to one token variable are refused, and
+    /// the check covers route targets as well as explicit choices.
+    #[test]
+    fn two_ids_that_share_a_variable_are_refused() {
+        let mut file = AllowlistFile {
+            version: super::ROUTING_VERSION,
+            ..AllowlistFile::default()
+        };
+        file.workspace.insert("/a".to_owned(), "a-b".to_owned());
+        file.workspace.insert("/b".to_owned(), "a_b".to_owned());
+        let error = file.validate().expect_err("collision");
+        assert!(error.contains("LIVINGBRAIN_TOKEN_A_B"), "{error}");
+
+        let mut routed = AllowlistFile {
+            version: super::ROUTING_VERSION,
+            ..AllowlistFile::default()
+        };
+        routed
+            .workspace
+            .insert("/a".to_owned(), "ws-one".to_owned());
+        routed.routes = vec![super::Route {
+            remote_owner: Some("acme".to_owned()),
+            folder_glob: None,
+            host: None,
+            workspace: "WS-ONE".to_owned(),
+        }];
+        assert!(routed.validate().is_err(), "case-only difference collides");
+        routed.routes[0].workspace = "ws-two".to_owned();
+        assert!(routed.validate().is_ok());
+        routed
+            .workspace
+            .insert("/b".to_owned(), "default".to_owned());
+        assert!(routed.validate().is_ok(), "`default` has no variable");
+    }
+
+    /// A nested checkout follows its parent by lookup, not by copy: changing the
+    /// parent's workspace later changes where the nested root's sessions go.
+    #[test]
+    fn a_nested_root_follows_its_parent_when_the_parent_changes() {
+        let mut file = AllowlistFile {
+            version: super::ROUTING_VERSION,
+            ..AllowlistFile::default()
+        };
+        file.allowed.insert("/opt/work".to_owned());
+        file.allowed.insert("/opt/work/app".to_owned());
+        file.workspace
+            .insert("/opt/work".to_owned(), "ws-a".to_owned());
+        let mut repos = super::Repos::default();
+        let mut record = super::empty_record(Agent::Codex, 2);
+        record.cwds = vec!["/opt/work/app/src".to_owned()];
+        assert_eq!(
+            super::destination_for(&record, &file, &mut repos),
+            super::route::Destination::Workspace("ws-a".to_owned())
+        );
+        file.workspace
+            .insert("/opt/work".to_owned(), "ws-b".to_owned());
+        assert_eq!(
+            super::destination_for(&record, &file, &mut repos),
+            super::route::Destination::Workspace("ws-b".to_owned()),
+            "the nested root moved with its parent"
+        );
+        assert!(
+            file.explicit_workspace("/opt/work/app").is_none(),
+            "nothing was copied"
+        );
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// The reproduced disagreement: a plain folder that holds a CHI checkout and
+    /// a foreign one. Status must say the folder is per-repository and list each
+    /// checkout's own answer; sync judges each session on its own checkout.
+    #[test]
+    fn a_plain_folder_is_per_repository_and_sync_routes_each_checkout() {
+        let base = std::env::temp_dir().join(format!("lb-logs-folder-{}", std::process::id()));
+        let chi = base.join("chi-web");
+        let notes = base.join("team").join("notes");
+        let mut ok = true;
+        for (dir, url) in [
+            (&chi, "https://github.com/CHI-Ecosystem/chi-web.git"),
+            (&notes, "https://github.com/someone/notes.git"),
+        ] {
+            ok &= std::fs::create_dir_all(dir).is_ok() && git_ok(dir, &["init", "-q"]);
+            ok &= git_ok(dir, &["remote", "add", "origin", url]);
+        }
+        if !ok {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // no git on this machine
+        }
+        let mut file = AllowlistFile {
+            version: super::ROUTING_VERSION,
+            ..AllowlistFile::default()
+        };
+        file.allowed.insert(base.to_string_lossy().into_owned());
+        file.routes = vec![super::Route {
+            remote_owner: Some("CHI-Ecosystem".to_owned()),
+            folder_glob: None,
+            host: None,
+            workspace: "ws-chi".to_owned(),
+        }];
+        let mut repos = super::Repos::default();
+        let status = super::root_status(&base.to_string_lossy(), &file, &mut repos);
+        assert_eq!(status.effective, "per-repository");
+        assert_eq!(status.reason.as_deref(), Some("per-repository"));
+        let judged: Vec<(String, String)> = status
+            .nested
+            .iter()
+            .map(|(path, effective, _)| (path.clone(), effective.clone()))
+            .collect();
+        let chi_key = chi.to_string_lossy().into_owned();
+        let notes_key = notes.to_string_lossy().into_owned();
+        assert!(
+            judged.contains(&(chi_key.clone(), "ws-chi".to_owned())),
+            "{judged:?}"
+        );
+        assert!(
+            judged.contains(&(notes_key.clone(), "default".to_owned())),
+            "{judged:?}"
+        );
+
+        for (dir, want) in [
+            (
+                &chi,
+                super::route::Destination::Workspace("ws-chi".to_owned()),
+            ),
+            (&notes, super::route::Destination::Default),
+        ] {
+            let mut record = super::empty_record(Agent::Codex, 2);
+            record.cwds = vec![dir.to_string_lossy().into_owned()];
+            assert_eq!(super::destination_for(&record, &file, &mut repos), want);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

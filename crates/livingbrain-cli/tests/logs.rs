@@ -1677,10 +1677,11 @@ fn status_separates_the_explicit_choice_from_the_effective_one() {
     assert!(!reserved.status.success(), "`auto` is not a workspace id");
 }
 
-/// (u) A nested checkout allowed under a parent with a workspace takes the
-/// parent's workspace, as `status` reports it.
+/// (u) A nested checkout allowed under a parent with a workspace follows the
+/// parent by lookup: nothing is copied onto it, `status` shows the parent as
+/// its source, and changing the parent moves it too.
 #[test]
-fn a_nested_checkout_inherits_its_parents_workspace() {
+fn a_nested_checkout_follows_its_parent_without_a_copy() {
     let home = temp_dir("logs-home");
     let cwd = temp_dir("logs-cwd");
     let parent = "/nonexistent-lb-parent/work";
@@ -1695,7 +1696,109 @@ fn a_nested_checkout_inherits_its_parents_workspace() {
     assert!(parented.status.success(), "stderr: {}", parented.stderr);
     let nested = run(&cwd, &home, &["logs", "allow", child, "--json"], &[], None);
     assert!(nested.status.success(), "stderr: {}", nested.stderr);
-    assert_eq!(status_json(&home)["workspace_explicit"][child], "ws-chi");
+    let status = status_json(&home);
+    assert_eq!(status["workspace_explicit"][child], Value::Null, "no copy");
+    assert_eq!(status["workspace_effective"][child], "ws-chi");
+    assert_eq!(status["explicit_from"][child], parent);
+
+    let moved = run(
+        &cwd,
+        &home,
+        &["logs", "workspace", parent, "default", "--json"],
+        &[],
+        None,
+    );
+    assert!(moved.status.success(), "stderr: {}", moved.stderr);
+    assert_eq!(status_json(&home)["workspace_effective"][child], "default");
+}
+
+/// (x) A file cannot hold two workspace ids that share a token variable: the
+/// command that would save the second is refused and nothing is written.
+#[test]
+fn a_colliding_workspace_id_is_refused_and_not_saved() {
+    let home = temp_dir("logs-home");
+    let cwd = temp_dir("logs-cwd");
+    let first = "/nonexistent-lb-collide/one";
+    let second = "/nonexistent-lb-collide/two";
+    assert!(
+        run(
+            &cwd,
+            &home,
+            &["logs", "allow", first, "--workspace", "a-b", "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let clash = run(
+        &cwd,
+        &home,
+        &["logs", "allow", second, "--workspace", "a_b", "--json"],
+        &[],
+        None,
+    );
+    assert!(!clash.status.success(), "{}", clash.stdout);
+    assert!(
+        clash.stderr.contains("LIVINGBRAIN_TOKEN_A_B"),
+        "{}",
+        clash.stderr
+    );
+    let saved: Value = serde_json::from_slice(
+        &std::fs::read(home.join("livingbrain").join("logs-allow.json")).expect("file"),
+    )
+    .expect("json");
+    assert_eq!(
+        saved["allowed"],
+        json!([first]),
+        "the refused root was not saved"
+    );
+}
+
+/// (y) A plain folder holding two checkouts is reported as per-repository, with
+/// each checkout's own answer; no single answer is given for the folder.
+#[test]
+fn a_plain_folder_is_reported_per_repository() {
+    let home = temp_dir("logs-home");
+    let folder = temp_dir("logs-folder").join("work");
+    for (dir, url) in [
+        ("chi-web", "https://github.com/CHI-Ecosystem/chi-web.git"),
+        ("notes", "https://github.com/someone/notes.git"),
+    ] {
+        let repo = folder.join(dir);
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["remote", "add", "origin", url]);
+    }
+    let folder_path = std::fs::canonicalize(&folder)
+        .expect("canonical")
+        .to_string_lossy()
+        .into_owned();
+    allowlist_json(
+        &home,
+        json!({
+            "version": 2,
+            "allowed": [folder_path],
+            "routes": [{"remote_owner": "CHI-Ecosystem", "workspace": "ws-chi"}]
+        }),
+    );
+    let status = status_json(&home);
+    assert_eq!(
+        status["workspace_effective"][&folder_path],
+        "per-repository"
+    );
+    assert_eq!(status["route_reason"][&folder_path], "per-repository");
+    let repos = status["repos"][&folder_path].as_array().expect("repos");
+    let chi = repos
+        .iter()
+        .find(|r| r["path"].as_str().unwrap_or("").ends_with("chi-web"))
+        .expect("chi");
+    let notes = repos
+        .iter()
+        .find(|r| r["path"].as_str().unwrap_or("").ends_with("notes"))
+        .expect("notes");
+    assert_eq!(chi["effective"], "ws-chi");
+    assert_eq!(notes["effective"], "default");
 }
 
 /// (v) A file a routing build writes is version 2; a file with no routing stays

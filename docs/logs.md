@@ -168,7 +168,9 @@ That is the example "CHI repos go to the CHI workspace". `side-project` names
 explicit choice, where its sessions currently go, and why.
 
 **Version.** A file that names a workspace or a route is written as `"version": 2`;
-a file without routing stays `"version": 1`. Every CLI that reads the file must be
+a file without routing stays `"version": 1`, and a version-1 file that names a
+workspace or a route is refused. Two configured workspace ids that would share a
+`LIVINGBRAIN_TOKEN_*` variable (`a-b` and `a_b`, say) are refused, and never saved. Every CLI that reads the file must be
 at least this version: an older build refuses a version-2 file outright rather
 than sending everything to the default. Unknown top-level keys are refused in
 either version, so a misspelt `routes` is an error, not a silent default.
@@ -176,15 +178,25 @@ either version, so a misspelt `routes` is an error, not a silent default.
 **Precedence.** For each session's working directory, in order:
 
 1. the workspace of the nearest enclosing allowed root that names one (`default`
-   counts, and stops the routes). A nested checkout inherits its parent's choice,
-   and `logs allow` copies it onto a new nested root;
+   counts, and stops the routes). A nested checkout follows its parent by
+   lookup, not by copy: changing the parent's workspace moves every checkout
+   inside it that names none of its own;
 2. otherwise the **first** matching route, judged on that repository's own facts:
    its git top level, folder name (`folder_glob`, with `*` and `?`) and `origin`
    remote (`remote_owner`). `origin` is used; with no `origin`, the only remote.
-   The owner comparison is case-insensitive. A `remote_owner` route reads
+   The URL is read as configured (`git config --get`), so an `insteadOf` rule
+   cannot change the owner or host a route sees. The owner comparison is
+   case-insensitive. A `remote_owner` route reads
    `github.com` unless it names a `host` (for GitHub Enterprise); a remote on any
    other host is not decided by that route;
 3. otherwise the default workspace.
+
+**Folders of checkouts.** `status` judges each allowed root as the sessions under
+it will be judged. A root that is not itself a checkout, or that holds checkouts,
+has no single answer: it reports `route_reason: "per-repository"`, lists each
+checkout inside with its own workspace (`repos`), and warns that pinning the
+folder would override every route inside it. An explicit choice on the folder
+still covers everything inside, and is reported as such.
 
 **Held, never defaulted.** When routes exist and a route needs a fact that cannot
 be read, the session is **held**, not sent to the default. The facts that cannot be
@@ -198,9 +210,10 @@ such session reports `skipped_unroutable` with the reason:
 "skipped_unroutable": 2
 ```
 
-Git is asked read-only, with the caller's repository overrides (`GIT_DIR`,
-`GIT_WORK_TREE`, `GIT_CONFIG*` and the like) removed and a five-second limit per
-call; a call that times out is an unknown fact.
+Git is asked read-only, with the caller's repository and config overrides
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_CONFIG`, `GIT_CONFIG_GLOBAL` and the like)
+removed and a five-second limit per call; a call that times out is an unknown
+fact. A repository is probed once per run, per working directory.
 
 A session whose working directories resolve to different workspaces is never
 sent: it is reported as `skipped_mixed_workspace`. A session with any held

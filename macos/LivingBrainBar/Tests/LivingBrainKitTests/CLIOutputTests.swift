@@ -125,6 +125,27 @@ final class CLIOutputTests: XCTestCase {
         XCTAssertTrue(older.projects.allSatisfy { $0.explicit == nil && $0.effective == SyncedProject.defaultWorkspace })
     }
 
+    /// A folder that holds checkouts is per-repository and lists each checkout's
+    /// own answer; a child that follows a parent says so, and a held repository
+    /// carries its own top level for "Pin This Repository".
+    func testStatusProjectsCarryParentAndNestedAnswers() throws {
+        let json = #"""
+        {"allowed":["/work","/work/app","/work/chi-web"],
+         "workspace_explicit":{"/work":null,"/work/app":null,"/work/chi-web":null},
+         "workspace_effective":{"/work":"per-repository","/work/app":"ws-team","/work/chi-web":"unroutable"},
+         "route_reason":{"/work":"per-repository","/work/app":null,"/work/chi-web":"the remote is on gitlab.com"},
+         "explicit_from":{"/work":null,"/work/app":"/work/team","/work/chi-web":null},
+         "repo_top":{"/work":null,"/work/app":null,"/work/chi-web":"/work/chi-web"},
+         "repos":{"/work":[{"path":"/work/notes","effective":"default","route_reason":null}]}}
+        """#
+        let status = try CLIOutput.allowStatus(oneLine(json))
+        let folder = status.projects[0]
+        XCTAssertEqual(folder.effective, "per-repository")
+        XCTAssertEqual(folder.nested, [NestedRepo(path: "/work/notes", effective: "default")])
+        XCTAssertEqual(status.projects[1].inheritedFrom, "/work/team")
+        XCTAssertEqual(status.projects[2].repoTop, "/work/chi-web")
+    }
+
     /// A version-2 file (routing) is read; a version this build does not know is not.
     func testAllowlistFileAcceptsVersionTwo() throws {
         let file = try CLIOutput.allowlistFile(Data(#"{"version":2,"allowed":["/x"],"routes":[]}"#.utf8))

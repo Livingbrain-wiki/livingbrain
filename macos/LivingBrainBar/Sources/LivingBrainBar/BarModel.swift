@@ -306,6 +306,25 @@ final class BarModel: ObservableObject {
         }
     }
 
+    /// Pin one repository (its own top level, never a parent folder) to a
+    /// workspace: `logs allow <top> --workspace <id>`, which adds the root if it
+    /// is new. Its own explicit choice then decides for it alone.
+    func pinRepository(top: String, to workspace: String) {
+        Task {
+            do {
+                let result = try await runCLI(["--json", "logs", "allow", top, "--workspace", workspace])
+                if result.succeeded {
+                    await refreshProjects()
+                } else {
+                    projectsError = CLIOutput.firstErrorLine(result.stderr) ?? "livingbrain exited with status \(result.status)"
+                }
+            } catch {
+                projectsError = error.localizedDescription
+            }
+            NotificationCenter.default.post(name: .livingBrainProjectsChanged, object: nil)
+        }
+    }
+
     /// `logs workspace <path> <id|default>`: send an allowed project's sessions
     /// to another workspace. The CLI refuses a project that is not opted in.
     func setWorkspace(_ project: SyncedProject, to workspace: String) {
