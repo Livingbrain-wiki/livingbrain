@@ -89,17 +89,21 @@ struct SettingsView: View {
                     .foregroundStyle(workspace.me == nil ? .secondary : .primary)
                     .textSelection(.enabled)
             }
-            if !workspace.workspaces.isEmpty {
-                Picker("Default workspace", selection: Binding(
-                    get: { workspace.defaultId ?? "" },
-                    set: { workspace.setDefault($0) }
-                )) {
-                    Text("Not chosen").tag("")
-                    ForEach(workspace.workspaces) { item in
-                        Text(item.name.isEmpty ? item.id : item.name).tag(item.id)
-                    }
+            Picker("Default workspace", selection: Binding(
+                get: { workspace.defaultId ?? "" },
+                set: { workspace.setDefault($0.isEmpty ? nil : $0) }
+            )) {
+                Text("Not chosen").tag("")
+                ForEach(workspace.workspaces) { item in
+                    Text(item.name.isEmpty ? item.id : item.name).tag(item.id)
                 }
-                .help("The CLI's default destination (sessions without a repository workspace) uses this workspace's sign-in.")
+            }
+            .help("Sessions with no workspace of their own, and the job runner, use this workspace's sign-in.")
+            if workspace.defaultId == nil {
+                Text(workspace.workspaces.isEmpty
+                     ? "Choose a default workspace: sign in to a workspace below first."
+                     : "Choose a default workspace. Until then, sessions with no workspace of their own are held.")
+                    .font(.caption).foregroundStyle(.orange)
             }
             ForEach(workspace.workspaces) { item in
                 HStack {

@@ -8,7 +8,7 @@ final class WorkspaceDirectoryTests: XCTestCase {
     private var items: [String: MemoryTokenStore] = [:]
 
     override func setUp() {
-        defaults = UserDefaults(suiteName: "WorkspaceDirectoryTests.\(UUID().uuidString)")
+        defaults = temporaryDefaults("WorkspaceDirectoryTests")
         items = [:]
     }
 

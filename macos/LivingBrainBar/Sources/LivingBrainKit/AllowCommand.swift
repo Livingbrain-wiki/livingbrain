@@ -18,12 +18,20 @@ public enum AllowCommand {
         }
     }
 
-    /// The workspace a new opt-in goes to without asking: the one in use, else
-    /// the only one signed in. Nil when the user must choose (several signed in
-    /// and none in use) or can choose nothing (none signed in).
-    public static func defaultWorkspace(active: String?, signedIn: [SavedWorkspace]) -> String? {
-        if let active, !active.isEmpty { return active }
-        return signedIn.count == 1 ? signedIn[0].id : nil
+    /// The workspace a new opt-in goes to without asking: only the one signed-in
+    /// workspace, when there is exactly one. With several, the user always
+    /// chooses (the one in use is preselected, never assumed), and with none
+    /// nothing is opted in. Auto-picking the one in use is how a repository ends
+    /// up in the wrong workspace.
+    public static func defaultWorkspace(signedIn: [SavedWorkspace]) -> String? {
+        signedIn.count == 1 ? signedIn[0].id : nil
+    }
+
+    /// The order to offer workspaces in a chooser: the one in use first (the
+    /// default button), then the rest in their saved order.
+    public static func pickerOrder(active: String?, signedIn: [SavedWorkspace]) -> [SavedWorkspace] {
+        guard let active, let first = signedIn.first(where: { $0.id == active }) else { return signedIn }
+        return [first] + signedIn.filter { $0.id != active }
     }
 
     /// Arguments for `logs allow <path> --workspace <id>`, with `--detail` when

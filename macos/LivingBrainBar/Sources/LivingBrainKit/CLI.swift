@@ -61,14 +61,27 @@ public struct CLIWorkspaceToken: Sendable, Equatable {
 /// a count. Environment variables are readable only by the same user's
 /// processes, and the CLI scrubs them from every child it starts.
 public struct CLITokenHandoff: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    /// The default sign-in (`LIVINGBRAIN_TOKEN`). The app does not hold the
-    /// CLI's own sign-in, so this is nil today.
+    /// The default workspace's token (`LIVINGBRAIN_TOKEN`): the token the
+    /// default destination and `jobs run` use.
     public let defaultToken: String?
+    /// The workspace that token must belong to (`LIVINGBRAIN_DEFAULT_WORKSPACE`);
+    /// the CLI confirms it once per run before using the token.
+    public let defaultWorkspaceId: String?
     public let workspaces: [CLIWorkspaceToken]
+    /// The server the tokens belong to. Set over any inherited
+    /// `LIVINGBRAIN_API_URL`, so a token never meets another server.
+    public let apiURL: String?
 
-    public init(defaultToken: String? = nil, workspaces: [CLIWorkspaceToken] = []) {
+    public init(
+        defaultToken: String? = nil,
+        defaultWorkspaceId: String? = nil,
+        workspaces: [CLIWorkspaceToken] = [],
+        apiURL: String? = nil
+    ) {
         self.defaultToken = defaultToken
+        self.defaultWorkspaceId = defaultWorkspaceId
         self.workspaces = workspaces
+        self.apiURL = apiURL
     }
 
     /// The variables this handoff sets. Two workspace ids that normalise to the
@@ -78,6 +91,9 @@ public struct CLITokenHandoff: Sendable, CustomStringConvertible, CustomDebugStr
         var env: [String: String] = [:]
         if let defaultToken, !defaultToken.isEmpty {
             env["LIVINGBRAIN_TOKEN"] = defaultToken
+            if let defaultWorkspaceId, !defaultWorkspaceId.isEmpty {
+                env["LIVINGBRAIN_DEFAULT_WORKSPACE"] = defaultWorkspaceId
+            }
         }
         let groups = Dictionary(grouping: workspaces, by: { CLIEnvironment.workspaceVariable($0.id) })
         for (name, group) in groups where group.count == 1 && !group[0].token.isEmpty {
@@ -134,13 +150,13 @@ public enum CLIEnvironment {
             }
             env.merge(handoff.variables) { _, handed in handed }
             env[noKeychainVariable] = "1"
-            if handoff.workspaces.isEmpty {
+            if handoff.workspaces.isEmpty && handoff.defaultWorkspaceId == nil {
                 env.removeValue(forKey: multiWorkspaceVariable)
             } else {
                 env[multiWorkspaceVariable] = "1"
             }
-        }
-        if (env["LIVINGBRAIN_API_URL"] ?? "").isEmpty {
+            env["LIVINGBRAIN_API_URL"] = handoff.apiURL ?? apiURL
+        } else if (env["LIVINGBRAIN_API_URL"] ?? "").isEmpty {
             env["LIVINGBRAIN_API_URL"] = apiURL
         }
         let extra = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]

@@ -128,10 +128,25 @@ impl fmt::Debug for Token {
 pub struct KeyringStore;
 
 impl KeyringStore {
-    fn entry(user: &str) -> CliResult<keyring::Entry> {
-        keychain_gate_process()?;
+    fn entry(env: &dyn EnvSource, user: &str) -> CliResult<keyring::Entry> {
+        keychain_gate(env)?;
         keyring::Entry::new(SERVICE, user)
             .map_err(|e| err(format!("the OS keychain is unavailable: {e}")))
+    }
+
+    /// Write the CLI's own item, unless this run has the keychain off.
+    fn set_in(env: &dyn EnvSource, user: &str, token: &str) -> CliResult<()> {
+        Self::entry(env, user)?
+            .set_password(token)
+            .map_err(|e| err(format!("could not write the OS keychain: {e}")))
+    }
+
+    /// Delete the CLI's own item, unless this run has the keychain off.
+    fn delete_in(env: &dyn EnvSource, user: &str) -> CliResult<()> {
+        match Self::entry(env, user)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(err(format!("could not update the OS keychain: {e}"))),
+        }
     }
 }
 
@@ -150,16 +165,11 @@ fn keychain_get(env: &dyn EnvSource, service: &str, user: &str) -> CliResult<Opt
 
 impl TokenStore for KeyringStore {
     fn set(&self, user: &str, token: &str) -> CliResult<()> {
-        Self::entry(user)?
-            .set_password(token)
-            .map_err(|e| err(format!("could not write the OS keychain: {e}")))
+        Self::set_in(&ProcessEnv, user, token)
     }
 
     fn delete(&self, user: &str) -> CliResult<()> {
-        match Self::entry(user)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(err(format!("could not update the OS keychain: {e}"))),
-        }
+        Self::delete_in(&ProcessEnv, user)
     }
 }
 
@@ -193,7 +203,7 @@ fn token_for_in(env: &dyn EnvSource, api_url: &str) -> CliResult<Token> {
     }
     if !keychain_allowed(env) {
         return Err(CliError::NotLoggedIn(format!(
-            "not logged in — no token was passed to this run (LIVINGBRAIN_TOKEN is unset and {NO_KEYCHAIN_ENV}=1)"
+            "not logged in — no default token was passed to this run (LIVINGBRAIN_TOKEN is unset and {NO_KEYCHAIN_ENV}=1); choose the default workspace in Living Brain for Mac"
         )));
     }
     match keychain_get(env, SERVICE, &user_key(api_url))? {
@@ -347,17 +357,22 @@ pub fn logout(api_url: &str, out: &Out) -> CliResult<()> {
     Ok(())
 }
 
+/// Serialises every test that installs or uses a keyring backend: the default
+/// builder is process-wide, so tests in any module hold this while they run.
+#[cfg(test)]
+pub(crate) static KEYRING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use std::any::Any;
     use std::collections::HashMap;
     use std::ffi::{OsStr, OsString};
     use std::process::Command;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use super::{
-        APP_SERVICE, EnvSource, KeyringStore, SERVICE, Token, TokenStore, is_token_var,
+        APP_SERVICE, EnvSource, KEYRING_TEST_LOCK, KeyringStore, SERVICE, Token, is_token_var,
         keychain_get, scrub_token_vars, token_for_in, workspace_token_in,
     };
     use crate::CliError;
@@ -383,10 +398,6 @@ mod tests {
             self.0.get(key).cloned()
         }
     }
-
-    /// Serialises the tests that install a keyring backend: the default
-    /// builder is process-wide.
-    static KEYRING_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Wraps keyring's in-memory mock and counts every credential it builds.
     /// Each `Entry::new` builds one, so a zero count means the keychain was
@@ -434,14 +445,16 @@ mod tests {
     fn the_keychain_store_maps_a_missing_entry_to_none() {
         let _lock = KEYRING_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-        let store = KeyringStore;
+        // The environment is a fixed map, so an inherited NO_KEYCHAIN cannot
+        // change what this test does.
+        let env = MapEnv::new(&[]);
         assert_eq!(
-            keychain_get(&MapEnv::new(&[]), SERVICE, "https://api.example").expect("read"),
+            keychain_get(&env, SERVICE, "https://api.example").expect("read"),
             None
         );
-        store.set("https://api.example", "t").expect("write");
-        store.delete("https://api.example").expect("delete");
-        store.delete("https://api.example").expect("delete again");
+        KeyringStore::set_in(&env, "https://api.example", "t").expect("write");
+        KeyringStore::delete_in(&env, "https://api.example").expect("delete");
+        KeyringStore::delete_in(&env, "https://api.example").expect("delete again");
     }
 
     /// `LIVINGBRAIN_NO_KEYCHAIN=1` means the keyring is never called: not for

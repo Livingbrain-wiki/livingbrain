@@ -125,6 +125,10 @@ fn sources_mock() -> Mock {
             });
             return Reply::json(200, &reply.to_string());
         }
+        if request.path == "/v1/me" {
+            // The default sign-in in these tests belongs to ws-earth.
+            return Reply::json(200, r#"{"workspace":{"id":"ws-earth","name":"EarthOS"}}"#);
+        }
         if request.path != "/v1/pages/sources" {
             return Reply::json(404, r#"{"error":"no such route"}"#);
         }
@@ -1677,11 +1681,12 @@ fn status_separates_the_explicit_choice_from_the_effective_one() {
     assert!(!reserved.status.success(), "`auto` is not a workspace id");
 }
 
-/// (u) A nested checkout allowed under a parent with a workspace follows the
-/// parent by lookup: nothing is copied onto it, `status` shows the parent as
-/// its source, and changing the parent moves it too.
+/// (u) A nested checkout allowed under a parent with a workspace is written
+/// with that workspace, so its routing survives changes to the parent. Moving
+/// the parent to another workspace leaves the checkout where it was (it no
+/// longer follows the parent by lookup).
 #[test]
-fn a_nested_checkout_follows_its_parent_without_a_copy() {
+fn a_nested_checkout_keeps_the_parents_workspace_it_was_allowed_with() {
     let home = temp_dir("logs-home");
     let cwd = temp_dir("logs-cwd");
     let parent = "/nonexistent-lb-parent/work";
@@ -1696,10 +1701,10 @@ fn a_nested_checkout_follows_its_parent_without_a_copy() {
     assert!(parented.status.success(), "stderr: {}", parented.stderr);
     let nested = run(&cwd, &home, &["logs", "allow", child, "--json"], &[], None);
     assert!(nested.status.success(), "stderr: {}", nested.stderr);
+    assert_eq!(json_of(&nested)["workspace"][child], "ws-chi");
     let status = status_json(&home);
-    assert_eq!(status["workspace_explicit"][child], Value::Null, "no copy");
+    assert_eq!(status["workspace_explicit"][child], "ws-chi");
     assert_eq!(status["workspace_effective"][child], "ws-chi");
-    assert_eq!(status["explicit_from"][child], parent);
 
     let moved = run(
         &cwd,
@@ -1709,7 +1714,58 @@ fn a_nested_checkout_follows_its_parent_without_a_copy() {
         None,
     );
     assert!(moved.status.success(), "stderr: {}", moved.stderr);
-    assert_eq!(status_json(&home)["workspace_effective"][child], "default");
+    assert_eq!(status_json(&home)["workspace_effective"][child], "ws-chi");
+}
+
+/// (u2) Denying a parent, or setting it back to automatic, pins its nested
+/// checkouts to the parent's workspace first: no checkout falls to the default
+/// token because its parent went away.
+#[test]
+fn deny_and_auto_on_a_parent_keep_its_nested_checkouts_routed() {
+    let home = temp_dir("logs-home");
+    let cwd = temp_dir("logs-cwd");
+    let parent = "/nonexistent-lb-pin/work";
+    let child = "/nonexistent-lb-pin/work/app";
+    let legacy = "/nonexistent-lb-pin/work/legacy";
+    assert!(
+        run(
+            &cwd,
+            &home,
+            &["logs", "allow", parent, "--workspace", "ws-b", "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(&cwd, &home, &["logs", "allow", child, "--json"], &[], None)
+            .status
+            .success()
+    );
+    // A checkout allowed before this build wrote the parent's workspace onto
+    // nested checkouts: it has no workspace of its own in the file, so it
+    // inherits the parent by lookup.
+    allowlist_json(
+        &home,
+        json!({
+            "version": 2,
+            "allowed": [parent, child, legacy],
+            "workspace": {parent: "ws-b", child: "ws-b"},
+        }),
+    );
+    let before = status_json(&home);
+    assert_eq!(before["workspace_effective"][legacy], "ws-b");
+
+    let denied = run(&cwd, &home, &["logs", "deny", parent, "--json"], &[], None);
+    assert!(denied.status.success(), "stderr: {}", denied.stderr);
+    let after = status_json(&home);
+    assert_eq!(after["workspace_effective"][child], "ws-b", "child kept B");
+    assert_eq!(
+        after["workspace_effective"][legacy], "ws-b",
+        "legacy child kept B"
+    );
+    assert_ne!(after["workspace_effective"][child], "default");
 }
 
 /// (x) A file cannot hold two workspace ids that share a token variable: the
@@ -1983,4 +2039,179 @@ fn no_keychain_runs_hold_a_routed_session_without_its_handed_token() {
             .iter()
             .all(|bearer| bearer.as_deref() == Some(WS_CHI_TOKEN)),
     );
+}
+
+/// (p) The default token is used only when `GET /v1/me` confirms it belongs to
+/// the workspace the app or the opt-in file names. A different workspace holds
+/// the default group: nothing is sent with it.
+#[test]
+fn a_default_token_for_another_workspace_is_held_never_sent() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    assert!(
+        run(
+            &temp_dir("logs-cwd"),
+            &home,
+            &["logs", "allow", DEMO_REPO, "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_DEFAULT_WORKSPACE", "ws-chi"));
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 0, "{report}");
+    assert_eq!(
+        report["skipped_default_mismatch"],
+        json!([{"workspace": "default", "sessions": 2}])
+    );
+    assert!(
+        mock.requests()
+            .iter()
+            .all(|request| request.path != "/v1/pages/sources"),
+        "a held default group must not upload"
+    );
+}
+
+/// (q2) The same default token, confirmed as the expected workspace, uploads.
+/// The expectation comes from the opt-in file (what a terminal run records).
+#[test]
+fn a_confirmed_default_token_uploads_with_the_file_expectation() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    assert!(
+        run(
+            &temp_dir("logs-cwd"),
+            &home,
+            &["logs", "allow", DEMO_REPO, "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let recorded = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "default-workspace", "ws-earth", "--json"],
+        &[],
+        None,
+    );
+    assert!(recorded.status.success(), "stderr: {}", recorded.stderr);
+    assert_eq!(opt_in_default(&home), "ws-earth");
+
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert_eq!(json_of(&output)["uploaded"], 2, "{}", json_of(&output));
+}
+
+/// (q3) An app and a file that name different default workspaces hold the
+/// default group rather than guess.
+#[test]
+fn an_app_and_file_that_disagree_about_the_default_hold_it() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    assert!(
+        run(
+            &temp_dir("logs-cwd"),
+            &home,
+            &["logs", "allow", DEMO_REPO, "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            &temp_dir("logs-cwd"),
+            &home,
+            &["logs", "default-workspace", "ws-earth", "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_DEFAULT_WORKSPACE", "ws-chi"));
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    assert_eq!(json_of(&output)["uploaded"], 0);
+    assert_eq!(
+        json_of(&output)["skipped_default_mismatch"],
+        json!([{"workspace": "default", "sessions": 2}])
+    );
+}
+
+/// (r) With the keychain off and no default token handed over, only the default
+/// group is held: the routed workspace still uploads, and the run succeeds.
+#[test]
+fn no_keychain_without_a_default_token_holds_only_the_default_group() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    assert!(
+        run(
+            &temp_dir("logs-cwd"),
+            &home,
+            &["logs", "allow", DEMO_REPO, "--json"],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    assert!(
+        run(
+            &temp_dir("logs-cwd"),
+            &home,
+            &[
+                "logs",
+                "allow",
+                SIDE_REPO,
+                "--workspace",
+                "ws-chi",
+                "--json"
+            ],
+            &[],
+            None
+        )
+        .status
+        .success()
+    );
+    let envs = [
+        ("LIVINGBRAIN_API_URL", mock.base.as_str()),
+        ("LIVINGBRAIN_NO_KEYCHAIN", "1"),
+        ("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN),
+    ];
+    let output = sync(&home, &envs, &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    // The side repository's one session goes out; the two default ones wait.
+    assert_eq!(report["uploaded"], 1, "{report}");
+    assert_eq!(
+        report["skipped_no_token"],
+        json!([{"workspace": "default", "sessions": 2}])
+    );
+    assert!(
+        source_bearers(&mock)
+            .iter()
+            .all(|bearer| bearer.as_deref() == Some(WS_CHI_TOKEN)),
+    );
+}
+
+/// The opt-in file's `default_workspace`, as written.
+fn opt_in_default(home: &Path) -> String {
+    let text = std::fs::read_to_string(home.join("livingbrain").join("logs-allow.json"))
+        .expect("opt-in file");
+    let value: Value = serde_json::from_str(&text).expect("json");
+    value["default_workspace"].as_str().unwrap_or("").to_owned()
 }

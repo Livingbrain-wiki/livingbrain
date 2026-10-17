@@ -153,7 +153,13 @@ The default destination (sessions in a repository with no workspace, and
 once into the app's items on first launch of this build (macOS may ask once to
 let the app read the CLI's item; if you refuse, pick the default in Settings →
 Workspace). A CLI `login` run from the app re-adopts it. Opting a repository in
-always names its workspace; the app asks which one when several are signed in.
+always names its workspace: the app asks which one, with the one in use first,
+unless exactly one workspace is signed in. Changing the default lists the
+repositories that move with it, and is recorded in the opt-in file
+(`livingbrain logs default-workspace`), so a terminal run agrees with the app.
+Before the default token is used, the CLI confirms with `GET /v1/me` that it
+belongs to that workspace; a mismatch holds the default group, and nothing is
+sent with it.
 
 - **Wiki** — the page list (`GET /v1/pages`), search with a project filter
   (`GET /v1/search`, ⌘K), pages rendered natively (headings, lists, quotes,

@@ -35,6 +35,7 @@ public final class WorkspaceDirectory {
     private var activeKey: String { "workspaces.active.\(base)" }
     private var defaultKey: String { "workspaces.default.\(base)" }
     private var cliCheckedKey: String { "workspaces.cli-checked.\(base)" }
+    private var defaultChosenKey: String { "workspaces.default-chosen.\(base)" }
 
     /// The workspace the CLI's default destination uses: its token is handed to
     /// the CLI as `LIVINGBRAIN_TOKEN`. Set from the CLI's own sign-in when the
@@ -49,6 +50,13 @@ public final class WorkspaceDirectory {
     public func defaultToken() -> String? {
         guard let id = defaultId else { return nil }
         return try? store(for: id).read()
+    }
+
+    /// Whether the user chose the default workspace (in Settings). A chosen
+    /// default is never replaced by a CLI sign-in adopted later.
+    public var defaultWasChosen: Bool {
+        get { defaults.bool(forKey: defaultChosenKey) }
+        set { defaults.set(newValue, forKey: defaultChosenKey) }
     }
 
     /// Whether the CLI's own sign-in has been looked at once for this server. The

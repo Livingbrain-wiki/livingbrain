@@ -296,6 +296,12 @@ impl Client {
         )
     }
 
+    /// `GET /v1/me`: who the token speaks for, including its workspace id. Used
+    /// to confirm the default token really belongs to the default workspace.
+    pub fn me(&self) -> CliResult<Value> {
+        read_json(self.get("/v1/me").call().map_err(transport)?)
+    }
+
     /// `GET /v1/sources` — the caller's sources, newest first, without their
     /// bodies; `cursor` is the previous page's `next_cursor`.
     pub fn sources(
