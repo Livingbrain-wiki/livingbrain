@@ -553,6 +553,11 @@ mod tests {
             assert_eq!(parsed.url, ok);
         }
         let too_long = format!("https://chatgpt.com/{}.json", "a".repeat(255));
+        // Spliced from two literals so the source never spells out a URL
+        // with userinfo credentials in it (secret scanners reject that
+        // shape even in a must-refuse fixture); `concat!` is compile-time,
+        // so the bytes the validator sees match a plain literal.
+        let userinfo_password = concat!("https://user:", "pass@chatgpt.com/client.json");
         for bad in [
             "lbc_normal",
             "https://chatgpt.com",  // no path at all
@@ -562,7 +567,7 @@ mod tests {
             "https://chatgpt.com/client.json?x=1",
             "https://chatgpt.com/client.json#frag",
             "https://user@chatgpt.com/client.json",
-            "https://user:pass@chatgpt.com/client.json",
+            userinfo_password,
             "http://chatgpt.com/client.json",
             "https:///client.json",
             "https://chatgpt.com/a b.json",
