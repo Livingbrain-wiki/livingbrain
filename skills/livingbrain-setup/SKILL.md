@@ -180,9 +180,24 @@ allowed. Secrets are redacted on the Mac before upload.
    and tool names only) or `--detail summary` (each message cut to 2,000 characters).
 3. Leave **Live Sync** on, or press **Sync Now** (⌘R).
 
-**Coming soon:** per-repository routing to a chosen workspace. Until it ships,
-sign the CLI in to the workspace you want before syncing. Sessions go to the
-CLI token's workspace. Sessions already synced stay where they went.
+**Several companies on one Mac (Mac app 0.1.4 or later).** Sessions go to the
+default workspace (the CLI's sign-in) unless a repository is routed elsewhere:
+
+- **[HUMAN]** Sign the Mac app in to each workspace (**Settings → Workspaces →
+  Sign In**). In **Projects & Sync**, pick each repository's workspace
+  (**Automatic**, **Default**, or a named workspace). Pinning a parent folder
+  overrides every repository inside it, so pin the repository itself.
+- **[AGENT]** The same from the terminal:
+  `livingbrain logs allow <repo> --workspace <workspace-id>` or
+  `livingbrain logs workspace <repo> <workspace-id|default|auto>`. Rules can
+  route by git remote owner or folder name, in `~/.config/livingbrain/logs-allow.json`:
+  `"routes": [{"remote_owner": "Acme-Org", "workspace": "<id>"}]` (the file
+  becomes version 2; update every `livingbrain` CLI on that Mac).
+- A session whose workspace can't be decided (no remote, unknown host, missing
+  sign-in, keychain denied) is **held**, never sent to another workspace;
+  `livingbrain logs status --json` shows why (`skipped_unroutable`,
+  `skipped_no_token`, `skipped_keychain_denied`). Sessions already synced stay
+  where they went.
 
 **[AGENT]** Verify from the terminal. Nothing is sent:
 

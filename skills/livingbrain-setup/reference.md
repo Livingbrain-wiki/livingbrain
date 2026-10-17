@@ -175,9 +175,9 @@ schedule, notifications), **Recent Sessions**, and **Settings → Workspace**
 4. **Cron timing.** The brief says pages appear "within one cron cycle". That
    holds for a session or a small import. A large GitHub backfill spans several
    ticks, so the skill says "a cycle or two" and "several for large backfills".
-5. **Per-repository workspace routing** is not in `origin/main`. The brief says
-   it is "coming soon" on `feat/per-repo-workspace` (remote branch exists). The
-   skill says only "coming soon" and gives the workaround.
+5. **Per-repository workspace routing** shipped in PR #236 and Mac app 0.1.4
+   (`logs allow --workspace`, `logs workspace`, `routes` in the version-2
+   opt-in file; undecidable sessions are held). See `docs/logs.md`.
 6. **Member role `viewer`.** `app/assets/members.js` labels a `viewer` role, but
    the invite form offers only Member, Admin and Owner. The skill lists only the
    three invitable roles.
