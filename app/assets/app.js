@@ -738,6 +738,7 @@ pages.settings = async function settings() {
   wireSectionNav();
   wireCopyButtons();
   fillConnectPanel();
+  wireConnectorApps();
   await Promise.all([
     wireModels(),
     wireTokens(),
@@ -906,6 +907,60 @@ function fillConnectPanel() {
     `claude mcp add --transport http livingbrain ${mcp} --header "Authorization: Bearer <token>"`,
   );
   set("cmd-cli", `LIVINGBRAIN_API_URL=${origin} livingbrain login`);
+}
+
+/**
+ * The endpoint a chat app adds as a custom connector: the same MCP endpoint
+ * the panel's field shows, derived the same way (the app's own origin, so
+ * staging shows staging).
+ */
+export function connectorUrl(origin = apiOrigin()) {
+  return `${String(origin).replace(/\/+$/, "")}${MCP_PATH}`;
+}
+
+/** Reveals one chat app's steps (`"chatgpt"` or `"claude"`); any other
+ * value hides both. */
+export function revealConnectorSteps(pick) {
+  for (const app of ["chatgpt", "claude"]) {
+    const steps = $(`#steps-${app}`);
+    if (steps) steps.hidden = pick !== app;
+  }
+}
+
+/**
+ * One "Add to ChatGPT/Claude" click: reveals that app's steps, then copies
+ * the connector endpoint for pasting straight in. Resolves `false` when the
+ * clipboard refuses — the steps stay open, and the endpoint is still in the
+ * field above. `write` stands in for the clipboard so the test can watch it.
+ */
+export async function chooseConnectorApp(app, { url = connectorUrl(), write } = {}) {
+  revealConnectorSteps(app);
+  const copy = write || ((text) => navigator.clipboard.writeText(text));
+  try {
+    await copy(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Wires the Connect panel's two chat-app buttons. */
+function wireConnectorApps() {
+  for (const app of ["chatgpt", "claude"]) {
+    const button = $(`#add-${app}`);
+    if (!button) continue;
+    button.addEventListener("click", async () => {
+      if (!(await chooseConnectorApp(app))) {
+        toast("Copying was blocked. Copy the endpoint from the field above.", "warn");
+        return;
+      }
+      const label = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(() => {
+        button.textContent = label;
+      }, 1500);
+    });
+  }
 }
 
 /* --- models ---------------------------------------------------------- */

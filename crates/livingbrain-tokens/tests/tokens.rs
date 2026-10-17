@@ -575,6 +575,134 @@ async fn the_discovery_documents_name_the_host_they_were_fetched_from() {
 }
 
 // ---------------------------------------------------------------------------
+// The `actions` audience (issue #234): a second restricted token, this one
+// for a ChatGPT custom GPT's Actions.
+
+/// An actions token is admitted by the one surface that names its audience,
+/// and refused by every other entry point — the same gate that holds a
+/// connector token to the MCP endpoint. It resolves to its member, never as
+/// an admin, carrying the `read:`-only subset the mint forces.
+#[pollster::test]
+async fn an_actions_token_reaches_only_a_surface_that_names_it() {
+    let kit = support::signed_in().await;
+    let actions = mint(&kit, "ChatGPT", &["shared"]).await;
+    stamp(
+        &kit,
+        prefix_of(&actions),
+        "actions",
+        &["read:shared".to_owned()],
+    )
+    .await;
+
+    // The actions surface: its member, not an admin, read-only.
+    let Ok(livingbrain_tokens::Authenticated::Member(member)) =
+        livingbrain_tokens::authenticate_actions(
+            &kit.ports,
+            &Caller::Token(actions.clone()).headers(),
+        )
+        .await
+    else {
+        panic!("the actions surface admits the token");
+    };
+    assert_eq!(member.user_id, OWNER);
+    assert!(!member.is_admin, "an actions token is never an admin");
+    assert_eq!(
+        member.scopes.as_deref(),
+        Some(&["read:shared".to_owned()][..])
+    );
+
+    // Every entry point that names no audience refuses it, as each refuses a
+    // connector token: the surfaces behind `authenticate` and
+    // `authenticate_any`, and the wire itself on `/v1/me` and here.
+    for refused in [
+        livingbrain_tokens::authenticate(&kit.ports, &Caller::Token(actions.clone()).headers())
+            .await
+            .is_err(),
+        livingbrain_tokens::authenticate_any(&kit.ports, &Caller::Token(actions.clone()).headers())
+            .await
+            .is_err(),
+        livingbrain_tokens::authenticate_mcp(&kit.ports, &Caller::Token(actions.clone()).headers())
+            .await
+            .is_err(),
+    ] {
+        assert!(
+            refused,
+            "an actions token reached a surface that names no audience"
+        );
+    }
+    for path in ["/v1/me", "/v1/tokens"] {
+        let answered = support::get(&kit, path, &Caller::Token(actions.clone())).await;
+        assert_eq!(
+            answered.status,
+            StatusCode::UNAUTHORIZED,
+            "{path}: {}",
+            answered.text()
+        );
+    }
+    let minted = support::post_json(
+        &kit,
+        "/v1/tokens",
+        &json!({"name": "A second machine"}),
+        &Caller::Token(actions.clone()),
+    )
+    .await;
+    assert_eq!(minted.status, StatusCode::UNAUTHORIZED, "{}", minted.text());
+
+    // And the other way round: the actions surface refuses a connector token
+    // exactly as every surface outside the MCP endpoint does.
+    let connector = mint(&kit, "Claude", &["shared"]).await;
+    stamp(&kit, prefix_of(&connector), "mcp", &["shared".to_owned()]).await;
+    assert!(
+        livingbrain_tokens::authenticate_actions(&kit.ports, &Caller::Token(connector).headers())
+            .await
+            .is_err(),
+        "a connector token reached the actions surface"
+    );
+}
+
+/// An actions token is a connected app in the settings list — labelled the
+/// way a connector token is, and revoked the same way, after which the
+/// actions surface refuses it too.
+#[pollster::test]
+async fn an_actions_token_is_listed_and_revoked_as_a_connected_app() {
+    let kit = support::signed_in().await;
+    let actions = mint(&kit, "ChatGPT", &["shared"]).await;
+    stamp(
+        &kit,
+        prefix_of(&actions),
+        "actions",
+        &["read:shared".to_owned()],
+    )
+    .await;
+
+    let listed = support::get(&kit, "/v1/tokens", &kit.owner()).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.text());
+    let body = listed.json();
+    let tokens = body["tokens"].as_array().expect("an array");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0]["prefix"], json!(prefix_of(&actions)));
+    assert_eq!(
+        tokens[0]["connector"],
+        json!(true),
+        "an actions token is labelled as a connected app"
+    );
+
+    let revoked = support::delete(
+        &kit,
+        &format!("/v1/tokens/{}", prefix_of(&actions)),
+        &kit.owner(),
+    )
+    .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT, "{}", revoked.text());
+    assert!(
+        livingbrain_tokens::authenticate_actions(&kit.ports, &Caller::Token(actions).headers())
+            .await
+            .is_err(),
+        "a revoked actions token authenticates nowhere"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 
 async fn mint(kit: &Kit, name: &str, scopes: &[&str]) -> String {
@@ -593,6 +721,38 @@ async fn mint_as(kit: &Kit, name: &str, scopes: &[&str], who: &Caller) -> String
         .as_str()
         .expect("the token, once")
         .to_owned()
+}
+
+/// The row an audience-carrying mint writes, stamped straight onto a token
+/// minted over the wire — the way `web_session.rs` stamps a connector token,
+/// and the row the OAuth grant's `mint_actions` will write: the audience,
+/// and the scope subset exactly as that mint forces it for `actions` (each
+/// entry `read:`-prefixed), untouched for `mcp`.
+async fn stamp(kit: &Kit, prefix: &str, audience: &str, scopes: &[String]) {
+    let scopes = if audience == "actions" {
+        scopes
+            .iter()
+            .map(|scope| {
+                if scope.starts_with("read:") {
+                    scope.clone()
+                } else {
+                    format!("read:{scope}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        scopes.join(" ")
+    };
+    let text = |value: &str| sea_query::Value::String(Some(Box::new(value.to_owned())));
+    kit.harness
+        .db
+        .execute(&cratefield_core::Statement::with_values(
+            "UPDATE personal_access_tokens SET audience = ?, scopes = ? WHERE prefix = ?",
+            vec![text(audience), text(&scopes), text(prefix)],
+        ))
+        .await
+        .expect("the audience is stamped");
 }
 
 /// The caller a token resolves to, asked of the same `authenticate` the

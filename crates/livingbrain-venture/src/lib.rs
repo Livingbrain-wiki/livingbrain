@@ -17,7 +17,9 @@
 //! harness router itself (`serve_cli` below); and `tokens` with the harness
 //! `device-auth` grant beside it — the personal access tokens behind issue
 //! #72, minted by a device that has no browser to sign in with, which are
-//! also what the MCP endpoint now accepts.
+//! also what the MCP endpoint now accepts, beside the `actions` audience a
+//! ChatGPT custom GPT holds (issue #234), admitted on four read-only routes
+//! alone.
 //! `wrangler.toml` and the D1 migrations are beside this crate.
 //!
 //! `workspaces` requires `Db`, `Signer`, `HttpClient`, `Clock` and `IdGen`.
@@ -33,14 +35,18 @@
 use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
 use cratefield_adapter_typesafe::TypeSafe;
+use cratefield_core::axum::Router;
 use cratefield_core::axum::body::{Body, to_bytes};
+use cratefield_core::axum::extract::State as AxumState;
 use cratefield_core::axum::http::{
     HeaderMap, HeaderValue, Method as HttpMethod, Request as HttpRequest, header,
 };
-use cratefield_core::axum::response::Response as AxumResponse;
+use cratefield_core::axum::middleware::{Next, from_fn_with_state};
+use cratefield_core::axum::response::{IntoResponse as _, Response as AxumResponse};
 use cratefield_core::{
-    Blob, Classifier, Database, Harness, HarnessBuilder, Module, Ports, Problem, RandomBytes,
-    RandomError, Rendered, ScheduledBudget, ScheduledLimits, ScheduledSplit, Template, Venture,
+    Blob, Classifier, Database, Harness, HarnessBuilder, Module, ModuleContext, Ports, Problem,
+    RandomBytes, RandomError, Rendered, ScheduledBudget, ScheduledLimits, ScheduledSplit, Template,
+    Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
@@ -522,13 +528,17 @@ fn cli_modules(
     };
     // The compiler's triage classifier rides on the same `Wiki`; only the
     // coding-agents compiler asks it.
-    let wiki = wiki(kms).with_jev(jev);
+    let wiki = wiki(Arc::clone(&kms)).with_jev(jev.clone());
+    // The three surfaces an actions token may reach (issue #234): each
+    // serves exactly one of its four allowed routes, and the writes on them
+    // are refused by the token's `read:`-only scopes already.
+    let actions = wiki_actions(kms).with_jev(jev);
     vec![
         Arc::new(Notes::new(wiki.clone())),
-        Arc::new(Search::new(wiki.clone())),
-        Arc::new(Ask::new(wiki.clone())),
+        Arc::new(Search::new(actions.clone())),
+        Arc::new(Ask::new(actions.clone())),
         Arc::new(Export::new(wiki.clone())),
-        Arc::new(Facts::new(wiki.clone())),
+        Arc::new(Facts::new(actions.clone())),
         Arc::new(Sources::new(wiki.clone())),
         // The brain map's data (`GET /v1/graph`): the asker's own pages,
         // sources and facts as nodes and edges, read-only.
@@ -690,16 +700,18 @@ fn pages_module(
     let mcp_kms = Arc::clone(&kms);
     // The MCP endpoint alone also takes a connector token (issue #72); every
     // other bearer surface refuses one, as `TokenBearer` does.
-    let mcp_auth: Arc<dyn BearerAuth> = Arc::new(McpBearer);
+    let mcp_auth = mcp_bearer();
     // The page routes the web app reads and writes answer to its session
     // cookie as well as to a bearer; the MCP endpoint below takes the bearer
     // resolver alone and stays bearer-only, and the importer takes the
-    // cookie too so the Imports page can upload (same origin only).
-    let surface = wiki(Arc::clone(&kms));
+    // cookie too so the Imports page can upload (same origin only). The
+    // surface also answers an actions token on `GET /{slug}` alone, and
+    // [`pages_surface`]'s guard holds it to that one route.
+    let surface = wiki_actions(Arc::clone(&kms));
     let cell = answers.clone();
     let shred = erasure.clone();
     Pages::new()
-        .surface(move |ctx| livingbrain_api::pages_routes(ctx, &surface))
+        .surface(move |ctx| pages_surface(ctx, &surface))
         .nest("/mcp", move |ctx| {
             // Read apart from `ctx`, which the MCP router below takes whole.
             if let (Some(db), Some(blob), Some(clock), Some(id_gen)) = (
@@ -993,6 +1005,31 @@ pub fn wiki(kms: Arc<dyn Kms>) -> Wiki {
     Wiki::new(kms, Arc::new(TokenBearer)).with_session(session)
 }
 
+/// The [`Wiki`] the four read-only routes an actions token may call are
+/// built with (issue #234, a ChatGPT custom GPT's Actions): `search`, `ask`
+/// and `facts` in [`cli_modules`], and the pages surface in
+/// [`pages_module`]. Exactly [`wiki`], but the bearer also admits an actions
+/// token ([`livingbrain_tokens::ACTIONS_AUDIENCE`]) beside the ordinary
+/// credentials. The token is read-only by construction — its scope subset
+/// is `read:`-prefixed and non-empty at the mint — and the pages surface
+/// wraps [`actions_guard`] around it, which refuses the token on every
+/// route of that surface but `GET /v1/pages/{slug}`. Every other module
+/// keeps [`wiki`], whose bearer answers an actions token as an unknown one.
+#[must_use]
+pub fn wiki_actions(kms: Arc<dyn Kms>) -> Wiki {
+    let session: Arc<dyn SessionAuth> = Arc::new(WebSession);
+    Wiki::new(kms, Arc::new(ActionsBearer)).with_session(session)
+}
+
+/// The [`BearerAuth`] the MCP endpoint below `/v1/pages` resolves with:
+/// [`TokenBearer`]'s credentials plus a connector token — the one audience
+/// no other bearer surface takes. Public so a native test mounts what the
+/// Worker serves, the same reason [`wiki`] is.
+#[must_use]
+pub fn mcp_bearer() -> Arc<dyn BearerAuth> {
+    Arc::new(McpBearer)
+}
+
 /// The [`SessionAuth`] behind the web app's calls to `livingbrain-api`: the
 /// session cookie, resolved by the tokens module's [`livingbrain_tokens::session`]
 /// — the cookie half of the one `authenticate` every cookie route here
@@ -1053,18 +1090,10 @@ impl BearerAuth for TokenBearer {
         // An agent account's key is accepted here and only here (ADR 0004):
         // these are the routes whose every read and write goes through the
         // grants plan, where an agent reaches exactly what it was granted.
-        match livingbrain_tokens::authenticate_any(ports, &headers).await {
-            Ok(Authenticated::Member(member)) => Ok(member_asker(member)),
-            Ok(Authenticated::Agent(agent)) => Ok(Asker {
-                workspace_id: agent.workspace_id,
-                user_id: agent.agent_id,
-                token_scopes: agent.scopes,
-                agent_owner: Some(agent.owner_id),
-                role: None,
-                credential: Some(agent.credential),
-            }),
-            Err(_) => Err(AuthError::Rejected),
-        }
+        livingbrain_tokens::authenticate_any(ports, &headers)
+            .await
+            .map(asker_of)
+            .map_err(|_| AuthError::Rejected)
     }
 }
 
@@ -1086,19 +1115,108 @@ impl BearerAuth for McpBearer {
         };
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value);
-        match livingbrain_tokens::authenticate_mcp(ports, &headers).await {
-            Ok(Authenticated::Member(member)) => Ok(member_asker(member)),
-            Ok(Authenticated::Agent(agent)) => Ok(Asker {
-                workspace_id: agent.workspace_id,
-                user_id: agent.agent_id,
-                token_scopes: agent.scopes,
-                agent_owner: Some(agent.owner_id),
-                role: None,
-                credential: Some(agent.credential),
-            }),
-            Err(_) => Err(AuthError::Rejected),
-        }
+        livingbrain_tokens::authenticate_mcp(ports, &headers)
+            .await
+            .map(asker_of)
+            .map_err(|_| AuthError::Rejected)
     }
+}
+
+/// The [`BearerAuth`] for the four read-only REST routes an actions token
+/// may call (issue #234, a ChatGPT custom GPT's Actions). It resolves the
+/// same credentials [`TokenBearer`] does, and additionally an actions token
+/// — the one audience no other REST surface takes. That token is read-only
+/// and never admin by construction (its scope subset is `read:`-prefixed
+/// and non-empty at the mint), so these routes see exactly what the subset
+/// grants, and no write among them opens to it.
+struct ActionsBearer;
+
+#[async_trait::async_trait]
+impl BearerAuth for ActionsBearer {
+    async fn authenticate(&self, ports: &Ports, token: &str) -> Result<Asker, AuthError> {
+        if !token.bytes().all(is_cookie_octet) {
+            return Err(AuthError::Rejected);
+        }
+        let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) else {
+            return Err(AuthError::Rejected);
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, value);
+        livingbrain_tokens::authenticate_actions(ports, &headers)
+            .await
+            .map(asker_of)
+            .map_err(|_| AuthError::Rejected)
+    }
+}
+
+/// The one allowlist of what an actions token may call (issue #234): the
+/// four read-only REST endpoints a ChatGPT custom GPT's Actions are pointed
+/// at — `GET /v1/search`, `GET /v1/pages/{slug}` (one page, never the list
+/// and never `mcp`), `GET /v1/facts` and `POST /v1/ask`.
+///
+/// The [`BearerAuth`] seam cannot see a request — its `authenticate` takes
+/// a token alone — so the allowlist is enforced where one can:
+/// [`actions_guard`] wraps the pages surface, the one module whose routes
+/// mix an allowed read (`GET /{slug}`) with refused ones (the list, `PUT`,
+/// and the `mcp` nest beside it); the other three modules each serve
+/// exactly one allowed route, with writes among them already refused by the
+/// token's `read:`-only scopes. `path` may be the request's whole path or
+/// the prefix-stripped view a nested router sees; both spellings answer
+/// the same.
+fn actions_request_allowed(method: &HttpMethod, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    let read = method == HttpMethod::GET || method == HttpMethod::HEAD;
+    if read && (path == "/v1/search" || path == "/v1/facts") {
+        return true;
+    }
+    if method == HttpMethod::POST && path == "/v1/ask" {
+        return true;
+    }
+    if !read {
+        return false;
+    }
+    // `GET /v1/pages/{slug}`: exactly one segment after the mount, which
+    // the surface's own router spells `/{slug}` once the nest has stripped
+    // its prefix — and never `mcp`, the MCP endpoint nested beside it.
+    path.strip_prefix("/v1/pages/")
+        .or_else(|| path.strip_prefix('/'))
+        .is_some_and(|slug| !slug.is_empty() && !slug.contains('/') && slug != "mcp")
+}
+
+/// The route-aware half of an actions token's restriction, wrapped around
+/// the pages surface by [`pages_surface`]: a bearer whose audience is
+/// `actions` passes only where [`actions_request_allowed`] says, answered
+/// with the same 401 every refused credential gets. Every other request
+/// passes through untouched — the allowlisted routes cost nothing, and a
+/// request with no bearer, or one the tokens module does not know, keeps
+/// the surface's own answer.
+async fn actions_guard(
+    AxumState(ctx): AxumState<Arc<ModuleContext>>,
+    req: HttpRequest<Body>,
+    next: Next,
+) -> AxumResponse {
+    if actions_request_allowed(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
+    if let Some(token) = cratefield_core::bearer_token(req.headers())
+        && livingbrain_tokens::bearer_audience(&ctx.ports, token)
+            .await
+            .as_deref()
+            == Some(livingbrain_tokens::ACTIONS_AUDIENCE)
+    {
+        return livingbrain_tokens::AuthError::problem().into_response();
+    }
+    next.run(req).await
+}
+
+/// The pages surface as the Worker serves it: the page routes over the same
+/// [`Wiki`] as every other surface, wrapped in [`actions_guard`] — the one
+/// place a route, not just a credential, decides what an actions token
+/// reaches. Public so a native test mounts what the Worker mounts, the same
+/// reason [`wiki`] is.
+pub fn pages_surface(ctx: Arc<ModuleContext>, wiki: &Wiki) -> Router {
+    livingbrain_api::pages_routes(Arc::clone(&ctx), wiki)
+        .layer(from_fn_with_state(ctx, actions_guard))
 }
 
 /// A member as the wiki routes see them: workspace, id, role, and the
@@ -1111,6 +1229,22 @@ fn member_asker(member: livingbrain_tokens::Member) -> Asker {
         agent_owner: None,
         role: Some(member.role.as_str().to_owned()),
         credential: member.credential,
+    }
+}
+
+/// A tokens-module resolution as the wiki routes see it: a member or an
+/// agent account, the one shape every bearer below answers with.
+fn asker_of(authenticated: Authenticated) -> Asker {
+    match authenticated {
+        Authenticated::Member(member) => member_asker(member),
+        Authenticated::Agent(agent) => Asker {
+            workspace_id: agent.workspace_id,
+            user_id: agent.agent_id,
+            token_scopes: agent.scopes,
+            agent_owner: Some(agent.owner_id),
+            role: None,
+            credential: Some(agent.credential),
+        },
     }
 }
 
@@ -1682,6 +1816,55 @@ const CODING_AGENTS_MODULE: &str = "coding-agents";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one allowlist an actions token is held to (issue #234): the four
+    /// read-only endpoints a ChatGPT custom GPT's Actions call, each under
+    /// both path spellings a request can arrive with — the whole one and the
+    /// prefix-stripped view the nested surface router sees.
+    #[test]
+    fn an_actions_token_may_call_exactly_four_read_only_routes() {
+        for (allowed, method, path) in [
+            (true, HttpMethod::GET, "/v1/search"),
+            (true, HttpMethod::GET, "/v1/search?q=launch&limit=10"),
+            (true, HttpMethod::HEAD, "/v1/search"),
+            (true, HttpMethod::GET, "/v1/facts"),
+            (true, HttpMethod::GET, "/v1/facts?limit=50"),
+            (true, HttpMethod::POST, "/v1/ask"),
+            (true, HttpMethod::GET, "/v1/pages/launch-plan"),
+            (true, HttpMethod::GET, "/launch-plan"),
+            // The same four, refused under every other method.
+            (false, HttpMethod::POST, "/v1/search"),
+            (false, HttpMethod::PUT, "/v1/ask"),
+            (false, HttpMethod::DELETE, "/v1/facts"),
+            (false, HttpMethod::POST, "/v1/pages/launch-plan"),
+        ] {
+            assert_eq!(
+                actions_request_allowed(&method, path),
+                allowed,
+                "{method} {path}"
+            );
+        }
+        // Everything else the four modules serve: the page list, a write on
+        // a page, the MCP endpoint nested under the same mount, a nested
+        // path, and the bare mount itself.
+        for (method, path) in [
+            (HttpMethod::GET, "/v1/pages"),
+            (HttpMethod::GET, "/v1/pages/"),
+            (HttpMethod::GET, "/"),
+            (HttpMethod::PUT, "/v1/pages/launch-plan"),
+            (HttpMethod::PUT, "/launch-plan"),
+            (HttpMethod::GET, "/v1/pages/mcp"),
+            (HttpMethod::POST, "/v1/pages/mcp"),
+            (HttpMethod::GET, "/v1/pages/mcp/tools"),
+            (HttpMethod::GET, "/v1/pages/a/nested/path"),
+            (HttpMethod::GET, "/v1/notes"),
+        ] {
+            assert!(
+                !actions_request_allowed(&method, path),
+                "{method} {path} reached"
+            );
+        }
+    }
 
     #[test]
     fn a_tick_logs_its_trigger_and_where_its_time_went() {

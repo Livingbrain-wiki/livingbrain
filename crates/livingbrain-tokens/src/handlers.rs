@@ -250,11 +250,18 @@ fn require_same_origin(headers: &HeaderMap) -> Result<(), Problem> {
 /// authorization-code grant with PKCE for a browser-based MCP client, which
 /// signs in at `/v1/oauth/authorize`, registers at `/v1/oauth/register` and
 /// redeems at `/v1/oauth/token` — the `token_endpoint` advertised here, since
-/// no client reads the device poll from metadata. Every client is public
-/// (`none`): a registration names no secret, and PKCE is what binds a code to
-/// the client that asked for it. `scopes_supported` is deliberately absent:
-/// a connector's token carries every scope its member holds, and the device
-/// grant's two per-person scopes have no finite list.
+/// no client reads the device poll from metadata. Every client this metadata
+/// can bring is public (`none`): a registration names no secret, and PKCE is
+/// what binds a code to the client that asked for it — the one confidential
+/// client (the predefined Actions client, issue #234) is configured out of
+/// band and tells itself what it is. A client may also identify itself by a
+/// Client ID Metadata Document (`client_id_metadata_document_supported`,
+/// issue #234), which this server fetches and validates itself. The
+/// authorization response carries `iss` on every redirect (RFC 9207), which
+/// `authorization_response_iss_parameter_supported` says out loud.
+/// `scopes_supported` is deliberately absent: a connector's token carries
+/// every scope its member holds, and the device grant's two per-person
+/// scopes have no finite list.
 fn authorization_server(base: &str) -> serde_json::Value {
     json!({
         "issuer": base,
@@ -269,7 +276,13 @@ fn authorization_server(base: &str) -> serde_json::Value {
         ],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
+        // `none` alone, on purpose: every client this metadata can bring is
+        // public, and advertising a secret method would have some clients
+        // pick one they cannot keep — the one confidential client (the
+        // predefined Actions client, issue #234) is configured out of band.
         "token_endpoint_auth_methods_supported": ["none"],
+        "client_id_metadata_document_supported": true,
+        "authorization_response_iss_parameter_supported": true,
     })
 }
 

@@ -124,13 +124,43 @@ pub(crate) fn redirect_host(uri: &str) -> Option<String> {
     ok.then(|| host.to_ascii_lowercase())
 }
 
-/// Whether a redirect host is one Living Brain recognises as a Claude app:
-/// `claude.ai` and `claude.com`, and their subdomains. Only these get the
-/// "Claude connector" label; every other app is shown as unverified.
-pub(crate) fn verified_host(host: &str) -> bool {
-    ["claude.ai", "claude.com"]
-        .iter()
-        .any(|base| host == *base || host.ends_with(&format!(".{base}")))
+/// A connector platform Living Brain recognises by its redirect hosts, and
+/// the label a connection to it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectorVendor {
+    /// Claude: `claude.ai` and `claude.com`, and their subdomains.
+    Claude,
+    /// ChatGPT: `chatgpt.com` and `chat.openai.com` (a Custom GPT's Actions
+    /// callback), and their subdomains.
+    ChatGpt,
+}
+
+impl ConnectorVendor {
+    /// The platform's name as the connector label spells it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::ChatGpt => "ChatGPT",
+        }
+    }
+}
+
+/// The connector platform a redirect host belongs to, if it is one Living
+/// Brain recognises: Claude's `claude.ai`/`claude.com` and ChatGPT's
+/// `chatgpt.com`/`chat.openai.com`, subdomains included. Only these are
+/// shown as verified and carry a platform's connector label; every other
+/// app keeps the unverified warning and its own name alone.
+pub(crate) fn connector_vendor(host: &str) -> Option<ConnectorVendor> {
+    const CLAUDE: [&str; 2] = ["claude.ai", "claude.com"];
+    const CHATGPT: [&str; 2] = ["chatgpt.com", "chat.openai.com"];
+    let is = |base: &str| host == base || host.ends_with(&format!(".{base}"));
+    if CLAUDE.iter().any(|base| is(base)) {
+        Some(ConnectorVendor::Claude)
+    } else if CHATGPT.iter().any(|base| is(base)) {
+        Some(ConnectorVendor::ChatGpt)
+    } else {
+        None
+    }
 }
 
 /// Strips the characters a name must never carry into a settings row or a
@@ -186,6 +216,82 @@ pub(crate) fn encode(value: &str) -> String {
         }
     }
     out
+}
+
+/// RFC 6749 §2.3.1's Basic credentials: the payload is standard base64
+/// (RFC 4648 §4, padded) for the form-urlencoded client id, a colon, and the
+/// form-urlencoded client secret, so both halves come back percent-decoded.
+/// `None` for a payload that is not that shape. The scheme is the caller's
+/// to check; an empty id is malformed however it decodes.
+pub(crate) fn basic_credentials(payload: &[u8]) -> Option<(String, String)> {
+    let decoded = base64(payload)?;
+    let text = std::str::from_utf8(&decoded).ok()?;
+    let (id, secret) = text.split_once(':')?;
+    let id = percent_decode(id);
+    (!id.is_empty()).then_some((id, percent_decode(secret)))
+}
+
+/// Standard base64 (RFC 4648 §4) with padding, as the Basic scheme carries
+/// it — written out for the same reason [`base64url`] is: one function is
+/// not a dependency. `None` for anything that is not well-formed base64.
+fn base64(input: &[u8]) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let pads = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
+    if pads > 2 || bytes[..bytes.len() - pads].contains(&b'=') {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let mut values = [0_u8; 4];
+        for (slot, byte) in values.iter_mut().zip(chunk) {
+            if *byte == b'=' {
+                // Padding decodes as zero; the truncate below drops it.
+                continue;
+            }
+            *slot = ALPHABET.iter().position(|c| c == byte)? as u8;
+        }
+        let n = (u32::from(values[0]) << 18)
+            | (u32::from(values[1]) << 12)
+            | (u32::from(values[2]) << 6)
+            | u32::from(values[3]);
+        out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+    }
+    out.truncate(bytes.len() / 4 * 3 - pads);
+    Some(out)
+}
+
+/// RFC 3986 §2.1 percent-decoding, for the halves of a Basic credential.
+/// A `%` not followed by two hex digits stays as it is: half a sequence is
+/// not a sequence, and such a credential simply matches nothing.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let digit = |byte: u8| (byte as char).to_digit(16);
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%'
+            && at + 2 < bytes.len()
+            && bytes[at + 1].is_ascii_hexdigit()
+            && bytes[at + 2].is_ascii_hexdigit()
+        {
+            let high = digit(bytes[at + 1]).expect("checked") as u8;
+            let low = digit(bytes[at + 2]).expect("checked") as u8;
+            out.push((high << 4) | low);
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `uri` with `params` appended to its query, `?` or `&` as the URI already
@@ -418,6 +524,58 @@ mod tests {
             "&lt;a href=&#39;x&#39;&gt;&amp;&quot;&lt;/a&gt;"
         );
     }
+
+    /// RFC 6749 §2.3.1: the Basic payload is standard, padded base64 over the
+    /// form-urlencoded id and secret, so both halves come back decoded.
+    #[test]
+    fn basic_credentials_decode_and_percent_decode_their_halves() {
+        let payload = |raw: &str| {
+            // Standard base64 with padding, the test's only encoder need.
+            let mut out = String::new();
+            for chunk in raw.as_bytes().chunks(3) {
+                let b = [
+                    chunk[0],
+                    *chunk.get(1).unwrap_or(&0),
+                    *chunk.get(2).unwrap_or(&0),
+                ];
+                let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+                for shift in [18, 12, 6, 0] {
+                    out.push(char::from(
+                        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+                            [(n >> shift) as usize & 63],
+                    ));
+                }
+            }
+            match raw.len() % 3 {
+                1 => {
+                    out.truncate(out.len() - 2);
+                    out.push_str("==");
+                }
+                2 => {
+                    out.truncate(out.len() - 1);
+                    out.push('=');
+                }
+                _ => {}
+            }
+            out
+        };
+        assert_eq!(
+            basic_credentials(payload("gpt:sec ret").as_bytes()),
+            Some(("gpt".to_owned(), "sec ret".to_owned()))
+        );
+        assert_eq!(
+            basic_credentials(payload("a%20b:s%3Ap").as_bytes()),
+            Some(("a b".to_owned(), "s:p".to_owned())),
+            "the halves are form-urlencoded"
+        );
+        for bad in ["", "not base64!", "====", payload("nocolon").as_str()] {
+            assert!(basic_credentials(bad.as_bytes()).is_none(), "{bad:?}");
+        }
+        assert!(
+            basic_credentials(payload(":secret").as_bytes()).is_none(),
+            "an empty id is malformed"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -448,13 +606,36 @@ mod hardening_tests {
     }
 
     #[test]
-    fn only_claude_hosts_are_verified_and_their_subdomains() {
-        assert!(verified_host("claude.ai"));
-        assert!(verified_host("claude.com"));
-        assert!(verified_host("app.claude.ai"));
-        assert!(!verified_host("claude.ai.evil.example"));
-        assert!(!verified_host("evilclaude.ai"));
-        assert!(!verified_host("example.test"));
+    fn only_claude_and_chatgpt_hosts_are_verified_and_their_subdomains() {
+        assert_eq!(connector_vendor("claude.ai"), Some(ConnectorVendor::Claude));
+        assert_eq!(
+            connector_vendor("claude.com"),
+            Some(ConnectorVendor::Claude)
+        );
+        assert_eq!(
+            connector_vendor("app.claude.ai"),
+            Some(ConnectorVendor::Claude)
+        );
+        assert_eq!(
+            connector_vendor("chatgpt.com"),
+            Some(ConnectorVendor::ChatGpt)
+        );
+        assert_eq!(
+            connector_vendor("chat.openai.com"),
+            Some(ConnectorVendor::ChatGpt)
+        );
+        assert_eq!(
+            connector_vendor("app.chatgpt.com"),
+            Some(ConnectorVendor::ChatGpt)
+        );
+        assert_eq!(connector_vendor("chatgpt.com.evil.example"), None);
+        assert_eq!(connector_vendor("claude.ai.evil.example"), None);
+        assert_eq!(connector_vendor("evilclaude.ai"), None);
+        assert_eq!(connector_vendor("evilchatgpt.com"), None);
+        assert_eq!(connector_vendor("example.test"), None);
+        // The label the connector carries follows the same mapping.
+        assert_eq!(ConnectorVendor::Claude.label(), "Claude");
+        assert_eq!(ConnectorVendor::ChatGpt.label(), "ChatGPT");
     }
 
     /// M1: control and format characters, including the bidi overrides, are
