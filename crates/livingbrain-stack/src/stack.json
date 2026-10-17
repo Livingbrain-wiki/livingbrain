@@ -17,8 +17,8 @@
       "id": "FZ-004",
       "kind": "factory-zero",
       "url": "https://cratefield.com/",
-      "status": "planned",
-      "note": "Built in Rust as a Cratefield venture; nothing is deployed yet, including the waitlist."
+      "status": "live",
+      "note": "Built in Rust as a Cratefield venture: the app at app.livingbrain.wiki and the waitlist Worker at api.livingbrain.wiki run on the Cratefield harness."
     },
     {
       "role": "agents",

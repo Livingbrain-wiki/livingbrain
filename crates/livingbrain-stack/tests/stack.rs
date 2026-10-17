@@ -35,14 +35,16 @@ fn the_vendored_entry_is_fz018_with_nine_uses() {
     );
 }
 
-/// (b) Exactly one entry is live, and it is Cloudflare's hosting.
+/// (b) Two entries are live: the Cratefield framework the app and waitlist
+/// run on, and Cloudflare's hosting.
 #[test]
-fn one_entry_is_live_and_it_is_hosting() {
+fn the_framework_and_hosting_are_live() {
     let live = stack().live();
     let names: Vec<&str> = live.iter().map(|entry| entry.name.as_str()).collect();
-    assert_eq!(names, ["Cloudflare"], "{names:?}");
-    assert_eq!(live[0].role, "hosting");
-    assert!(live[0].url.starts_with("https://"));
+    assert_eq!(names, ["Cratefield", "Cloudflare"], "{names:?}");
+    assert_eq!(live[0].role, "framework");
+    assert_eq!(live[1].role, "hosting");
+    assert!(live.iter().all(|entry| entry.url.starts_with("https://")));
 }
 
 /// (c) Every entry is complete, and every link is one a reader can be sent to.
@@ -107,11 +109,16 @@ fn the_text_shows_every_product_and_mislabels_nothing() {
     }
     // The wording the list exists for: a planned thing is called planned in
     // the row, not only in a legend at the bottom.
-    let cratefield = text
+    let planned = stack
+        .entries()
+        .iter()
+        .find(|entry| !entry.is_live())
+        .expect("a planned entry");
+    let row = text
         .lines()
-        .find(|line| line.contains("Cratefield"))
-        .expect("the framework row");
-    assert!(cratefield.contains("planned"), "{cratefield}");
+        .find(|line| line.contains(&planned.name))
+        .expect("the planned row");
+    assert!(row.contains("planned"), "{row}");
 }
 
 /// (e) The two places a reader is sent to check the list against the registry
@@ -176,7 +183,7 @@ fn the_typographic_quote_survived_the_vendoring() {
 #[test]
 fn the_vendored_file_has_not_been_edited_by_hand() {
     use sha2::{Digest, Sha256};
-    const PINNED: &str = "9927a43ebd0b447da37390ebbad9be9b89f8d93fff62acfe31e62e6f32710796";
+    const PINNED: &str = "c4c03cbbdbfe2b8e22896703f26a18b8825d9ad042a1f1059c1d8d449953015b";
 
     let digest = format!(
         "{:x}",

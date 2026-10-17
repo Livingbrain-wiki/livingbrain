@@ -328,8 +328,8 @@ fn about_needs_no_credentials() {
             human.stdout
         );
     }
-    // Nothing is deployed but the site, and the row says so: hosting is live
-    // and the framework it is built with is not.
+    // The registry says both are in use: hosting is live, and the app and its
+    // waitlist Worker run on the Cratefield harness.
     let hosting = human
         .stdout
         .lines()
@@ -341,7 +341,7 @@ fn about_needs_no_credentials() {
         .lines()
         .find(|line| line.contains("Cratefield"))
         .expect("the framework row");
-    assert!(framework.contains(" planned "), "{framework}");
+    assert!(framework.contains(" live "), "{framework}");
 
     let json = run(&cwd, &home, &["about", "--json"], &[], None);
     assert!(json.status.success(), "stderr: {}", json.stderr);
@@ -350,7 +350,7 @@ fn about_needs_no_credentials() {
     assert_eq!(value["source"], "https://factory0.ventures/stack.json");
     assert_eq!(value["uses"].as_array().expect("uses").len(), 9);
     assert_eq!(value["uses"][8]["status"], "live");
-    assert_eq!(value["uses"][0]["status"], "planned");
+    assert_eq!(value["uses"][0]["status"], "live");
 }
 
 /// `sources` lists the caller's sources with the filters on the query
