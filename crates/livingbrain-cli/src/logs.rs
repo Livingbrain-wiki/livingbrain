@@ -1509,17 +1509,24 @@ fn root_status(root: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> Root
         // inside is either: git's reason stands.
         return own(res);
     }
-    let nested = inside
-        .into_iter()
-        .map(|path| {
-            let judged = resolve(&path, allowlist, repos);
-            (
-                path,
-                judged.destination.key().to_owned(),
-                judged.route_reason,
-            )
-        })
-        .collect();
+    // A root that is itself a checkout is listed first with its own answer, so a
+    // held root shows as held and can be pinned like its nested checkouts.
+    let mut nested: Vec<(String, String, Option<String>)> = Vec::new();
+    if res.repo_top.is_some() {
+        nested.push((
+            root.to_owned(),
+            res.destination.key().to_owned(),
+            res.route_reason.clone(),
+        ));
+    }
+    nested.extend(inside.into_iter().map(|path| {
+        let judged = resolve(&path, allowlist, repos);
+        (
+            path,
+            judged.destination.key().to_owned(),
+            judged.route_reason,
+        )
+    }));
     RootStatus {
         effective: PER_REPOSITORY.to_owned(),
         reason: Some(PER_REPOSITORY.to_owned()),
@@ -3755,6 +3762,51 @@ mod tests {
             record.cwds = vec![dir.to_string_lossy().into_owned()];
             assert_eq!(super::destination_for(&record, &file, &mut repos), want);
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A root that is itself a checkout, and holds a nested checkout, lists its
+    /// own answer first: a held root shows as held in the folder's list.
+    #[test]
+    fn a_checkout_root_with_nested_checkouts_lists_its_own_answer() {
+        let base = std::env::temp_dir().join(format!("lb-logs-root-{}", std::process::id()));
+        let inner = base.join("inner");
+        let mut ok = std::fs::create_dir_all(&inner).is_ok();
+        for (dir, url) in [
+            (&base, "https://gitlab.com/CHI-Ecosystem/root.git"),
+            (&inner, "https://github.com/someone/inner.git"),
+        ] {
+            ok &= git_ok(dir, &["init", "-q"]) && git_ok(dir, &["remote", "add", "origin", url]);
+        }
+        if !ok {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // no git on this machine
+        }
+        let mut file = AllowlistFile {
+            version: super::ROUTING_VERSION,
+            ..AllowlistFile::default()
+        };
+        file.allowed.insert(base.to_string_lossy().into_owned());
+        file.routes = vec![super::Route {
+            remote_owner: Some("CHI-Ecosystem".to_owned()),
+            folder_glob: None,
+            host: None,
+            workspace: "ws-chi".to_owned(),
+        }];
+        let mut repos = super::Repos::default();
+        let status = super::root_status(&base.to_string_lossy(), &file, &mut repos);
+        let root_key = base.to_string_lossy().into_owned();
+        assert_eq!(
+            status.nested.first().map(|(p, _, _)| p.as_str()),
+            Some(root_key.as_str())
+        );
+        let own = &status.nested[0];
+        assert_eq!(own.1, "unroutable", "the held root shows as held");
+        assert!(
+            own.2.as_deref().unwrap_or("").contains("gitlab.com"),
+            "{own:?}"
+        );
+        assert_eq!(status.nested.len(), 2, "{:?}", status.nested);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

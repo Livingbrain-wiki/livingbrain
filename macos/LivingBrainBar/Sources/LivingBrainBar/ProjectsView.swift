@@ -116,8 +116,8 @@ struct ProjectsView: View {
     }
 
     /// What decides an automatic project's sessions, and the action that fits.
-    /// A parent's explicit choice is named as the parent. A repository held by
-    /// its route is offered "Pin This Repository" on its own top level. A folder
+    /// A parent's explicit choice is named as the parent. A held checkout offers
+    /// a pin that never widens consent (see `SyncedProject.pinAction`). A folder
     /// of checkouts is warned that pinning it would override every route inside.
     @ViewBuilder
     private func hint(for project: SyncedProject) -> some View {
@@ -128,21 +128,18 @@ struct ProjectsView: View {
             Text("Each repository inside this folder follows its own route. Pinning this folder would override every one of them.")
                 .font(.caption).foregroundStyle(.secondary)
             ForEach(project.nested) { nested in
-                Text("\((nested.path as NSString).lastPathComponent) → \(nested.effective)")
-                    .font(.caption2).foregroundStyle(.secondary)
+                HStack {
+                    Text("\((nested.path as NSString).lastPathComponent) → \(nested.effective)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if nested.effective == "unroutable" {
+                        pinMenu(project, checkout: nested.path, title: "Pin \((nested.path as NSString).lastPathComponent)")
+                    }
+                }
             }
         case "unroutable":
             Text("Held: \(project.routeReason ?? "a route cannot read this repository").")
                 .font(.caption).foregroundStyle(.secondary)
-            if let top = project.repoTop {
-                Menu("Pin This Repository") {
-                    Button("Default") { bar.pinRepository(top: top, to: SyncedProject.defaultWorkspace) }
-                    ForEach(accounts.workspaces) { item in
-                        Button(item.name) { bar.pinRepository(top: top, to: item.id) }
-                    }
-                }
-                .font(.caption)
-            }
+            pinMenu(project, checkout: project.repoTop ?? project.path, title: nil)
         default:
             if let parent = project.inheritedFrom {
                 Text("Sent to \(project.effective) from \(parent).")
@@ -152,5 +149,21 @@ struct ProjectsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// The pin menu for one checkout. Offered as "Pin This Repository" when the
+    /// checkout may be pinned; when it sits above the allowed path (never pinned
+    /// without widening consent), the menu pins the allowed folder instead.
+    @ViewBuilder
+    private func pinMenu(_ project: SyncedProject, checkout: String, title: String?) -> some View {
+        let refused = project.pinAction(for: checkout) == .refused
+        let target = refused ? project.path : checkout
+        Menu(title ?? (refused ? "Pin This Folder" : "Pin This Repository")) {
+            Button("Default") { bar.pin(project, checkout: target, to: SyncedProject.defaultWorkspace) }
+            ForEach(accounts.workspaces) { item in
+                Button(item.name) { bar.pin(project, checkout: target, to: item.id) }
+            }
+        }
+        .font(.caption)
     }
 }

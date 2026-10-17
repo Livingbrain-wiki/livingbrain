@@ -41,12 +41,33 @@ public struct SyncedProject: Identifiable, Equatable, Sendable {
     public var repoTop: String?
     /// For a folder that holds checkouts: each one's own answer.
     public var nested: [NestedRepo]
+    /// The detail level the allowed path sends at (`summary`, `messages`, `full`).
+    public var detail: String?
     public var id: String { path }
+
+    /// What "pin a checkout" may do without widening what the opt-in covers.
+    public enum PinAction: Equatable, Sendable {
+        /// The checkout is the allowed path itself: set its workspace.
+        case allowedRoot
+        /// A checkout inside the allowed path: add it at the same detail level.
+        case nestedCheckout
+        /// A parent of the allowed path, or an unrelated path: never pinned.
+        case refused
+    }
+
+    /// The pin action for one checkout. Consent covers the allowed path and
+    /// everything under it, so only those can be pinned; a checkout above the
+    /// allowed path would widen what syncs, and is refused.
+    public func pinAction(for checkout: String) -> PinAction {
+        if checkout == path { return .allowedRoot }
+        if checkout.hasPrefix(path + "/") { return .nestedCheckout }
+        return .refused
+    }
 
     public init(
         path: String, explicit: String? = nil, effective: String = SyncedProject.defaultWorkspace,
         routeReason: String? = nil, inheritedFrom: String? = nil, repoTop: String? = nil,
-        nested: [NestedRepo] = []
+        nested: [NestedRepo] = [], detail: String? = nil
     ) {
         self.path = path
         self.explicit = explicit
@@ -55,6 +76,7 @@ public struct SyncedProject: Identifiable, Equatable, Sendable {
         self.inheritedFrom = inheritedFrom
         self.repoTop = repoTop
         self.nested = nested
+        self.detail = detail
     }
 
     /// The repo's folder name.

@@ -146,6 +146,25 @@ final class CLIOutputTests: XCTestCase {
         XCTAssertEqual(status.projects[2].repoTop, "/work/chi-web")
     }
 
+    /// Pinning never widens consent: the allowed path and checkouts under it may
+    /// be pinned (the latter at the allowed path's own detail level); a parent of
+    /// the allowed path, a sibling that only shares a name prefix, or an unrelated
+    /// path is refused.
+    func testPinActionNeverWidensConsent() throws {
+        let project = SyncedProject(path: "/repo/src", detail: "summary")
+        XCTAssertEqual(project.pinAction(for: "/repo/src"), .allowedRoot)
+        XCTAssertEqual(project.pinAction(for: "/repo/src/app"), .nestedCheckout)
+        XCTAssertEqual(project.pinAction(for: "/repo"), .refused, "a parent would widen what syncs")
+        XCTAssertEqual(project.pinAction(for: "/repo/srcx"), .refused, "a name prefix is not inside")
+        XCTAssertEqual(project.pinAction(for: "/elsewhere"), .refused)
+
+        let json = #"""
+        {"allowed":["/repo/src"],"detail":{"/repo/src":"summary"},"config":"/x"}
+        """#
+        let status = try CLIOutput.allowStatus(oneLine(json))
+        XCTAssertEqual(status.projects.first?.detail, "summary")
+    }
+
     /// A version-2 file (routing) is read; a version this build does not know is not.
     func testAllowlistFileAcceptsVersionTwo() throws {
         let file = try CLIOutput.allowlistFile(Data(#"{"version":2,"allowed":["/x"],"routes":[]}"#.utf8))

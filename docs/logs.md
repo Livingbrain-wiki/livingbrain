@@ -181,6 +181,8 @@ either version, so a misspelt `routes` is an error, not a silent default.
    counts, and stops the routes). A nested checkout follows its parent by
    lookup, not by copy: changing the parent's workspace moves every checkout
    inside it that names none of its own;
+   after `logs deny <parent>`, a nested root that names none of its own falls
+   back to routes or the default, again by lookup;
 2. otherwise the **first** matching route, judged on that repository's own facts:
    its git top level, folder name (`folder_glob`, with `*` and `?`) and `origin`
    remote (`remote_owner`). `origin` is used; with no `origin`, the only remote.

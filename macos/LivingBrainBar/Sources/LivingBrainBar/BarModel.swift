@@ -306,13 +306,25 @@ final class BarModel: ObservableObject {
         }
     }
 
-    /// Pin one repository (its own top level, never a parent folder) to a
-    /// workspace: `logs allow <top> --workspace <id>`, which adds the root if it
-    /// is new. Its own explicit choice then decides for it alone.
-    func pinRepository(top: String, to workspace: String) {
+    /// Pin one checkout to a workspace, never widening what the opt-in covers:
+    /// the allowed path itself sets its workspace (`logs workspace`); a checkout
+    /// inside it is added at the allowed path's own detail level; anything else
+    /// is refused, as a parent folder would widen consent.
+    func pin(_ project: SyncedProject, checkout: String, to workspace: String) {
+        let arguments: [String]
+        switch project.pinAction(for: checkout) {
+        case .allowedRoot:
+            arguments = ["--json", "logs", "workspace", project.path, workspace]
+        case .nestedCheckout:
+            arguments = ["--json", "logs", "allow", checkout, "--workspace", workspace,
+                         "--detail", project.detail ?? "full"]
+        case .refused:
+            projectsError = "\(checkout) is above \(project.path); pinning it would widen what syncs."
+            return
+        }
         Task {
             do {
-                let result = try await runCLI(["--json", "logs", "allow", top, "--workspace", workspace])
+                let result = try await runCLI(arguments)
                 if result.succeeded {
                     await refreshProjects()
                 } else {

@@ -264,6 +264,8 @@ public struct AllowStatus: Decodable, Equatable, Sendable {
     public var repoTop: [String: String?]?
     /// For a folder that holds checkouts: each checkout's own answer.
     public var repos: [String: [NestedRepo]]?
+    /// Each allowed path's detail level.
+    public var detail: [String: String]?
     /// The opt-in file's path.
     public var config: String?
     /// Only on `allow`/`deny`.
@@ -276,7 +278,7 @@ public struct AllowStatus: Decodable, Equatable, Sendable {
         case routeReason = "route_reason"
         case explicitFrom = "explicit_from"
         case repoTop = "repo_top"
-        case repos
+        case repos, detail
     }
 
     public init(
@@ -309,7 +311,8 @@ public struct AllowStatus: Decodable, Equatable, Sendable {
             let effective = workspaceEffective?[path] ?? explicit ?? SyncedProject.defaultWorkspace
             return SyncedProject(
                 path: path, explicit: explicit, effective: effective, routeReason: reason,
-                inheritedFrom: from, repoTop: top, nested: repos?[path] ?? []
+                inheritedFrom: from, repoTop: top, nested: repos?[path] ?? [],
+                detail: detail?[path]
             )
         }
     }
