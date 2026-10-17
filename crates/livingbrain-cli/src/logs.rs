@@ -2,8 +2,9 @@
 //! wrote into the source ledger.
 //!
 //! Claude Code and Codex keep complete JSONL transcripts of every session on
-//! the machine that ran them — `~/.claude/projects`, `~/.codex/sessions`. This
-//! module reads those files, normalises both formats into one versioned
+//! the machine that ran them — `~/.claude/projects`, `~/.codex/sessions` — and
+//! Colonizer keeps each colony's (`colonizer` reads them under the repository
+//! its registry names). This module reads those files, normalises both formats into one versioned
 //! record, and uploads the sessions whose repositories are opted in (`logs
 //! allow`, one JSON file in the CLI's config directory). The order of the work
 //! is the point, as in [`crate::import`]: walk, parse, decide, redact — all
@@ -29,6 +30,7 @@
 mod claude;
 mod clean;
 mod codex;
+mod colonizer;
 mod note;
 mod route;
 mod tools;
@@ -45,6 +47,7 @@ use serde_json::{Value, json};
 use crate::api::Client;
 use crate::auth::Token;
 use crate::{CliError, CliResult, Out, err};
+use colonizer::Colony;
 use route::{Destination, Repos, Route};
 
 /// The version of the normalised session schema this build writes: adding a
@@ -208,11 +211,20 @@ pub enum Command {
         /// Read Codex sessions from here instead of ~/.codex/sessions
         #[arg(long, value_name = "DIR")]
         codex_dir: Option<PathBuf>,
+        /// Read Colonizer colony transcripts from here (default
+        /// ~/.local/share/colonizer, when it exists). Only colonies whose
+        /// repository is opted in are read
+        #[arg(long, value_name = "DIR")]
+        colonizer_dir: Option<PathBuf>,
         /// Parse, normalise and report, but never touch the network
         #[arg(long)]
         dry_run: bool,
+        /// Upload at most this many new colony sessions, oldest first; the
+        /// rest wait for a later run. Sessions already in the ledger do not count
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+        max_sessions: Option<u64>,
         /// Sync only this session file (repeatable). It must sit under the
-        /// Claude Code or Codex directory, and its repo must still be opted in
+        /// Claude Code, Codex or Colonizer directory, and its repo must still be opted in
         #[arg(long = "session", value_name = "FILE")]
         sessions: Vec<PathBuf>,
     },
@@ -227,6 +239,9 @@ pub enum Command {
         /// Read Codex sessions from here instead of ~/.codex/sessions
         #[arg(long, value_name = "DIR")]
         codex_dir: Option<PathBuf>,
+        /// Read Colonizer colony transcripts from here (default ~/.local/share/colonizer)
+        #[arg(long, value_name = "DIR")]
+        colonizer_dir: Option<PathBuf>,
     },
 }
 
@@ -245,13 +260,19 @@ pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
         Command::Sync {
             claude_dir,
             codex_dir,
+            colonizer_dir,
             dry_run,
+            max_sessions,
             sessions,
         } => sync(
-            claude_dir.as_deref(),
-            codex_dir.as_deref(),
-            *dry_run,
-            sessions,
+            SyncArgs {
+                claude_dir: claude_dir.as_deref(),
+                codex_dir: codex_dir.as_deref(),
+                colonizer_dir: colonizer_dir.as_deref(),
+                dry_run: *dry_run,
+                max_sessions: *max_sessions,
+                only: sessions,
+            },
             api_url,
             out,
         ),
@@ -259,7 +280,14 @@ pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
             file,
             claude_dir,
             codex_dir,
-        } => show(file, claude_dir.as_deref(), codex_dir.as_deref(), out),
+            colonizer_dir,
+        } => show(
+            file,
+            claude_dir.as_deref(),
+            codex_dir.as_deref(),
+            colonizer_dir.as_deref(),
+            out,
+        ),
     }
 }
 
@@ -1267,6 +1295,16 @@ fn normalise_path(raw: &str) -> CliResult<String> {
     Ok(cleaned.to_string_lossy().into_owned())
 }
 
+/// The stored form of a path a command names: a Colonizer root as it is, any
+/// other path as a directory (see [`normalise_path`]).
+fn target_of(raw: &str) -> CliResult<String> {
+    if colonizer::is_root(raw) {
+        colonizer::root_of(raw).map_err(err)
+    } else {
+        normalise_path(raw)
+    }
+}
+
 /// An absolute path with `.` and `..` resolved away, for a path the
 /// filesystem cannot confirm.
 fn lexically_absolute(path: &Path) -> PathBuf {
@@ -1287,6 +1325,10 @@ fn lexically_absolute(path: &Path) -> PathBuf {
 /// is component-wise, so `/home/alice/code-demo` is not inside
 /// `/home/alice/code` however many bytes they share.
 fn is_inside(child: &str, ancestor: &str) -> bool {
+    // A colony's virtual root is inside no directory, and no directory inside one.
+    if colonizer::is_root(child) || colonizer::is_root(ancestor) {
+        return colonizer::inside(child, ancestor);
+    }
     // Both sides are cleaned lexically first, so `..` cannot make a path look
     // inside a root it is not inside.
     let child = lexical(child);
@@ -1379,7 +1421,7 @@ fn allow(
     if let Some(workspace) = workspace {
         route::check_target(workspace).map_err(err)?;
     }
-    let target = normalise_path(path.unwrap_or("."))?;
+    let target = target_of(path.unwrap_or("."))?;
     let mut allowlist = read_allowlist()?;
     // Without a workspace a new opt-in would take the default token, and on a
     // machine that signs in to several workspaces that is the wrong one for
@@ -1434,7 +1476,7 @@ fn set_workspace(path: &str, workspace: &str, out: &Out) -> CliResult<()> {
     if workspace != route::AUTO {
         route::check_target(workspace).map_err(err)?;
     }
-    let target = normalise_path(path)?;
+    let target = target_of(path)?;
     let mut allowlist = read_allowlist()?;
     if !allowlist.allowed.contains(&target) {
         return Err(err(format!(
@@ -1503,7 +1545,7 @@ fn set_default_workspace(workspace: Option<&str>, out: &Out) -> CliResult<()> {
 
 /// `logs deny`: remove one path and its level. Idempotent.
 fn deny(path: Option<&str>, out: &Out) -> CliResult<()> {
-    let target = normalise_path(path.unwrap_or("."))?;
+    let target = target_of(path.unwrap_or("."))?;
     let mut allowlist = read_allowlist()?;
     pin_nested_children(&mut allowlist, &target);
     let changed = allowlist.allowed.remove(&target);
@@ -1600,6 +1642,20 @@ fn root_status(root: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> Root
         repo_top: res.repo_top,
         nested: Vec::new(),
     };
+    // A colony root has no checkouts inside to list. An organisation with
+    // routes and no workspace of its own has no answer: each colony decides.
+    if colonizer::is_root(root) {
+        if colonizer::is_org(root) && res.explicit_root.is_none() && !allowlist.routes.is_empty() {
+            return RootStatus {
+                effective: PER_REPOSITORY.to_owned(),
+                reason: Some(PER_REPOSITORY.to_owned()),
+                explicit_from: None,
+                repo_top: None,
+                nested: Vec::new(),
+            };
+        }
+        return own(res);
+    }
     if res.explicit_root.is_some() || allowlist.routes.is_empty() {
         return own(res);
     }
@@ -1728,37 +1784,45 @@ struct Prepared {
     /// The session's searchable note — planned for an opted-in session
     /// with a repo, written after its source upload succeeds.
     note: Option<note::Planned>,
+    /// The colony a Colonizer transcript came from: its id, sent as the
+    /// source's `origin_ref`. `None` for every other session.
+    origin_ref: Option<String>,
+}
+
+/// What `logs sync` was asked to do: the directories it reads and how it runs.
+struct SyncArgs<'a> {
+    claude_dir: Option<&'a Path>,
+    codex_dir: Option<&'a Path>,
+    colonizer_dir: Option<&'a Path>,
+    dry_run: bool,
+    max_sessions: Option<u64>,
+    only: &'a [PathBuf],
 }
 
 /// `livingbrain logs sync`: everything before [`upload`] is local — walk,
 /// parse, decide, elide, redact — so a machine with nothing opted in runs the
 /// whole command without a single packet, the auth request included.
 /// `--dry-run` stops after the report for the same reason.
-fn sync(
-    claude_dir: Option<&Path>,
-    codex_dir: Option<&Path>,
-    dry_run: bool,
-    only: &[PathBuf],
-    api_url: &str,
-    out: &Out,
-) -> CliResult<()> {
-    let (home, claude_dir, codex_dir) = session_dirs(claude_dir, codex_dir)?;
-    let only = resolve_only(only)?;
+fn sync(args: SyncArgs<'_>, api_url: &str, out: &Out) -> CliResult<()> {
+    let (home, claude_dir, codex_dir, colonizer_dir) =
+        session_dirs(args.claude_dir, args.codex_dir, args.colonizer_dir)?;
+    let only = resolve_only(args.only)?;
     let allowlist = read_allowlist()?;
     let (mut sessions, unreadable, unparsed) = collect_sessions(
         &claude_dir,
         &codex_dir,
+        colonizer_dir.as_deref(),
         &allowlist,
         &home,
         only.as_ref(),
         false,
     )?;
-    let held = upload(&mut sessions, dry_run, api_url)?;
+    let held = upload(&mut sessions, args.dry_run, api_url, args.max_sessions)?;
     report(
         &sessions,
         unreadable,
         unparsed,
-        dry_run,
+        args.dry_run,
         (&claude_dir, &codex_dir),
         &held,
         out,
@@ -1766,12 +1830,14 @@ fn sync(
     Ok(())
 }
 
-/// `$HOME` and the two agents' session directories: the flags when given,
-/// the defaults under `$HOME` otherwise.
+/// `$HOME`, the two agents' session directories and the Colonizer directory:
+/// the flags when given, the defaults under `$HOME` otherwise. The Colonizer
+/// default is only used when it exists, so a Mac without Colonizer is unchanged.
 fn session_dirs(
     claude_dir: Option<&Path>,
     codex_dir: Option<&Path>,
-) -> CliResult<(Option<PathBuf>, PathBuf, PathBuf)> {
+    colonizer_dir: Option<&Path>,
+) -> CliResult<(Option<PathBuf>, PathBuf, PathBuf, Option<PathBuf>)> {
     let home: Option<PathBuf> = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| !home.as_os_str().is_empty());
@@ -1787,7 +1853,14 @@ fn session_dirs(
             .map(|home| home.join(".codex").join("sessions")),
         "--codex-dir",
     )?;
-    Ok((home, claude_dir, codex_dir))
+    let colonizer_dir = match colonizer_dir {
+        Some(dir) => Some(resolve_dir(Some(dir), None, "--colonizer-dir")?),
+        None => home
+            .as_ref()
+            .map(|home| home.join(".local").join("share").join("colonizer"))
+            .filter(|dir| dir.is_dir()),
+    };
+    Ok((home, claude_dir, codex_dir, colonizer_dir))
 }
 
 /// The `--session` files, resolved through the filesystem so they compare
@@ -1815,14 +1888,17 @@ fn show(
     file: &Path,
     claude_dir: Option<&Path>,
     codex_dir: Option<&Path>,
+    colonizer_dir: Option<&Path>,
     out: &Out,
 ) -> CliResult<()> {
-    let (home, claude_dir, codex_dir) = session_dirs(claude_dir, codex_dir)?;
+    let (home, claude_dir, codex_dir, colonizer_dir) =
+        session_dirs(claude_dir, codex_dir, colonizer_dir)?;
     let only = resolve_only(&[file.to_path_buf()])?;
     let allowlist = read_allowlist()?;
     let (sessions, _, _) = collect_sessions(
         &claude_dir,
         &codex_dir,
+        colonizer_dir.as_deref(),
         &allowlist,
         &home,
         only.as_ref(),
@@ -1924,7 +2000,7 @@ fn resolve(cwd: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> Resolutio
     if allowlist.routes.is_empty() {
         return Resolution::plain(Destination::Default);
     }
-    match repos.of(cwd) {
+    match repo_for(cwd, repos) {
         Err(reason) => Resolution {
             destination: Destination::Unroutable(reason.clone()),
             route_reason: Some(reason),
@@ -1954,6 +2030,16 @@ fn resolve(cwd: &str, allowlist: &AllowlistFile, repos: &mut Repos) -> Resolutio
     }
 }
 
+/// The repository a working directory is in: a colony's virtual root names one
+/// without any `git` call, and every other path is probed.
+fn repo_for(cwd: &str, repos: &mut Repos) -> Result<route::Repo, String> {
+    if colonizer::is_root(cwd) {
+        return colonizer::repo_of(cwd)
+            .ok_or_else(|| format!("{cwd} names an organisation, not a repository"));
+    }
+    repos.of(cwd)
+}
+
 /// Where an opted-in session goes: every working directory resolves, and the
 /// session's directories must agree (see [`Destination::combine`]).
 fn destination_for(
@@ -1979,6 +2065,7 @@ fn destination_for(
 fn collect_sessions(
     claude_dir: &Path,
     codex_dir: &Path,
+    colonizer_dir: Option<&Path>,
     allowlist: &AllowlistFile,
     home: &Option<PathBuf>,
     only: Option<&BTreeSet<PathBuf>>,
@@ -1993,6 +2080,9 @@ fn collect_sessions(
     // One repository probe per top level for the whole run, and only when a
     // route needs it.
     let mut repos = Repos::default();
+    // Every file this run may read, in the order it decides them: Claude Code's
+    // and Codex's trees, then the opted-in colonies' transcripts, oldest first.
+    let mut files: Vec<(Agent, PathBuf, Option<Colony>)> = Vec::new();
     for (agent, dir, levels) in [
         // Claude Code lays sessions out one directory per project — walk into
         // exactly that one level; Codex nests them by date, so its walk goes
@@ -2000,83 +2090,130 @@ fn collect_sessions(
         (Agent::ClaudeCode, claude_dir, Some(1usize)),
         (Agent::Codex, codex_dir, None),
     ] {
-        for file in session_files(dir, levels) {
-            // `--session`: only the named files, matched on their resolved
-            // path. The agent is still decided by which tree the file is in.
-            let named = only.is_some_and(|only| {
-                only.contains(&std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone()))
-            });
-            if let Some(only) = only {
-                let resolved = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
-                if !only.contains(&resolved) {
-                    continue;
-                }
-                matched.insert(resolved);
-            }
-            // A spawned rollout whose spawner is here travels inside it —
-            // unless it was named on its own.
-            if matches!(agent, Agent::Codex) && spawns.nested.contains(&file) && !named {
+        files.extend(
+            session_files(dir, levels)
+                .into_iter()
+                .map(|file| (agent, file, None)),
+        );
+    }
+    if let Some(dir) = colonizer_dir {
+        files.extend(
+            colony_files(dir, allowlist, show_all)?
+                .into_iter()
+                .map(|(file, colony)| (Agent::ClaudeCode, file, Some(colony))),
+        );
+    }
+    for (agent, file, colony) in files {
+        // `--session`: only the named files, matched on their resolved
+        // path. The agent is still decided by which tree the file is in.
+        let named = only.is_some_and(|only| {
+            only.contains(&std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone()))
+        });
+        if let Some(only) = only {
+            let resolved = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+            if !only.contains(&resolved) {
                 continue;
             }
-            let text = match std::fs::read_to_string(&file) {
-                Ok(text) => text,
-                Err(_) => {
-                    unreadable += 1;
-                    continue;
-                }
-            };
-            let Some(mut record) = collect(&text, agent) else {
-                unparsed += 1;
-                continue;
-            };
-            match agent {
-                Agent::ClaudeCode => claude::attach(&mut record, claude::children(&file)),
-                Agent::Codex => spawns.attach(&mut record, 0),
-            }
-            // Opt-in is decided on the cwds as the log recorded them, before
-            // anything is rewritten for the wire.
-            let opted = opted_in(&record, &allowlist.allowed);
-            let detail = if opted {
-                detail_for(&record, allowlist)
-            } else {
-                Detail::Full
-            };
-            let built = prepare(&mut record, detail, home, opted || show_all, &file)?;
-            let (body, redacted) = match built {
-                Some((body, redacted)) => (Some(body), redacted),
-                None => (None, 0),
-            };
-            let tool_calls = tool_call_count(&record);
-            let planned_note = if opted { note::plan(&record) } else { None };
-            let destination = if opted {
-                destination_for(&record, allowlist, &mut repos)
-            } else {
-                Destination::Default
-            };
-            sessions.push(Prepared {
-                record,
-                file,
-                opted_in: opted,
-                body,
-                redacted,
-                tool_calls,
-                uploaded: None,
-                created: false,
-                note: planned_note,
-                destination,
-                held: None,
-            });
+            matched.insert(resolved);
         }
+        // A spawned rollout whose spawner is here travels inside it —
+        // unless it was named on its own.
+        if matches!(agent, Agent::Codex) && spawns.nested.contains(&file) && !named {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
+        };
+        let Some(mut record) = collect(&text, agent) else {
+            unparsed += 1;
+            continue;
+        };
+        match agent {
+            Agent::ClaudeCode => claude::attach(&mut record, claude::children(&file)),
+            Agent::Codex => spawns.attach(&mut record, 0),
+        }
+        // A colony's records name the guest's `/workspace`; the session
+        // happened in the colony's repository, so that is its one directory.
+        if let Some(colony) = &colony {
+            record.cwds = vec![colony.url.clone()];
+            record.repo = colony.url.clone();
+        }
+        // Opt-in is decided on the cwds as the log recorded them, before
+        // anything is rewritten for the wire.
+        let opted = opted_in(&record, &allowlist.allowed);
+        let detail = if opted {
+            detail_for(&record, allowlist)
+        } else {
+            Detail::Full
+        };
+        let built = prepare(&mut record, detail, home, opted || show_all, &file)?;
+        let (body, redacted) = match built {
+            Some((body, redacted)) => (Some(body), redacted),
+            None => (None, 0),
+        };
+        let tool_calls = tool_call_count(&record);
+        let planned_note = if opted { note::plan(&record) } else { None };
+        let destination = if opted {
+            destination_for(&record, allowlist, &mut repos)
+        } else {
+            Destination::Default
+        };
+        sessions.push(Prepared {
+            record,
+            file,
+            opted_in: opted,
+            body,
+            redacted,
+            tool_calls,
+            uploaded: None,
+            created: false,
+            note: planned_note,
+            destination,
+            held: None,
+            origin_ref: colony.map(|colony| colony.id),
+        });
     }
     if let Some(stray) = only.and_then(|only| only.difference(&matched).next()) {
         return Err(err(format!(
-            "--session {}: not a session file under {} or {}",
+            "--session {}: not a session file under {} or {}, or in an opted-in colony",
             stray.display(),
             claude_dir.display(),
             codex_dir.display()
         )));
     }
     Ok((sessions, unreadable, unparsed))
+}
+
+/// The transcripts of the colonies whose repository is opted in, each with its
+/// colony, oldest first by last write: the `--max-sessions` cap takes the
+/// oldest. `show_all` (`logs show`) lists every colony's, opted in or not.
+fn colony_files(
+    dir: &Path,
+    allowlist: &AllowlistFile,
+    show_all: bool,
+) -> CliResult<Vec<(PathBuf, Colony)>> {
+    let mut files = Vec::new();
+    for colony in colonizer::colonies(dir)? {
+        if !show_all && !cwd_opted_in(&colony.url, &allowlist.allowed) {
+            continue;
+        }
+        files.extend(
+            session_files(&colony.transcripts, Some(0))
+                .into_iter()
+                .map(|file| (file, colony.clone())),
+        );
+    }
+    files.sort_by_cached_key(|(file, _)| {
+        let written = std::fs::metadata(file)
+            .and_then(|meta| meta.modified())
+            .ok();
+        (written, file.clone())
+    });
+    Ok(files)
 }
 
 /// Which Codex rollouts were spawned by which: every rollout's first line,
@@ -2206,7 +2343,12 @@ fn plan_tokens<T>(
 /// session whose workspace cannot be signed into is held (never sent to
 /// another workspace) and reported. Unroutable and mixed sessions are never
 /// grouped at all.
-fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<Vec<Held>> {
+fn upload(
+    sessions: &mut [Prepared],
+    dry_run: bool,
+    api_url: &str,
+    max_sessions: Option<u64>,
+) -> CliResult<Vec<Held>> {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, session) in sessions.iter().enumerate() {
         if !session.opted_in {
@@ -2243,6 +2385,8 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
         crate::auth::workspace_token(api_url, workspace)
     })?;
     let mut held = Vec::new();
+    // Each workspace's client, for the workspaces whose token is ready.
+    let mut clients: BTreeMap<String, Client> = BTreeMap::new();
     for (workspace, outcome, indices) in plan {
         let token = match outcome {
             Lookup::Ready(token) => token,
@@ -2274,10 +2418,43 @@ fn upload(sessions: &mut [Prepared], dry_run: bool, api_url: &str) -> CliResult<
             });
             continue;
         }
-        let client = Client::new(api_url).with_token(token);
-        for index in indices {
-            send(&client, &mut sessions[index])?;
+        clients.insert(workspace, Client::new(api_url).with_token(token));
+    }
+    // Sent in collection order, which puts the colonies' transcripts last and
+    // oldest first. `max_sessions` counts only the sessions the ledger takes as
+    // new, and stops at the cap: a re-run skips what is already there, so
+    // successive runs work through the backlog from the oldest end.
+    let mut new_colony = 0u64;
+    let mut waiting: BTreeMap<String, usize> = BTreeMap::new();
+    for session in sessions.iter_mut() {
+        if !session.opted_in || session.held.is_some() {
+            continue;
         }
+        let workspace = match &session.destination {
+            Destination::Default => route::DEFAULT.to_owned(),
+            Destination::Workspace(id) => id.clone(),
+            Destination::Unroutable(_) | Destination::Mixed => continue,
+        };
+        let Some(client) = clients.get(&workspace) else {
+            continue;
+        };
+        let colony = session.origin_ref.is_some();
+        if colony && max_sessions.is_some_and(|cap| new_colony >= cap) {
+            session.held = Some("skipped_max_sessions");
+            *waiting.entry(workspace).or_default() += 1;
+            continue;
+        }
+        send(client, session)?;
+        if colony && session.created {
+            new_colony += 1;
+        }
+    }
+    for (workspace, sessions) in waiting {
+        held.push(Held {
+            workspace,
+            sessions,
+            status: "skipped_max_sessions",
+        });
     }
     Ok(held)
 }
@@ -2341,7 +2518,14 @@ fn send(client: &Client, session: &mut Prepared) -> CliResult<()> {
     );
     let project = project_of(&session.record.repo);
     let value = client
-        .post_source(SOURCE_KIND, &title, body, SCOPE, project.as_deref())
+        .post_source(
+            SOURCE_KIND,
+            &title,
+            body,
+            SCOPE,
+            project.as_deref(),
+            session.origin_ref.as_deref(),
+        )
         .map_err(|error| err(format!("{title}: {error}")))?;
     session.uploaded = Some(crate::text(&value, "id").to_owned());
     session.created = value
@@ -2403,6 +2587,8 @@ fn report(
     let mut would_upload = 0usize;
     let mut redacted_total = 0usize;
     let mut notes: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    // Opted-in sessions per workspace, then per project (the repository's basename).
+    let mut projects: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     let mut entries = Vec::new();
     let mut lines = Vec::new();
     for session in sessions {
@@ -2428,6 +2614,19 @@ fn report(
             "unchanged"
         };
         redacted_total += session.redacted;
+        if session.opted_in
+            && matches!(
+                session.destination,
+                Destination::Default | Destination::Workspace(_)
+            )
+        {
+            let project = project_of(&session.record.repo).unwrap_or_else(|| "(none)".to_owned());
+            *projects
+                .entry(session.destination.key().to_owned())
+                .or_default()
+                .entry(project)
+                .or_default() += 1;
+        }
         let mut entry = json!({
             "agent": session.record.agent,
             "session_id": session.record.session_id,
@@ -2475,6 +2674,9 @@ fn report(
                     destination.key()
                 ));
             }
+            ("skipped_max_sessions", _) => {
+                entry["reason"] = json!("waiting: --max-sessions reached; it syncs on a later run");
+            }
             _ => {}
         }
         if let Some(id) = &session.uploaded {
@@ -2505,6 +2707,8 @@ fn report(
         "skipped_no_token": held_list("skipped_no_token"),
         "skipped_keychain_denied": held_list("skipped_keychain_denied"),
         "skipped_default_mismatch": held_list("skipped_default_mismatch"),
+        "skipped_max_sessions": held_list("skipped_max_sessions"),
+        "projects": projects,
         "unreadable": unreadable,
         "unparsed": unparsed,
         "redacted": redacted_total,
@@ -2561,6 +2765,10 @@ fn report(
                     "  {} session(s) held: the default sign-in is not confirmed as workspace {}; choose the default workspace again in Living Brain for Mac (Settings → Workspace).",
                     held.sessions, held.workspace
                 ),
+                "skipped_max_sessions" => println!(
+                    "  {} session(s) left for a later run: --max-sessions reached for workspace {}.",
+                    held.sessions, held.workspace
+                ),
                 _ => println!(
                     "  {} session(s) held: not signed in to workspace {}; sign in to sync them.",
                     held.sessions, held.workspace
@@ -2581,6 +2789,11 @@ fn report(
             println!("  {line}");
         }
         if dry_run {
+            for (workspace, by_project) in &projects {
+                for (project, count) in by_project {
+                    println!("  {workspace} / {project}: {count} session(s)");
+                }
+            }
             println!("Dry run: nothing was sent.");
         }
     });
@@ -2654,6 +2867,7 @@ fn human_line(session: &Prepared, status: &str) -> String {
         "skipped_no_token" => "held: not signed in to its workspace",
         "skipped_keychain_denied" => "held: keychain denied its sign-in",
         "skipped_default_mismatch" => "held: default sign-in is not its workspace",
+        "skipped_max_sessions" => "waiting: --max-sessions reached",
         "would_upload" => "would upload",
         "uploaded" => "uploaded",
         _ => "unchanged (already in the ledger)",
@@ -4014,5 +4228,112 @@ mod tests {
             super::default_expectation(Some("ws-a".into()), &file(Some("ws-b"))),
             super::DefaultExpectation::Conflict
         );
+    }
+
+    /// A colony's session, as `collect_sessions` builds it: its records named
+    /// the guest's `/workspace`, and the colony's virtual root replaces them.
+    fn colony_record(url: &str) -> super::SessionRecord {
+        let mut record = super::empty_record(Agent::ClaudeCode, 3);
+        record.cwds = vec![url.to_owned()];
+        record.repo = url.to_owned();
+        record
+    }
+
+    /// The allowlist a routing machine writes: an org opted in to CHI, another
+    /// org to its own workspace, and one repository of a third org that is
+    /// opted in with no workspace of its own.
+    fn colony_allowlist() -> super::AllowlistFile {
+        let mut file = super::AllowlistFile {
+            version: 2,
+            ..Default::default()
+        };
+        for root in [
+            "colonizer://CHI-Ecosystem",
+            "colonizer://Colonizer-dev",
+            "colonizer://Someone/tool",
+        ] {
+            file.allowed.insert(root.to_owned());
+            file.detail.insert(root.to_owned(), Detail::Full);
+        }
+        file.workspace
+            .insert("colonizer://CHI-Ecosystem".into(), "ws-chi".into());
+        file.workspace
+            .insert("colonizer://Colonizer-dev".into(), "ws-fz".into());
+        file
+    }
+
+    /// A colony repository is judged by its owner and name, through the same
+    /// nesting as a checkout: the org's workspace reaches every repository in it,
+    /// whatever the case of the names. An org that is not opted in is not
+    /// opted in, and a session with one colony outside the opt-in is not.
+    #[test]
+    fn colonies_route_by_their_org_and_are_opted_in_only_under_an_opted_in_root() {
+        let file = colony_allowlist();
+        let chi = colony_record("colonizer://chi-ecosystem/chi-backend");
+        assert!(super::opted_in(&chi, &file.allowed));
+        assert_eq!(
+            super::destination_for(&chi, &file, &mut super::Repos::default()),
+            super::Destination::Workspace("ws-chi".into())
+        );
+        let fz = colony_record("colonizer://Colonizer-dev/parallel");
+        assert_eq!(
+            super::destination_for(&fz, &file, &mut super::Repos::default()),
+            super::Destination::Workspace("ws-fz".into())
+        );
+        // Opted in on its own repository, with no workspace of its own, and no
+        // routes: it goes to the default workspace.
+        let tool = colony_record("colonizer://Someone/tool");
+        assert_eq!(
+            super::destination_for(&tool, &file, &mut super::Repos::default()),
+            super::Destination::Default
+        );
+        let stranger = colony_record("colonizer://Someone/other");
+        assert!(!super::opted_in(&stranger, &file.allowed));
+        let mut mixed = colony_record("colonizer://CHI-Ecosystem/chi-backend");
+        mixed.cwds.push("colonizer://Someone/other".into());
+        assert!(!super::opted_in(&mixed, &file.allowed));
+        assert!(super::is_inside(
+            "colonizer://CHI-Ecosystem/chi-backend",
+            "colonizer://chi-ecosystem"
+        ));
+        assert!(!super::is_inside(
+            "/home/alice/code/chi",
+            "colonizer://CHI-Ecosystem"
+        ));
+    }
+
+    /// A colony root with no checkouts never reaches git: an organisation names
+    /// no repository, so a route cannot judge it and it is held rather than
+    /// sent to the default workspace.
+    #[test]
+    fn an_organisation_root_is_never_probed_and_holds_under_routes() {
+        let mut file = colony_allowlist();
+        file.routes.push(super::Route {
+            remote_owner: Some("CHI-Ecosystem".into()),
+            folder_glob: None,
+            host: None,
+            workspace: "ws-chi".into(),
+        });
+        let mut repos = super::Repos::default();
+        let org = super::resolve("colonizer://Someone", &file, &mut repos);
+        assert!(matches!(org.destination, super::Destination::Unroutable(_)));
+        let repo = super::resolve("colonizer://Someone/tool", &file, &mut repos);
+        assert_eq!(repo.destination, super::Destination::Default);
+        let routed = super::resolve("colonizer://chi-ecosystem/chi-web", &file, &mut repos);
+        assert_eq!(
+            routed.destination,
+            super::Destination::Workspace("ws-chi".into())
+        );
+    }
+
+    /// A colony's `--workspace` is stored under its virtual root, and a bad
+    /// root is refused before anything is written.
+    #[test]
+    fn a_colony_root_is_its_own_target_and_a_bad_one_is_refused() {
+        assert_eq!(
+            super::target_of("colonizer://CHI-Ecosystem/").expect("a root"),
+            "colonizer://CHI-Ecosystem"
+        );
+        assert!(super::target_of("colonizer://a/b/c").is_err());
     }
 }

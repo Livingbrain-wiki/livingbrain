@@ -285,6 +285,31 @@ A corrupt opt-in file, or one written by a newer version of the CLI, is an
 error rather than an empty allowlist: silently reading it as empty would sync
 exactly the sessions you meant to keep off the wire.
 
+## Colonizer colonies
+
+Colonizer runs each agent in a microVM, and the guest writes its transcripts
+as `/workspace`, so the path a session records names no repository. The
+colony's repository is in the Colonizer registry instead, so `logs sync` reads
+it there: `~/.local/share/colonizer/sessions.json` (or `--colonizer-dir`, when
+it exists) maps each colony id to `repo`, `Owner/name`.
+
+A colony is judged as if it ran in the virtual root
+`colonizer://<owner>/<name>`, and it is opted in with an entry of that form:
+
+```
+livingbrain logs allow colonizer://CHI-Ecosystem --workspace ws-chi
+livingbrain logs allow colonizer://Colonizer-dev/tool --workspace ws-fz
+```
+
+An organisation's entry covers each repository in it, and names match
+case-insensitively, as GitHub's do. A colony whose repository is not opted in is
+not read at all. The project is the repository's basename, and the source's
+`origin_ref` is the colony id. `--max-sessions N` uploads at most N new
+colony sessions per run, oldest first; sessions already in the ledger do not
+count, so repeated runs work through the backlog. `--dry-run` reports the
+counts per workspace and project. A colony routes like any repository: it is
+never sent to the default workspace on a route that cannot judge it.
+
 ## What a session becomes
 
 Both formats normalise into one record, versioned with `schema_version` (3)

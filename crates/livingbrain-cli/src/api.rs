@@ -288,12 +288,13 @@ impl Client {
         body: &str,
         scope: &str,
         project: Option<&str>,
+        origin_ref: Option<&str>,
     ) -> CliResult<Value> {
-        self.post_json(
-            "/v1/pages/sources",
-            json!({ "kind": kind, "path": path, "body": body, "scope": scope }),
-            project,
-        )
+        let mut envelope = json!({ "kind": kind, "path": path, "body": body, "scope": scope });
+        if let Some(origin_ref) = origin_ref {
+            envelope["origin_ref"] = Value::String(origin_ref.to_owned());
+        }
+        self.post_json("/v1/pages/sources", envelope, project)
     }
 
     /// `GET /v1/me`: who the token speaks for, including its workspace id. Used

@@ -158,7 +158,7 @@ fn markdown(args: &Markdown, api_url: &str, out: &Out) -> CliResult<()> {
         // Stop at the first failure rather than push on: half an import that
         // the reader was not told about is worse than a clear stop.
         let value = client
-            .post_source("import", &source.path, &source.body, scope, None)
+            .post_source("import", &source.path, &source.body, scope, None, None)
             .map_err(|e| err(format!("{}: {e}", source.path)))?;
         let is_new = value["created"].as_bool().unwrap_or(false);
         created += usize::from(is_new);
@@ -409,7 +409,7 @@ fn chat(
     for source in &plan.sources {
         // Stop at the first failure rather than push on, as in [`markdown`].
         let value = client
-            .post_source("import", &source.path, &source.body, scope, None)
+            .post_source("import", &source.path, &source.body, scope, None, None)
             .map_err(|e| err(format!("{}: {e}", source.path)))?;
         let is_new = value["created"].as_bool().unwrap_or(false);
         created += usize::from(is_new);
