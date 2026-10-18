@@ -90,7 +90,7 @@ pub use budgets::{
     ASK_MAX_TOKENS_FLOOR, BudgetSettings, ask_context_ceiling, ask_max_tokens, compiler_settings,
     overrides,
 };
-pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, StoreFacts};
+pub use coding_agents::{CodingAgents, FACT_WRITER, MODEL_ROLE, ResumeParkedOnMain, StoreFacts};
 pub use dreaming::{Dreaming, MODEL_ROLES};
 pub use export::Export;
 pub use facts::Facts;

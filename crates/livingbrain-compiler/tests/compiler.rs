@@ -4152,3 +4152,153 @@ fn units_stop_at_their_share_of_the_budget_and_sessions_still_compile() {
         .expect("the session");
     assert_eq!(mine.status, JobStatus::Done, "{jobs:?}");
 }
+
+/// `(workspace, status, attempts)` of every coding-agent job, by source.
+fn job_rows(world: &World) -> Vec<(String, String, i64)> {
+    pollster::block_on(world.db.query(&Statement::new(
+        "SELECT workspace, status, attempts FROM coding_agent_jobs ORDER BY source_id",
+    )))
+    .expect("a read")
+    .rows
+    .iter()
+    .map(|row| {
+        (
+            row.get::<String>("workspace").unwrap_or_default(),
+            row.get::<String>("status").unwrap_or_default(),
+            row.get::<i64>("attempts").unwrap_or(-1),
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn requeue_parked_no_model_resumes_only_this_workspace_s_parked_jobs() {
+    let world = world();
+    let parked_here = world.sync(WORKSPACE, "u1", "s-1", "anything");
+    world.sync(OTHER_WORKSPACE, "u1", "s-2", "anything else");
+    let failed_here = world.sync(WORKSPACE, "u1", "s-3", "a third thing");
+    let queue = Queue::new(world.db.clone());
+    let now = world.clock.now();
+    pollster::block_on(queue.enqueue_from_ledger(now, None)).expect("an enqueue");
+    let model = Fake::none();
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed.len(), 3, "{processed:?}");
+    assert!(
+        processed
+            .iter()
+            .all(|p| p.status == JobStatus::SkippedNoModel),
+        "{processed:?}"
+    );
+    // A job of another status in the same workspace must stay as it is.
+    pollster::block_on(world.db.execute(&Statement::with_values(
+        "UPDATE coding_agent_jobs SET status = 'failed', attempts = 3 WHERE source_id = ?",
+        vec![sea_query::Value::String(Some(Box::new(
+            failed_here.clone(),
+        )))],
+    )))
+    .expect("a write");
+
+    let resumed =
+        pollster::block_on(queue.requeue_parked_no_model(WORKSPACE, now)).expect("a requeue");
+    assert_eq!(resumed, 1, "only the parked job of WORKSPACE");
+    let rows = job_rows(&world);
+    assert_eq!(
+        rows,
+        vec![
+            (WORKSPACE.to_owned(), "queued".to_owned(), 0),
+            (OTHER_WORKSPACE.to_owned(), "skipped-no-model".to_owned(), 0),
+            (WORKSPACE.to_owned(), "failed".to_owned(), 3),
+        ],
+        "{rows:?} (rows are in source order: {parked_here}, s-2, {failed_here})"
+    );
+
+    // Nothing left to resume in WORKSPACE, and the other one is not touched
+    // by a call for WORKSPACE.
+    assert_eq!(
+        pollster::block_on(queue.requeue_parked_no_model(WORKSPACE, now)).expect("a requeue"),
+        0
+    );
+    // The other workspace resumes on its own connect.
+    assert_eq!(
+        pollster::block_on(queue.requeue_parked_no_model(OTHER_WORKSPACE, now)).expect("a requeue"),
+        1
+    );
+    // The resumed job is ready to be claimed at once, without a model wait.
+    let ready = pollster::block_on(queue.ready(
+        now,
+        &ClaimFilter {
+            workspace: Some(WORKSPACE.to_owned()),
+            ..ClaimFilter::default()
+        },
+        10,
+    ))
+    .expect("a read");
+    assert_eq!(ready.len(), 1, "{ready:?}");
+    assert_eq!(ready[0].source_id, parked_here);
+}
+
+#[test]
+fn requeue_parked_no_model_scoped_takes_only_the_given_scopes() {
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "anything");
+    world.sync(WORKSPACE, "u2", "s-2", "anything else");
+    let queue = Queue::new(world.db.clone());
+    let now = world.clock.now();
+    pollster::block_on(queue.enqueue_from_ledger(now, None)).expect("an enqueue");
+    world.drain(&world.compiler(&Fake::none()));
+
+    assert_eq!(
+        pollster::block_on(queue.requeue_parked_no_model_scoped(WORKSPACE, &[], now))
+            .expect("a requeue"),
+        0,
+        "no scopes, nothing requeued"
+    );
+    let mine = vec![personal(WORKSPACE, "u1")];
+    assert_eq!(
+        pollster::block_on(queue.requeue_parked_no_model_scoped(WORKSPACE, &mine, now))
+            .expect("a requeue"),
+        1
+    );
+    let statuses: Vec<String> = job_rows(&world).into_iter().map(|row| row.1).collect();
+    assert_eq!(statuses, vec!["queued", "skipped-no-model"]);
+}
+
+#[test]
+fn requeue_parked_units_no_model_resumes_a_parked_unit_of_its_workspace() {
+    let world = world();
+    world.store(
+        SourceKind::GithubCommit,
+        &shared(),
+        "u1",
+        "github/acme/demo/commit/abc1234",
+        Some("https://github.com/acme/demo/commit/abc1234"),
+        github_commit("abc1234", "Switch the demo to D1"),
+    );
+    let model = Fake::none();
+    let compiler = world.compiler(&model);
+    assert_eq!(world.enqueue_units(&compiler), 1);
+    let runs = world.drain_units(&compiler, 5);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].status, JobStatus::SkippedNoModel, "{runs:?}");
+
+    let queue = Queue::new(world.db.clone());
+    let now = world.clock.now();
+    assert_eq!(
+        pollster::block_on(queue.requeue_parked_units_no_model(OTHER_WORKSPACE, now))
+            .expect("a requeue"),
+        0
+    );
+    assert_eq!(
+        pollster::block_on(queue.requeue_parked_units_no_model(WORKSPACE, now)).expect("a requeue"),
+        1
+    );
+    let status = pollster::block_on(world.db.query(&Statement::new(
+        "SELECT status, attempts FROM source_compile_units",
+    )))
+    .expect("a read");
+    assert_eq!(
+        status.rows[0].get::<String>("status").as_deref(),
+        Some("queued")
+    );
+    assert_eq!(status.rows[0].get::<i64>("attempts"), Some(0));
+}

@@ -24,8 +24,8 @@ use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind, Search, Sources, Wiki,
-    pages_routes,
+    Ask, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind, ResumeParkedOnMain,
+    Search, Sources, Wiki, pages_routes,
 };
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
 use livingbrain_pages::{
@@ -329,7 +329,9 @@ fn fixture_with(
         Box::new(ModelJobs::new(wiki)),
         // The two tables the compiler reads beside its own: which model
         // serves the workspace, and the usage ledger its budget gate reads.
-        Box::new(livingbrain_models::Models::new()),
+        Box::new(
+            livingbrain_models::Models::new().with_main_connected(Arc::new(ResumeParkedOnMain)),
+        ),
         Box::new(livingbrain_usage::Usage::new()),
         // The grants tables (ADR 0004): every route reads its access plan
         // from them, and refuses when they cannot be read.

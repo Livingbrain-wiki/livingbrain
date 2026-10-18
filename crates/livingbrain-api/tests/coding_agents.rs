@@ -305,6 +305,52 @@ fn retry_requeues_only_the_asker_s_failed_jobs() {
     );
 }
 
+/// "Retry failed" also resumes the asker's jobs parked for want of a model
+/// (`skipped-no-model`), and reports them in a new field; another member's
+/// parked job stays parked.
+#[test]
+fn retry_also_resumes_the_asker_s_parked_no_model_jobs() {
+    let fx = fixture();
+    let mine = sync(&fx, "user-a", "s-a");
+    let theirs = sync(&fx, "user-b", "s-b");
+    // No model and no runner: both sessions park.
+    let body = post(&fx, TOKEN_A, "/v1/coding-agents/process", json!({"max": 1})).json();
+    assert_eq!(body["processed"][0]["status"], "skipped-no-model", "{body}");
+    let body = post(&fx, TOKEN_B, "/v1/coding-agents/process", json!({"max": 1})).json();
+    assert_eq!(body["processed"][0]["status"], "skipped-no-model", "{body}");
+
+    let response = post(&fx, TOKEN_A, "/v1/coding-agents/retry", json!({}));
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{}",
+        common::body_text(&response)
+    );
+    let body = response.json();
+    assert_eq!(body["requeued"], 0, "{body}");
+    assert_eq!(body["resumed_parked"]["jobs"], 1, "{body}");
+    assert_eq!(body["resumed_parked"]["units"], 0, "{body}");
+    assert_eq!(body["counts"]["queued"], 1, "{body}");
+    // The counts are the asker's own scopes: the other member's parked job
+    // is not in them, and is not resumed.
+    assert_eq!(body["counts"]["skipped-no-model"], 0, "{body}");
+    let queue = get(&fx, TOKEN_A, "/v1/coding-agents/queue").json();
+    let job = queue["jobs"]
+        .as_array()
+        .expect("jobs")
+        .iter()
+        .find(|job| job["source_id"] == mine.as_str())
+        .expect("the asker's job");
+    assert_eq!(job["status"], "queued", "{queue}");
+    assert_eq!(job["attempts"], 0, "{queue}");
+    let theirs_queue = get(&fx, TOKEN_B, "/v1/coding-agents/queue").json();
+    assert_eq!(theirs_queue["jobs"][0]["source_id"], theirs.as_str());
+    assert_eq!(
+        theirs_queue["jobs"][0]["status"], "skipped-no-model",
+        "{theirs_queue}"
+    );
+}
+
 #[test]
 fn a_skipped_session_is_counted_and_compile_fully_compiles_it_for_its_owner_only() {
     let fx = fixture();

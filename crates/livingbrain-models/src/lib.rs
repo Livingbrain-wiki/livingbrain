@@ -54,8 +54,8 @@ mod store;
 pub mod stream;
 
 use cratefield_core::{
-    Config, ConfigError, DataKind, Disposition, Migrations, Module, ModuleContext, PersonalDataSet,
-    Port, SqlMigration,
+    Config, ConfigError, DataKind, Database, Disposition, Migrations, Module, ModuleContext,
+    PersonalDataSet, Port, SqlMigration,
 };
 
 /// The one migration: `model_connections`.
@@ -119,17 +119,37 @@ const MIGRATION_JEV_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0004_jev.sql"),
 );
 
+/// Told when a workspace's **Main** connection is saved and its probe says
+/// `works`: the one moment a backlog that parked for want of a model can
+/// run. The compiler's queue sits beside this module, not under it, so the
+/// venture wires the implementation in ([`Models::with_main_connected`]).
+/// Called after the row is stored; a failure inside it never fails the
+/// connect that already succeeded.
+#[async_trait::async_trait]
+pub trait MainConnected: Send + Sync {
+    /// The Main connection for `workspace` is now serving and working.
+    async fn main_works(
+        &self,
+        db: std::sync::Arc<dyn Database>,
+        workspace: &str,
+        now: time::OffsetDateTime,
+    );
+}
+
 /// Bring your own model, with a capability check.
 #[derive(Default)]
 pub struct Models {
     /// How Jev's classifier is built, when the venture wires TypeSafe.
     jev: Option<std::sync::Arc<dyn jev::JevConnector>>,
+    /// Told when a Main connection is saved and works ([`MainConnected`]).
+    main_connected: Option<std::sync::Arc<dyn MainConnected>>,
 }
 
 impl std::fmt::Debug for Models {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Models")
             .field("jev", &self.jev.is_some())
+            .field("main_connected", &self.main_connected.is_some())
             .finish()
     }
 }
@@ -147,6 +167,14 @@ impl Models {
     #[must_use]
     pub fn with_jev(mut self, connector: std::sync::Arc<dyn jev::JevConnector>) -> Self {
         self.jev = Some(connector);
+        self
+    }
+
+    /// The same module, telling `hook` when a Main connection is saved and
+    /// its probe says `works` ([`MainConnected`]).
+    #[must_use]
+    pub fn with_main_connected(mut self, hook: std::sync::Arc<dyn MainConnected>) -> Self {
+        self.main_connected = Some(hook);
         self
     }
 }
@@ -290,7 +318,7 @@ impl Module for Models {
     }
 
     fn router(&self, ctx: ModuleContext) -> cratefield_core::axum::Router {
-        handlers::router(ctx, self.jev.clone())
+        handlers::router(ctx, self.jev.clone(), self.main_connected.clone())
     }
 }
 

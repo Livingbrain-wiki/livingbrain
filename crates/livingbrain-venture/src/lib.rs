@@ -58,7 +58,7 @@ use cratefield_runtime_cloudflare::{
 use livingbrain_accounts::{Access, Agents, Audit};
 use livingbrain_api::{
     Ask, BudgetSettings, CodingAgents, Dreaming, Export, Facts, Graph, ModelJobs, Notes,
-    PagesRebind, Search, SessionAuth, Sources, Wiki,
+    PagesRebind, ResumeParkedOnMain, Search, SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
 use livingbrain_discord::DiscordModule;
@@ -436,10 +436,15 @@ fn build(
                         pages: erasure.clone(),
                     })),
             )
-            .module(match &jev {
-                Some(jev) => Models::new().with_jev(jev.clone()),
-                None => Models::new(),
-            })
+            .module(
+                // A Main connection that works resumes the workspace's parked
+                // coding-agent backlog (`skipped-no-model`).
+                match &jev {
+                    Some(jev) => Models::new().with_jev(jev.clone()),
+                    None => Models::new(),
+                }
+                .with_main_connected(Arc::new(ResumeParkedOnMain)),
+            )
             .module(Tools::new())
             .module(device_auth_module(&device_ports))
             .module(tokens_module(device_ports))

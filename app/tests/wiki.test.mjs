@@ -2122,7 +2122,7 @@ test("coding-agents: the sessions view shows each session's status, its pages, a
     }
     if (url === "/v1/coding-agents/retry" && method === "POST") {
       queue = { ...queue, counts: { done: 1, queued: 1 } };
-      return json({ requeued: 1, counts: queue.counts });
+      return json({ requeued: 1, resumed_parked: { jobs: 2, units: 1 }, counts: queue.counts });
     }
     return json({ title: "not found" }, 404);
   };
@@ -2153,7 +2153,40 @@ test("coding-agents: the sessions view shows each session's status, its pages, a
   await drain();
   const retry = calls.find((call) => call.url === "/v1/coding-agents/retry");
   assert.equal(retry.method, "POST");
-  assert.equal(el("ca-result").textContent, "1 session requeued.");
+  assert.equal(
+    el("ca-result").textContent,
+    "1 session requeued. 3 parked jobs waiting for a model resumed.",
+  );
+  assert.equal(el("ca-retry").hidden, true);
+});
+
+test("coding-agents: parked jobs alone show Retry, and it says they resumed", async () => {
+  reset({ search: "?view=sessions" });
+  seedTriggers();
+  let queue = {
+    counts: { queued: 0, done: 0, "skipped-no-model": 2 },
+    model: { connected: false, role: "main" },
+    budget: { daily_tokens: 400000, spent_today: 0 },
+    jobs: [],
+  };
+  respond = (method, url) => {
+    if (url === "/v1/workspaces/me") return json(ME);
+    if (url === "/v1/sources/projects") return json(PROJECTS);
+    if (url === "/v1/sources?kind=agent_log&limit=50") return json({ ...SESSIONS, next_cursor: null });
+    if (url === "/v1/coding-agents/queue?limit=100") return json(queue);
+    if (url === "/v1/coding-agents/retry" && method === "POST") {
+      queue = { ...queue, counts: { queued: 2, "skipped-no-model": 0 } };
+      return json({ requeued: 0, resumed_parked: { jobs: 2, units: 0 }, counts: queue.counts });
+    }
+    return json({ title: "not found" }, 404);
+  };
+  await wikiPage(globalThis.LB.api);
+  await drain();
+  assert.equal(el("ca-retry").hidden, false, "parked jobs can be resumed from here");
+
+  await el("ca-retry").click();
+  await drain();
+  assert.equal(el("ca-result").textContent, "0 sessions requeued. 2 parked jobs waiting for a model resumed.");
   assert.equal(el("ca-retry").hidden, true);
 });
 
