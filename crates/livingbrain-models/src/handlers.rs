@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 
+use crate::MainConnected;
 use crate::catalog::{self, Auth, Wire};
 use crate::crypto;
 use crate::curated;
@@ -97,11 +98,21 @@ struct ModuleState {
     ctx: ModuleContext,
     /// How Jev's classifier is built, when the venture wires TypeSafe.
     jev: Option<Arc<dyn JevConnector>>,
+    /// Told when a Main connection is saved and works.
+    main_connected: Option<Arc<dyn MainConnected>>,
 }
 
 /// The module's routes.
-pub(crate) fn router(ctx: ModuleContext, jev: Option<Arc<dyn JevConnector>>) -> axum::Router {
-    let state = Arc::new(ModuleState { ctx, jev });
+pub(crate) fn router(
+    ctx: ModuleContext,
+    jev: Option<Arc<dyn JevConnector>>,
+    main_connected: Option<Arc<dyn MainConnected>>,
+) -> axum::Router {
+    let state = Arc::new(ModuleState {
+        ctx,
+        jev,
+        main_connected,
+    });
     axum::Router::new()
         .route("/", get(list))
         .route("/discover", post(discover))
@@ -283,6 +294,10 @@ async fn connect(
     )
     .await
     .map_err(database)?;
+
+    if role == "main" && probe_result.status == "works" {
+        resume_on_main(&state, &db, &c.workspace_id, clock.now()).await;
+    }
 
     let row = store::get(&*db, &c.workspace_id, &role)
         .await
@@ -585,11 +600,29 @@ async fn switch_model(
     )
     .await
     .map_err(database)?;
+    if role == "main" && probe_result.status == "works" {
+        resume_on_main(&state, &db, &c.workspace_id, clock.now()).await;
+    }
     let row = store::get(&*db, &c.workspace_id, &role)
         .await
         .map_err(database)?
         .ok_or_else(Problem::internal)?;
     Ok(Json(view(row)).into_response())
+}
+
+/// A Main connection just saved and probed `works`: tell the wired hook,
+/// so the workspace's parked `skipped-no-model` backlog can run. Nothing
+/// is wired in a bare module, and the hook's own failures never reach the
+/// member — the connection is already stored.
+async fn resume_on_main(
+    state: &ModuleState,
+    db: &Arc<dyn cratefield_core::Database>,
+    workspace: &str,
+    now: time::OffsetDateTime,
+) {
+    if let Some(hook) = &state.main_connected {
+        hook.main_works(Arc::clone(db), workspace, now).await;
+    }
 }
 
 /// The request body for `PUT /{role}`. `Debug` is safe because the key

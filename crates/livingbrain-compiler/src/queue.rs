@@ -652,6 +652,61 @@ impl Queue {
             .await
     }
 
+    /// Puts every `skipped-no-model` job of `workspace`, in any scope, back
+    /// to `queued` with its attempts reset: a model was just connected for
+    /// the workspace, so the backlog parked for want of one can run. Only
+    /// that status and that workspace are touched. Answers how many were
+    /// requeued.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn requeue_parked_no_model(
+        &self,
+        workspace: &str,
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        self.requeue_parked_no_model_in(workspace, None, now).await
+    }
+
+    /// [`Queue::requeue_parked_no_model`], limited to these scopes (the
+    /// asker's own, for "Retry failed"). No scopes, nothing requeued.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn requeue_parked_no_model_scoped(
+        &self,
+        workspace: &str,
+        scopes: &[String],
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        if scopes.is_empty() {
+            return Ok(0);
+        }
+        self.requeue_parked_no_model_in(workspace, Some(scopes), now)
+            .await
+    }
+
+    async fn requeue_parked_no_model_in(
+        &self,
+        workspace: &str,
+        scopes: Option<&[String]>,
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        let mut values = vec![text(&rfc3339(now)), text(workspace)];
+        let mut sql = String::from(
+            "UPDATE coding_agent_jobs SET status = 'queued', attempts = 0, \
+                    next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
+             WHERE status = 'skipped-no-model' AND workspace = ?",
+        );
+        if let Some(scopes) = scopes {
+            sql.push_str(&format!(" AND scope IN ({})", placeholders(scopes.len())));
+            values.extend(scopes.iter().map(|scope| text(scope)));
+        }
+        self.db.execute(&Statement::with_values(sql, values)).await
+    }
+
     /// "Compile fully": puts one of the asker's triaged jobs — a
     /// `skipped-trivial` or `summary-only` one, found by its source id in
     /// these scopes of `workspace` — back to `queued`, to be compiled with

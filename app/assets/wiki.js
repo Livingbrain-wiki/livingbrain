@@ -2855,7 +2855,10 @@ export async function wikiPage(api) {
       els.caTriage.textContent = line;
       els.caTriage.hidden = line === "";
     }
-    if (els.caRetry) els.caRetry.hidden = !((data.counts && data.counts.failed) > 0);
+    if (els.caRetry) {
+      const counts = data.counts || {};
+      els.caRetry.hidden = !(counts.failed > 0 || counts["skipped-no-model"] > 0);
+    }
     els.caModel.replaceChildren();
     const model = data.model || {};
     if (model.connected) {
@@ -2962,7 +2965,11 @@ export async function wikiPage(api) {
     try {
       const data = await api("/v1/coding-agents/retry", { method: "POST", body: {} });
       const n = (data && data.requeued) || 0;
-      els.caResult.textContent = n === 1 ? "1 session requeued." : `${n} sessions requeued.`;
+      const parked = data && data.resumed_parked ? data.resumed_parked : {};
+      const resumed = (parked.jobs || 0) + (parked.units || 0);
+      let text = n === 1 ? "1 session requeued." : `${n} sessions requeued.`;
+      if (resumed > 0) text += ` ${resumed} parked ${resumed === 1 ? "job" : "jobs"} waiting for a model resumed.`;
+      els.caResult.textContent = text;
     } catch (error) {
       els.caResult.textContent = `Could not requeue: ${error.message}`;
     } finally {

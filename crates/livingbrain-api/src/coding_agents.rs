@@ -1153,8 +1153,19 @@ async fn retry(
     let db = port(ctx.ports.db.clone())?;
     let clock = port(ctx.ports.clock.clone())?;
     let queue = Queue::new(db);
+    let now = clock.now();
     let requeued = queue
-        .requeue_failed(&asker.workspace_id, &own, clock.now())
+        .requeue_failed(&asker.workspace_id, &own, now)
+        .await
+        .map_err(|_| Problem::internal())?;
+    // The parked backlog too: jobs and units that waited for a model, in
+    // the same scopes. The drain parks them again if still no model.
+    let resumed_jobs = queue
+        .requeue_parked_no_model_scoped(&asker.workspace_id, &own, now)
+        .await
+        .map_err(|_| Problem::internal())?;
+    let resumed_units = queue
+        .requeue_parked_units_no_model_scoped(&asker.workspace_id, &own, now)
         .await
         .map_err(|_| Problem::internal())?;
     let counts = queue
@@ -1163,11 +1174,33 @@ async fn retry(
         .map_err(|_| Problem::internal())?;
     Ok(Json(json!({
         "requeued": requeued,
+        "resumed_parked": { "jobs": resumed_jobs, "units": resumed_units },
         "counts": counts
             .iter()
             .map(|(status, n)| (status.as_str().to_owned(), json!(n)))
             .collect::<serde_json::Map<String, Value>>(),
     })))
+}
+
+/// Resumes a workspace's parked `skipped-no-model` backlog when its Main
+/// connection is saved and probes `works` — wired into the models module
+/// by the venture and the API test fixture.
+pub struct ResumeParkedOnMain;
+
+#[async_trait::async_trait]
+impl livingbrain_models::MainConnected for ResumeParkedOnMain {
+    async fn main_works(
+        &self,
+        db: std::sync::Arc<dyn cratefield_core::Database>,
+        workspace: &str,
+        now: time::OffsetDateTime,
+    ) {
+        let queue = Queue::new(db);
+        // Best effort: a failure leaves the backlog parked, and "Retry
+        // failed" resumes it too.
+        let _ = queue.requeue_parked_no_model(workspace, now).await;
+        let _ = queue.requeue_parked_units_no_model(workspace, now).await;
+    }
 }
 
 /// The scopes a member's compile jobs are listed from, and the ones their

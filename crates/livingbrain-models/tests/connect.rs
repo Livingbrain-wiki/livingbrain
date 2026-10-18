@@ -8,9 +8,68 @@
 
 mod support;
 
+use std::sync::{Arc, Mutex};
+
+use cratefield_core::Database;
 use cratefield_core::axum::http::StatusCode;
+use livingbrain_models::{MainConnected, Models};
 use serde_json::{Value, json};
 use support::{FakeHttp, KEY, OWNER, PLAIN, WORKSPACE, ciphertext, delete, get, put};
+
+/// Records each workspace whose Main connection the module reported working.
+#[derive(Default)]
+struct RecordingMain(Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl MainConnected for RecordingMain {
+    async fn main_works(
+        &self,
+        _db: Arc<dyn Database>,
+        workspace: &str,
+        _now: time::OffsetDateTime,
+    ) {
+        self.0.lock().expect("a lock").push(workspace.to_owned());
+    }
+}
+
+/// A Main connection that saves as `works` tells the hook once, for its
+/// workspace; a Main that answers only does not, and neither does a
+/// connection to another role.
+#[test]
+fn a_working_main_connection_tells_the_hook_and_nothing_else_does() {
+    pollster::block_on(async {
+        let http = FakeHttp::new();
+        let hook = Arc::new(RecordingMain::default());
+        let (kit, cookie) =
+            support::signed_in_with(&http, Models::new().with_main_connected(hook.clone())).await;
+
+        let res = put(&kit, "/v1/models/triage", &cookie, custom("93.184.216.34")).await;
+        assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+        assert!(
+            hook.0.lock().expect("a lock").is_empty(),
+            "triage is not Main"
+        );
+
+        let res = put(&kit, "/v1/models/main", &cookie, custom("93.184.216.34")).await;
+        assert_eq!(res.json()["status"], "works", "{}", res.text());
+        assert_eq!(*hook.0.lock().expect("a lock"), vec![WORKSPACE.to_owned()]);
+    });
+}
+
+#[test]
+fn an_answers_only_main_connection_does_not_tell_the_hook() {
+    pollster::block_on(async {
+        let http = FakeHttp::new();
+        http.calling_tools(false);
+        let hook = Arc::new(RecordingMain::default());
+        let (kit, cookie) =
+            support::signed_in_with(&http, Models::new().with_main_connected(hook.clone())).await;
+
+        let res = put(&kit, "/v1/models/main", &cookie, custom("93.184.216.34")).await;
+        assert_eq!(res.json()["status"], "answers only", "{}", res.text());
+        assert!(hook.0.lock().expect("a lock").is_empty());
+    });
+}
 
 /// A custom endpoint whose host resolves into `10.0.0.0/8` is refused,
 /// and nothing is sent to it: the guard runs before the probe.

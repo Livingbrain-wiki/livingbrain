@@ -74,7 +74,7 @@ hook.
 | `processing` | claimed under a 15-minute lease; a dead worker's lease lapses |
 | `done` | compiled; `pages` lists what it wrote |
 | `failed` | retried after 15 min, then 1 h; after 3 attempts it stays failed. `error` says why — for a model call, the provider's status and its (redacted, 300-character) error body, e.g. `model-http 429: {"error":{"code":"1302",…}}`. A rate limit (HTTP 429) is retried after `Retry-After` (or 5 min, at most 30) without counting an attempt, and stops that drain. **Retry failed** (`POST /v1/coding-agents/retry`) puts your failed jobs back to `queued` with their attempts reset |
-| `skipped-no-model` | no model connected; checked again hourly, and at once by **Process now** |
+| `skipped-no-model` | no model connected; checked again hourly, and at once by **Process now**. Saving a Main model that probes `works` moves them back to `queued`, as does **Retry failed** |
 | `over-budget` | the compile budget is spent; checked again when it resets |
 | `superseded` | a newer body of the same session arrived before this one ran |
 | `skipped` | not a session record, empty, or its source is gone |

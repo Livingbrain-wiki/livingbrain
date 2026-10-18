@@ -38,6 +38,8 @@ percent-encoding = { workspace = true }
 sea-query = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The `MainConnected` hook (`lib.rs`) is an async trait, like the ports.
+async-trait = { workspace = true }
 # ISO-8601 timestamps for the rows (the portable subset stores TEXT, not a
 # dialect date type). The `wasm-bindgen` half of this crate arrives only
 # on wasm32, so it never enters a host `cargo tree`.

@@ -538,6 +538,61 @@ impl Queue {
         Ok(changed == 1)
     }
 
+    /// The source-unit half of [`Queue::requeue_parked_no_model`]: every
+    /// `skipped-no-model` unit of `workspace`, in any scope, back to
+    /// `queued` with its attempts reset. Answers how many were requeued.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn requeue_parked_units_no_model(
+        &self,
+        workspace: &str,
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        self.requeue_parked_units_no_model_in(workspace, None, now)
+            .await
+    }
+
+    /// [`Queue::requeue_parked_units_no_model`], limited to these scopes
+    /// (the asker's own, for "Retry failed"). No scopes, nothing requeued.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError`] from the database.
+    pub async fn requeue_parked_units_no_model_scoped(
+        &self,
+        workspace: &str,
+        scopes: &[String],
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        if scopes.is_empty() {
+            return Ok(0);
+        }
+        self.requeue_parked_units_no_model_in(workspace, Some(scopes), now)
+            .await
+    }
+
+    async fn requeue_parked_units_no_model_in(
+        &self,
+        workspace: &str,
+        scopes: Option<&[String]>,
+        now: OffsetDateTime,
+    ) -> Result<u64, DbError> {
+        let mut values = vec![text(&rfc3339(now)), text(workspace)];
+        let mut sql = String::from(
+            "UPDATE source_compile_units SET status = 'queued', attempts = 0, \
+                    next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
+             WHERE status = 'skipped-no-model' AND workspace = ?",
+        );
+        if let Some(scopes) = scopes {
+            let marks = vec!["?"; scopes.len()].join(", ");
+            sql.push_str(&format!(" AND scope IN ({marks})"));
+            values.extend(scopes.iter().map(|scope| text(scope)));
+        }
+        self.db.execute(&Statement::with_values(sql, values)).await
+    }
+
     /// Parks an unread-to-claim unit (no model, no budget, paused) without
     /// counting an attempt. Compare-and-set like a claim.
     ///
