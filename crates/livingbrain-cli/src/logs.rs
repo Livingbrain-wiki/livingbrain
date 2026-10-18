@@ -1781,6 +1781,9 @@ struct Prepared {
     /// Why the session was held back at upload, when its workspace could not
     /// be signed into: `skipped_no_token` or `skipped_keychain_denied`.
     held: Option<&'static str>,
+    /// Why the upload failed after its retries, when it did. The run goes on
+    /// with the other sessions, and the session is reported as failed.
+    failure: Option<String>,
     /// The session's searchable note — planned for an opted-in session
     /// with a repo, written after its source upload succeeds.
     note: Option<note::Planned>,
@@ -1827,6 +1830,16 @@ fn sync(args: SyncArgs<'_>, api_url: &str, out: &Out) -> CliResult<()> {
         &held,
         out,
     );
+    // The report has said which sessions failed; the exit code says that one did.
+    let failed = sessions
+        .iter()
+        .filter(|session| session.failure.is_some())
+        .count();
+    if failed > 0 {
+        return Err(err(format!(
+            "{failed} session(s) failed to upload; the rest were synced, and the failed ones go again on the next run"
+        )));
+    }
     Ok(())
 }
 
@@ -2174,6 +2187,7 @@ fn collect_sessions(
             note: planned_note,
             destination,
             held: None,
+            failure: None,
             origin_ref: colony.map(|colony| colony.id),
         });
     }
@@ -2444,9 +2458,13 @@ fn upload(
             *waiting.entry(workspace).or_default() += 1;
             continue;
         }
-        send(client, session)?;
-        if colony && session.created {
-            new_colony += 1;
+        // A session that still fails after its retries is recorded, and the
+        // loop goes on: one bad upload must not hold back the rest. Nothing
+        // was written for it, so the next run sends it again.
+        match send(client, session) {
+            Ok(()) if colony && session.created => new_colony += 1,
+            Ok(()) => {}
+            Err(error) => session.failure = Some(error.to_string()),
         }
     }
     for (workspace, sessions) in waiting {
@@ -2517,16 +2535,14 @@ fn send(client: &Client, session: &mut Prepared) -> CliResult<()> {
         session.record.agent, session.record.session_id
     );
     let project = project_of(&session.record.repo);
-    let value = client
-        .post_source(
-            SOURCE_KIND,
-            &title,
-            body,
-            SCOPE,
-            project.as_deref(),
-            session.origin_ref.as_deref(),
-        )
-        .map_err(|error| err(format!("{title}: {error}")))?;
+    let value = client.post_source(
+        SOURCE_KIND,
+        &title,
+        body,
+        SCOPE,
+        project.as_deref(),
+        session.origin_ref.as_deref(),
+    )?;
     session.uploaded = Some(crate::text(&value, "id").to_owned());
     session.created = value
         .get("created")
@@ -2584,6 +2600,7 @@ fn report(
 ) {
     let (mut uploaded, mut unchanged, mut skipped, mut mixed, mut unroutable) =
         (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut failed = 0usize;
     let mut would_upload = 0usize;
     let mut redacted_total = 0usize;
     let mut notes: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -2603,6 +2620,9 @@ fn report(
             "skipped_unroutable"
         } else if let Some(status) = session.held {
             status
+        } else if session.failure.is_some() {
+            failed += 1;
+            "failed"
         } else if dry_run {
             would_upload += 1;
             "would_upload"
@@ -2677,6 +2697,7 @@ fn report(
             ("skipped_max_sessions", _) => {
                 entry["reason"] = json!("waiting: --max-sessions reached; it syncs on a later run");
             }
+            ("failed", _) => entry["reason"] = json!(session.failure),
             _ => {}
         }
         if let Some(id) = &session.uploaded {
@@ -2708,6 +2729,17 @@ fn report(
         "skipped_keychain_denied": held_list("skipped_keychain_denied"),
         "skipped_default_mismatch": held_list("skipped_default_mismatch"),
         "skipped_max_sessions": held_list("skipped_max_sessions"),
+        "failed": failed,
+        "failures": sessions
+            .iter()
+            .filter_map(|session| {
+                Some(json!({
+                    "agent": session.record.agent,
+                    "session_id": session.record.session_id,
+                    "reason": session.failure.as_ref()?,
+                }))
+            })
+            .collect::<Vec<_>>(),
         "projects": projects,
         "unreadable": unreadable,
         "unparsed": unparsed,
@@ -2735,6 +2767,9 @@ fn report(
                 "{uploaded} uploaded, {unchanged} already in the ledger, {skipped} skipped: repo not opted in"
             )
         };
+        if failed > 0 {
+            summary.push_str(&format!(", {failed} failed (will retry next run)"));
+        }
         if mixed > 0 {
             summary.push_str(&format!(
                 ", {mixed} skipped: repositories in different workspaces"
@@ -2870,7 +2905,12 @@ fn human_line(session: &Prepared, status: &str) -> String {
         "skipped_max_sessions" => "waiting: --max-sessions reached",
         "would_upload" => "would upload",
         "uploaded" => "uploaded",
+        "failed" => "failed",
         _ => "unchanged (already in the ledger)",
+    };
+    let status = match &session.failure {
+        Some(reason) => format!("failed: {reason}"),
+        None => status.to_owned(),
     };
     format!(
         "{} {} · {} · {} · {} turn(s), {} tool call(s) · in {}, out {}, cache {} read / {} write · {} · {}",

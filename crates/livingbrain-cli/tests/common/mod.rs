@@ -66,7 +66,16 @@ impl Reply {
             body,
         }
     }
+
+    /// A connection dropped without a reply: the client sees the socket close
+    /// (or reset) where the response should be.
+    pub fn reset() -> Self {
+        Self::bytes(RESET, "", Vec::new())
+    }
 }
+
+/// The status a [`Reply::reset`] carries: never sent, only read by [`serve`].
+const RESET: u16 = 0;
 
 /// A running mock server on an ephemeral local port.
 pub struct Mock {
@@ -142,6 +151,10 @@ fn serve<F: Fn(&Request) -> Reply>(
     };
     let reply = handler(&request);
     seen.lock().expect("requests lock").push(request);
+    if reply.status == RESET {
+        // Returning drops the stream with nothing written: a reset, as seen.
+        return Ok(());
+    }
     let head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         reply.status,
@@ -161,7 +174,11 @@ fn reason(status: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Status",
     }
 }
@@ -261,6 +278,9 @@ pub fn run(
     // Debug-only hook (see `auth::poll_interval`): poll the device token with no
     // sleep. Ignored by a release build, so the login test is `ignore`d there.
     command.env("LIVINGBRAIN_TEST_POLL_INTERVAL", "0");
+    // Debug-only hook (see `api::retry_pause`): retry a transient upload failure
+    // with no pause, so the retry tests run at full speed.
+    command.env("LIVINGBRAIN_TEST_RETRY_PAUSE", "0");
     // Scrubbed before `envs` is applied, so a test that wants one of these
     // values still sets it explicitly — an inherited value can never win.
     for key in SCRUBBED {
