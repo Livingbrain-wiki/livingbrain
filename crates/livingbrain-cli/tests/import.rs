@@ -41,12 +41,31 @@ fn sha256_hex(text: &str) -> String {
 /// created:false` after. The set is shared across runs, so importing the same
 /// vault twice against one mock exercises the idempotency key.
 fn sources_mock() -> Mock {
+    sources_mock_with(None)
+}
+
+/// [`sources_mock`], with one file's uploads failing: `fault` is (the path, how
+/// many tries fail, the status they fail with — `0` for a connection reset).
+/// Every try after that answers as the server does.
+fn sources_mock_with(fault: Option<(&'static str, u32, u16)>) -> Mock {
     let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let faulted_tries = Arc::new(Mutex::new(0u32));
     let handler = move |request: &common::Request| {
         if request.path != "/v1/pages/sources" {
             return Reply::json(404, r#"{"error":"no such route"}"#);
         }
         let body: Value = serde_json::from_str(&request.body_text()).unwrap_or(Value::Null);
+        let faulted = fault.filter(|(path, _, _)| body["path"].as_str() == Some(path));
+        if let Some((_, times, status)) = faulted {
+            let mut tries = faulted_tries.lock().expect("tries lock");
+            *tries += 1;
+            if *tries <= times {
+                return match status {
+                    0 => Reply::reset(),
+                    status => Reply::json(status, r#"{"error":"refused"}"#),
+                };
+            }
+        }
         let text = body["body"].as_str().unwrap_or("");
         let digest = sha256_hex(text);
         let created = seen.lock().expect("seen lock").insert(digest.clone());
@@ -433,5 +452,135 @@ fn exclude_globs_keep_files_off_the_wire_and_an_empty_vault_uploads_nothing() {
         source_requests(&mock).len(),
         1,
         "the empty vault made a request"
+    );
+}
+
+/// The paths the mock saw a source upload for, in order, retries included.
+fn attempts_at(mock: &Mock, path: &str) -> usize {
+    uploaded_paths(&source_requests(mock))
+        .iter()
+        .filter(|uploaded| uploaded.as_str() == path)
+        .count()
+}
+
+/// (7) A file whose connection resets twice lands on its third try, and the
+/// import exits zero: the retries are the command's, not the reader's.
+#[test]
+fn a_file_reset_twice_lands_on_its_third_try() {
+    let mock = sources_mock_with(Some(("daily/notes.markdown", 2, 0)));
+    let (cwd, home) = (temp_dir("retry-cwd"), temp_dir("retry-home"));
+    let vault = fixture_vault();
+    let dir = vault.display().to_string();
+
+    let output = run(
+        &cwd,
+        &home,
+        &[
+            "import",
+            "markdown",
+            &dir,
+            "--yes",
+            "--json",
+            "--max-bytes",
+            "64",
+        ],
+        &api_envs(&mock.base),
+        None,
+    );
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let value = json_of(&output);
+    assert_eq!(value["created"], 3, "{value}");
+    assert_eq!(value["failed"], 0, "{value}");
+    assert_eq!(attempts_at(&mock, "daily/notes.markdown"), 3);
+    assert_eq!(
+        attempts_at(&mock, "index.md"),
+        1,
+        "a healthy file is sent once"
+    );
+}
+
+/// (8) A file that keeps failing is recorded with its reason, the walk goes on
+/// past it, the summary says how many failed, and the exit is non-zero.
+#[test]
+fn a_file_that_keeps_failing_is_reported_and_the_rest_import() {
+    let mock = sources_mock_with(Some(("daily/notes.markdown", u32::MAX, 0)));
+    let (cwd, home) = (temp_dir("fail-cwd"), temp_dir("fail-home"));
+    let vault = fixture_vault();
+    let dir = vault.display().to_string();
+
+    let output = run(
+        &cwd,
+        &home,
+        &[
+            "import",
+            "markdown",
+            &dir,
+            "--yes",
+            "--json",
+            "--max-bytes",
+            "64",
+        ],
+        &api_envs(&mock.base),
+        None,
+    );
+    assert!(!output.status.success(), "a failed file must exit non-zero");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        output.stderr.contains("failed to import"),
+        "{}",
+        output.stderr
+    );
+    let value = json_of(&output);
+    assert_eq!(value["created"], 2, "{value}");
+    assert_eq!(value["failed"], 1, "{value}");
+    let failures = value["failures"].as_array().expect("failures");
+    assert_eq!(failures.len(), 1, "{value}");
+    assert_eq!(failures[0]["path"], "daily/notes.markdown");
+    assert!(
+        failures[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{value}"
+    );
+    // The files after it in the walk still went up.
+    assert_eq!(attempts_at(&mock, "index.md"), 1);
+    assert_eq!(attempts_at(&mock, "daily/2026-04-15.md"), 1);
+    assert_eq!(value["sources"].as_array().expect("sources").len(), 2);
+    // Three tries, then give up: the file was never sent a fourth time.
+    assert_eq!(attempts_at(&mock, "daily/notes.markdown"), 3);
+}
+
+/// (9) A client error is final: one request, recorded as failed, no retry.
+#[test]
+fn a_client_error_is_not_retried() {
+    let mock = sources_mock_with(Some(("index.md", u32::MAX, 400)));
+    let (cwd, home) = (temp_dir("refuse-cwd"), temp_dir("refuse-home"));
+    let vault = fixture_vault();
+    let dir = vault.display().to_string();
+
+    let output = run(
+        &cwd,
+        &home,
+        &[
+            "import",
+            "markdown",
+            &dir,
+            "--yes",
+            "--json",
+            "--max-bytes",
+            "64",
+        ],
+        &api_envs(&mock.base),
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    let value = json_of(&output);
+    assert_eq!(value["failed"], 1, "{value}");
+    assert_eq!(attempts_at(&mock, "index.md"), 1, "a 400 was retried");
+    assert!(
+        value["failures"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("refused")),
+        "{value}"
     );
 }

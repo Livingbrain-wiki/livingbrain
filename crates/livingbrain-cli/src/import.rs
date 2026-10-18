@@ -138,7 +138,7 @@ fn markdown(args: &Markdown, api_url: &str, out: &Out) -> CliResult<()> {
     // A directory with nothing to say is a successful no-op, not a failure:
     // `import` is often run from a script over a vault that may be empty.
     if plan.sources.is_empty() {
-        out.json_or(&report(args, &plan, scope, 0, 0, &[]), || {
+        out.json_or(&report(args, &plan, scope, 0, 0, &[], &[]), || {
             println!("Nothing to import.");
         });
         return Ok(());
@@ -154,28 +154,48 @@ fn markdown(args: &Markdown, api_url: &str, out: &Out) -> CliResult<()> {
 
     let mut created = 0usize;
     let mut uploaded = Vec::new();
+    let mut failed = Vec::new();
     for source in &plan.sources {
-        // Stop at the first failure rather than push on: half an import that
-        // the reader was not told about is worse than a clear stop.
-        let value = client
-            .post_source("import", &source.path, &source.body, scope, None, None)
-            .map_err(|e| err(format!("{}: {e}", source.path)))?;
-        let is_new = value["created"].as_bool().unwrap_or(false);
-        created += usize::from(is_new);
-        uploaded.push(json!({
-            "path": source.path,
-            "id": text(&value, "id"),
-            "created": is_new,
-        }));
+        // A file that still fails after its retries is recorded, and the walk
+        // goes on: one bad upload must not stop the rest. A re-run sends the
+        // failed ones again, and the ones that landed answer as already present.
+        match client.post_source("import", &source.path, &source.body, scope, None, None) {
+            Ok(value) => {
+                let is_new = value["created"].as_bool().unwrap_or(false);
+                created += usize::from(is_new);
+                uploaded.push(json!({
+                    "path": source.path,
+                    "id": text(&value, "id"),
+                    "created": is_new,
+                }));
+            }
+            Err(error) => failed.push(json!({
+                "path": source.path,
+                "reason": error.to_string(),
+            })),
+        }
     }
 
     let unchanged = uploaded.len() - created;
     let redacted: usize = plan.sources.iter().map(|source| source.secrets).sum();
     out.json_or(
-        &report(args, &plan, scope, created, unchanged, &uploaded),
-        || println!("Imported {created} new, {unchanged} already present ({redacted} redacted)."),
+        &report(args, &plan, scope, created, unchanged, &uploaded, &failed),
+        || {
+            println!(
+                "Imported {created} new, {unchanged} already present ({redacted} redacted){}.",
+                failure_summary(&failed)
+            );
+            // The reasons are errors, so they go to stderr, as the exit's would.
+            for failure in &failed {
+                eprintln!(
+                    "  failed {}: {}",
+                    text(failure, "path"),
+                    text(failure, "reason")
+                );
+            }
+        },
     );
-    Ok(())
+    finish(&failed)
 }
 
 /// Walk `args.dir` and build the plan. Local reads only: no token, no socket.
@@ -312,7 +332,13 @@ struct ChatPlan<'a> {
 
 impl ChatPlan<'_> {
     /// The one object `--json` prints.
-    fn report(&self, created: usize, unchanged: usize, uploaded: &[Value]) -> Value {
+    fn report(
+        &self,
+        created: usize,
+        unchanged: usize,
+        uploaded: &[Value],
+        failed: &[Value],
+    ) -> Value {
         json!({
             "source": self.kind.as_str(),
             "export": self.export.display().to_string(),
@@ -321,9 +347,11 @@ impl ChatPlan<'_> {
             "files": self.sources.len(),
             "created": created,
             "unchanged": unchanged,
+            "failed": failed.len(),
             "redacted": self.redaction.values().sum::<usize>(),
             "redaction": self.redaction,
             "sources": uploaded,
+            "failures": failed,
         })
     }
 }
@@ -394,7 +422,9 @@ fn chat(
 
     chat_preview(kind, &args.export, &selected, &plan, brain);
     if plan.sources.is_empty() {
-        out.json_or(&plan.report(0, 0, &[]), || println!("Nothing to import."));
+        out.json_or(&plan.report(0, 0, &[], &[]), || {
+            println!("Nothing to import.")
+        });
         return Ok(());
     }
     if !args.yes && !confirm(plan.sources.len(), brain)? {
@@ -406,26 +436,64 @@ fn chat(
     let client = Client::new(api_url).with_token(crate::auth::token_for(api_url)?);
     let mut created = 0usize;
     let mut uploaded = Vec::new();
+    let mut failed = Vec::new();
     for source in &plan.sources {
-        // Stop at the first failure rather than push on, as in [`markdown`].
-        let value = client
-            .post_source("import", &source.path, &source.body, scope, None, None)
-            .map_err(|e| err(format!("{}: {e}", source.path)))?;
-        let is_new = value["created"].as_bool().unwrap_or(false);
-        created += usize::from(is_new);
-        uploaded.push(json!({
-            "path": source.path,
-            "id": text(&value, "id"),
-            "created": is_new,
-        }));
+        // A part that still fails is recorded and the rest go on, as in [`markdown`].
+        match client.post_source("import", &source.path, &source.body, scope, None, None) {
+            Ok(value) => {
+                let is_new = value["created"].as_bool().unwrap_or(false);
+                created += usize::from(is_new);
+                uploaded.push(json!({
+                    "path": source.path,
+                    "id": text(&value, "id"),
+                    "created": is_new,
+                }));
+            }
+            Err(error) => failed.push(json!({
+                "path": source.path,
+                "reason": error.to_string(),
+            })),
+        }
     }
 
     let unchanged = uploaded.len() - created;
     let redacted: usize = plan.redaction.values().sum();
-    out.json_or(&plan.report(created, unchanged, &uploaded), || {
-        println!("Imported {created} new, {unchanged} already present ({redacted} redacted).")
+    out.json_or(&plan.report(created, unchanged, &uploaded, &failed), || {
+        println!(
+            "Imported {created} new, {unchanged} already present ({redacted} redacted){}.",
+            failure_summary(&failed)
+        );
+        for failure in &failed {
+            eprintln!(
+                "  failed {}: {}",
+                text(failure, "path"),
+                text(failure, "reason")
+            );
+        }
     });
-    Ok(())
+    finish(&failed)
+}
+
+/// The human summary's failure clause, empty when nothing failed.
+fn failure_summary(failed: &[Value]) -> String {
+    if failed.is_empty() {
+        String::new()
+    } else {
+        format!(", {} failed (run again to retry them)", failed.len())
+    }
+}
+
+/// The exit: an import with a failed file exits non-zero, after everything
+/// else was reported; one that landed everything exits zero.
+fn finish(failed: &[Value]) -> CliResult<()> {
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(err(format!(
+            "{} file(s) failed to import; the rest were imported, and a re-run retries the failed ones",
+            failed.len()
+        )))
+    }
 }
 
 /// What this run would upload, on stderr so `--json` keeps stdout to one
@@ -568,6 +636,7 @@ fn report(
     created: usize,
     unchanged: usize,
     uploaded: &[Value],
+    failed: &[Value],
 ) -> Value {
     json!({
         "root": args.dir.display().to_string(),
@@ -575,6 +644,7 @@ fn report(
         "files": plan.sources.len(),
         "created": created,
         "unchanged": unchanged,
+        "failed": failed.len(),
         "redacted": plan.sources.iter().map(|s| s.secrets).sum::<usize>(),
         "skipped": {
             "not_markdown": plan.skipped.not_text,
@@ -582,6 +652,7 @@ fn report(
             "binary": plan.skipped.binary,
         },
         "sources": uploaded,
+        "failures": failed,
     })
 }
 

@@ -21,11 +21,19 @@
 //! | `POST /v1/model-jobs/{id}/result` | `{text, prompt_tokens, completion_tokens}` | `{status:"done"}`; `422` when the server's validation refuses the text |
 //! | `POST /v1/model-jobs/{id}/fail` | `{reason}` | `{status:"failed"}` |
 //!
+//! `POST /v1/pages/sources` is the one request that retries: the server dedupes
+//! on `(scope, body_sha256)`, so a resend cannot create a second source. A
+//! transient failure (a reset, refusal, close or timeout, or a `429`, `502`,
+//! `503` or `504`) gets [`UPLOAD_ATTEMPTS`] tries in all; a `4xx` never does.
+//!
 //! `POST /v1/device-auth/token` answers `400 {error}` with one of
 //! `authorization_pending`, `slow_down`, `expired_token`, `access_denied`
 //! (RFC 8628 §3.5). Any other non-2xx is read as `{error}` or `{message}`, or as
 //! the RFC 9457 problem document the modules answer with (`title`, `detail`).
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -39,6 +47,19 @@ const ASK_RUNNER_WAIT: Duration = Duration::from_secs(300);
 
 /// A response body, already read.
 type Response = ureq::http::Response<ureq::Body>;
+
+/// The tries a source upload gets: the first, and two retries.
+const UPLOAD_ATTEMPTS: u32 = 3;
+
+/// The pause before each retry, before jitter. Three tries leave two pauses;
+/// the schedule's third step (about 15 seconds) would only be used by a fourth.
+const RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+
+/// The longest a `Retry-After` header may hold a retry back, in seconds.
+const RETRY_AFTER_CAP: u64 = 30;
+
+/// The statuses that name a passing fault rather than a bad request.
+const RETRY_STATUSES: [u16; 4] = [429, 502, 503, 504];
 
 /// What one poll of the token endpoint ended as (RFC 8628 §3.5).
 pub enum Poll {
@@ -281,6 +302,9 @@ impl Client {
     /// the body's SHA-256). `project`, when given, files the source under a
     /// project (`logs sync` sends the session's repository basename); a
     /// re-upload that names one fills in a row that had none.
+    ///
+    /// A transient failure is retried ([`UPLOAD_ATTEMPTS`] tries in all); the
+    /// error that comes back is the last try's.
     pub fn post_source(
         &self,
         kind: &str,
@@ -294,7 +318,39 @@ impl Client {
         if let Some(origin_ref) = origin_ref {
             envelope["origin_ref"] = Value::String(origin_ref.to_owned());
         }
-        self.post_json("/v1/pages/sources", envelope, project)
+        let envelope = with_project(envelope, project);
+        let response = retrying(
+            || self.send_attempt(self.post("/v1/pages/sources").send_json(&envelope)),
+            |tried, after| std::thread::sleep(retry_pause(tried, after)),
+        )?;
+        read_json(response)
+    }
+
+    /// Judge one try at a request: a retryable status or a transient transport
+    /// failure is [`Attempt::Transient`], anything else is final.
+    fn send_attempt(&self, sent: Result<Response, ureq::Error>) -> Attempt<Response> {
+        match sent {
+            Ok(response) if RETRY_STATUSES.contains(&response.status().as_u16()) => {
+                let status = response.status().as_u16();
+                let after = retry_after(&response);
+                match response.into_body().read_to_vec() {
+                    Ok(body) => Attempt::Transient {
+                        error: api_error(status, &body),
+                        after,
+                    },
+                    Err(error) => Attempt::Transient {
+                        error: transport(error),
+                        after,
+                    },
+                }
+            }
+            Ok(response) => Attempt::Done(response),
+            Err(error) if is_transient(&error) => Attempt::Transient {
+                error: transport(error),
+                after: None,
+            },
+            Err(error) => Attempt::Fatal(transport(error)),
+        }
     }
 
     /// `GET /v1/me`: who the token speaks for, including its workspace id. Used
@@ -354,12 +410,104 @@ impl Client {
     }
 
     /// POST one JSON body (plus `project`) and read the JSON answer.
-    fn post_json(&self, path: &str, mut body: Value, project: Option<&str>) -> CliResult<Value> {
-        if let Some(project) = project {
-            body["project"] = Value::String(project.to_owned());
-        }
+    fn post_json(&self, path: &str, body: Value, project: Option<&str>) -> CliResult<Value> {
+        let body = with_project(body, project);
         read_json(self.post(path).send_json(&body).map_err(transport)?)
     }
+}
+
+/// `body` with `project` set, when there is one.
+fn with_project(mut body: Value, project: Option<&str>) -> Value {
+    if let Some(project) = project {
+        body["project"] = Value::String(project.to_owned());
+    }
+    body
+}
+
+/// What one try at a request came to, as [`retrying`] judges it.
+enum Attempt<T> {
+    Done(T),
+    /// Worth another try. `after` is the server's `Retry-After`, in seconds.
+    Transient {
+        error: CliError,
+        after: Option<u64>,
+    },
+    /// Final: a `4xx`, a refusal, anything a retry would only repeat.
+    Fatal(CliError),
+}
+
+/// Run `attempt` until it is done, fails for good, or runs out of tries. Before
+/// each retry `pause` is called with the number of the try that just failed and
+/// the server's hint, and it waits.
+fn retrying<T>(
+    mut attempt: impl FnMut() -> Attempt<T>,
+    mut pause: impl FnMut(u32, Option<u64>),
+) -> CliResult<T> {
+    let mut tried = 1;
+    loop {
+        match attempt() {
+            Attempt::Done(value) => return Ok(value),
+            Attempt::Fatal(error) => return Err(error),
+            Attempt::Transient { error, .. } if tried >= UPLOAD_ATTEMPTS => return Err(error),
+            Attempt::Transient { after, .. } => pause(tried, after),
+        }
+        tried += 1;
+    }
+}
+
+/// Whether a transport failure is worth another try: the connection was reset,
+/// refused, closed or timed out. A name that will not resolve is not, because
+/// a retry would only repeat it.
+fn is_transient(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Timeout(_) | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(error) => matches!(
+            error.kind(),
+            ErrorKind::ConnectionReset
+                | ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionAborted
+                | ErrorKind::BrokenPipe
+                | ErrorKind::UnexpectedEof
+                | ErrorKind::TimedOut
+        ),
+        _ => false,
+    }
+}
+
+/// The `Retry-After` header as whole seconds, when it is one.
+fn retry_after(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(ureq::http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The pause before retry number `tried`: the server's `Retry-After` when it
+/// gave one, the schedule otherwise, jittered either way so a fleet of runs
+/// does not retry in step. A debug-only override (`LIVINGBRAIN_TEST_RETRY_PAUSE`,
+/// milliseconds) lets tests retry without sleeping; it does not exist in a
+/// release build.
+fn retry_pause(tried: u32, after: Option<u64>) -> Duration {
+    #[cfg(debug_assertions)]
+    if let Ok(millis) = std::env::var("LIVINGBRAIN_TEST_RETRY_PAUSE") {
+        return Duration::from_millis(millis.parse().unwrap_or(0));
+    }
+    let base = match after {
+        Some(secs) => Duration::from_secs(secs.clamp(1, RETRY_AFTER_CAP)),
+        None => RETRY_PAUSES[(tried as usize - 1).min(RETRY_PAUSES.len() - 1)],
+    };
+    jittered(base)
+}
+
+/// `base` scaled by a factor in [0.75, 1.25). std's `RandomState` is the CLI's
+/// one source of randomness (see `telemetry.rs`), and a jitter needs no more.
+fn jittered(base: Duration) -> Duration {
+    let unit = (RandomState::new().build_hasher().finish() % 1000) as f64 / 1000.0;
+    base.mul_f64(0.75 + 0.5 * unit)
 }
 
 /// Percent-encode one path segment (RFC 3986 unreserved characters kept).
@@ -436,7 +584,115 @@ fn api_error(status: u16, body: &[u8]) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::Poll;
+    use std::cell::Cell;
+    use std::io;
+    use std::time::Duration;
+
+    use super::{
+        Attempt, CliError, CliResult, Poll, UPLOAD_ATTEMPTS, is_transient, jittered, retrying,
+    };
+
+    fn transient() -> Attempt<u32> {
+        Attempt::Transient {
+            error: CliError::Api("reset".to_owned()),
+            after: None,
+        }
+    }
+
+    #[test]
+    fn only_a_reset_refusal_close_or_timeout_is_transient() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                is_transient(&ureq::Error::Io(io::Error::from(kind))),
+                "{kind:?}"
+            );
+        }
+        assert!(is_transient(&ureq::Error::ConnectionFailed));
+        assert!(is_transient(&ureq::Error::Timeout(ureq::Timeout::Global)));
+        assert!(!is_transient(&ureq::Error::HostNotFound));
+        assert!(!is_transient(&ureq::Error::Io(io::Error::from(
+            io::ErrorKind::PermissionDenied
+        ))));
+        assert!(!is_transient(&ureq::Error::BadUri("no host".to_owned())));
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_until_it_succeeds() {
+        let tries = Cell::new(0);
+        let pauses = Cell::new(0);
+        let result = retrying(
+            || {
+                tries.set(tries.get() + 1);
+                if tries.get() < 3 {
+                    transient()
+                } else {
+                    Attempt::Done(7)
+                }
+            },
+            |_, _| pauses.set(pauses.get() + 1),
+        );
+        assert_eq!(result.expect("succeeds on the third try"), 7);
+        assert_eq!(tries.get(), 3);
+        assert_eq!(pauses.get(), 2, "one pause before each retry");
+    }
+
+    #[test]
+    fn a_final_failure_is_not_retried() {
+        let tries = Cell::new(0);
+        let result: Result<u32, CliError> = retrying(
+            || {
+                tries.set(tries.get() + 1);
+                Attempt::Fatal(CliError::Api("refused".to_owned()))
+            },
+            |_, _| panic!("a final failure must not pause"),
+        );
+        assert!(result.is_err());
+        assert_eq!(tries.get(), 1);
+    }
+
+    #[test]
+    fn a_transient_failure_gives_up_after_the_last_try_with_its_error() {
+        let tries = Cell::new(0);
+        let result: Result<u32, CliError> = retrying(
+            || {
+                tries.set(tries.get() + 1);
+                transient()
+            },
+            |_, _| {},
+        );
+        assert_eq!(tries.get(), UPLOAD_ATTEMPTS);
+        assert_eq!(result.expect_err("gives up").to_string(), "reset");
+    }
+
+    #[test]
+    fn the_server_hint_reaches_the_pause() {
+        let hints = std::cell::RefCell::new(Vec::new());
+        let _: CliResult<u32> = retrying(
+            || Attempt::Transient {
+                error: CliError::Api("busy".to_owned()),
+                after: Some(9),
+            },
+            |tried, after| hints.borrow_mut().push((tried, after)),
+        );
+        assert_eq!(*hints.borrow(), vec![(1, Some(9)), (2, Some(9))]);
+    }
+
+    #[test]
+    fn jitter_stays_within_a_quarter_either_way() {
+        let base = Duration::from_secs(4);
+        for _ in 0..200 {
+            let pause = jittered(base);
+            assert!(pause >= Duration::from_secs(3), "{pause:?}");
+            assert!(pause < Duration::from_secs(5), "{pause:?}");
+        }
+    }
 
     #[test]
     fn a_token_poll_is_read_by_the_rfc_8628_error_code() {

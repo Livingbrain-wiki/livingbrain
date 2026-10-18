@@ -100,8 +100,16 @@ fn sha256_hex(text: &str) -> String {
 /// note: one page per `slug`, a new version only when the note's content
 /// (title, project, body) changed, `unchanged: true` otherwise.
 fn sources_mock() -> Mock {
+    sources_mock_with(None)
+}
+
+/// [`sources_mock`], with one session's source uploads failing: `fault` is
+/// (a fragment of the session's filing name, how many tries fail, the status
+/// they fail with — `0` for a connection reset). Later tries answer as usual.
+fn sources_mock_with(fault: Option<(&'static str, u32, u16)>) -> Mock {
     let seen: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let pages: Arc<Mutex<HashMap<String, (String, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let faulted_tries = Arc::new(Mutex::new(0u32));
     let handler = move |request: &common::Request| {
         if request.path == "/v1/notes" {
             let body: Value = serde_json::from_str(&request.body_text()).unwrap_or(Value::Null);
@@ -133,6 +141,21 @@ fn sources_mock() -> Mock {
             return Reply::json(404, r#"{"error":"no such route"}"#);
         }
         let body: Value = serde_json::from_str(&request.body_text()).unwrap_or(Value::Null);
+        let faulted = fault.filter(|(needle, _, _)| {
+            body["path"]
+                .as_str()
+                .is_some_and(|path| path.contains(needle))
+        });
+        if let Some((_, times, status)) = faulted {
+            let mut tries = faulted_tries.lock().expect("tries lock");
+            *tries += 1;
+            if *tries <= times {
+                return match status {
+                    0 => Reply::reset(),
+                    status => Reply::json(status, r#"{"error":"refused"}"#),
+                };
+            }
+        }
         let text = body["body"].as_str().unwrap_or("");
         let digest = sha256_hex(text);
         let created = seen.lock().expect("seen lock").insert(digest.clone());
@@ -2385,4 +2408,79 @@ fn colony_sync_is_capped_and_never_falls_back_to_the_default_token() {
     origins.sort();
     origins.dedup();
     assert_eq!(origins, vec!["c-chi", "c-chi-lower", "c-fz"]);
+}
+
+/// (p) A session whose connection resets twice uploads on its third try, and
+/// the sync exits zero: the retries are the command's, not the operator's.
+#[test]
+fn a_session_reset_twice_uploads_on_its_third_try() {
+    let mock = sources_mock_with(Some((CLAUDE_SESSION, 2, 0)));
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 2, "{report}");
+    assert_eq!(report["failed"], 0, "{report}");
+    let tries = source_bodies(&mock)
+        .iter()
+        .filter(|body| {
+            body["path"]
+                .as_str()
+                .is_some_and(|p| p.contains(CLAUDE_SESSION))
+        })
+        .count();
+    assert_eq!(tries, 3, "two resets, then the upload that landed");
+}
+
+/// (q) A session that always fails is recorded as failed with its reason; the
+/// other sessions still upload, the JSON lists the failure, and the exit is 1.
+#[test]
+fn a_session_that_always_fails_does_not_stop_the_others() {
+    let mock = sources_mock_with(Some((CLAUDE_SESSION, u32::MAX, 0)));
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let output = sync(&home, &api_envs(&mock.base), &[]);
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", output.stderr);
+    assert!(
+        output.stderr.contains("failed to upload"),
+        "{}",
+        output.stderr
+    );
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 1, "{report}");
+    assert_eq!(report["failed"], 1, "{report}");
+    let failures = report["failures"].as_array().expect("failures");
+    assert_eq!(failures.len(), 1, "{report}");
+    assert_eq!(failures[0]["session_id"], CLAUDE_SESSION);
+    assert!(
+        failures[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "{report}"
+    );
+    let failed_session = report["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .find(|session| session["session_id"] == CLAUDE_SESSION)
+        .expect("the failed session is listed");
+    assert_eq!(failed_session["status"], "failed");
+    assert_eq!(failed_session["reason"], failures[0]["reason"]);
+    // Three tries, then give up.
+    let tries = source_bodies(&mock)
+        .iter()
+        .filter(|body| {
+            body["path"]
+                .as_str()
+                .is_some_and(|p| p.contains(CLAUDE_SESSION))
+        })
+        .count();
+    assert_eq!(tries, 3);
 }
