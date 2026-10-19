@@ -821,6 +821,50 @@ async fn link_row(kit: &TestHarness, token: &str) -> StoredLink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The cost ledger (issue #12)
+
+/// `email/start` is unauthenticated and the workspace id in its body is
+/// whatever the caller typed. A send is counted against a workspace that
+/// exists, and never against an id that names nothing — otherwise anyone
+/// could write ledger rows for tenants that are not there.
+#[pollster::test]
+async fn a_send_is_counted_only_against_a_workspace_that_exists() {
+    let http = TokenHttp::new();
+    let ledger = RecordingLedger::default();
+    let kit = harness_with_ledger(&http, &ledger);
+    let alice = sign_in(&kit, &http, TEAM, ALICE_SLACK, "Alice").await;
+
+    // No workspace named: nothing to count against.
+    let unscoped = post_json(&kit.router, START, &[], &json!({"email": STRANGER})).await;
+    assert_eq!(unscoped.status, StatusCode::ACCEPTED);
+    assert!(ledger.recorded().is_empty(), "{:?}", ledger.recorded());
+
+    // A made-up workspace id: the mail still goes and the answer is the
+    // same 202, but no ledger row is written for it.
+    let bogus = post_json(
+        &kit.router,
+        START,
+        &[],
+        &json!({"email": STRANGER, "workspace_id": "ws_NOSUCHTENANT"}),
+    )
+    .await;
+    assert_eq!(bogus.status, StatusCode::ACCEPTED);
+    assert_eq!(bogus.body, unscoped.body);
+    assert!(ledger.recorded().is_empty(), "{:?}", ledger.recorded());
+
+    // A real workspace: the send is counted against it.
+    let scoped = post_json(
+        &kit.router,
+        START,
+        &[],
+        &json!({"email": ALICE, "workspace_id": alice.workspace_id}),
+    )
+    .await;
+    assert_eq!(scoped.status, StatusCode::ACCEPTED);
+    assert_eq!(ledger.recorded(), vec![alice.workspace_id.clone()]);
+}
+
 fn column(row: &Row, name: &str) -> String {
     row.get::<String>(name).unwrap_or_default()
 }

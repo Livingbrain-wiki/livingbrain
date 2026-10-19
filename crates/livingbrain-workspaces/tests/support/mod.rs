@@ -16,13 +16,14 @@ use bytes::Bytes;
 use cratefield_core::axum::http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use cratefield_core::axum::{self, body::Body};
 use cratefield_core::{
-    Config, DbError, HttpClient, HttpError, Kid, MapConfig, Payload, Row, Signer, Statement,
+    Config, Database, DbError, HttpClient, HttpError, Kid, MapConfig, Payload, Row, Signer,
+    Statement,
 };
 use cratefield_testing::{FixedClock, TestHarness};
 use livingbrain_pages::{PageAnswers, PageStore};
 use livingbrain_workspaces::{
-    FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE, UserChange, Workspaces,
-    apply_user_change,
+    EmailLedger, FLOW_COOKIE, FLOW_PURPOSE, SESSION_COOKIE, SESSION_PURPOSE, UserChange,
+    Workspaces, apply_user_change,
 };
 use sea_query::Value as SeaValue;
 use serde_json::{Value, json};
@@ -91,10 +92,40 @@ pub fn harness(http: &TokenHttp) -> TestHarness {
 /// A harness at an arbitrary instant and config, so a test can expire a
 /// cookie by moving the clock rather than waiting.
 pub fn harness_at(http: &TokenHttp, config: MapConfig, now: i64) -> TestHarness {
+    harness_with(http, config, now, Workspaces::new())
+}
+
+/// The workspace ids an [`EmailLedger`] was asked to count, in order.
+#[derive(Clone, Default)]
+pub struct RecordingLedger(Arc<Mutex<Vec<String>>>);
+
+impl RecordingLedger {
+    pub fn recorded(&self) -> Vec<String> {
+        self.0.lock().expect("ledger lock").clone()
+    }
+}
+
+#[async_trait]
+impl EmailLedger for RecordingLedger {
+    async fn record_email(&self, _db: &dyn Database, _now: OffsetDateTime, workspace_id: &str) {
+        self.0
+            .lock()
+            .expect("ledger lock")
+            .push(workspace_id.to_owned());
+    }
+}
+
+/// A harness at [`NOW`] whose email sends are counted into `ledger`.
+pub fn harness_with_ledger(http: &TokenHttp, ledger: &RecordingLedger) -> TestHarness {
+    let module = Workspaces::new().email_ledger(Arc::new(ledger.clone()));
+    harness_with(http, config(), NOW, module)
+}
+
+fn harness_with(http: &TokenHttp, config: MapConfig, now: i64, module: Workspaces) -> TestHarness {
     let config: Arc<dyn Config> = Arc::new(config);
     let http = http.clone();
     let clock = FixedClock(OffsetDateTime::from_unix_timestamp(now).expect("a valid instant"));
-    TestHarness::with_ports(vec![Box::new(Workspaces::new())], move |ports| {
+    TestHarness::with_ports(vec![Box::new(module)], move |ports| {
         ports.config = config;
         ports.http = Some(Arc::new(http));
         ports.clock = Some(Arc::new(clock));
