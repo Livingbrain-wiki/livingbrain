@@ -1382,11 +1382,19 @@ async fn email_start(
     }
     // The cost ledger (issue #12): one increment per send. The seam's
     // contract is best-effort, and a link that named no workspace (the
-    // body's optional field) has nothing to record against. `email_start`
-    // is unauthenticated and workspace-named — safe only while the email
-    // rate is 0 (pilot free tier); a membership check must precede any
-    // non-zero rate.
-    if let (Some(ledger), Some(workspace_id)) = (&state.ledger, workspace_id) {
+    // body's optional field) has nothing to record against.
+    //
+    // `email_start` is unauthenticated and the workspace id is whatever the
+    // caller typed, so it is only recorded against a workspace that exists:
+    // an id naming nothing would otherwise write a ledger row for a tenant
+    // that is not there, one per string an anonymous caller cares to send.
+    // A lookup that fails records nothing — the count is best-effort, the
+    // mail already went. Anyone can still name a *real* workspace here;
+    // that is safe only while the email rate is 0 (pilot free tier), and a
+    // membership check must precede any non-zero rate.
+    if let (Some(ledger), Some(workspace_id)) = (&state.ledger, workspace_id)
+        && matches!(store::workspace(&*db, workspace_id).await, Ok(Some(_)))
+    {
         ledger.record_email(&*db, now, workspace_id).await;
     }
     email_ok()
