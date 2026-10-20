@@ -43,7 +43,7 @@ build" below) on the same custom domain as the API. Mail leaves from
 `crates/livingbrain-venture/wrangler.toml`: `worker-build`, then
 `node ../../tools/stamp-assets.mjs`, which writes `build/app/` — the directory
 both environments' `[assets]` serve. It copies `app/` (minus `tests/` and the
-README) and adds a content-hashed copy of every file under `assets/` at
+README) and adds a content-hashed copy of every cacheable file under `assets/` at
 `static/assets/<name>.<hash>.<ext>`; the pages' scripts and stylesheets, every
 module `import`, every stylesheet `url()`, the manifest's icons and the
 service worker's precache list point at those. `_headers` then caches
