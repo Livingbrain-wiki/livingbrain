@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use api::Client;
 
 mod api;
+mod apps;
 mod auth;
 mod chat_export;
 mod import;
@@ -195,6 +196,16 @@ enum Command {
         #[command(subcommand)]
         command: jobs::Command,
     },
+    /// Connect apps (SupportGenius, EarthOS) and issue or revoke their credentials (owner only)
+    Apps {
+        #[command(subcommand)]
+        command: apps::AppsCommand,
+    },
+    /// Publish pages to customers, or withdraw them (owner only)
+    Public {
+        #[command(subcommand)]
+        command: apps::PublicCommand,
+    },
     /// Turn anonymous usage data on or off, and show what would be sent
     Telemetry {
         #[command(subcommand)]
@@ -258,6 +269,8 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             out.json_or(&value, || render_search(&value));
             Ok(())
         }
+        Command::Apps { command } => apps::apps(&client(cli)?, out, command),
+        Command::Public { command } => apps::public(&client(cli)?, out, command),
         Command::Note { project, text } => {
             let body = read_note_body(text)?;
             let value = client(cli)?.note(&body, project.as_deref())?;

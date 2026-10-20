@@ -18,10 +18,17 @@ use cratefield_core::{ModuleContext, Problem};
 use cratefield_kms::Kms;
 use livingbrain_mcp::{Asker, BearerAuth, SessionAuth};
 use livingbrain_pages::access::AccessPlan;
-use livingbrain_pages::{FactStore, PageStore, SourceStore};
+use livingbrain_pages::{FactStore, MemoryStore, PageStore, PublicStore, SourceStore};
 
 use crate::problems::{CROSS_SITE_REQUEST, UNAUTHORIZED};
 use crate::{Wiki, port};
+
+/// A request's database, clock and id generator.
+pub(crate) type CoreParts = (
+    Arc<dyn cratefield_core::Database>,
+    Arc<dyn cratefield_core::Clock>,
+    Arc<dyn cratefield_core::IdGen>,
+);
 
 /// The state behind every route in this crate.
 ///
@@ -123,6 +130,67 @@ impl Service {
             port(self.ctx.ports.clock.clone())?,
             port(self.ctx.ports.id_gen.clone())?,
         ))
+    }
+
+    /// The app-memory store for one request: rows in the database, sealed
+    /// under the subject's scope key like a fact.
+    ///
+    /// # Errors
+    ///
+    /// [`Problem::internal`] when the composition left a declared port
+    /// unwired, exactly as [`Service::store`] does.
+    pub(crate) fn memories_store(&self) -> Result<MemoryStore, Problem> {
+        Ok(MemoryStore::new(
+            port(self.ctx.ports.db.clone())?,
+            self.kms.clone(),
+            port(self.ctx.ports.clock.clone())?,
+            port(self.ctx.ports.id_gen.clone())?,
+        ))
+    }
+
+    /// The publication ledger for one request.
+    ///
+    /// # Errors
+    ///
+    /// [`Problem::internal`] when the composition left a declared port
+    /// unwired.
+    pub(crate) fn public_store(&self) -> Result<PublicStore, Problem> {
+        Ok(PublicStore::new(
+            port(self.ctx.ports.db.clone())?,
+            port(self.ctx.ports.clock.clone())?,
+        ))
+    }
+
+    /// The request's database, clock and id generator, for the routes that
+    /// speak to the grants and service-account tables directly.
+    ///
+    /// # Errors
+    ///
+    /// [`Problem::internal`] when the composition left a declared port
+    /// unwired.
+    pub(crate) fn core(&self) -> Result<CoreParts, Problem> {
+        Ok((
+            port(self.ctx.ports.db.clone())?,
+            port(self.ctx.ports.clock.clone())?,
+            port(self.ctx.ports.id_gen.clone())?,
+        ))
+    }
+
+    /// Refuses everyone but a workspace **owner** acting with their whole
+    /// credential: publishing to customers and connecting an app are the
+    /// workspace's decisions. An agent account, a token narrowed to a subset
+    /// of scopes, and any other role are refused alike.
+    ///
+    /// # Errors
+    ///
+    /// [`AGENT_NOT_ALLOWED`](crate::problems::AGENT_NOT_ALLOWED) for an
+    /// agent, [`OWNER_ONLY`](crate::problems::OWNER_ONLY) otherwise.
+    pub(crate) fn owner_only(asker: &Asker) -> Result<(), Problem> {
+        Self::member_only(asker)?;
+        if asker.token_scopes.is_some() || asker.role.as_deref() != Some("owner") {
+            return Err(Problem::new(&crate::problems::OWNER_ONLY));
+        }
+        Ok(())
     }
 
     /// The asker the request's credential speaks for: the bearer token when

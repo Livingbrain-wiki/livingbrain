@@ -123,7 +123,8 @@ impl Blob for RebindBlob {
 /// The whole port layer, rooted on the pages key space: every key one of
 /// this crate's modules writes arrives carrying that module's own scope
 /// (`notes/…`, `search/…`, `ask/…`, `export/…`, `sources/…`,
-/// `coding-agents/…`, `model-jobs/…`, `github/…` — the harness's
+/// `coding-agents/…`, `model-jobs/…`, `github/…`, `public/…`,
+/// `app-tools/…`, `apps/…` — the harness's
 /// [`ScopedBlob`] keyed it) and is rewritten to `pages/…`; every other key
 /// passes through untouched, so the `pages` module's own `pages/…` keys land
 /// exactly as they always did.
@@ -147,7 +148,7 @@ pub struct PagesRebind {
     /// store the runtime resolved, and the `pages` module's own path.
     inner: Arc<dyn Blob>,
     /// The per-module rebinds, one per name this crate mounts.
-    rebinds: [(&'static str, RebindBlob); 8],
+    rebinds: [(&'static str, RebindBlob); 11],
 }
 
 impl PagesRebind {
@@ -193,6 +194,18 @@ impl PagesRebind {
                     "github",
                     RebindBlob::new(Arc::clone(&inner), "github", "pages"),
                 ),
+                // Connected apps (issues #51 and #146): publishing copies a
+                // shared page into the public scope, and the public answer
+                // reads it back — both in the pages key space.
+                (
+                    "public",
+                    RebindBlob::new(Arc::clone(&inner), "public", "pages"),
+                ),
+                (
+                    "app-tools",
+                    RebindBlob::new(Arc::clone(&inner), "app-tools", "pages"),
+                ),
+                ("apps", RebindBlob::new(Arc::clone(&inner), "apps", "pages")),
             ],
             inner,
         }
@@ -471,6 +484,9 @@ mod tests {
             "coding-agents",
             "model-jobs",
             "github",
+            "public",
+            "app-tools",
+            "apps",
         ] {
             let scoped = ScopedBlob::new(Arc::clone(&planted) as Arc<dyn Blob>, module);
             // The key as the page store writes it: relative, because the

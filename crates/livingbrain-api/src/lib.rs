@@ -63,6 +63,7 @@
 
 #![forbid(unsafe_code)]
 
+mod apps;
 mod ask;
 mod budgets;
 mod coding_agents;
@@ -74,13 +75,16 @@ mod model_jobs;
 mod notes;
 mod pages;
 mod problems;
+mod public;
 mod rebind;
 mod recipes;
 mod search;
 mod service;
 mod sources;
+mod tools;
 mod zip;
 
+pub use apps::{Apps, TOOLS as APP_TOOLS, TOOLS_KIND, app_space, is_app_name, subject_scope};
 pub use ask::{
     ASK_CONTEXT_CHARS_MAX, ASK_ROLE, Ask, AskModel, DEFAULT_CONTEXT_CHARS_MAX, MAX_ANSWER_TOKENS,
     MAX_CONTEXT_CHARS, MAX_QUESTION_CHARS, MODEL_FAILED, NO_MODEL, OVER_BUDGET, context_budget,
@@ -101,9 +105,11 @@ pub use livingbrain_mcp::SessionAuth;
 pub use model_jobs::ModelJobs;
 pub use notes::{BACKFILL_BATCH, Backfilled, Notes, backfill};
 pub use pages::pages_routes;
+pub use public::PublicPages;
 pub use rebind::{PagesRebind, RebindBlob};
 pub use search::Search;
 pub use sources::Sources;
+pub use tools::{AppTools, QUESTION_MAX, RECALL_CHARS, RECALL_MAX, RESPONSE_MAX_BYTES};
 
 use cratefield_core::Problem;
 use cratefield_kms::Kms;

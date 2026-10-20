@@ -1349,6 +1349,14 @@ impl PageStore {
                     "DELETE FROM fact_dreams WHERE scope = ?",
                     vec![text(scope)],
                 ),
+                Statement::with_values(
+                    "DELETE FROM app_memories WHERE scope = ?",
+                    vec![text(scope)],
+                ),
+                Statement::with_values(
+                    "DELETE FROM public_pages WHERE scope = ?",
+                    vec![text(scope)],
+                ),
             ])
             .await
             .map_err(PageError::Store)
@@ -1530,6 +1538,53 @@ impl PageStore {
             self.db
                 .execute(&Statement::with_values(
                     "UPDATE facts SET sealed = ?, key_version = ? \
+                     WHERE scope = ? AND id = ? AND key_version = ?",
+                    vec![
+                        text(&sealed),
+                        int(active.version),
+                        text(scope),
+                        text(&id),
+                        int(version),
+                    ],
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            report.rewritten += 1;
+        }
+        drop(old_key);
+
+        // App memories (issue #146) are sealed in their rows the same way.
+        let memories = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT id, sealed, key_version FROM app_memories \
+                 WHERE scope = ? AND key_version <> ? ORDER BY key_version ASC, id ASC",
+                vec![text(scope), int(active.version)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let mut old_version: Option<u32> = None;
+        let mut old_key = None;
+        for row in &memories.rows {
+            let id = row.get::<String>("id").unwrap_or_default();
+            let version = row.get::<u32>("key_version").unwrap_or_default();
+            if old_version != Some(version) {
+                old_key = Some(self.keys.dek(scope, version).await?);
+                old_version = Some(version);
+            }
+            let key = old_key.as_ref().expect("the key is set with the version");
+            let sealed = crate::memories::reseal(
+                key,
+                version,
+                &active.dek,
+                active.version,
+                scope,
+                &id,
+                &row.get::<String>("sealed").unwrap_or_default(),
+            )?;
+            self.db
+                .execute(&Statement::with_values(
+                    "UPDATE app_memories SET sealed = ?, key_version = ? \
                      WHERE scope = ? AND id = ? AND key_version = ?",
                     vec![
                         text(&sealed),

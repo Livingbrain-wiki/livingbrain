@@ -206,5 +206,9 @@
   "oauth/0002": {
     "file": "0052_oauth_0002_metadata_expiry.sql",
     "sha256": "9d8925bdf22ba1867116e233cd06958565a7e92c21540a44f54e9e36c5492181"
+  },
+  "pages/0012": {
+    "file": "0053_pages_0012_apps.sql",
+    "sha256": "8ca3f25e78a59c108f67326b9ab1e85d6b70701cf26dc3ec6c5be2a29e626325"
   }
 }

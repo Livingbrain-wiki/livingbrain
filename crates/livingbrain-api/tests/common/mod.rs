@@ -24,8 +24,8 @@ use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::{MemoryBlob, TestHarness, TestResponse, request, request_as};
 use livingbrain_access::{Scope, UserId};
 use livingbrain_api::{
-    Ask, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind, ResumeParkedOnMain,
-    Search, Sources, Wiki, pages_routes,
+    AppTools, Apps, Ask, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind,
+    PublicPages, ResumeParkedOnMain, Search, Sources, Wiki, pages_routes,
 };
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
 use livingbrain_pages::{
@@ -67,14 +67,45 @@ pub const TOKEN_A_READ: &str = "token-a-read";
 /// `user-b` with a token cut down to the shared space.
 pub const TOKEN_B_SHARED: &str = "user-b-shared";
 
+/// The owner of [`WORKSPACE`], with their whole credential.
+pub const TOKEN_OWNER: &str = "owner-1";
+/// The same owner, with a token cut down to the shared space.
+pub const TOKEN_OWNER_NARROW: &str = "owner-1-narrow";
+/// An admin of [`WORKSPACE`] (not an owner).
+pub const TOKEN_ADMIN: &str = "admin-1";
+/// The owner of [`OTHER_WORKSPACE`].
+pub const TOKEN_OWNER_ELSEWHERE: &str = "owner-elsewhere";
+
 /// A bearer resolver over a fixed table: a known token names an asker, an
 /// unknown one names nobody. That is the whole of what #72 replaces.
+///
+/// An agent account's real key (`lba_…`) is resolved against the service
+/// account tables, the way the venture's resolver does it minus the
+/// membership check, so a test can issue a credential through
+/// `POST /v1/apps` and call with the key it got back.
 #[derive(Default)]
 struct Tokens(BTreeMap<String, Asker>);
 
 #[async_trait::async_trait]
 impl BearerAuth for Tokens {
-    async fn authenticate(&self, _ports: &Ports, token: &str) -> Result<Asker, AuthError> {
+    async fn authenticate(&self, ports: &Ports, token: &str) -> Result<Asker, AuthError> {
+        if token.starts_with("lba_") {
+            let db = ports.db.clone().ok_or(AuthError::Rejected)?;
+            let clock = ports.clock.clone().ok_or(AuthError::Rejected)?;
+            let principal =
+                cratefield_module_orgs::service_accounts::verify_key(&*db, token, clock.now())
+                    .await
+                    .map_err(|_| AuthError::Rejected)?
+                    .ok_or(AuthError::Rejected)?;
+            return Ok(Asker {
+                workspace_id: principal.account.org_id,
+                user_id: principal.account.id,
+                token_scopes: principal.scopes,
+                agent_owner: Some(principal.account.owner_sub),
+                role: None,
+                credential: Some(principal.prefix),
+            });
+        }
         self.0.get(token).cloned().ok_or(AuthError::Rejected)
     }
 }
@@ -105,6 +136,13 @@ impl Fixture {
     #[must_use]
     pub fn db(&self) -> Arc<dyn Database> {
         self.db.clone()
+    }
+
+    /// The key custodian every store of this fixture seals with.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn kms(&self) -> Arc<dyn Kms> {
+        self.key.clone()
     }
 
     /// The harness's own clock.
@@ -264,6 +302,36 @@ fn fixture_with(
     .collect::<BTreeMap<_, _>>();
     // ADR 0004: an agent account user-a owns, with a whole key and with one
     // cut down to reading one folder; and user-b with a shared-only token.
+    for (token, workspace, user, role, scopes) in [
+        (TOKEN_OWNER, WORKSPACE, "owner-1", "owner", None),
+        (
+            TOKEN_OWNER_NARROW,
+            WORKSPACE,
+            "owner-1",
+            "owner",
+            Some(vec!["shared".to_owned()]),
+        ),
+        (TOKEN_ADMIN, WORKSPACE, "admin-1", "admin", None),
+        (
+            TOKEN_OWNER_ELSEWHERE,
+            OTHER_WORKSPACE,
+            "owner-2",
+            "owner",
+            None,
+        ),
+    ] {
+        askers.insert(
+            token.to_owned(),
+            Asker {
+                workspace_id: workspace.to_owned(),
+                user_id: user.to_owned(),
+                token_scopes: scopes,
+                agent_owner: None,
+                role: Some(role.to_owned()),
+                credential: None,
+            },
+        );
+    }
     askers.insert(
         TOKEN_AGENT.to_owned(),
         Asker {
@@ -326,6 +394,9 @@ fn fixture_with(
         Box::new(Sources::new(wiki.clone())),
         Box::new(Graph::new(wiki.clone())),
         Box::new(CodingAgents::new(wiki.clone())),
+        Box::new(Apps::new(wiki.clone())),
+        Box::new(PublicPages::new(wiki.clone())),
+        Box::new(AppTools::new(wiki.clone())),
         Box::new(ModelJobs::new(wiki)),
         // The two tables the compiler reads beside its own: which model
         // serves the workspace, and the usage ledger its budget gate reads.
@@ -385,6 +456,18 @@ pub fn post(fixture: &Fixture, token: &str, path: &str, body: Value) -> TestResp
         path,
         token,
         Some(&body.to_string()),
+    ))
+}
+
+/// A `DELETE` with a bearer token.
+#[allow(dead_code)]
+pub fn delete(fixture: &Fixture, token: &str, path: &str) -> TestResponse {
+    pollster::block_on(request_as(
+        &fixture.router,
+        Method::DELETE,
+        path,
+        token,
+        None,
     ))
 }
 

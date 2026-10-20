@@ -193,3 +193,27 @@ fn connection_borrowing() {
     );
     assert_eq!(needs.resolve(Approval::Approve), ConnectionGrant::Granted);
 }
+
+#[test]
+fn public_parses_round_trips_and_is_never_granted_by_scopes_for() {
+    assert_eq!("public".parse::<Scope>().unwrap(), Scope::Public);
+    assert_eq!(Scope::Public.to_string(), "public");
+    // The id forms need an id; `public` is the whole scope.
+    assert!("public:x".parse::<Scope>().is_err());
+
+    let mut memberships = ChannelMemberships::new();
+    let channel = ChannelId::new("c1".to_owned());
+    let asker = UserId::new("u1".to_owned());
+    memberships.sync_channel(channel.clone(), [asker.clone()]);
+    for location in [
+        Location::PublicChannel,
+        Location::PrivateChannel(channel),
+        Location::Dm,
+    ] {
+        let set = scopes_for(&asker, location, &memberships);
+        assert!(
+            !set.contains(&Scope::Public),
+            "no asker is ever granted the customer-safe scope by the access model"
+        );
+    }
+}

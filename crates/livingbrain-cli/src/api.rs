@@ -409,6 +409,26 @@ impl Client {
         Ok((status, body))
     }
 
+    /// One JSON request with any method, and its JSON answer: the thin
+    /// calls of `livingbrain apps` and `livingbrain public`.
+    pub fn send_json(&self, method: &str, path: &str, body: Option<&Value>) -> CliResult<Value> {
+        let url = format!("{}{path}", self.base);
+        let authorize = |request: ureq::RequestBuilder<ureq::typestate::WithoutBody>| match &self
+            .token
+        {
+            Some(token) => request.header("Authorization", format!("Bearer {}", token.expose())),
+            None => request,
+        };
+        let response = match (method, body) {
+            ("GET", _) => authorize(self.agent.get(url)).call(),
+            ("DELETE", _) => authorize(self.agent.delete(url)).call(),
+            (_, body) => self
+                .post(path)
+                .send_json(body.cloned().unwrap_or_else(|| json!({}))),
+        };
+        read_json(response.map_err(transport)?)
+    }
+
     /// POST one JSON body (plus `project`) and read the JSON answer.
     fn post_json(&self, path: &str, body: Value, project: Option<&str>) -> CliResult<Value> {
         let body = with_project(body, project);

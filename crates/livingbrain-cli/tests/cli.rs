@@ -458,3 +458,83 @@ fn ask_waits_for_the_member_s_own_runner() {
     );
     assert_eq!(polls.load(Ordering::SeqCst), 2);
 }
+
+/// Issue #146: `apps issue` connects an app and prints its credential once;
+/// `apps revoke` sends the DELETE; `public publish` posts the slug.
+#[test]
+fn apps_issue_revoke_and_public_publish_speak_the_owner_routes() {
+    let mock = Mock::start(
+        |request| match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/v1/apps") => Reply::json(
+                201,
+                r#"{"app":"earthos","agent_id":"agt_1","prefix":"lba_0011223344556677","key":"lba_0011223344556677_SECRET","tools":["brain_answer_public"]}"#,
+            ),
+            ("DELETE", "/v1/apps/earthos") => {
+                Reply::ok_json(r#"{"app":"earthos","revoked_keys":2}"#)
+            }
+            ("DELETE", "/v1/apps/earthos/keys/lba_0011223344556677") => {
+                Reply::ok_json(r#"{"app":"earthos","revoked":"lba_0011223344556677"}"#)
+            }
+            ("POST", "/v1/public/pages") => Reply::json(
+                201,
+                r#"{"slug":"refund-policy","title":"Refund policy","url":"https://x.test/r","scope":"public"}"#,
+            ),
+            _ => Reply::json(404, r#"{"error":"no such route"}"#),
+        },
+    );
+    let (cwd, home) = (temp_dir("apps-cwd"), temp_dir("apps-home"));
+    let envs = api_envs(&mock.base);
+
+    let issued = run(
+        &cwd,
+        &home,
+        &["apps", "issue", "earthos", "--json"],
+        &envs,
+        None,
+    );
+    assert!(issued.status.success(), "stderr: {}", issued.stderr);
+    assert_eq!(json_of(&issued)["key"], "lba_0011223344556677_SECRET");
+    let human = run(&cwd, &home, &["apps", "issue", "earthos"], &envs, None);
+    assert!(human.stdout.contains("shown once"), "{}", human.stdout);
+    assert!(human.stdout.contains("lba_0011223344556677_SECRET"));
+
+    let revoked = run(&cwd, &home, &["apps", "revoke", "earthos"], &envs, None);
+    assert!(revoked.status.success(), "stderr: {}", revoked.stderr);
+    assert!(revoked.stdout.contains("2 key(s)"), "{}", revoked.stdout);
+    let one = run(
+        &cwd,
+        &home,
+        &["apps", "revoke", "earthos", "--key", "lba_0011223344556677"],
+        &envs,
+        None,
+    );
+    assert!(one.status.success(), "stderr: {}", one.stderr);
+
+    let published = run(
+        &cwd,
+        &home,
+        &[
+            "public",
+            "publish",
+            "refund-policy",
+            "--url",
+            "https://x.test/r",
+        ],
+        &envs,
+        None,
+    );
+    assert!(published.status.success(), "stderr: {}", published.stderr);
+
+    let requests = mock.requests();
+    let issue = requests
+        .iter()
+        .find(|r| r.method == "POST" && r.path == "/v1/apps")
+        .expect("issue was called");
+    assert_eq!(issue.bearer().as_deref(), Some(TOKEN));
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.method == "DELETE" && r.path == "/v1/apps/earthos")
+    );
+    assert!(requests.iter().any(|r| r.path == "/v1/public/pages"));
+}
