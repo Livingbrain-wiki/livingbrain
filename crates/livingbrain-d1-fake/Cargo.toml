@@ -1,0 +1,19 @@
+[package]
+name = "livingbrain-d1-fake"
+description = "Test double for Cloudflare D1's bound-parameter ceiling: a Database that refuses any statement over 100 binds"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# A test double. Consumers name it under [dev-dependencies] only, so it never
+# reaches the Worker.
+[dependencies]
+async-trait = { workspace = true }
+cratefield-core = { workspace = true }
+livingbrain-d1 = { path = "../livingbrain-d1" }
