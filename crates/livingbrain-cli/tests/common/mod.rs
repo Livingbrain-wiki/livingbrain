@@ -251,15 +251,11 @@ const SCRUBBED: &[&str] = &[
     "LIVINGBRAIN_MULTI_WORKSPACE",
 ];
 
-/// Run the binary in `cwd` with an isolated `home`, the given environment and
-/// optional stdin. The test-only keychain hook is always set.
-pub fn run(
-    cwd: &Path,
-    home: &Path,
-    args: &[&str],
-    envs: &[(&str, &str)],
-    stdin: Option<&str>,
-) -> Output {
+/// The binary, set up in the sandbox: its working directory, its home and
+/// config directories, the scrubbed environment and `envs`, with `args`. Stdio
+/// is left to the caller. A test that spawns the binary itself must use this,
+/// never `CARGO_BIN_EXE_livingbrain` directly (see `tests/isolation.rs`).
+pub fn sandboxed(cwd: &Path, home: &Path, args: &[&str], envs: &[(&str, &str)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_livingbrain"));
     command.current_dir(cwd);
     for key in [
@@ -300,6 +296,19 @@ pub fn run(
         command.env(key, value);
     }
     command.args(args);
+    command
+}
+
+/// Run the binary in `cwd` with an isolated `home`, the given environment and
+/// optional stdin, and wait for it.
+pub fn run(
+    cwd: &Path,
+    home: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    stdin: Option<&str>,
+) -> Output {
+    let mut command = sandboxed(cwd, home, args, envs);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command.stdin(if stdin.is_some() {
         Stdio::piped()
