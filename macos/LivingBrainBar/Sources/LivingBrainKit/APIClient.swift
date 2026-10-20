@@ -406,3 +406,12 @@ public struct FixtureTransport: HTTPTransport {
         return (found ?? Data(#"{"error":"no fixture \#(name)"}"#.utf8), response)
     }
 }
+
+extension APIClient {
+    /// `GET /v1/graph?limit=1`: whether the brain map can be read with this
+    /// token. Throws the usual `APIError` (401 when the token is refused).
+    public func graphProbe() async throws {
+        struct Probe: Decodable {}
+        _ = try await get(Probe.self, BrainWeb.graphPath, query: [("limit", "1")])
+    }
+}

@@ -4,10 +4,11 @@ import SwiftUI
 
 /// The sidebar's destinations.
 enum Destination: String, CaseIterable, Identifiable, Hashable {
-    case wiki, ask, timeline, usage, sessions, projects, settings
+    case wiki, ask, timeline, usage, brain, sessions, projects, settings
     var id: String { rawValue }
 
-    static let workspace: [Destination] = [.wiki, .ask, .timeline, .usage]
+    /// `brain` comes last so the ⌘1–⌘7 shortcuts of the other sections keep their numbers.
+    static let workspace: [Destination] = [.wiki, .ask, .timeline, .usage, .brain]
     static let local: [Destination] = [.sessions, .projects]
 
     var title: String {
@@ -16,6 +17,7 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
         case .ask: return "Ask"
         case .timeline: return "Agent Sessions"
         case .usage: return "Usage"
+        case .brain: return "Brain"
         case .sessions: return "Recent Sessions"
         case .projects: return "Projects & Sync"
         case .settings: return "Settings"
@@ -28,6 +30,7 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
         case .ask: return "questionmark.bubble"
         case .timeline: return "clock.badge.checkmark"
         case .usage: return "chart.bar.xaxis"
+        case .brain: return "brain"
         case .sessions: return "clock.arrow.circlepath"
         case .projects: return "folder.badge.gearshape"
         case .settings: return "gearshape"
@@ -124,10 +127,11 @@ struct MainWindow: View {
         case .sessions: SessionsView(model: sessions)
         case .projects: ProjectsView(bar: bar, model: sessions, accounts: workspace)
         case .settings: SettingsView(workspace: workspace, bar: bar, runner: runner, router: router, updates: updates)
-        case .wiki, .ask, .timeline, .usage:
+        case .wiki, .ask, .timeline, .usage, .brain:
             if workspace.signedIn {
                 switch router.destination {
                 case .wiki: WikiView(workspace: workspace, router: router)
+                case .brain: BrainView(workspace: workspace)
                 case .ask: AskView(workspace: workspace, router: router)
                 case .timeline: TimelineView(workspace: workspace, router: router)
                 default: UsageView(workspace: workspace)
