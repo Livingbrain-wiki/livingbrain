@@ -24,6 +24,7 @@ mod jobs;
 mod logs;
 mod mcp;
 mod telemetry;
+mod view;
 
 /// Production: the API and the web app share one origin (MCP is on
 /// `mcp.livingbrain.wiki`). `api.livingbrain.wiki` is the waitlist Worker.
@@ -211,6 +212,8 @@ enum Command {
         #[command(subcommand)]
         action: telemetry::Action,
     },
+    /// Open the 3D brain map locally, from this machine (127.0.0.1 only)
+    View(view::ViewArgs),
     /// What Living Brain is built with, from the vendored Factory Zero stack registry
     About,
 }
@@ -230,6 +233,7 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         Command::Login => auth::login(&cli.api_url, out),
         Command::Logout => auth::logout(&cli.api_url, out),
         Command::Mcp => mcp::serve(&client(cli)?),
+        Command::View(args) => view::run(&cli.api_url, args, out),
         // The stack is vendored into the binary (issue #61), so this is the
         // one command that needs neither a token nor the API — a reader who
         // asks what the brain is made of should get an answer before signing in.
