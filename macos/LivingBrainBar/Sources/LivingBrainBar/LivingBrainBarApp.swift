@@ -103,6 +103,9 @@ struct BarMenu: View {
         if let message = model.state.errorMessage {
             Text("⚠︎ " + message)
         }
+        if let hint = model.state.errorHint {
+            Text(hint)
+        }
         if model.paused {
             Text("Sync is paused")
         } else if model.pendingFiles > 0 {

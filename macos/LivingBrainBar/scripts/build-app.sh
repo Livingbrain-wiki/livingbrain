@@ -5,6 +5,11 @@
 #   CODESIGN_IDENTITY="Developer ID Application: …" scripts/build-app.sh
 #   UNIVERSAL=1 scripts/build-app.sh     # arm64 + x86_64
 #   OUTPUT_DIR=/some/dir scripts/build-app.sh
+#   BUNDLE_CLI=0 scripts/build-app.sh   # app only, no livingbrain CLI inside
+#
+# The app bundles the `livingbrain` CLI at Contents/Resources/livingbrain, built
+# from the same checkout as the app, so the app and its CLI always agree on the
+# opt-in file format. The app prefers this copy over any CLI on the PATH.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,6 +40,16 @@ cp "$bin_dir/$exe_name" "$app/Contents/MacOS/$exe_name"
 for bundle in "$bin_dir"/*.bundle; do
   [[ -e "$bundle" ]] && cp -R "$bundle" "$app/Contents/Resources/"
 done
+# The CLI from this same checkout (host architecture unless UNIVERSAL=1 is
+# handled by scripts/release.sh, which builds both slices itself and passes
+# BUNDLE_CLI=0 here so the CLI is not built twice).
+if [[ "${BUNDLE_CLI:-1}" == "1" ]]; then
+  repo="$(cd "$here/../.." && pwd)"
+  target_dir="${CARGO_TARGET_DIR:-$repo/target}"
+  echo "==> livingbrain CLI from this checkout"
+  (cd "$repo" && cargo build --locked --release -p livingbrain-cli --bin livingbrain)
+  install -m 0755 "$target_dir/release/livingbrain" "$app/Contents/Resources/livingbrain"
+fi
 if [[ -f "$here/Resources/AppIcon.icns" ]]; then
   cp "$here/Resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 fi
@@ -70,6 +85,10 @@ echo "==> codesign (${identity/#-/ad-hoc})"
 sign_flags=(--force --sign "$identity")
 if [[ "$identity" != "-" ]]; then
   sign_flags+=(--options runtime --timestamp)
+fi
+# Inside out: the nested CLI first, then the bundle (which seals Resources).
+if [[ -f "$app/Contents/Resources/livingbrain" ]]; then
+  codesign "${sign_flags[@]}" "$app/Contents/Resources/livingbrain"
 fi
 codesign "${sign_flags[@]}" "$app"
 codesign --verify --strict "$app"

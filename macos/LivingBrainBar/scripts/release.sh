@@ -58,7 +58,7 @@ lipo -info "$cli"
 
 echo "==> app (universal)"
 UNIVERSAL=1 APP_VERSION="$version" BUILD_NUMBER="${BUILD_NUMBER:-1}" \
-  OUTPUT_DIR="$out_dir" CODESIGN_IDENTITY="-" "$here/scripts/build-app.sh"
+  OUTPUT_DIR="$out_dir" CODESIGN_IDENTITY="-" BUNDLE_CLI=0 "$here/scripts/build-app.sh"
 
 echo "==> bundling the CLI"
 install -m 0755 "$cli" "$app/Contents/Resources/livingbrain"

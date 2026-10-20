@@ -435,6 +435,21 @@ public enum CLIOutput {
         let lower = message.lowercased()
         return lower.contains("not logged in") || lower.contains("livingbrain login")
     }
+
+    /// What the user can do about an opt-in file error, or nil for any other
+    /// error. The wording matches logs.rs `parse_allowlist`: a file from a newer
+    /// format, or a CLI older than the file (an old CLI on the PATH).
+    public static func optInHint(_ message: String) -> String? {
+        let lower = message.lowercased()
+        guard lower.contains("opt-in file") else { return nil }
+        if lower.contains("written by a newer livingbrain") {
+            return "Written by a newer livingbrain. Update Living Brain, then Sync Now."
+        }
+        if lower.contains("upgrade the cli") {
+            return "The livingbrain CLI this app ran is older than your opt-in file. Update Living Brain (it bundles a current CLI), then Sync Now."
+        }
+        return nil
+    }
 }
 
 /// Belt and braces: the CLI never prints a token, but nothing this app shows
