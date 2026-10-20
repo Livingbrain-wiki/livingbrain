@@ -336,3 +336,35 @@ scripts/release.sh
 
 There is no macOS CI job: the repository's CI runs on Linux only. Run
 `swift test` locally before sending a change here.
+
+## The 3D brain (Brain)
+
+**Brain** (sidebar, or ⌘5 in the Go menu) shows the web app's own brain map
+(`/brain`) in a web view, so the 3D graph, filters and side panel are the same
+front end as app.livingbrain.wiki/brain.
+
+- **Auth.** The web app signs in with an HttpOnly session cookie, which the app
+  cannot hold for that origin. The app keeps a bearer token in the keychain
+  instead, and `GET /v1/graph` accepts it. The page is loaded through the
+  `lbbrain://livingbrain/brain` scheme, and `BrainSchemeHandler` fetches each
+  request from the signed-in server. It adds `Authorization: Bearer` only to
+  `GET`/`HEAD` under `/v1/`, and refuses every other method. The token never
+  appears in a URL, in the page's JavaScript, or in any web storage. The web view
+  uses a non-persistent data store, so there are no cookies to keep.
+- **Session check.** The page's sign-in check calls `GET /v1/workspaces/me`,
+  which is cookie-only. For that one request the handler reads `GET /v1/me` with
+  the bearer token and reshapes it to the cookie route's form (`BrainWeb.sessionShim`).
+  The reshaped `is_owner` is always false, so owner-only controls are hidden in
+  this view. The server still makes every decision.
+- **Navigation.** Only the brain page (and `about:blank`) loads in the view.
+  Other app pages and external links open in the default browser. Other
+  schemes are cancelled. Redirects are followed only to the same origin.
+- **States.** Before the page loads, the view reads the graph once. A signed-out
+  workspace shows a sign-in prompt, an unreachable server or a failed graph
+  request shows the error with Try Again, and nothing is left blank.
+- **Limitations.** Writes from the page are refused (the map is read-only here).
+  The page's top bar and the sign-in-only controls follow the web app's
+  behaviour where they depend on the cookie route.
+
+Rules and the reshaping live in `Sources/LivingBrainKit/BrainWeb.swift`; tests are in
+`Tests/LivingBrainKitTests/BrainWebTests.swift`.

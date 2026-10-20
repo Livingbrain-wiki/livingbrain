@@ -57,6 +57,11 @@ final class WorkspaceModel: ObservableObject {
 
     var baseURL: URL { bar.serverURL }
 
+    /// The saved token for this server's workspace in use. Only the brain view's
+    /// scheme handler reads it, to set the `Authorization` header; it is never
+    /// put in a URL, a page or a log.
+    var accessToken: String? { token }
+
     private var directory: WorkspaceDirectory {
         WorkspaceDirectory(baseURL: baseURL) {
             KeychainTokenStore(service: KeychainTokenStore.appService, account: $0)
