@@ -314,6 +314,31 @@ impl ScopeFilter {
         self.deny.is_empty() && self.allow.iter().any(String::is_empty)
     }
 
+    /// Splits this filter into pieces whose predicates each bind at most
+    /// `budget` values, by halving the allow list. The pieces' union matches
+    /// exactly what this filter matches (deny is kept on every piece), so a
+    /// query over the pieces, OR-ed, reads the same rows. A filter whose
+    /// predicate is over budget with one allow entry is returned whole.
+    pub(crate) fn split_to_budget(
+        &self,
+        budget: usize,
+        binds: &dyn Fn(&ScopeFilter) -> usize,
+    ) -> Vec<ScopeFilter> {
+        if binds(self) <= budget || self.allow.len() <= 1 || self.is_whole() {
+            return vec![self.clone()];
+        }
+        let (left, right) = self.allow.split_at(self.allow.len() / 2);
+        let half = |allow: &[String]| Self {
+            scope: self.scope.clone(),
+            space: self.space.clone(),
+            allow: allow.to_vec(),
+            deny: self.deny.clone(),
+        };
+        let mut pieces = half(left).split_to_budget(budget, binds);
+        pieces.extend(half(right).split_to_budget(budget, binds));
+        pieces
+    }
+
     /// The SQL predicate for this filter over a table with `scope` and
     /// `slug` columns (optionally qualified by `alias`), and its binds — so
     /// a listing or a search applies the grant before it orders or limits.
