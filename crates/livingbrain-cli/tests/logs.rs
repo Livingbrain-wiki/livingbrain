@@ -2484,3 +2484,29 @@ fn a_session_that_always_fails_does_not_stop_the_others() {
         .count();
     assert_eq!(tries, 3);
 }
+
+/// (vi) A file written by a newer format is refused with the message that says
+/// what to do, and the file is left exactly as it was: nothing is synced and
+/// nothing is rewritten by a build that cannot read it.
+#[test]
+fn a_newer_opt_in_file_is_refused_with_an_upgrade_hint() {
+    let home = temp_dir("logs-home-v3");
+    let cwd = temp_dir("logs-cwd-v3");
+    let body = r#"{"version":3,"allowed":["/opt/work"],"workspace":{"/opt/work":"ws-chi"}}"#;
+    write_allowlist_file(&home, body);
+    let output = run(&cwd, &home, &["logs", "status"], &[], None);
+    assert!(!output.status.success(), "a newer file must be refused");
+    let stderr = &output.stderr;
+    assert!(
+        stderr.contains("written by a newer livingbrain"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("update the Living Brain Mac app"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Nothing was synced"), "{stderr}");
+    let on_disk = std::fs::read_to_string(home.join("livingbrain").join("logs-allow.json"))
+        .expect("the file is still there");
+    assert_eq!(on_disk, body, "the file is not rewritten");
+}

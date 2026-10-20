@@ -26,6 +26,11 @@ public struct SyncState: Equatable, Sendable {
         return nil
     }
 
+    /// What to do about the error, when the error has a known fix.
+    public var errorHint: String? {
+        errorMessage.flatMap(CLIOutput.optInHint)
+    }
+
     /// Start a sync. Returns false (and changes nothing) when one is already
     /// running, so a timer tick and a click never run two CLIs at once.
     @discardableResult

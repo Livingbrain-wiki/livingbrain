@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 pub fn page_scope(workspace_id: &str, scope: &Scope) -> String {
     let (prefix, id) = match scope {
         Scope::Shared => ("shared", String::new()),
+        Scope::Public => ("public", String::new()),
         Scope::Channel(id) => ("channel", id.to_string()),
         Scope::User(id) => ("user", id.to_string()),
     };
@@ -65,6 +66,8 @@ fn specificity(scope: &Scope) -> u8 {
         Scope::User(_) => 0,
         Scope::Shared => 1,
         Scope::Channel(_) => 2,
+        // Never granted by `scopes_for`, so never ranked; last if it ever is.
+        Scope::Public => 3,
     }
 }
 

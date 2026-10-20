@@ -21,15 +21,17 @@
 //! redacted text, so the same document redacted the same way twice is still
 //! one row.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use cratefield_core::{Blob, BlobError, Clock, Database, DbError, IdGen, Statement};
+use cratefield_core::{Blob, BlobError, Clock, Database, DbError, IdGen, Row, Statement};
 use cratefield_kms::{Kms, KmsError};
 use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
 use sea_query::Value as SeaValue;
+
+use livingbrain_d1::distinct_chunks;
 
 use crate::entity;
 use crate::keys::{self, ScopeKeys};
@@ -69,6 +71,13 @@ pub const MAX_PROJECT_LEN: usize = 64;
 /// The most distinct projects [`SourceStore::projects`] answers with: a
 /// filter dropdown, not an export. Past this the list is cut, alphabetically.
 const MAX_PROJECTS: usize = 500;
+/// The scopes one statement reads at once, and the project names one
+/// statement matches at once. A listing binds the workspace, one scope per
+/// slot of [`SCOPE_CHUNK`], one name per slot of [`NAME_CHUNK`], and at most
+/// four more (kind, cursor, agent, limit): 1 + 60 + 30 + 4 = 95, inside D1's
+/// 100. Larger inputs are read in groups and merged.
+const SCOPE_CHUNK: usize = 60;
+const NAME_CHUNK: usize = 30;
 /// How much of the body's hash the blob key carries, so two files whose bodies
 /// share a prefix still land on different keys.
 const BODY_KEY_SHA_PREFIX: usize = 12;
@@ -731,64 +740,90 @@ impl SourceStore {
         if scopes.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let (mut sql, mut values) = owned_by(
-            "SELECT id, scope, kind, rel_path, project, held, created_at FROM sources",
-            workspace,
-            scopes,
-        );
-        if let Some(kind) = filter.kind {
-            sql.push_str(" AND kind = ?");
-            values.push(text(kind.as_str()));
-        }
-        if let Some(project) = &filter.project {
-            // Every spelling of the project the asker's rows use: the
-            // filter matches the project, not one way of writing it.
-            let key = crate::project_key(project);
-            let mut names: Vec<String> = match &key {
-                Some(key) => self
-                    .spellings(workspace, scopes)
-                    .await?
-                    .into_iter()
-                    .filter(|name| crate::project_key(name).as_ref() == Some(key))
-                    .collect(),
-                None => Vec::new(),
-            };
-            if names.is_empty() {
-                names.push(project.clone());
+        // Every spelling of the project the asker's rows use: the filter
+        // matches the project, not one way of writing it.
+        let names: Option<Vec<String>> = match &filter.project {
+            Some(project) => {
+                let key = crate::project_key(project);
+                let mut names: Vec<String> = match &key {
+                    Some(key) => self
+                        .spellings(workspace, scopes)
+                        .await?
+                        .into_iter()
+                        .filter(|name| crate::project_key(name).as_ref() == Some(key))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if names.is_empty() {
+                    names.push(project.clone());
+                }
+                Some(names)
             }
-            let marks = names
-                .iter()
-                .map(|name| {
-                    values.push(text(name));
-                    "?"
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            sql.push_str(&format!(" AND project IN ({marks})"));
+            None => None,
+        };
+        let name_groups: Vec<Option<Vec<String>>> = match &names {
+            Some(names) => distinct_chunks(names, NAME_CHUNK)
+                .into_iter()
+                .map(Some)
+                .collect(),
+            None => vec![None],
+        };
+        // One statement per (scope group, name group), each capped at
+        // `limit`; the answers merge below into what one statement returns.
+        let mut fetched: Vec<Row> = Vec::new();
+        for scope_group in distinct_chunks(scopes, SCOPE_CHUNK) {
+            for name_group in &name_groups {
+                let (mut sql, mut values) = owned_by(
+                    "SELECT id, scope, kind, rel_path, project, held, created_at FROM sources",
+                    workspace,
+                    &scope_group,
+                );
+                if let Some(kind) = filter.kind {
+                    sql.push_str(" AND kind = ?");
+                    values.push(text(kind.as_str()));
+                }
+                if let Some(names) = name_group {
+                    let marks = names
+                        .iter()
+                        .map(|name| {
+                            values.push(text(name));
+                            "?"
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    sql.push_str(&format!(" AND project IN ({marks})"));
+                }
+                if let Some(agent) = &filter.agent {
+                    // A prefix match on the path, escaped: `_` is a wildcard in
+                    // LIKE and `claude_code` is spelled with one.
+                    sql.push_str(" AND rel_path LIKE ? ESCAPE '!'");
+                    let escaped: String = agent
+                        .chars()
+                        .flat_map(|ch| match ch {
+                            '!' | '%' | '_' => vec!['!', ch],
+                            other => vec![other],
+                        })
+                        .collect();
+                    values.push(text(&format!("{escaped} session %")));
+                }
+                if let Some(before) = &filter.before {
+                    sql.push_str(" AND id < ?");
+                    values.push(text(before));
+                }
+                sql.push_str(" ORDER BY id DESC LIMIT ?");
+                values.push(SeaValue::BigInt(Some(
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                )));
+                let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+                fetched.extend(rows.rows);
+            }
         }
-        if let Some(agent) = &filter.agent {
-            // A prefix match on the path, escaped: `_` is a wildcard in
-            // LIKE and `claude_code` is spelled with one.
-            sql.push_str(" AND rel_path LIKE ? ESCAPE '!'");
-            let escaped: String = agent
-                .chars()
-                .flat_map(|ch| match ch {
-                    '!' | '%' | '_' => vec!['!', ch],
-                    other => vec![other],
-                })
-                .collect();
-            values.push(text(&format!("{escaped} session %")));
-        }
-        if let Some(before) = &filter.before {
-            sql.push_str(" AND id < ?");
-            values.push(text(before));
-        }
-        sql.push_str(" ORDER BY id DESC LIMIT ?");
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(limit).unwrap_or(i64::MAX),
-        )));
-        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
-        rows.rows
+        // Newest id first, one row per source, cut to the limit.
+        fetched.sort_by_key(|row| std::cmp::Reverse(row.get::<String>("id")));
+        let mut seen = BTreeSet::new();
+        fetched.retain(|row| seen.insert(row.get::<String>("id").unwrap_or_default()));
+        fetched.truncate(limit);
+        fetched
             .iter()
             .map(|row| {
                 let raw = row
@@ -830,30 +865,40 @@ impl SourceStore {
         if scopes.is_empty() {
             return Ok(Vec::new());
         }
-        let (mut sql, mut values) = owned_by(
-            "SELECT project, COUNT(*) AS sources FROM sources",
-            workspace,
-            scopes,
-        );
-        sql.push_str(" AND project IS NOT NULL");
-        if let Some(kind) = kind {
-            sql.push_str(" AND kind = ?");
-            values.push(text(kind.as_str()));
+        // Each scope group's first `MAX_PROJECTS` names, summed by name. A
+        // name in the whole list's first `MAX_PROJECTS` is in every group
+        // that holds it among that group's first, so the sums are exact and
+        // the cut below is the cut one statement would have made.
+        let mut by_name: BTreeMap<String, u64> = BTreeMap::new();
+        for scope_group in distinct_chunks(scopes, SCOPE_CHUNK) {
+            let (mut sql, mut values) = owned_by(
+                "SELECT project, COUNT(*) AS sources FROM sources",
+                workspace,
+                &scope_group,
+            );
+            sql.push_str(" AND project IS NOT NULL");
+            if let Some(kind) = kind {
+                sql.push_str(" AND kind = ?");
+                values.push(text(kind.as_str()));
+            }
+            sql.push_str(" GROUP BY project ORDER BY project ASC LIMIT ?");
+            values.push(SeaValue::BigInt(Some(
+                i64::try_from(MAX_PROJECTS).unwrap_or(i64::MAX),
+            )));
+            let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+            for row in &rows.rows {
+                let Some(project) = row.get::<String>("project") else {
+                    continue;
+                };
+                let sources = row
+                    .get::<i64>("sources")
+                    .and_then(|count| u64::try_from(count).ok())
+                    .unwrap_or_default();
+                *by_name.entry(project).or_insert(0) += sources;
+            }
         }
-        sql.push_str(" GROUP BY project ORDER BY project ASC LIMIT ?");
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(MAX_PROJECTS).unwrap_or(i64::MAX),
-        )));
-        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
         let mut merged: Vec<ProjectCount> = Vec::new();
-        for row in &rows.rows {
-            let Some(project) = row.get::<String>("project") else {
-                continue;
-            };
-            let sources = row
-                .get::<i64>("sources")
-                .and_then(|count| u64::try_from(count).ok())
-                .unwrap_or_default();
+        for (project, sources) in by_name.into_iter().take(MAX_PROJECTS) {
             let key = crate::project_key(&project).unwrap_or_else(|| project.clone());
             match merged.iter_mut().find(|entry| entry.key == key) {
                 Some(entry) => {
@@ -883,18 +928,26 @@ impl SourceStore {
         workspace: &str,
         scopes: &[&str],
     ) -> Result<Vec<String>, SourceError> {
-        let (mut sql, mut values) =
-            owned_by("SELECT DISTINCT project FROM sources", workspace, scopes);
-        sql.push_str(" AND project IS NOT NULL LIMIT ?");
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(MAX_PROJECTS * 4).unwrap_or(i64::MAX),
-        )));
-        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
-        Ok(rows
-            .rows
-            .iter()
-            .filter_map(|row| row.get::<String>("project"))
-            .collect())
+        let cap = MAX_PROJECTS * 4;
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for scope_group in distinct_chunks(scopes, SCOPE_CHUNK) {
+            let (mut sql, mut values) = owned_by(
+                "SELECT DISTINCT project FROM sources",
+                workspace,
+                &scope_group,
+            );
+            sql.push_str(" AND project IS NOT NULL LIMIT ?");
+            values.push(SeaValue::BigInt(Some(
+                i64::try_from(cap).unwrap_or(i64::MAX),
+            )));
+            let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+            names.extend(
+                rows.rows
+                    .iter()
+                    .filter_map(|row| row.get::<String>("project")),
+            );
+        }
+        Ok(names.into_iter().take(cap).collect())
     }
 
     /// Clears a held source's flag in `scope`, and says what happened.

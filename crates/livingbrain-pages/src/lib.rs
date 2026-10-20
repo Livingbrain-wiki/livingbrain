@@ -37,6 +37,8 @@ mod graph;
 mod ingest;
 mod keys;
 mod links;
+mod memories;
+mod public;
 mod query;
 mod scope;
 mod sources;
@@ -64,6 +66,14 @@ pub use ingest::{
 };
 pub use keys::{SEALED_CONTENT_TYPE, envelope_version};
 pub use links::{APP_BASE_KEY, DEFAULT_APP_BASE, app_base, page_url, reference_url};
+pub use memories::{
+    MAX_MEMORIES, MAX_MEMORY_CHARS, MAX_SOURCE_CHARS, Memory, MemoryError, MemoryStore, app_scopes,
+    is_memory_id,
+};
+pub use public::{
+    MAX_ANSWER_CHARS, MAX_PASSAGES, MIN_COVERAGE_PERCENT, Passage, PublicStore, Publication, clip,
+    extract,
+};
 pub use query::{MAX_QUERY_TERMS, QueryTerm, is_stopword, query_terms};
 pub use scope::{page_scope, page_scopes_for};
 pub use sources::{
@@ -167,6 +177,14 @@ const MIGRATION_ACTIVITY: SqlMigration = SqlMigration::new(
     "0011",
     "activity",
     include_str!("../migrations/sqlite/0011_activity.sql"),
+);
+
+/// App memories and the publication ledger (issues #51 and #146), same
+/// portable subset.
+const MIGRATION_APPS: SqlMigration = SqlMigration::new(
+    "0012",
+    "apps",
+    include_str!("../migrations/sqlite/0012_apps.sql"),
 );
 
 /// Routes a composition mounts inside this module.
@@ -320,6 +338,8 @@ impl Module for Pages {
             "fact_dream_decisions",
             "fact_rule_scan",
             "graph_activity",
+            "app_memories",
+            "public_pages",
         ]
     }
 
@@ -433,6 +453,29 @@ impl Module for Pages {
                  searched, written) and by which client; a day of rows, pruned on each write",
                 "the identifying content is the slug, not a column an erasure query can bind to",
             ),
+            // What an app keeps for its own end members (issue #146). The
+            // row is keyed by the subject's page scope, a hash that folds in
+            // the workspace and the `<app>:<subject>` id, so no column an
+            // erasure query can bind names the person; the text is sealed.
+            // `brain_memory_forget_all` deletes the rows of a scope, and a
+            // workspace erasure deletes them with the scope's key.
+            PersonalDataSet::unreachable(
+                "app_memories",
+                DataKind::Content,
+                "What a connected app's end member chose to keep: the sealed memory text \
+                 and the conversation it came from, under the subject's own scope key.",
+                "the subject is a hash inside the scope column, not a value an erasure query \
+                 can bind to; the scope is erased by brain_memory_forget_all or by \
+                 PageStore::forget_scope",
+            ),
+            PersonalDataSet::unreachable(
+                "public_pages",
+                DataKind::Identifier,
+                "Which pages the workspace published to customers, who published each (a \
+                 member id), when, and the title and link a citation shows.",
+                "the row names the publishing owner by id inside a record the audit trail \
+                 keeps on purpose; the published pages are the workspace's, not a person's",
+            ),
             PersonalDataSet::none(
                 "fact_rule_scan",
                 "The rule pass's position: a fact id and a timestamp, no fact text and no person.",
@@ -449,7 +492,7 @@ impl Module for Pages {
     }
 
     fn migrations(&self) -> Migrations {
-        const MIGRATIONS: [SqlMigration; 11] = [
+        const MIGRATIONS: [SqlMigration; 12] = [
             MIGRATION_INIT,
             MIGRATION_SCOPE_KEYS,
             MIGRATION_SOURCES,
@@ -461,6 +504,7 @@ impl Module for Pages {
             MIGRATION_DREAM_CURSOR,
             MIGRATION_RULE_SCAN,
             MIGRATION_ACTIVITY,
+            MIGRATION_APPS,
         ];
         // The array is the apply order; this refuses a gap, a duplicate or an
         // entry out of order at build time (issue #27).

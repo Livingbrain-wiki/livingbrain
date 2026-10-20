@@ -69,8 +69,12 @@ livingbrain-pages = { path = "../livingbrain-pages" }
 # that leaves the machine first unredacted. Pure Rust, wasm-safe, already in
 # the tree.
 livingbrain-redact = { path = "../livingbrain-redact" }
+# D1's bound-parameter ceiling and the helpers that keep a statement under it.
+livingbrain-d1 = { path = "../livingbrain-d1" }
 
 [dev-dependencies]
+# D1's bind ceiling as a test double. Dev-only.
+livingbrain-d1-fake = { path = "../livingbrain-d1-fake" }
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
 # (issue #20) and, through `harness`, `assert_wasm_safe_deps`. Dev-only, so
 # sqlx and tokio never reach the module's wasm graph.

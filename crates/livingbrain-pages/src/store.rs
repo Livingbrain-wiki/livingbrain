@@ -5,7 +5,7 @@
 //! a per-scope data key held only wrapped in D1, so reading or searching for
 //! one is also a KMS round trip — which is what buys [`PageStore::forget_scope`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cratefield_core::{Blob, BlobError, Clock, Database, DbError, IdGen, Row, Statement};
@@ -16,6 +16,7 @@ use time::format_description::well_known::Rfc3339;
 
 use base64::Engine as _;
 use cratefield_kms::Dek;
+use livingbrain_d1::{BIND_BUDGET, pack};
 
 use crate::access::ScopeFilter;
 use crate::entity::{self, EntityType, Frontmatter};
@@ -753,66 +754,102 @@ impl PageStore {
         if filters.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let mut values = Vec::new();
-        let predicate = filters
-            .iter()
-            .map(|filter| {
-                let (sql, binds) = filter.predicate(None);
-                values.extend(binds);
-                sql
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let mut sql = format!(
-            "SELECT scope, slug, entity_type, head_version, updated_at, title_sealed, \
-             title_key_version FROM pages WHERE ({predicate})"
-        );
-        if !filter.types.is_empty() {
-            let marks = filter
-                .types
-                .iter()
-                .map(|kind| {
-                    values.push(text(kind.as_str()));
-                    "?"
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            sql.push_str(&format!(" AND entity_type IN ({marks})"));
-        }
-        if !filter.exclude.is_empty() {
-            let marks = filter
-                .exclude
-                .iter()
-                .map(|kind| {
-                    values.push(text(kind.as_str()));
-                    "?"
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            sql.push_str(&format!(" AND entity_type NOT IN ({marks})"));
-        }
         if let Some(project) = &filter.project {
             // A project key is `[a-z0-9-]`, so it carries no LIKE wildcard;
             // anything else matches nothing rather than everything.
             if titles::project_key(project).as_deref() != Some(project.as_str()) {
                 return Ok(Vec::new());
             }
-            sql.push_str(" AND (slug LIKE ? OR slug = ?)");
-            values.push(text(&format!("coding-agents--%--{project}--%")));
-            values.push(text(&format!("coding-agents--projects--{project}")));
         }
-        sql.push_str(" ORDER BY updated_at DESC, slug ASC LIMIT ?");
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(limit).unwrap_or(i64::MAX),
-        )));
-        let rows = self
-            .db
-            .query(&Statement::with_values(sql, values))
-            .await
-            .map_err(PageError::Store)?;
+        // A type named twice is one type: the lists are de-duplicated, so
+        // they bind at most one value per entity type however often a caller
+        // repeated one.
+        let types: BTreeSet<&str> = filter.types.iter().map(|kind| kind.as_str()).collect();
+        let exclude: BTreeSet<&str> = filter.exclude.iter().map(|kind| kind.as_str()).collect();
+        // The clauses after the grant's predicate bind a fixed number of
+        // values; the grant's pieces get what is left of D1's budget.
+        let fixed = types.len() + exclude.len() + if filter.project.is_some() { 2 } else { 0 } + 1;
+        let budget = BIND_BUDGET.saturating_sub(fixed);
+        let grant_binds = |piece: &ScopeFilter| piece.predicate(None).1.len();
+        let pieces: Vec<ScopeFilter> = filters
+            .iter()
+            .flat_map(|filter| filter.split_to_budget(budget, &grant_binds))
+            .collect();
+        // One statement per group of pieces, each capped at `limit`; the
+        // answers merge below into what one statement would have returned.
+        let mut rows = Vec::new();
+        for group in pack(pieces, budget, grant_binds) {
+            let mut values = Vec::new();
+            let predicate = group
+                .iter()
+                .map(|filter| {
+                    let (sql, binds) = filter.predicate(None);
+                    values.extend(binds);
+                    sql
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let mut sql = format!(
+                "SELECT scope, slug, entity_type, head_version, updated_at, title_sealed, \
+                 title_key_version FROM pages WHERE ({predicate})"
+            );
+            if !types.is_empty() {
+                let marks = types
+                    .iter()
+                    .map(|kind| {
+                        values.push(text(kind));
+                        "?"
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" AND entity_type IN ({marks})"));
+            }
+            if !exclude.is_empty() {
+                let marks = exclude
+                    .iter()
+                    .map(|kind| {
+                        values.push(text(kind));
+                        "?"
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" AND entity_type NOT IN ({marks})"));
+            }
+            if let Some(project) = &filter.project {
+                sql.push_str(" AND (slug LIKE ? OR slug = ?)");
+                values.push(text(&format!("coding-agents--%--{project}--%")));
+                values.push(text(&format!("coding-agents--projects--{project}")));
+            }
+            sql.push_str(" ORDER BY updated_at DESC, slug ASC LIMIT ?");
+            values.push(SeaValue::BigInt(Some(
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            )));
+            let fetched = self
+                .db
+                .query(&Statement::with_values(sql, values))
+                .await
+                .map_err(PageError::Store)?;
+            rows.extend(fetched.rows);
+        }
+        // The order one statement would have used, then one row per page
+        // (a page two pieces name is one page), cut to the limit.
+        rows.sort_by(|a, b| {
+            b.get::<String>("updated_at")
+                .cmp(&a.get::<String>("updated_at"))
+                .then_with(|| a.get::<String>("slug").cmp(&b.get::<String>("slug")))
+                .then_with(|| a.get::<String>("scope").cmp(&b.get::<String>("scope")))
+        });
+        let mut seen = BTreeSet::new();
+        rows.retain(|row| {
+            seen.insert((
+                row.get::<String>("scope").unwrap_or_default(),
+                row.get::<String>("slug").unwrap_or_default(),
+            ))
+        });
+        rows.truncate(limit);
         let mut keys: BTreeMap<(String, u32), Option<Dek>> = BTreeMap::new();
-        let mut out = Vec::with_capacity(rows.rows.len());
-        for row in &rows.rows {
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
             let raw = row
                 .get::<String>("entity_type")
                 .ok_or_else(|| PageError::Corrupt("pages.entity_type is not text".to_owned()))?;
@@ -1206,46 +1243,55 @@ impl PageStore {
                 .join(", ")
         };
 
-        let scope = filter.scope.as_str();
-        let pages = self
-            .db
-            .query(&{
-                let (predicate, values) = filter.predicate(None);
-                Statement::with_values(
+        // The grant's predicate binds one value per prefix, so a long allow
+        // list is read in pieces (disjoint by construction, see
+        // `ScopeFilter::split_to_budget`). The count, the document
+        // frequencies and the ranking are each summed or merged over the
+        // pieces, so every word still weighs what it would over the whole
+        // grant, and the ranking is the one a single statement would give.
+        let grant_binds = |piece: &ScopeFilter| piece.predicate(None).1.len();
+        let pieces = filter.split_to_budget(BIND_BUDGET - 1, &grant_binds);
+
+        let mut total: i64 = 0;
+        let mut frequencies: BTreeMap<String, i64> = BTreeMap::new();
+        for piece in &pieces {
+            let (predicate, values) = piece.predicate(None);
+            let counted = self
+                .db
+                .query(&Statement::with_values(
                     format!("SELECT COUNT(*) AS n FROM pages WHERE {predicate}"),
                     values,
-                )
-            })
-            .await
-            .map_err(PageError::Store)?;
-        let total = pages
-            .first()
-            .and_then(|row| row.get::<i64>("n"))
-            .unwrap_or(0)
-            .max(0);
-        if total == 0 {
-            return Ok(Vec::new());
-        }
-        let frequencies = self
-            .db
-            .query(&{
-                let (predicate, values) = filter.predicate(None);
-                Statement::with_values(
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            total += counted
+                .first()
+                .and_then(|row| row.get::<i64>("n"))
+                .unwrap_or(0)
+                .max(0);
+            let (predicate, values) = piece.predicate(None);
+            let df_rows = self
+                .db
+                .query(&Statement::with_values(
                     format!(
                         "SELECT term, COUNT(*) AS df FROM page_terms \
                          WHERE {predicate} AND term IN ({}) GROUP BY term",
                         in_list(&mut body.iter().map(|(_, mac)| mac))
                     ),
                     values,
-                )
-            })
-            .await
-            .map_err(PageError::Store)?;
-        let df_of: BTreeMap<String, i64> = frequencies
-            .rows
-            .iter()
-            .filter_map(|row| Some((row.get::<String>("term")?, row.get::<i64>("df")?)))
-            .collect();
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            for row in &df_rows.rows {
+                if let (Some(term), Some(df)) = (row.get::<String>("term"), row.get::<i64>("df")) {
+                    *frequencies.entry(term).or_insert(0) += df;
+                }
+            }
+        }
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let df_of = frequencies;
         // A word's document frequency is its most frequent form's: the forms
         // of one word overlap on the pages that use both.
         let mut df = vec![0_i64; terms.len()];
@@ -1271,39 +1317,40 @@ impl PageStore {
         }
         group_case.push_str(" END");
         weight_case.push_str(" END");
-        let (predicate, mut values) = filter.predicate(None);
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(limit).unwrap_or(i64::MAX),
-        )));
-        let rows = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT g.slug AS slug, SUM(g.w) AS score, MAX(p.updated_at) AS recency \
-                     FROM (SELECT scope, slug, {group_case} AS grp, MAX({weight_case}) AS w \
-                           FROM page_terms WHERE {predicate} AND term IN ({}) \
-                           GROUP BY scope, slug, grp) g \
-                     JOIN pages p ON p.scope = g.scope AND p.slug = g.slug \
-                     GROUP BY g.slug \
-                     ORDER BY score DESC, recency DESC, slug ASC LIMIT ?",
-                    in_list(&mut body.iter().chain(&title).map(|(_, mac)| mac))
-                ),
-                values,
-            ))
-            .await
-            .map_err(PageError::Store)?;
-        Ok(rows
-            .rows
-            .iter()
-            .filter_map(|row| {
+        let scope = filter.scope.as_str();
+        let mut ranked = Vec::new();
+        for piece in &pieces {
+            let (predicate, mut values) = piece.predicate(None);
+            values.push(SeaValue::BigInt(Some(
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            )));
+            let rows = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT g.slug AS slug, SUM(g.w) AS score, MAX(p.updated_at) AS recency \
+                         FROM (SELECT scope, slug, {group_case} AS grp, MAX({weight_case}) AS w \
+                               FROM page_terms WHERE {predicate} AND term IN ({}) \
+                               GROUP BY scope, slug, grp) g \
+                         JOIN pages p ON p.scope = g.scope AND p.slug = g.slug \
+                         GROUP BY g.slug \
+                         ORDER BY score DESC, recency DESC, slug ASC LIMIT ?",
+                        in_list(&mut body.iter().chain(&title).map(|(_, mac)| mac))
+                    ),
+                    values,
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            ranked.extend(rows.rows.iter().filter_map(|row| {
                 Some(Ranked {
                     scope: scope.to_owned(),
                     slug: row.get::<String>("slug")?,
                     score: row.get::<i64>("score").unwrap_or(0),
                     updated_at: row.get::<String>("recency").unwrap_or_default(),
                 })
-            })
-            .collect())
+            }));
+        }
+        Ok(ranked)
     }
 
     /// Forgets a scope: every version of its key is destroyed, and its blind
@@ -1347,6 +1394,14 @@ impl PageStore {
                 ),
                 Statement::with_values(
                     "DELETE FROM fact_dreams WHERE scope = ?",
+                    vec![text(scope)],
+                ),
+                Statement::with_values(
+                    "DELETE FROM app_memories WHERE scope = ?",
+                    vec![text(scope)],
+                ),
+                Statement::with_values(
+                    "DELETE FROM public_pages WHERE scope = ?",
                     vec![text(scope)],
                 ),
             ])
@@ -1530,6 +1585,53 @@ impl PageStore {
             self.db
                 .execute(&Statement::with_values(
                     "UPDATE facts SET sealed = ?, key_version = ? \
+                     WHERE scope = ? AND id = ? AND key_version = ?",
+                    vec![
+                        text(&sealed),
+                        int(active.version),
+                        text(scope),
+                        text(&id),
+                        int(version),
+                    ],
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            report.rewritten += 1;
+        }
+        drop(old_key);
+
+        // App memories (issue #146) are sealed in their rows the same way.
+        let memories = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT id, sealed, key_version FROM app_memories \
+                 WHERE scope = ? AND key_version <> ? ORDER BY key_version ASC, id ASC",
+                vec![text(scope), int(active.version)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let mut old_version: Option<u32> = None;
+        let mut old_key = None;
+        for row in &memories.rows {
+            let id = row.get::<String>("id").unwrap_or_default();
+            let version = row.get::<u32>("key_version").unwrap_or_default();
+            if old_version != Some(version) {
+                old_key = Some(self.keys.dek(scope, version).await?);
+                old_version = Some(version);
+            }
+            let key = old_key.as_ref().expect("the key is set with the version");
+            let sealed = crate::memories::reseal(
+                key,
+                version,
+                &active.dek,
+                active.version,
+                scope,
+                &id,
+                &row.get::<String>("sealed").unwrap_or_default(),
+            )?;
+            self.db
+                .execute(&Statement::with_values(
+                    "UPDATE app_memories SET sealed = ?, key_version = ? \
                      WHERE scope = ? AND id = ? AND key_version = ?",
                     vec![
                         text(&sealed),

@@ -28,6 +28,9 @@ cratefield-module-orgs = { workspace = true }
 # which scopes an asker may read (issue #123), so it asks the model rather
 # than reimplementing the rule. Pure Rust, wasm-safe.
 livingbrain-access = { path = "../livingbrain-access" }
+# D1's bound-parameter ceiling and the helpers that keep every statement
+# under it (the group budget, the `?` lists).
+livingbrain-d1 = { path = "../livingbrain-d1" }
 # Redaction, so a question carrying a secret is cleaned before it becomes a
 # search query (issue #108).
 livingbrain-redact = { path = "../livingbrain-redact" }
@@ -71,3 +74,6 @@ proptest = { workspace = true }
 # module suites use. Dev-only, so it never reaches the module's dependency
 # tree either.
 pollster = "0.4"
+# D1's bind ceiling as a test double (the wrapper over the real SQLite
+# database, and the fake the graph test drives). Dev-only.
+livingbrain-d1-fake = { path = "../livingbrain-d1-fake" }

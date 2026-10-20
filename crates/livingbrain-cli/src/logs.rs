@@ -1208,9 +1208,17 @@ fn parse_allowlist(bytes: &[u8]) -> Result<AllowlistFile, String> {
         .get("version")
         .and_then(Value::as_u64)
         .ok_or_else(|| "not a valid opt-in file (no version); fix or remove it".to_owned())?;
+    if version > u64::from(ROUTING_VERSION) {
+        // Newer than anything this build knows. Its meaning is unknown, and a
+        // reader that guessed could widen what is uploaded, so the whole file
+        // is refused (nothing is skipped and nothing is rewritten).
+        return Err(format!(
+            "opt-in file was written by a newer livingbrain (format version {version}; this build reads versions {ALLOWLIST_VERSION} and {ROUTING_VERSION}): update the Living Brain Mac app or the livingbrain CLI, then sync again. Nothing was synced and the file was not changed"
+        ));
+    }
     if version != u64::from(ALLOWLIST_VERSION) && version != u64::from(ROUTING_VERSION) {
         return Err(format!(
-            "opt-in file version {version} is not {ALLOWLIST_VERSION} or {ROUTING_VERSION} (this build's); upgrade the CLI or fix the file"
+            "opt-in file version {version} is not a format this build reads (versions {ALLOWLIST_VERSION} and {ROUTING_VERSION}); fix or remove the file"
         ));
     }
     if version == u64::from(ALLOWLIST_VERSION) {
@@ -3433,7 +3441,7 @@ mod tests {
         assert!(parse_allowlist(b"{}").is_err(), "no version, no allowed");
         let error = parse_allowlist(br#"{"version":99,"allowed":[]}"#)
             .expect_err("an unknown version is refused");
-        assert!(error.contains("version 99 is not 1 or 2"), "{error}");
+        assert!(error.contains("format version 99"), "{error}");
         assert!(
             parse_allowlist(br#"{"version":1,"allowed":["/x"],"detail":{"/x":"everything"}}"#)
                 .is_err(),
@@ -3620,7 +3628,28 @@ mod tests {
         assert!(parse_allowlist(br#"{"version":1,"allowed":[],"routes":[]}"#).is_ok());
         assert!(parse_allowlist(br#"{"version":1,"allowed":[],"route":[]}"#).is_err());
         let future = parse_allowlist(br#"{"version":3,"allowed":[]}"#).expect_err("future version");
-        assert!(future.contains("version 3 is not 1 or 2"), "{future}");
+        assert!(
+            future.contains("written by a newer livingbrain"),
+            "{future}"
+        );
+        assert!(future.contains("format version 3"), "{future}");
+        assert!(
+            future.contains("update the Living Brain Mac app"),
+            "{future}"
+        );
+        assert!(parse_allowlist(br#"{"version":0,"allowed":[]}"#).is_err());
+        // A version-3 file is refused whole, even when its keys are ones this
+        // build knows: a newer writer may mean them differently.
+        assert!(
+            parse_allowlist(br#"{"version":3,"allowed":["/x"],"workspace":{"/x":"ws"}}"#).is_err()
+        );
+        // A version-2 file written by a routing build reads, workspaces and all.
+        let v2_file = parse_allowlist(
+            br#"{"version":2,"allowed":["/x"],"workspace":{"/x":"ws-chi"},"routes":[{"folder_glob":"*","workspace":"ws-any"}]}"#,
+        )
+        .expect("a version-2 file reads");
+        assert_eq!(v2_file.explicit_workspace("/x"), Some("ws-chi"));
+        assert_eq!(v2_file.routes.len(), 1);
     }
 
     /// The reproduced leak: two checkouts under one allowed parent, with

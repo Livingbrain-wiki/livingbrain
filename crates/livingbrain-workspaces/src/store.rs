@@ -12,6 +12,7 @@
 //! verified first, and neither seam ever rewrites a row that exists.
 
 use cratefield_core::{Clock, Database, DbError, Row, Statement};
+use livingbrain_d1::{BIND_BUDGET, distinct_chunks, placeholders};
 use sea_query::Value;
 use serde_json::Value as Json;
 
@@ -830,41 +831,53 @@ pub(crate) async fn memberships_for(
     if addresses.is_empty() {
         return Ok(Vec::new());
     }
-    let marks = vec!["?"; addresses.len()].join(", ");
-    let statement = Statement::with_values(
-        format!(
-            "SELECT DISTINCT w.id AS workspace_id, w.name AS workspace_name, \
-                    w.avatar AS workspace_avatar, w.created_at AS workspace_created_at, \
-                    m.user_id AS user_id, m.role AS role \
-               FROM member_identities i \
-               JOIN workspace_members m \
-                 ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
-               JOIN workspaces w ON w.id = i.workspace_id \
-              WHERE i.platform = 'email' AND i.external_id IN ({marks}) \
-                AND m.removed_at IS NULL AND w.deleted_at IS NULL \
-              ORDER BY workspace_name, workspace_id"
-        ),
-        addresses.iter().map(|address| text(address)).collect(),
-    );
-    Ok(db
-        .query(&statement)
-        .await?
-        .rows
-        .iter()
-        .map(|row| Membership {
-            workspace_id: row.get::<String>("workspace_id").unwrap_or_default(),
-            workspace_name: row.get::<String>("workspace_name").unwrap_or_default(),
-            workspace_avatar: row.get::<Option<String>>("workspace_avatar").flatten(),
-            user_id: row.get::<String>("user_id").unwrap_or_default(),
-            role: row
-                .get::<String>("role")
-                .and_then(|role| Role::parse(&role))
-                .unwrap_or(Role::Viewer),
-            workspace_created_at: row
-                .get::<String>("workspace_created_at")
-                .unwrap_or_default(),
-        })
-        .collect())
+    // One statement per group of addresses (D1 binds one value per address);
+    // a membership an address pair both reach comes back once.
+    let mut found: Vec<Membership> = Vec::new();
+    for group in distinct_chunks(addresses, BIND_BUDGET) {
+        let marks = placeholders(group.len());
+        let statement = Statement::with_values(
+            format!(
+                "SELECT DISTINCT w.id AS workspace_id, w.name AS workspace_name, \
+                        w.avatar AS workspace_avatar, w.created_at AS workspace_created_at, \
+                        m.user_id AS user_id, m.role AS role \
+                   FROM member_identities i \
+                   JOIN workspace_members m \
+                     ON m.workspace_id = i.workspace_id AND m.user_id = i.user_id \
+                   JOIN workspaces w ON w.id = i.workspace_id \
+                  WHERE i.platform = 'email' AND i.external_id IN ({marks}) \
+                    AND m.removed_at IS NULL AND w.deleted_at IS NULL"
+            ),
+            group.iter().map(|address| text(address)).collect(),
+        );
+        let rows = db.query(&statement).await?;
+        found.extend(rows.rows.iter().map(membership_from));
+    }
+    found.sort_by(|a, b| {
+        (&a.workspace_name, &a.workspace_id, &a.user_id).cmp(&(
+            &b.workspace_name,
+            &b.workspace_id,
+            &b.user_id,
+        ))
+    });
+    found.dedup();
+    Ok(found)
+}
+
+fn membership_from(row: &Row) -> Membership {
+    Membership {
+        workspace_id: row.get::<String>("workspace_id").unwrap_or_default(),
+        workspace_name: row.get::<String>("workspace_name").unwrap_or_default(),
+        workspace_avatar: row.get::<Option<String>>("workspace_avatar").flatten(),
+        user_id: row.get::<String>("user_id").unwrap_or_default(),
+        role: row
+            .get::<String>("role")
+            .and_then(|role| Role::parse(&role))
+            .unwrap_or(Role::Viewer),
+        workspace_created_at: row
+            .get::<String>("workspace_created_at")
+            .unwrap_or_default(),
+    }
 }
 
 /// One invitation.
@@ -1193,4 +1206,24 @@ pub(crate) async fn delete_workspace_rows(
         ),
     ])
     .await
+}
+
+#[cfg(test)]
+mod d1_binds {
+    use livingbrain_d1_fake::D1Like;
+
+    use super::*;
+
+    #[test]
+    fn an_address_list_longer_than_one_statement_may_bind_is_read_in_groups() {
+        // Each address is one bound value. Two hundred and fifty of them are
+        // more than D1 binds in a statement, so the read must be split; the
+        // fake answers any accepted statement with no rows.
+        let addresses: Vec<String> = (0..250)
+            .map(|i| format!("person-{i}@example.test"))
+            .collect();
+        let found = pollster::block_on(memberships_for(&D1Like, &addresses))
+            .expect("the switcher's read stays within D1's bind ceiling");
+        assert!(found.is_empty());
+    }
 }

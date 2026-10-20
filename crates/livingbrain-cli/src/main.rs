@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use api::Client;
 
 mod api;
+mod apps;
 mod auth;
 mod chat_export;
 mod import;
@@ -23,6 +24,7 @@ mod jobs;
 mod logs;
 mod mcp;
 mod telemetry;
+mod view;
 
 /// Production: the API and the web app share one origin (MCP is on
 /// `mcp.livingbrain.wiki`). `api.livingbrain.wiki` is the waitlist Worker.
@@ -195,11 +197,23 @@ enum Command {
         #[command(subcommand)]
         command: jobs::Command,
     },
+    /// Connect apps (SupportGenius, EarthOS) and issue or revoke their credentials (owner only)
+    Apps {
+        #[command(subcommand)]
+        command: apps::AppsCommand,
+    },
+    /// Publish pages to customers, or withdraw them (owner only)
+    Public {
+        #[command(subcommand)]
+        command: apps::PublicCommand,
+    },
     /// Turn anonymous usage data on or off, and show what would be sent
     Telemetry {
         #[command(subcommand)]
         action: telemetry::Action,
     },
+    /// Open the 3D brain map locally, from this machine (127.0.0.1 only)
+    View(view::ViewArgs),
     /// What Living Brain is built with, from the vendored Factory Zero stack registry
     About,
 }
@@ -219,6 +233,7 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         Command::Login => auth::login(&cli.api_url, out),
         Command::Logout => auth::logout(&cli.api_url, out),
         Command::Mcp => mcp::serve(&client(cli)?),
+        Command::View(args) => view::run(&cli.api_url, args, out),
         // The stack is vendored into the binary (issue #61), so this is the
         // one command that needs neither a token nor the API — a reader who
         // asks what the brain is made of should get an answer before signing in.
@@ -258,6 +273,8 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
             out.json_or(&value, || render_search(&value));
             Ok(())
         }
+        Command::Apps { command } => apps::apps(&client(cli)?, out, command),
+        Command::Public { command } => apps::public(&client(cli)?, out, command),
         Command::Note { project, text } => {
             let body = read_note_body(text)?;
             let value = client(cli)?.note(&body, project.as_deref())?;
