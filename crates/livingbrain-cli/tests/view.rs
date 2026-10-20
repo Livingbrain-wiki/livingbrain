@@ -6,7 +6,7 @@ mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdout, Stdio};
 
 use common::{Mock, Reply, run, sandboxed, temp_dir};
 
@@ -14,12 +14,19 @@ use common::{Mock, Reply, run, sandboxed, temp_dir};
 const API_TOKEN: &str = "tok-view-api-credential-1234567890";
 
 /// A child process that is killed when the test ends, pass or fail.
-struct Viewer(Child);
+struct Viewer {
+    child: Child,
+    /// The read end of the child's stdout, kept open for the child's life. A
+    /// closed pipe is a broken pipe for the child, as it would be if the test
+    /// had dropped it; the view must survive that, and this keeps the tests
+    /// about the view, not about the pipe.
+    _stdout: Option<ChildStdout>,
+}
 
 impl Drop for Viewer {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -63,10 +70,16 @@ fn spawn_view(api: &str, extra: &[&str]) -> (Viewer, String) {
     command.stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = command.spawn().expect("spawn livingbrain view");
     let mut first = String::new();
-    BufReader::new(child.stdout.take().expect("stdout"))
-        .read_line(&mut first)
-        .expect("the first line");
-    (Viewer(child), first.trim().to_owned())
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    reader.read_line(&mut first).expect("the first line");
+    (
+        Viewer {
+            child,
+            _stdout: Some(reader.into_inner()),
+        },
+        first.trim().to_owned(),
+    )
 }
 
 /// Start `livingbrain view` (human output) and return the child with the port,
@@ -181,4 +194,47 @@ fn without_a_login_the_view_says_so_and_serves_nothing() {
     assert_eq!(output.status.code(), Some(2), "{}", output.stderr);
     assert!(output.stderr.contains("not logged in"));
     assert!(output.stdout.is_empty());
+}
+
+/// The view outlives its stdout. A reader that goes away (a closed pipe, `| head`)
+/// must not kill the server: a write to it fails, and the server keeps serving.
+#[test]
+fn the_view_outlives_a_closed_stdout() {
+    let api = api_mock();
+    let home = temp_dir("view-closed-stdout");
+    let cwd = temp_dir("view-closed-stdout-cwd");
+    let mut command = sandboxed(
+        &cwd,
+        &home,
+        &["view", "--no-open"],
+        &[
+            ("LIVINGBRAIN_API_URL", api.base.as_str()),
+            ("LIVINGBRAIN_TOKEN", API_TOKEN),
+            ("LIVINGBRAIN_NO_KEYCHAIN", "1"),
+        ],
+    );
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().expect("spawn livingbrain view");
+    let mut reader = BufReader::new(child.stdout.take().expect("stdout"));
+    let mut first = String::new();
+    reader.read_line(&mut first).expect("the first line");
+    let url = first
+        .trim()
+        .strip_prefix("Living Brain view: ")
+        .expect("the URL line")
+        .to_owned();
+    drop(reader); // the pipe's read end is gone now
+    let _viewer = Viewer {
+        child,
+        _stdout: None,
+    };
+
+    let rest = url.strip_prefix("http://127.0.0.1:").expect("loopback URL");
+    let (port, path) = rest.split_once('/').expect("a path");
+    let port: u16 = port.parse().expect("a port");
+    let token = path.trim_end_matches('/');
+    // Give the child time to write its second line into the closed pipe.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let (status, _, page) = http(port, &format!("/{token}/"), &format!("127.0.0.1:{port}"));
+    assert_eq!(status, 200, "the server died with its stdout: {page:.200}");
 }

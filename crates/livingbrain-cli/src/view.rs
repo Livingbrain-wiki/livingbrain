@@ -418,19 +418,32 @@ pub fn run(api_url: &str, args: &ViewArgs, out: &Out) -> CliResult<()> {
     );
 
     let opened = !args.no_open && open_browser(&url);
+    // The server outlives its output: a closed stdout or stderr (a pipe whose
+    // reader went away, `| head`) must not kill it, so these writes ignore errors
+    // where `println!` would panic and exit.
     if out.json {
-        println!("{}", json!({"url": url, "opened": opened}));
+        say(&json!({"url": url, "opened": opened}).to_string());
     } else {
-        println!("Living Brain view: {url}");
+        say(&format!("Living Brain view: {url}"));
         if args.no_open {
-            println!("Open that URL in a browser. Ctrl-C stops the server.");
+            say("Open that URL in a browser. Ctrl-C stops the server.");
         } else if opened {
-            println!("Opened in your browser. Ctrl-C stops the server.");
+            say("Opened in your browser. Ctrl-C stops the server.");
         } else {
-            eprintln!("could not open a browser; open the URL above. Ctrl-C stops the server.");
+            warn("could not open a browser; open the URL above. Ctrl-C stops the server.");
         }
     }
     serve(listener, Arc::new(server))
+}
+
+/// One line on stdout. A failed write is ignored: see `run`.
+fn say(line: &str) {
+    let _ = writeln!(std::io::stdout(), "{line}");
+}
+
+/// One line on stderr. A failed write is ignored: see `run`.
+fn warn(line: &str) {
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// Accept connections until the process ends (Ctrl-C ends it; nothing is
