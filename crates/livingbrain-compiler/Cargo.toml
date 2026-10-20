@@ -26,6 +26,8 @@ cratefield-core = { workspace = true }
 livingbrain-pages = { path = "../livingbrain-pages" }
 # Every model input and output is redacted, on top of the ingest's own pass.
 livingbrain-redact = { path = "../livingbrain-redact" }
+# D1's bound-parameter ceiling and the helpers that keep a statement under it.
+livingbrain-d1 = { path = "../livingbrain-d1" }
 # The `Model`, `Gate` and `FactSink` seams are `#[async_trait]`, like every
 # harness port.
 async-trait = { workspace = true }
@@ -39,6 +41,8 @@ serde_json = { workspace = true }
 time = { workspace = true }
 
 [dev-dependencies]
+# D1's bind ceiling as a test double. Dev-only.
+livingbrain-d1-fake = { path = "../livingbrain-d1-fake" }
 cratefield-testing = { workspace = true, features = ["postgres"] }
 cratefield-kms = { workspace = true }
 livingbrain-access = { path = "../livingbrain-access" }

@@ -1,0 +1,16 @@
+[package]
+name = "livingbrain-d1"
+description = "Cloudflare D1's bound-parameter ceiling and the helpers that keep every statement under it"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Pure Rust, no ports and no runtime: a helper a module composes, wasm-safe by
+# construction.
+[dependencies]

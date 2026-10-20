@@ -1946,6 +1946,8 @@ dependencies = [
  "cratefield-testing",
  "futures-util",
  "livingbrain-access",
+ "livingbrain-d1",
+ "livingbrain-d1-fake",
  "livingbrain-pages",
  "livingbrain-redact",
  "pollster",
@@ -1953,6 +1955,19 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+]
+
+[[package]]
+name = "livingbrain-d1"
+version = "0.1.0"
+
+[[package]]
+name = "livingbrain-d1-fake"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cratefield-core",
+ "livingbrain-d1",
 ]
 
 [[package]]
@@ -1966,6 +1981,8 @@ dependencies = [
  "cratefield-testing",
  "getrandom 0.4.3",
  "livingbrain-access",
+ "livingbrain-d1",
+ "livingbrain-d1-fake",
  "livingbrain-pages",
  "livingbrain-tokens",
  "livingbrain-workspaces",
@@ -2103,6 +2120,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac 0.12.1",
  "livingbrain-access",
+ "livingbrain-d1",
+ "livingbrain-d1-fake",
  "livingbrain-memory",
  "livingbrain-redact",
  "pollster",
@@ -2272,6 +2291,8 @@ dependencies = [
  "hmac 0.12.1",
  "livingbrain-access",
  "livingbrain-channel",
+ "livingbrain-d1",
+ "livingbrain-d1-fake",
  "livingbrain-judge",
  "livingbrain-pages",
  "livingbrain-redact",

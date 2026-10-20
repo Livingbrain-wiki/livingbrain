@@ -31,7 +31,9 @@ use sea_query::Value as SeaValue;
 use std::collections::BTreeMap;
 use time::{Duration, OffsetDateTime};
 
-use crate::queue::{JobStatus, MAX_ATTEMPTS, Queue, rfc3339, utc_day};
+use livingbrain_d1::distinct_chunks;
+
+use crate::queue::{JobStatus, MAX_ATTEMPTS, Queue, SCOPE_GROUP, rfc3339, utc_day};
 
 /// What one backlog pass did: how many stored sources it scanned after the
 /// cursor, and how many of them it filed under a unit.
@@ -579,18 +581,32 @@ impl Queue {
         scopes: Option<&[String]>,
         now: OffsetDateTime,
     ) -> Result<u64, DbError> {
-        let mut values = vec![text(&rfc3339(now)), text(workspace)];
-        let mut sql = String::from(
-            "UPDATE source_compile_units SET status = 'queued', attempts = 0, \
-                    next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
-             WHERE status = 'skipped-no-model' AND workspace = ?",
-        );
-        if let Some(scopes) = scopes {
-            let marks = vec!["?"; scopes.len()].join(", ");
-            sql.push_str(&format!(" AND scope IN ({marks})"));
-            values.extend(scopes.iter().map(|scope| text(scope)));
+        let groups: Vec<Option<Vec<String>>> = match scopes {
+            Some(scopes) => distinct_chunks(scopes, SCOPE_GROUP)
+                .into_iter()
+                .map(Some)
+                .collect(),
+            None => vec![None],
+        };
+        let mut requeued = 0;
+        for group in groups {
+            let mut values = vec![text(&rfc3339(now)), text(workspace)];
+            let mut sql = String::from(
+                "UPDATE source_compile_units SET status = 'queued', attempts = 0, \
+                        next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
+                 WHERE status = 'skipped-no-model' AND workspace = ?",
+            );
+            if let Some(scopes) = group {
+                let marks = vec!["?"; scopes.len()].join(", ");
+                sql.push_str(&format!(" AND scope IN ({marks})"));
+                values.extend(scopes.iter().map(|scope| text(scope)));
+            }
+            requeued += self
+                .db
+                .execute(&Statement::with_values(sql, values))
+                .await?;
         }
-        self.db.execute(&Statement::with_values(sql, values)).await
+        Ok(requeued)
     }
 
     /// Parks an unread-to-claim unit (no model, no budget, paused) without
@@ -790,99 +806,107 @@ impl Queue {
         if scopes.is_empty() {
             return Ok(lanes);
         }
-        let marks = vec!["?"; scopes.len()].join(", ");
-        let mut values = vec![text(workspace)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        let units = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT lane, status, COUNT(*) AS n FROM source_compile_units \
-                     WHERE workspace = ? AND scope IN ({marks}) GROUP BY lane, status"
-                ),
-                values.clone(),
-            ))
-            .await?;
-        for row in &units.rows {
-            let (Some(lane), Some(status)) = (
-                row.get::<String>("lane"),
-                row.get::<String>("status")
-                    .and_then(|s| JobStatus::parse(&s)),
-            ) else {
-                continue;
-            };
-            let n = row
-                .get::<i64>("n")
-                .and_then(|n| u64::try_from(n).ok())
-                .unwrap_or(0);
-            *lanes
-                .entry(lane)
-                .or_default()
-                .units
-                .entry(status)
-                .or_default() += n;
-        }
-        let members = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT u.lane AS lane, \
-                            COUNT(CASE WHEN m.compiled_at IS NULL THEN 1 END) AS pending, \
-                            COUNT(CASE WHEN m.compiled_at IS NOT NULL THEN 1 END) AS compiled \
-                     FROM source_compile_members m \
-                     JOIN source_compile_units u ON u.scope = m.scope AND u.unit_key = m.unit_key \
-                     WHERE u.workspace = ? AND u.scope IN ({marks}) GROUP BY u.lane"
-                ),
-                values,
-            ))
-            .await?;
-        for row in &members.rows {
-            let Some(lane) = row.get::<String>("lane") else {
-                continue;
-            };
-            let counts = lanes.entry(lane).or_default();
-            let count = |name: &str| {
-                row.get::<i64>(name)
+        let groups = distinct_chunks(scopes, SCOPE_GROUP);
+        // Units and their members, per scope group. Every scope is in one
+        // group, so the sums over groups are the sums one statement gives.
+        for group in &groups {
+            let marks = vec!["?"; group.len()].join(", ");
+            let mut values = vec![text(workspace)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            let units = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT lane, status, COUNT(*) AS n FROM source_compile_units \
+                         WHERE workspace = ? AND scope IN ({marks}) GROUP BY lane, status"
+                    ),
+                    values.clone(),
+                ))
+                .await?;
+            for row in &units.rows {
+                let (Some(lane), Some(status)) = (
+                    row.get::<String>("lane"),
+                    row.get::<String>("status")
+                        .and_then(|s| JobStatus::parse(&s)),
+                ) else {
+                    continue;
+                };
+                let n = row
+                    .get::<i64>("n")
                     .and_then(|n| u64::try_from(n).ok())
-                    .unwrap_or(0)
-            };
-            counts.sources_pending = count("pending");
-            counts.sources_compiled = count("compiled");
+                    .unwrap_or(0);
+                *lanes
+                    .entry(lane)
+                    .or_default()
+                    .units
+                    .entry(status)
+                    .or_default() += n;
+            }
+            let members = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT u.lane AS lane, \
+                                COUNT(CASE WHEN m.compiled_at IS NULL THEN 1 END) AS pending, \
+                                COUNT(CASE WHEN m.compiled_at IS NOT NULL THEN 1 END) AS compiled \
+                         FROM source_compile_members m \
+                         JOIN source_compile_units u ON u.scope = m.scope AND u.unit_key = m.unit_key \
+                         WHERE u.workspace = ? AND u.scope IN ({marks}) GROUP BY u.lane"
+                    ),
+                    values,
+                ))
+                .await?;
+            for row in &members.rows {
+                let Some(lane) = row.get::<String>("lane") else {
+                    continue;
+                };
+                let counts = lanes.entry(lane).or_default();
+                let count = |name: &str| {
+                    row.get::<i64>(name)
+                        .and_then(|n| u64::try_from(n).ok())
+                        .unwrap_or(0)
+                };
+                counts.sources_pending += count("pending");
+                counts.sources_compiled += count("compiled");
+            }
         }
         // Stored and not filed yet: everything after the backlog cursor. The
         // read is bounded by what the pass has not reached, not by the ledger.
         let cursor = self.source_cursor().await?.unwrap_or_default();
         let kinds = vec!["?"; UNIT_KINDS.len()].join(", ");
-        let mut values = vec![text(workspace)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        values.push(text(&cursor));
-        values.extend(UNIT_KINDS.iter().map(|kind| text(kind)));
-        let unfiled = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT kind, COUNT(*) AS n FROM sources \
-                     WHERE workspace = ? AND scope IN ({marks}) AND held = 0 AND id > ? \
-                       AND kind IN ({kinds}) GROUP BY kind"
-                ),
-                values,
-            ))
-            .await?;
-        for row in &unfiled.rows {
-            let Some(kind) = row.get::<String>("kind") else {
-                continue;
-            };
-            let Some(place) = placement(&kind, "", "", "") else {
-                continue;
-            };
-            let n = row
-                .get::<i64>("n")
-                .and_then(|n| u64::try_from(n).ok())
-                .unwrap_or(0);
-            lanes
-                .entry(place.lane.to_owned())
-                .or_default()
-                .sources_pending += n;
+        for group in &groups {
+            let marks = vec!["?"; group.len()].join(", ");
+            let mut values = vec![text(workspace)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            values.push(text(&cursor));
+            values.extend(UNIT_KINDS.iter().map(|kind| text(kind)));
+            let unfiled = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT kind, COUNT(*) AS n FROM sources \
+                         WHERE workspace = ? AND scope IN ({marks}) AND held = 0 AND id > ? \
+                           AND kind IN ({kinds}) GROUP BY kind"
+                    ),
+                    values,
+                ))
+                .await?;
+            for row in &unfiled.rows {
+                let Some(kind) = row.get::<String>("kind") else {
+                    continue;
+                };
+                let Some(place) = placement(&kind, "", "", "") else {
+                    continue;
+                };
+                let n = row
+                    .get::<i64>("n")
+                    .and_then(|n| u64::try_from(n).ok())
+                    .unwrap_or(0);
+                lanes
+                    .entry(place.lane.to_owned())
+                    .or_default()
+                    .sources_pending += n;
+            }
         }
         Ok(lanes)
     }

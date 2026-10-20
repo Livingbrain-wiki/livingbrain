@@ -16,6 +16,8 @@
 use cratefield_core::{Database, DbError, Statement};
 use sea_query::Value as SeaValue;
 
+use livingbrain_d1::{BIND_BUDGET, pack, placeholders};
+
 use crate::access::ScopeFilter;
 use crate::store::text;
 
@@ -74,39 +76,10 @@ pub struct GraphRows {
     pub truncated: bool,
 }
 
-fn placeholders(n: usize) -> String {
-    vec!["?"; n].join(", ")
-}
-
 fn limit(cap: usize) -> SeaValue {
     SeaValue::BigInt(Some(
         i64::try_from(cap.saturating_add(1)).unwrap_or(i64::MAX),
     ))
-}
-
-/// The bound parameters one statement may carry. Cloudflare D1 refuses more
-/// than 100 per statement; the budget leaves room for the row limit bind.
-const BIND_BUDGET: usize = 90;
-
-/// Packs `items` into consecutive groups whose costs each stay within
-/// [`BIND_BUDGET`]. An item over budget on its own gets a group of its own.
-fn pack<T>(items: Vec<T>, cost: impl Fn(&T) -> usize) -> Vec<Vec<T>> {
-    let mut groups = Vec::new();
-    let mut current = Vec::new();
-    let mut used = 0;
-    for item in items {
-        let weight = cost(&item);
-        if !current.is_empty() && used + weight > BIND_BUDGET {
-            groups.push(std::mem::take(&mut current));
-            used = 0;
-        }
-        used += weight;
-        current.push(item);
-    }
-    if !current.is_empty() {
-        groups.push(current);
-    }
-    groups
 }
 
 /// One clause of the source ledger's read: a whole scope, or some projects
@@ -198,7 +171,7 @@ pub async fn graph_rows_in(
             .collect();
         let mut seen = std::collections::BTreeSet::new();
         let mut pages = Vec::new();
-        for group in pack(pieces, page_binds) {
+        for group in pack(pieces, BIND_BUDGET - 1, page_binds) {
             let mut values = Vec::new();
             let predicate = group
                 .iter()
@@ -262,7 +235,7 @@ pub async fn graph_rows_in(
             .collect();
         let mut seen = std::collections::BTreeSet::new();
         let mut links = Vec::new();
-        for group in pack(pieces, link_binds) {
+        for group in pack(pieces, BIND_BUDGET, link_binds) {
             let mut values = Vec::new();
             let predicate = group
                 .iter()
@@ -325,7 +298,7 @@ pub async fn graph_rows_in(
         };
         let mut seen = std::collections::BTreeSet::new();
         let mut sources = Vec::new();
-        for group in pack(clauses, cost) {
+        for group in pack(clauses, BIND_BUDGET, cost) {
             let mut values = vec![text(workspace)];
             let mut parts = Vec::new();
             let wholes: Vec<&String> = group
@@ -405,7 +378,7 @@ pub async fn graph_rows_in(
         // not crowd out the ones it keeps.
         let read_cap = if checked { cap.saturating_mul(4) } else { cap };
         let mut found: Vec<(String, String, i64, Option<String>)> = Vec::new();
-        for group in pack(scopes, |_| 1) {
+        for group in pack(scopes, BIND_BUDGET - 2, |_| 1) {
             let mut values: Vec<SeaValue> = group.iter().map(|scope| text(scope)).collect();
             values.push(text("retracted"));
             values.push(limit(read_cap));

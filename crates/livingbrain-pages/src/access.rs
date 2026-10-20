@@ -315,16 +315,50 @@ impl ScopeFilter {
     }
 
     /// Splits this filter into pieces whose predicates each bind at most
-    /// `budget` values, by halving the allow list. The pieces' union matches
-    /// exactly what this filter matches (deny is kept on every piece), so a
-    /// query over the pieces, OR-ed, reads the same rows. A filter whose
-    /// predicate is over budget with one allow entry is returned whole.
+    /// `budget` values, so a statement over the pieces stays inside D1's
+    /// bound-parameter ceiling.
+    ///
+    /// The pieces are **disjoint**: the allow list first loses every prefix
+    /// an ancestor in the list already covers, and what is left matches no
+    /// slug twice (two folder prefixes that both match one slug are one the
+    /// ancestor of the other). So per-piece counts, and per-piece answers
+    /// merged by key, add up to what the whole filter would have given. Each
+    /// piece keeps only the denies that can touch its own allows, which is
+    /// what lets a long allow list fit. A deny list that cannot be split
+    /// (one allow with more denies under it than the budget) is returned
+    /// whole, and the statement built from it is over budget: the caller's
+    /// fake reports it.
     pub(crate) fn split_to_budget(
         &self,
         budget: usize,
         binds: &dyn Fn(&ScopeFilter) -> usize,
     ) -> Vec<ScopeFilter> {
-        if binds(self) <= budget || self.allow.len() <= 1 || self.is_whole() {
+        if self.is_whole() {
+            return vec![self.clone()];
+        }
+        let mut allow: Vec<String> = Vec::new();
+        for prefix in &self.allow {
+            if allow.iter().any(|kept| prefix_matches(kept, prefix)) {
+                continue;
+            }
+            allow.retain(|kept| !prefix_matches(prefix, kept));
+            allow.push(prefix.clone());
+        }
+        Self {
+            scope: self.scope.clone(),
+            space: self.space.clone(),
+            allow,
+            deny: self.deny.clone(),
+        }
+        .split_allows(budget, binds)
+    }
+
+    fn split_allows(
+        &self,
+        budget: usize,
+        binds: &dyn Fn(&ScopeFilter) -> usize,
+    ) -> Vec<ScopeFilter> {
+        if binds(self) <= budget || self.allow.len() <= 1 {
             return vec![self.clone()];
         }
         let (left, right) = self.allow.split_at(self.allow.len() / 2);
@@ -332,10 +366,21 @@ impl ScopeFilter {
             scope: self.scope.clone(),
             space: self.space.clone(),
             allow: allow.to_vec(),
-            deny: self.deny.clone(),
+            // A deny that is no ancestor or descendant of any of these allows
+            // matches no slug they could reach, so it is dropped here.
+            deny: self
+                .deny
+                .iter()
+                .filter(|deny| {
+                    allow
+                        .iter()
+                        .any(|a| prefix_matches(deny, a) || prefix_matches(a, deny))
+                })
+                .cloned()
+                .collect(),
         };
-        let mut pieces = half(left).split_to_budget(budget, binds);
-        pieces.extend(half(right).split_to_budget(budget, binds));
+        let mut pieces = half(left).split_allows(budget, binds);
+        pieces.extend(half(right).split_allows(budget, binds));
         pieces
     }
 
@@ -838,5 +883,36 @@ mod tests {
         let whole = ScopeFilter::whole("s", SHARED);
         assert_eq!(whole.predicate(None).0, "(scope = ?)");
         assert!(whole.is_whole() && whole.matches("anything"));
+    }
+
+    #[test]
+    fn split_pieces_are_disjoint_and_match_exactly_what_the_filter_matches() {
+        let filter = ScopeFilter {
+            scope: "s".to_owned(),
+            space: SHARED.to_owned(),
+            allow: (0..60)
+                .map(|i| format!("f{i:02}"))
+                .chain(["f01--x".to_owned()])
+                .collect(),
+            deny: vec!["f07--secret".to_owned(), "f30".to_owned()],
+        };
+        let binds = |f: &ScopeFilter| f.predicate(None).1.len();
+        let pieces = filter.split_to_budget(20, &binds);
+        assert!(pieces.len() > 1, "a 60-prefix filter must split");
+        assert!(pieces.iter().all(|piece| binds(piece) <= 20));
+        for slug in [
+            "f01",
+            "f01--x",
+            "f01--y",
+            "f07",
+            "f07--secret",
+            "f07--ok",
+            "f30--a",
+            "f59",
+            "g1",
+        ] {
+            let hits = pieces.iter().filter(|piece| piece.matches(slug)).count();
+            assert_eq!(hits, usize::from(filter.matches(slug)), "slug {slug}");
+        }
     }
 }

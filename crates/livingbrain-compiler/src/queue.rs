@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cratefield_core::{Database, DbError, Row, Statement};
+use livingbrain_d1::distinct_chunks;
 use sea_query::Value as SeaValue;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
@@ -105,6 +106,12 @@ impl JobStatus {
             .find(|status| status.as_str() == value)
     }
 }
+
+/// The scopes one statement reads or writes at once. A statement binds the
+/// workspace, its source id and up to ten fixed values besides, so 80 scopes
+/// keep every statement under D1's 100 binds; a longer list is read in
+/// groups and the answers merged.
+pub(crate) const SCOPE_GROUP: usize = 80;
 
 /// One job row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,38 +339,76 @@ impl Queue {
             sql.push_str(" AND source_id = ?");
             values.push(text(source_id));
         }
-        if let Some(scopes) = &filter.scopes {
-            if scopes.is_empty() {
-                return Ok(Vec::new());
+        let scope_groups: Vec<Option<Vec<String>>> = match &filter.scopes {
+            Some(scopes) => {
+                if scopes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                distinct_chunks(scopes, SCOPE_GROUP)
+                    .into_iter()
+                    .map(Some)
+                    .collect()
             }
-            sql.push_str(&format!(" AND scope IN ({})", placeholders(scopes.len())));
-            values.extend(scopes.iter().map(|scope| text(scope)));
-        }
+            None => vec![None],
+        };
         // Fair across workspaces: at most `per_workspace` of each, oldest
         // first within it, so one workspace's backlog cannot hide another's
         // jobs from the drain.
-        let sql = match per_workspace {
-            Some(per) => {
-                values.push(SeaValue::BigInt(Some(
-                    i64::try_from(per).unwrap_or(i64::MAX),
-                )));
-                format!(
-                    "SELECT {COLUMNS} FROM (SELECT {COLUMNS}, ROW_NUMBER() OVER \
-                     (PARTITION BY workspace ORDER BY queued_at ASC, source_created_at ASC) \
-                     AS lane_rank FROM coding_agent_jobs WHERE {sql}) ranked \
-                     WHERE lane_rank <= ? ORDER BY queued_at ASC, source_created_at ASC LIMIT ?"
-                )
-            }
-            None => format!(
-                "SELECT {COLUMNS} FROM coding_agent_jobs WHERE {sql} \
-                 ORDER BY queued_at ASC, source_created_at ASC LIMIT ?"
-            ),
+        //
+        // A group's lane ranks are computed over the group alone, and never
+        // exceed the whole set's, so each group keeps every row the whole set
+        // would keep. The groups' rows are merged, ranked again over the
+        // whole set, and cut. Without the per-workspace cut a group answers
+        // with its first `limit` rows; with it, every row its ranks keep.
+        let group_limit = match per_workspace {
+            Some(_) => i64::MAX,
+            None => i64::try_from(limit).unwrap_or(i64::MAX),
         };
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(limit).unwrap_or(i64::MAX),
-        )));
-        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
-        Ok(rows.rows.iter().filter_map(job_from).collect())
+        let mut fetched: Vec<Job> = Vec::new();
+        for group in &scope_groups {
+            let mut values = values.clone();
+            let mut where_sql = sql.clone();
+            if let Some(scopes) = group {
+                where_sql.push_str(&format!(" AND scope IN ({})", placeholders(scopes.len())));
+                values.extend(scopes.iter().map(|scope| text(scope)));
+            }
+            let statement = match per_workspace {
+                Some(per) => {
+                    values.push(SeaValue::BigInt(Some(
+                        i64::try_from(per).unwrap_or(i64::MAX),
+                    )));
+                    format!(
+                        "SELECT {COLUMNS} FROM (SELECT {COLUMNS}, ROW_NUMBER() OVER \
+                         (PARTITION BY workspace ORDER BY queued_at ASC, source_created_at ASC) \
+                         AS lane_rank FROM coding_agent_jobs WHERE {where_sql}) ranked \
+                         WHERE lane_rank <= ? ORDER BY queued_at ASC, source_created_at ASC LIMIT ?"
+                    )
+                }
+                None => format!(
+                    "SELECT {COLUMNS} FROM coding_agent_jobs WHERE {where_sql} \
+                     ORDER BY queued_at ASC, source_created_at ASC LIMIT ?"
+                ),
+            };
+            values.push(SeaValue::BigInt(Some(group_limit)));
+            let rows = self
+                .db
+                .query(&Statement::with_values(statement, values))
+                .await?;
+            fetched.extend(rows.rows.iter().filter_map(job_from));
+        }
+        fetched.sort_by(|a, b| {
+            (&a.queued_at, &a.source_created_at).cmp(&(&b.queued_at, &b.source_created_at))
+        });
+        if let Some(per) = per_workspace {
+            let mut taken: BTreeMap<String, usize> = BTreeMap::new();
+            fetched.retain(|job| {
+                let count = taken.entry(job.workspace.clone()).or_insert(0);
+                *count += 1;
+                *count <= per
+            });
+        }
+        fetched.truncate(limit);
+        Ok(fetched)
     }
 
     /// Claims one job read by [`Queue::ready`]: `processing` under a lease
@@ -555,22 +600,28 @@ impl Queue {
         if scopes.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let mut values = vec![text(workspace)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        let mut sql = format!(
-            "SELECT {COLUMNS} FROM coding_agent_jobs WHERE workspace = ? AND scope IN ({})",
-            placeholders(scopes.len())
-        );
-        if let Some(id) = source_id {
-            sql.push_str(" AND source_id = ?");
-            values.push(text(id));
+        let mut fetched: Vec<Job> = Vec::new();
+        for group in distinct_chunks(scopes, SCOPE_GROUP) {
+            let mut values = vec![text(workspace)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            let mut sql = format!(
+                "SELECT {COLUMNS} FROM coding_agent_jobs WHERE workspace = ? AND scope IN ({})",
+                placeholders(group.len())
+            );
+            if let Some(id) = source_id {
+                sql.push_str(" AND source_id = ?");
+                values.push(text(id));
+            }
+            sql.push_str(" ORDER BY source_created_at DESC LIMIT ?");
+            values.push(SeaValue::BigInt(Some(
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            )));
+            let rows = self.db.query(&Statement::with_values(sql, values)).await?;
+            fetched.extend(rows.rows.iter().filter_map(job_from));
         }
-        sql.push_str(" ORDER BY source_created_at DESC LIMIT ?");
-        values.push(SeaValue::BigInt(Some(
-            i64::try_from(limit).unwrap_or(i64::MAX),
-        )));
-        let rows = self.db.query(&Statement::with_values(sql, values)).await?;
-        Ok(rows.rows.iter().filter_map(job_from).collect())
+        fetched.sort_by(|a, b| b.source_created_at.cmp(&a.source_created_at));
+        fetched.truncate(limit);
+        Ok(fetched)
     }
 
     /// How many of the asker's jobs sit in each status.
@@ -590,29 +641,31 @@ impl Queue {
         if scopes.is_empty() {
             return Ok(counts);
         }
-        let mut values = vec![text(workspace)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        let rows = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT status, COUNT(*) AS n FROM coding_agent_jobs \
-                     WHERE workspace = ? AND scope IN ({}) GROUP BY status",
-                    placeholders(scopes.len())
-                ),
-                values,
-            ))
-            .await?;
-        for row in &rows.rows {
-            if let Some(status) = row
-                .get::<String>("status")
-                .and_then(|s| JobStatus::parse(&s))
-            {
-                let n = row
-                    .get::<i64>("n")
-                    .and_then(|n| u64::try_from(n).ok())
-                    .unwrap_or(0);
-                counts.insert(status, n);
+        for group in distinct_chunks(scopes, SCOPE_GROUP) {
+            let mut values = vec![text(workspace)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            let rows = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT status, COUNT(*) AS n FROM coding_agent_jobs \
+                         WHERE workspace = ? AND scope IN ({}) GROUP BY status",
+                        placeholders(group.len())
+                    ),
+                    values,
+                ))
+                .await?;
+            for row in &rows.rows {
+                if let Some(status) = row
+                    .get::<String>("status")
+                    .and_then(|s| JobStatus::parse(&s))
+                {
+                    let n = row
+                        .get::<i64>("n")
+                        .and_then(|n| u64::try_from(n).ok())
+                        .unwrap_or(0);
+                    *counts.entry(status).or_insert(0) += n;
+                }
             }
         }
         Ok(counts)
@@ -637,19 +690,24 @@ impl Queue {
         if scopes.is_empty() {
             return Ok(0);
         }
-        let mut values = vec![text(&rfc3339(now)), text(workspace)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        self.db
-            .execute(&Statement::with_values(
-                format!(
-                    "UPDATE coding_agent_jobs SET status = 'queued', attempts = 0, \
-                            next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
-                     WHERE status = 'failed' AND workspace = ? AND scope IN ({})",
-                    placeholders(scopes.len())
-                ),
-                values,
-            ))
-            .await
+        let mut requeued = 0;
+        for group in distinct_chunks(scopes, SCOPE_GROUP) {
+            let mut values = vec![text(&rfc3339(now)), text(workspace)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            requeued += self
+                .db
+                .execute(&Statement::with_values(
+                    format!(
+                        "UPDATE coding_agent_jobs SET status = 'queued', attempts = 0, \
+                                next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
+                         WHERE status = 'failed' AND workspace = ? AND scope IN ({})",
+                        placeholders(group.len())
+                    ),
+                    values,
+                ))
+                .await?;
+        }
+        Ok(requeued)
     }
 
     /// Puts every `skipped-no-model` job of `workspace`, in any scope, back
@@ -694,17 +752,31 @@ impl Queue {
         scopes: Option<&[String]>,
         now: OffsetDateTime,
     ) -> Result<u64, DbError> {
-        let mut values = vec![text(&rfc3339(now)), text(workspace)];
-        let mut sql = String::from(
-            "UPDATE coding_agent_jobs SET status = 'queued', attempts = 0, \
-                    next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
-             WHERE status = 'skipped-no-model' AND workspace = ?",
-        );
-        if let Some(scopes) = scopes {
-            sql.push_str(&format!(" AND scope IN ({})", placeholders(scopes.len())));
-            values.extend(scopes.iter().map(|scope| text(scope)));
+        let groups: Vec<Option<Vec<String>>> = match scopes {
+            Some(scopes) => distinct_chunks(scopes, SCOPE_GROUP)
+                .into_iter()
+                .map(Some)
+                .collect(),
+            None => vec![None],
+        };
+        let mut requeued = 0;
+        for group in groups {
+            let mut values = vec![text(&rfc3339(now)), text(workspace)];
+            let mut sql = String::from(
+                "UPDATE coding_agent_jobs SET status = 'queued', attempts = 0, \
+                        next_attempt_at = NULL, lease_until = NULL, updated_at = ? \
+                 WHERE status = 'skipped-no-model' AND workspace = ?",
+            );
+            if let Some(scopes) = group {
+                sql.push_str(&format!(" AND scope IN ({})", placeholders(scopes.len())));
+                values.extend(scopes.iter().map(|scope| text(scope)));
+            }
+            requeued += self
+                .db
+                .execute(&Statement::with_values(sql, values))
+                .await?;
         }
-        self.db.execute(&Statement::with_values(sql, values)).await
+        Ok(requeued)
     }
 
     /// "Compile fully": puts one of the asker's triaged jobs — a
@@ -726,22 +798,25 @@ impl Queue {
         if scopes.is_empty() {
             return Ok(false);
         }
-        let mut values = vec![text(&rfc3339(now)), text(workspace), text(source_id)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        let changed = self
-            .db
-            .execute(&Statement::with_values(
-                format!(
-                    "UPDATE coding_agent_jobs SET status = 'queued', force_full = 1, attempts = 0, \
-                            chunks_done = 0, next_attempt_at = NULL, lease_until = NULL, \
-                            updated_at = ? \
-                     WHERE workspace = ? AND source_id = ? AND scope IN ({}) \
-                       AND status IN ('skipped-trivial', 'summary-only')",
-                    placeholders(scopes.len())
-                ),
-                values,
-            ))
-            .await?;
+        let mut changed = 0;
+        for group in distinct_chunks(scopes, SCOPE_GROUP) {
+            let mut values = vec![text(&rfc3339(now)), text(workspace), text(source_id)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            changed += self
+                .db
+                .execute(&Statement::with_values(
+                    format!(
+                        "UPDATE coding_agent_jobs SET status = 'queued', force_full = 1, attempts = 0, \
+                                chunks_done = 0, next_attempt_at = NULL, lease_until = NULL, \
+                                updated_at = ? \
+                         WHERE workspace = ? AND source_id = ? AND scope IN ({}) \
+                           AND status IN ('skipped-trivial', 'summary-only')",
+                        placeholders(group.len())
+                    ),
+                    values,
+                ))
+                .await?;
+        }
         Ok(changed > 0)
     }
 
@@ -757,35 +832,49 @@ impl Queue {
         if scopes.is_empty() {
             return Ok(out);
         }
-        let mut values = vec![text(workspace)];
-        values.extend(scopes.iter().map(|scope| text(scope)));
-        let rows = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT triage, COUNT(*) AS n, CAST(SUM(est_tokens_raw) AS BIGINT) AS raw, \
-                            CAST(SUM(est_tokens_sent) AS BIGINT) AS sent \
-                     FROM coding_agent_jobs WHERE workspace = ? AND scope IN ({}) \
-                       AND triage IS NOT NULL GROUP BY triage",
-                    placeholders(scopes.len())
-                ),
-                values,
-            ))
-            .await?;
-        for row in &rows.rows {
-            let count = |name: &str| {
-                row.get::<i64>(name)
-                    .and_then(|n| u64::try_from(n).ok())
-                    .unwrap_or(0)
-            };
-            match row.get::<String>("triage").as_deref() {
-                Some("skip") => out.skipped = count("n"),
-                Some("summary") => out.summarised = count("n"),
-                Some("full") => out.full = count("n"),
+        // Per triage decision: (sessions, tokens without, tokens with), summed
+        // over the scope groups, then read as one statement's rows would be.
+        let mut by_triage: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+        for group in distinct_chunks(scopes, SCOPE_GROUP) {
+            let mut values = vec![text(workspace)];
+            values.extend(group.iter().map(|scope| text(scope)));
+            let rows = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT triage, COUNT(*) AS n, CAST(SUM(est_tokens_raw) AS BIGINT) AS raw, \
+                                CAST(SUM(est_tokens_sent) AS BIGINT) AS sent \
+                         FROM coding_agent_jobs WHERE workspace = ? AND scope IN ({}) \
+                           AND triage IS NOT NULL GROUP BY triage",
+                        placeholders(group.len())
+                    ),
+                    values,
+                ))
+                .await?;
+            for row in &rows.rows {
+                let Some(triage) = row.get::<String>("triage") else {
+                    continue;
+                };
+                let count = |name: &str| {
+                    row.get::<i64>(name)
+                        .and_then(|n| u64::try_from(n).ok())
+                        .unwrap_or(0)
+                };
+                let sums = by_triage.entry(triage).or_default();
+                sums.0 += count("n");
+                sums.1 += count("raw");
+                sums.2 += count("sent");
+            }
+        }
+        for (triage, (sessions, raw, sent)) in by_triage {
+            match triage.as_str() {
+                "skip" => out.skipped = sessions,
+                "summary" => out.summarised = sessions,
+                "full" => out.full = sessions,
                 _ => continue,
             }
-            out.tokens_raw += count("raw");
-            out.tokens_sent += count("sent");
+            out.tokens_raw += raw;
+            out.tokens_sent += sent;
         }
         Ok(out)
     }

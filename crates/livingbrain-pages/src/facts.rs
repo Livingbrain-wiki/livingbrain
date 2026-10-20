@@ -22,6 +22,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use cratefield_core::{Clock, Database, IdGen, Row, Statement};
 use cratefield_kms::{Dek, Kms};
+use livingbrain_d1::{BIND_BUDGET, distinct_chunks};
 use livingbrain_memory::timeline::{
     self, Cardinality, FactStatus, PartialDate, TimedFact, corroborated, normalize_attribute,
 };
@@ -614,25 +615,33 @@ impl FactStore {
         if scopes.is_empty() {
             return Ok(None);
         }
-        let mut values = vec![text(id)];
-        let placeholders = in_list(scopes, &mut values);
-        let rows = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT scope, subject, attribute FROM facts \
-                     WHERE id = ? AND scope IN ({placeholders})"
-                ),
-                values,
-            ))
-            .await
-            .map_err(PageError::Store)?;
-        let Some(row) = rows.first() else {
+        let mut found = None;
+        for group in scope_groups(scopes, 1) {
+            let mut values = vec![text(id)];
+            let placeholders = in_list(&group, &mut values);
+            let rows = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT scope, subject, attribute FROM facts \
+                         WHERE id = ? AND scope IN ({placeholders})"
+                    ),
+                    values,
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            if let Some(row) = rows.first() {
+                found = Some((
+                    row.get::<String>("scope").unwrap_or_default(),
+                    row.get::<String>("subject").unwrap_or_default(),
+                    row.get::<String>("attribute").unwrap_or_default(),
+                ));
+                break;
+            }
+        }
+        let Some((scope, subject, attribute)) = found else {
             return Ok(None);
         };
-        let scope = row.get::<String>("scope").unwrap_or_default();
-        let subject = row.get::<String>("subject").unwrap_or_default();
-        let attribute = row.get::<String>("attribute").unwrap_or_default();
         self.db
             .execute(&Statement::with_values(
                 "UPDATE facts SET status = ?, updated_at = ? WHERE scope = ? AND id = ?",
@@ -667,24 +676,27 @@ impl FactStore {
         if scopes.is_empty() {
             return Ok(None);
         }
-        let mut values = vec![text(id)];
-        let placeholders = in_list(scopes, &mut values);
-        let rows = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT scope, subject FROM facts WHERE id = ? AND scope IN ({placeholders})"
-                ),
-                values,
-            ))
-            .await
-            .map_err(PageError::Store)?;
-        Ok(rows.first().map(|row| {
-            (
-                row.get::<String>("scope").unwrap_or_default(),
-                row.get::<String>("subject").unwrap_or_default(),
-            )
-        }))
+        for group in scope_groups(scopes, 1) {
+            let mut values = vec![text(id)];
+            let placeholders = in_list(&group, &mut values);
+            let rows = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT scope, subject FROM facts WHERE id = ? AND scope IN ({placeholders})"
+                    ),
+                    values,
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            if let Some(row) = rows.first() {
+                return Ok(Some((
+                    row.get::<String>("scope").unwrap_or_default(),
+                    row.get::<String>("subject").unwrap_or_default(),
+                )));
+            }
+        }
+        Ok(None)
     }
 
     /// The timelines in `scopes`, optionally narrowed to one subject and/or
@@ -711,27 +723,46 @@ impl FactStore {
                 return Err(PageError::InvalidScope((*scope).to_owned()).into());
             }
         }
-        let mut values = Vec::new();
-        let placeholders = in_list(scopes, &mut values);
-        let mut sql = format!("SELECT * FROM facts WHERE scope IN ({placeholders})");
-        if let Some(subject) = subject {
-            sql.push_str(" AND subject = ?");
-            values.push(text(subject));
+        let fixed = 1 + usize::from(subject.is_some()) + usize::from(attribute.is_some());
+        let mut fetched: Vec<Row> = Vec::new();
+        for group in scope_groups(scopes, fixed) {
+            let mut values = Vec::new();
+            let placeholders = in_list(&group, &mut values);
+            let mut sql = format!("SELECT * FROM facts WHERE scope IN ({placeholders})");
+            if let Some(subject) = subject {
+                sql.push_str(" AND subject = ?");
+                values.push(text(subject));
+            }
+            if let Some(attribute) = attribute {
+                sql.push_str(" AND attribute = ?");
+                values.push(text(attribute));
+            }
+            sql.push_str(
+                " ORDER BY subject ASC, attribute ASC, scope ASC, valid_from_at ASC, id ASC LIMIT ?",
+            );
+            values.push(SeaValue::BigInt(Some(MAX_FACT_ROWS as i64)));
+            let rows = self
+                .db
+                .query(&Statement::with_values(sql, values))
+                .await
+                .map_err(PageError::Store)?;
+            fetched.extend(rows.rows);
         }
-        if let Some(attribute) = attribute {
-            sql.push_str(" AND attribute = ?");
-            values.push(text(attribute));
-        }
-        sql.push_str(
-            " ORDER BY subject ASC, attribute ASC, scope ASC, valid_from_at ASC, id ASC LIMIT ?",
-        );
-        values.push(SeaValue::BigInt(Some(MAX_FACT_ROWS as i64)));
-        let rows = self
-            .db
-            .query(&Statement::with_values(sql, values))
-            .await
-            .map_err(PageError::Store)?;
-        let facts = self.decode(&rows.rows).await?;
+        // The order one statement would have used, cut to the cap.
+        fetched.sort_by(|a, b| {
+            let key = |row: &Row| {
+                (
+                    row.get::<String>("subject"),
+                    row.get::<String>("attribute"),
+                    row.get::<String>("scope"),
+                    row.get::<String>("valid_from_at"),
+                    row.get::<String>("id"),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        fetched.truncate(MAX_FACT_ROWS);
+        let facts = self.decode(&fetched).await?;
         let mut grouped: BTreeMap<(String, String, String), Vec<TimedFact>> = BTreeMap::new();
         for (scope, fact) in facts {
             grouped
@@ -763,31 +794,37 @@ impl FactStore {
         if scopes.is_empty() {
             return Ok(Vec::new());
         }
-        let mut values = Vec::new();
-        let placeholders = in_list(scopes, &mut values);
-        values.push(SeaValue::BigInt(Some(MAX_INDEX_KEYS as i64)));
-        let rows = self
-            .db
-            .query(&Statement::with_values(
-                format!(
-                    "SELECT DISTINCT scope, subject, attribute FROM facts \
-                     WHERE scope IN ({placeholders}) \
-                     ORDER BY subject ASC, attribute ASC, scope ASC LIMIT ?"
-                ),
-                values,
-            ))
-            .await
-            .map_err(PageError::Store)?;
-        Ok(rows
-            .rows
-            .iter()
-            .map(|row| {
-                (
-                    row.get::<String>("scope").unwrap_or_default(),
+        let mut keys: BTreeSet<(String, String, String)> = BTreeSet::new();
+        for group in scope_groups(scopes, 1) {
+            let mut values = Vec::new();
+            let placeholders = in_list(&group, &mut values);
+            values.push(SeaValue::BigInt(Some(MAX_INDEX_KEYS as i64)));
+            let rows = self
+                .db
+                .query(&Statement::with_values(
+                    format!(
+                        "SELECT DISTINCT scope, subject, attribute FROM facts \
+                         WHERE scope IN ({placeholders}) \
+                         ORDER BY subject ASC, attribute ASC, scope ASC LIMIT ?"
+                    ),
+                    values,
+                ))
+                .await
+                .map_err(PageError::Store)?;
+            for row in &rows.rows {
+                keys.insert((
                     row.get::<String>("subject").unwrap_or_default(),
                     row.get::<String>("attribute").unwrap_or_default(),
-                )
-            })
+                    row.get::<String>("scope").unwrap_or_default(),
+                ));
+            }
+        }
+        // Sorted by subject, attribute, scope, as the statement would order
+        // them, and cut to the cap.
+        Ok(keys
+            .into_iter()
+            .take(MAX_INDEX_KEYS)
+            .map(|(subject, attribute, scope)| (scope, subject, attribute))
             .collect())
     }
 
@@ -1385,32 +1422,49 @@ impl FactStore {
         if scopes.is_empty() {
             return Ok(Vec::new());
         }
-        let mut values = Vec::new();
-        let placeholders = in_list(scopes, &mut values);
-        let mut sql = format!(
-            "SELECT scope, dream_at, seq, subject, op, fact_id, by_fact_id, new_valid_to, \
-             new_attribute, reason, applied, model, decided_at FROM fact_dream_decisions \
-             WHERE scope IN ({placeholders})"
-        );
-        if let Some((dream_at, scope, seq)) = before {
-            sql.push_str(
-                " AND (dream_at < ? OR (dream_at = ? AND (scope > ? OR (scope = ? AND seq > ?))))",
+        // The cursor and the limit are the fixed binds: 5 and 1.
+        let fixed = 1 + if before.is_some() { 5 } else { 0 };
+        let mut fetched: Vec<Row> = Vec::new();
+        for group in scope_groups(scopes, fixed) {
+            let mut values = Vec::new();
+            let placeholders = in_list(&group, &mut values);
+            let mut sql = format!(
+                "SELECT scope, dream_at, seq, subject, op, fact_id, by_fact_id, new_valid_to, \
+                 new_attribute, reason, applied, model, decided_at FROM fact_dream_decisions \
+                 WHERE scope IN ({placeholders})"
             );
-            values.push(text(dream_at));
-            values.push(text(dream_at));
-            values.push(text(scope));
-            values.push(text(scope));
-            values.push(SeaValue::BigInt(Some(seq)));
+            if let Some((dream_at, scope, seq)) = before {
+                sql.push_str(
+                    " AND (dream_at < ? OR (dream_at = ? AND (scope > ? OR (scope = ? AND seq > ?))))",
+                );
+                values.push(text(dream_at));
+                values.push(text(dream_at));
+                values.push(text(scope));
+                values.push(text(scope));
+                values.push(SeaValue::BigInt(Some(seq)));
+            }
+            sql.push_str(" ORDER BY dream_at DESC, scope ASC, seq ASC LIMIT ?");
+            values.push(SeaValue::BigInt(Some(limit as i64)));
+            let rows = self
+                .db
+                .query(&Statement::with_values(sql, values))
+                .await
+                .map_err(PageError::Store)?;
+            fetched.extend(rows.rows);
         }
-        sql.push_str(" ORDER BY dream_at DESC, scope ASC, seq ASC LIMIT ?");
-        values.push(SeaValue::BigInt(Some(limit as i64)));
-        let rows = self
-            .db
-            .query(&Statement::with_values(sql, values))
-            .await
-            .map_err(PageError::Store)?;
-        Ok(rows
-            .rows
+        // The order one statement would have used, cut to the limit.
+        fetched.sort_by(|a, b| {
+            let key = |row: &Row| {
+                (
+                    std::cmp::Reverse(row.get::<String>("dream_at")),
+                    row.get::<String>("scope"),
+                    row.get::<i64>("seq"),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        fetched.truncate(limit);
+        Ok(fetched
             .iter()
             .map(|row| DreamDecisionRecord {
                 scope: row.get::<String>("scope").unwrap_or_default(),
@@ -1446,36 +1500,58 @@ impl FactStore {
         if scopes.is_empty() {
             return Ok(DreamOutcomes::default());
         }
-        let mut values = Vec::new();
-        let placeholders = in_list(scopes, &mut values);
-        let mut passes_sql = format!(
-            "SELECT scope, subject, dreamt_at, facts_seen, decisions, applied FROM fact_dreams \
-             WHERE scope IN ({placeholders}) AND dreamt_at IS NOT NULL"
-        );
-        let mut edits_sql = format!(
-            "SELECT scope, subject, fact_id, op FROM fact_dream_decisions \
-             WHERE scope IN ({placeholders}) AND applied = 1"
-        );
-        if let Some(subject) = subject {
-            passes_sql.push_str(" AND subject = ?");
-            edits_sql.push_str(" AND subject = ?");
-            values.push(text(subject));
+        let fixed = usize::from(subject.is_some());
+        let mut pass_rows: Vec<Row> = Vec::new();
+        let mut edit_rows: Vec<Row> = Vec::new();
+        for group in scope_groups(scopes, fixed) {
+            let mut values = Vec::new();
+            let placeholders = in_list(&group, &mut values);
+            let mut passes_sql = format!(
+                "SELECT scope, subject, dreamt_at, facts_seen, decisions, applied FROM fact_dreams \
+                 WHERE scope IN ({placeholders}) AND dreamt_at IS NOT NULL"
+            );
+            let mut edits_sql = format!(
+                "SELECT scope, subject, fact_id, op, dream_at, seq FROM fact_dream_decisions \
+                 WHERE scope IN ({placeholders}) AND applied = 1"
+            );
+            if let Some(subject) = subject {
+                passes_sql.push_str(" AND subject = ?");
+                edits_sql.push_str(" AND subject = ?");
+                values.push(text(subject));
+            }
+            passes_sql.push_str(" ORDER BY dreamt_at DESC LIMIT 500");
+            edits_sql.push_str(" ORDER BY dream_at DESC, seq ASC LIMIT 2000");
+            let passes = self
+                .db
+                .query(&Statement::with_values(passes_sql, values.clone()))
+                .await
+                .map_err(PageError::Store)?;
+            let edits = self
+                .db
+                .query(&Statement::with_values(edits_sql, values))
+                .await
+                .map_err(PageError::Store)?;
+            pass_rows.extend(passes.rows);
+            edit_rows.extend(edits.rows);
         }
-        passes_sql.push_str(" ORDER BY dreamt_at DESC LIMIT 500");
-        edits_sql.push_str(" ORDER BY dream_at DESC, seq ASC LIMIT 2000");
-        let passes = self
-            .db
-            .query(&Statement::with_values(passes_sql, values.clone()))
-            .await
-            .map_err(PageError::Store)?;
-        let edits = self
-            .db
-            .query(&Statement::with_values(edits_sql, values))
-            .await
-            .map_err(PageError::Store)?;
+        // Each list in the order its statement used, cut to the same cap.
+        pass_rows.sort_by(|a, b| {
+            std::cmp::Reverse(a.get::<String>("dreamt_at"))
+                .cmp(&std::cmp::Reverse(b.get::<String>("dreamt_at")))
+        });
+        pass_rows.truncate(500);
+        edit_rows.sort_by(|a, b| {
+            let key = |row: &Row| {
+                (
+                    std::cmp::Reverse(row.get::<String>("dream_at")),
+                    row.get::<i64>("seq"),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        edit_rows.truncate(2000);
         Ok(DreamOutcomes {
-            passes: passes
-                .rows
+            passes: pass_rows
                 .iter()
                 .map(|row| DreamPass {
                     scope: row.get::<String>("scope").unwrap_or_default(),
@@ -1486,8 +1562,7 @@ impl FactStore {
                     applied: row.get::<i64>("applied").unwrap_or_default(),
                 })
                 .collect(),
-            edits: edits
-                .rows
+            edits: edit_rows
                 .iter()
                 .map(|row| {
                     (
@@ -1582,6 +1657,14 @@ fn in_list(scopes: &[&str], values: &mut Vec<SeaValue>) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The distinct scopes of `scopes`, in groups that leave `fixed` binds of
+/// D1's budget for the statement's other clauses. One statement per group;
+/// the answers merge back into what one statement over all of `scopes`
+/// would have given.
+fn scope_groups<'a>(scopes: &[&'a str], fixed: usize) -> Vec<Vec<&'a str>> {
+    distinct_chunks(scopes, BIND_BUDGET.saturating_sub(fixed).max(1))
 }
 
 fn per_mille(confidence: f64) -> i64 {

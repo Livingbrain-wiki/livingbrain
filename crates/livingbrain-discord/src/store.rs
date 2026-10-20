@@ -6,7 +6,10 @@
 //! writes are made only by the cron drain, under a channel lease, so an
 //! overlapping run cannot double-read a channel.
 
+use std::collections::BTreeSet;
+
 use cratefield_core::{Database, Statement};
+use livingbrain_d1::{BIND_BUDGET, distinct_chunks, placeholders};
 
 use crate::common::{
     StoreError, get_int, get_opt_int, get_opt_text, get_text, int, opt_int, opt_text, text, unix,
@@ -348,28 +351,44 @@ pub async fn mark_missing(
     listed: &[String],
 ) -> Result<(), StoreError> {
     let now = unix(now);
-    let mut values = vec![int(now), text(guild_id)];
-    let placeholders = if listed.is_empty() {
-        "''".to_owned()
-    } else {
-        listed
-            .iter()
-            .map(|id| {
-                values.push(text(id));
-                "?"
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    db.execute(&Statement::with_values(
-        format!(
-            "UPDATE discord_channels SET present = 0, updated_at = ? \
-             WHERE guild_id = ? AND present = 1 AND kind NOT IN (10, 11, 12) \
-               AND channel_id NOT IN ({placeholders})"
-        ),
-        values,
-    ))
-    .await?;
+    // The server's present, non-thread channels that Discord did not list.
+    // One read of the server's channels, then the update names only the
+    // missing ones, in groups: a server can have more channels than one
+    // statement may bind, and `NOT IN (every listed id)` cannot be split
+    // into statements that each keep their own list.
+    let present = db
+        .query(&Statement::with_values(
+            "SELECT channel_id FROM discord_channels \
+             WHERE guild_id = ? AND present = 1 AND kind NOT IN (10, 11, 12)",
+            vec![text(guild_id)],
+        ))
+        .await?;
+    let listed: BTreeSet<&str> = listed.iter().map(String::as_str).collect();
+    let missing: Vec<String> = present
+        .rows
+        .iter()
+        .filter_map(|row| row.get::<String>("channel_id"))
+        .filter(|id| !listed.contains(id.as_str()))
+        .collect();
+    let statements: Vec<Statement> = distinct_chunks(&missing, BIND_BUDGET - 2)
+        .iter()
+        .map(|group| {
+            let mut values = vec![int(now), text(guild_id)];
+            values.extend(group.iter().map(|id| text(id)));
+            Statement::with_values(
+                format!(
+                    "UPDATE discord_channels SET present = 0, updated_at = ? \
+                     WHERE guild_id = ? AND present = 1 AND kind NOT IN (10, 11, 12) \
+                       AND channel_id IN ({})",
+                    placeholders(group.len())
+                ),
+                values,
+            )
+        })
+        .collect();
+    if !statements.is_empty() {
+        db.batch_atomic(&statements).await?;
+    }
     Ok(())
 }
 
@@ -804,4 +823,86 @@ pub async fn record_connection_error(
     ))
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod d1_binds {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use cratefield_core::{DbError, Row, Rows};
+    use livingbrain_d1_fake::BindLimited;
+    use sea_query::Value as SeaValue;
+
+    use super::*;
+
+    /// A server's present channels, and every value each batch statement
+    /// binds. Every other read and write is refused as not expected here.
+    #[derive(Default)]
+    struct Channels {
+        present: Vec<String>,
+        bound: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Database for Channels {
+        async fn execute(&self, _stmt: &Statement) -> Result<u64, DbError> {
+            Err(DbError::Execute("not expected".to_owned()))
+        }
+
+        async fn query(&self, _stmt: &Statement) -> Result<Rows, DbError> {
+            Ok(Rows::new(
+                self.present
+                    .iter()
+                    .map(|id| Row::new(vec![("channel_id".to_owned(), text(id))]))
+                    .collect(),
+            ))
+        }
+
+        async fn batch_atomic(&self, stmts: &[Statement]) -> Result<(), DbError> {
+            let mut bound = self.bound.lock().expect("the recorder");
+            for stmt in stmts {
+                bound.extend(stmt.values.0.iter().filter_map(|value| match value {
+                    SeaValue::String(Some(text)) => Some((**text).clone()),
+                    _ => None,
+                }));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_server_with_more_channels_than_one_statement_may_bind_is_marked_in_groups() {
+        let name = |i: usize| format!("chan-{i:03}");
+        // 250 channels present; Discord lists four in five of them, so 50 are
+        // gone, and the gone set alone is over one statement's budget only
+        // when it is split.
+        let present: Vec<String> = (0..250).map(name).collect();
+        let listed: Vec<String> = (0..250).filter(|i| i % 5 != 0).map(name).collect();
+        let recorder = Arc::new(Channels {
+            present,
+            ..Channels::default()
+        });
+        let db = BindLimited::new(recorder.clone());
+        pollster::block_on(mark_missing(
+            &*db,
+            time::OffsetDateTime::UNIX_EPOCH,
+            "guild-1",
+            &listed,
+        ))
+        .expect("the marking stays within D1's bind ceiling");
+        assert!(db.widest() <= 100, "widest statement bound {}", db.widest());
+
+        let mut marked: Vec<String> = recorder
+            .bound
+            .lock()
+            .expect("the recorder")
+            .iter()
+            .filter(|value| value.starts_with("chan-"))
+            .cloned()
+            .collect();
+        marked.sort();
+        let gone: Vec<String> = (0..250).filter(|i| i % 5 == 0).map(name).collect();
+        assert_eq!(marked, gone);
+    }
 }
