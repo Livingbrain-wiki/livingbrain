@@ -57,8 +57,8 @@ use cratefield_runtime_cloudflare::{
 };
 use livingbrain_accounts::{Access, Agents, Audit};
 use livingbrain_api::{
-    Ask, BudgetSettings, CodingAgents, Dreaming, Export, Facts, Graph, ModelJobs, Notes,
-    PagesRebind, ResumeParkedOnMain, Search, SessionAuth, Sources, Wiki,
+    AppTools, Apps, Ask, BudgetSettings, CodingAgents, Dreaming, Export, Facts, Graph, ModelJobs,
+    Notes, PagesRebind, PublicPages, ResumeParkedOnMain, Search, SessionAuth, Sources, Wiki,
 };
 use livingbrain_canary::Canary;
 use livingbrain_discord::DiscordModule;
@@ -548,6 +548,16 @@ fn cli_modules(
         // The brain map's data (`GET /v1/graph`): the asker's own pages,
         // sources and facts as nodes and edges, read-only.
         Arc::new(Graph::new(wiki.clone())),
+        // Connected apps (issues #51 and #146, ADR 0005): the owner connects
+        // an app and issues its credential (`/v1/apps`), publishes pages to
+        // customers (`/v1/public`), and the app calls its five tools
+        // (`/v1/tools/{name}`, mounted as `app-tools` because the `tools`
+        // module owns that name — see [`rewrite_tools_path`]).
+        Arc::new(Apps::new(wiki.clone())),
+        Arc::new(PublicPages::new(wiki.clone())),
+        Arc::new(AppTools::new(wiki.clone())),
+        // (Mounted ahead of the compiler: it must stay third from last for the
+        // cron's split, and these modules have no scheduled work.)
         // Dreaming's settings and its decision log (`/v1/dreaming`): the
         // workspace's switch, model and "Run now", over the same table the
         // cron reads. Mounted before the compiler, which keeps the compiler's
@@ -797,6 +807,22 @@ impl WorkspaceErasure for WipeWorkspace {
         spaces: &[String],
     ) -> Result<(), ErasureFailed> {
         let store = self.pages.get().ok_or(ErasureFailed)?;
+        // The scopes of connected apps (issues #51 and #146): every subject
+        // an app keeps memories for, and the workspace's public scope. They
+        // are named by no member, so they are found by their own rows —
+        // before the shreds below delete those rows.
+        let mut app_scopes = livingbrain_pages::app_scopes(db, workspace_id)
+            .await
+            .map_err(|_| ErasureFailed)?;
+        // The public scope always: a withdrawn page's copy is still sealed in
+        // it, with no ledger row left to name it.
+        app_scopes.push(livingbrain_pages::page_scope(
+            workspace_id,
+            &livingbrain_access::Scope::Public,
+        ));
+        for scope in &app_scopes {
+            store.forget_scope(scope).await.map_err(|_| ErasureFailed)?;
+        }
         for space in spaces {
             let scope =
                 livingbrain_pages::access::space_scope(workspace_id, space).ok_or(ErasureFailed)?;
@@ -1271,7 +1297,7 @@ fn instance(env: &Env) -> &'static (Harness, Cloudflare, TurnsCell) {
 /// The CLI paths `fetch` diverts to [`serve_cli`] — the routes the
 /// [`cli_modules`] mount, minus `/v1/pages`, which the pages module
 /// serves through the ordinary [`serve`] path like every other route.
-const CLI_ROUTES: [&str; 10] = [
+const CLI_ROUTES: [&str; 13] = [
     "/v1/notes",
     "/v1/search",
     "/v1/graph",
@@ -1282,19 +1308,45 @@ const CLI_ROUTES: [&str; 10] = [
     "/v1/facts",
     "/v1/model-jobs",
     "/v1/dreaming",
+    "/v1/apps",
+    "/v1/public",
+    "/v1/tools",
 ];
 
 /// The diverted paths that have routes *under* them, so the divert matches
 /// the prefix: the sources listing, facet and citation route, the
 /// coding-agents queue and process routes, and a fact's retraction
 /// (`/v1/facts/{id}/retract`).
-const CLI_PREFIXES: [&str; 5] = [
+const CLI_PREFIXES: [&str; 8] = [
     "/v1/sources",
     "/v1/coding-agents",
     "/v1/facts",
     "/v1/model-jobs",
     "/v1/dreaming",
+    "/v1/apps",
+    "/v1/public",
+    "/v1/tools",
 ];
+
+/// The path the app tools are mounted at (the module is `app-tools`) and the
+/// public path they are served under. The harness mounts a module at
+/// `/v1/<name>` and `tools` is taken (the MCP-client module, which has no
+/// routes), while the contract clients speak is `POST /v1/tools/<name>`;
+/// `serve_cli` re-addresses the one to the other before the router sees it.
+const APP_TOOLS_MOUNT: &str = "/v1/app-tools";
+const APP_TOOLS_PUBLIC: &str = "/v1/tools";
+
+/// The path a diverted request is routed under: `/v1/tools/<name>` becomes
+/// `/v1/app-tools/<name>`, anything else is unchanged. Only `/v1/tools` and
+/// what is below it moves, so `/v1/toolsx` is nobody's route.
+fn rewrite_tools_path(path: &str) -> std::borrow::Cow<'_, str> {
+    match path.strip_prefix(APP_TOOLS_PUBLIC) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            std::borrow::Cow::Owned(format!("{APP_TOOLS_MOUNT}{rest}"))
+        }
+        _ => std::borrow::Cow::Borrowed(path),
+    }
+}
 
 /// The avatar paths `fetch` diverts to [`serve_cli`]: the two uploads and
 /// the read route. Three modules touch one avatar key space (`me`,
@@ -1565,8 +1617,11 @@ async fn serve_cli(
     let router = harness.router(ports);
     let problem_type_base = harness.venture().problem_type_base();
 
-    let url = req.url()?;
-    let path = url.path().to_owned();
+    let mut url = req.url()?;
+    // The app tools are served at `/v1/tools/…` but mounted as `app-tools`.
+    let routed = rewrite_tools_path(url.path()).into_owned();
+    url.set_path(&routed);
+    let path = routed;
     let method = HttpMethod::from_bytes(req.method().to_string().as_bytes())
         .map_err(|err| worker::Error::RustError(err.to_string()))?;
     let limit = harness.max_body_bytes(&path, config.as_ref());
@@ -2056,6 +2111,59 @@ mod tests {
         assert!(names.contains(&"settings"), "{names:?}");
         assert!(names.contains(&"usage"), "{names:?}");
         assert!(names.contains(&"github"), "{names:?}");
+        // Connected apps (issues #51 and #146): the connection, the
+        // publication and the five tools.
+        for name in ["apps", "public", "app-tools"] {
+            assert!(names.contains(&name), "{name} is mounted: {names:?}");
+        }
+        assert!(serves_cli(&harness, "/v1/apps"));
+        assert!(serves_cli(&harness, "/v1/apps/earthos/subjects/user:1"));
+        assert!(serves_cli(&harness, "/v1/public/pages"));
+        assert!(serves_cli(&harness, "/v1/tools/brain_answer_public"));
+        assert!(!serves_cli(&harness, "/v1/toolsx/brain_answer_public"));
+    }
+
+    /// The tools are served at `/v1/tools/…` (the contract SupportGenius and
+    /// EarthOS speak) and mounted as `app-tools`; only that prefix moves.
+    #[test]
+    fn the_tools_path_is_readdressed_to_the_app_tools_mount() {
+        assert_eq!(
+            rewrite_tools_path("/v1/tools/brain_answer_public"),
+            "/v1/app-tools/brain_answer_public"
+        );
+        assert_eq!(rewrite_tools_path("/v1/tools"), "/v1/app-tools");
+        for untouched in [
+            "/v1/toolsx/brain_answer_public",
+            "/v1/app-tools/brain_answer_public",
+            "/v1/notes",
+            "/v1/apps",
+        ] {
+            assert_eq!(rewrite_tools_path(untouched), untouched);
+        }
+    }
+
+    /// The five tools answer end to end through the venture's own
+    /// composition, at the path the clients call: the Worker's bundle, minus
+    /// the runtime. A credential for one app, a subject of its own.
+    #[test]
+    fn the_worker_composition_serves_the_tools_module_and_its_migration() {
+        let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
+            .expect("a well-formed key");
+        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let module = harness
+            .modules()
+            .iter()
+            .find(|module| module.name() == "app-tools")
+            .expect("app-tools is mounted");
+        assert!(module.requires().contains(&cratefield_core::Port::Blob));
+        assert!(
+            harness
+                .modules()
+                .iter()
+                .any(|module| module.name() == "pages"
+                    && module.tables().contains(&"app_memories")
+                    && module.tables().contains(&"public_pages"))
+        );
     }
 
     /// A migration's SQL without its `--` comments, its words joined by
@@ -2781,6 +2889,35 @@ mod erasure_tests {
                 );
             }
 
+            // Issues #51 and #146: what a connected app keeps for a subject,
+            // in each workspace, and a published page in the doomed one. None
+            // of it is a member's space, so the erasure finds it by its rows.
+            let memories = livingbrain_pages::MemoryStore::new(
+                db.clone(),
+                kms(),
+                Arc::new(kit.clock.clone()),
+                Arc::new(UlidIdGen),
+            );
+            let doomed_subject = livingbrain_api::subject_scope(WORKSPACE, "earthos", "user:1");
+            let kept_subject = livingbrain_api::subject_scope(OTHER, "earthos", "user:1");
+            assert_ne!(doomed_subject, kept_subject);
+            for (workspace, scope) in [(WORKSPACE, &doomed_subject), (OTHER, &kept_subject)] {
+                memories
+                    .note(workspace, "earthos", scope, "Likes sunrise walks", "conv")
+                    .await
+                    .expect("a memory");
+            }
+            let public_scope =
+                livingbrain_pages::page_scope(WORKSPACE, &livingbrain_access::Scope::Public);
+            write(&store, &public_scope, "Published refund policy.").await;
+            run(
+                &db,
+                "INSERT INTO public_pages (scope, slug, workspace_id, title, url, source_scope, \
+                 source_version, published_by, published_at) \
+                 VALUES (?, 'alpha', ?, 'Alpha', 'https://x.test/a', 's', 1, 'owner', 'now')",
+                vec![text(&public_scope), text(WORKSPACE)],
+            );
+
             let erasure = WipeWorkspace {
                 pages: PageStoreCell::default(),
             };
@@ -2814,6 +2951,45 @@ mod erasure_tests {
                     .expect_err("a shredded scope must not read");
                 assert!(matches!(error, PageError::Shredded(_)), "{error:?}");
             }
+            // The app memories and the public scope went with it: no row, no
+            // key — and the other workspace's subject, same app and same
+            // subject string, reads on.
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT id FROM app_memories WHERE scope = ?",
+                    vec![text(&doomed_subject)]
+                ),
+                0
+            );
+            assert!(matches!(
+                memories
+                    .note(WORKSPACE, "earthos", &doomed_subject, "again", "")
+                    .await,
+                Err(livingbrain_pages::MemoryError::Store(PageError::Shredded(
+                    _
+                )))
+            ));
+            assert_eq!(
+                memories
+                    .recall(&kept_subject, 20)
+                    .await
+                    .expect("a recall")
+                    .len(),
+                1
+            );
+            assert!(matches!(
+                store.read(&public_scope, "alpha").await,
+                Err(PageError::Shredded(_))
+            ));
+            assert_eq!(
+                count(
+                    &db,
+                    "SELECT slug FROM public_pages WHERE workspace_id = ?",
+                    vec![text(WORKSPACE)]
+                ),
+                0
+            );
             // The other workspace, with the same member id, reads on.
             assert!(store.read(&kept_personal, "alpha").await.is_ok());
             assert!(store.read(&kept_shared, "alpha").await.is_ok());

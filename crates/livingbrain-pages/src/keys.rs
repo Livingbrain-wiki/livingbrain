@@ -426,9 +426,13 @@ impl ScopeKeys {
                  AND NOT EXISTS (SELECT 1 FROM facts \
                                  WHERE scope = ? AND key_version = ?) \
                  AND NOT EXISTS (SELECT 1 FROM pages \
-                                 WHERE scope = ? AND title_key_version = ?)",
+                                 WHERE scope = ? AND title_key_version = ?) \
+                 AND NOT EXISTS (SELECT 1 FROM app_memories \
+                                 WHERE scope = ? AND key_version = ?)",
                 vec![
                     text(&self.now()),
+                    text(scope),
+                    int(version),
                     text(scope),
                     int(version),
                     text(scope),

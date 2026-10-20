@@ -124,6 +124,60 @@ pub(crate) const AGENT_NOT_ALLOWED: ProblemDef = ProblemDef {
                   the wiki routes its grants open.",
 };
 
+/// A route only a workspace owner may use.
+pub(crate) const OWNER_ONLY: ProblemDef = ProblemDef {
+    slug: "api/owner-only",
+    status: StatusCode::FORBIDDEN,
+    title: "Only a workspace owner can do this",
+    description: "Connecting an app and publishing pages to customers are the workspace \
+                  owner's decisions, made with the owner's whole credential — not a \
+                  narrowed token, and not another role. Nothing was changed.",
+};
+
+/// A tool call the credential is not allowed to make.
+pub(crate) const TOOL_NOT_ALLOWED: ProblemDef = ProblemDef {
+    slug: "api/tool-not-allowed",
+    status: StatusCode::FORBIDDEN,
+    title: "This credential cannot call that tool",
+    description: "An app credential may call only the five tools its connection grants, \
+                  for its own app's subjects. Nothing was done.",
+};
+
+/// A tool name this surface does not serve.
+pub(crate) const TOOL_NOT_FOUND: ProblemDef = ProblemDef {
+    slug: "api/tool-not-found",
+    status: StatusCode::NOT_FOUND,
+    title: "No such tool",
+    description: "The tools are brain_answer_public, brain_memory_recall, \
+                  brain_memory_note, brain_memory_forget and brain_memory_forget_all.",
+};
+
+/// A request body that is not the shape the tool takes.
+pub(crate) const TOOL_INPUT: ProblemDef = ProblemDef {
+    slug: "api/tool-input",
+    status: StatusCode::UNPROCESSABLE_ENTITY,
+    title: "The tool input was refused",
+    description: "The request body does not match what the tool takes; the `detail` says \
+                  which field. Nothing was done.",
+};
+
+/// Text refused by the same screening every inbound note passes.
+pub(crate) const SCREENED: ProblemDef = ProblemDef {
+    slug: "api/screened",
+    status: StatusCode::UNPROCESSABLE_ENTITY,
+    title: "Content refused before storing",
+    description: "The text looked like an instruction to a model or held content the \
+                  screen refuses to handle. Nothing was stored, and the text is not echoed.",
+};
+
+/// An app, memory or publication that is not there.
+pub(crate) const NOT_FOUND: ProblemDef = ProblemDef {
+    slug: "api/not-found",
+    status: StatusCode::NOT_FOUND,
+    title: "Not found",
+    description: "No such app, subject or published page in this workspace.",
+};
+
 pub(crate) const SCOPE_NOT_GRANTED: ProblemDef = ProblemDef {
     slug: "api/scope-not-granted",
     status: StatusCode::FORBIDDEN,

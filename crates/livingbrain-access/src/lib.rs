@@ -61,11 +61,19 @@ impl fmt::Display for ChannelId {
     }
 }
 
-/// The scope a memory item carries. String forms: `shared`, `channel:<id>`,
-/// `user:<id>`, round-tripping through [`Display`](Scope::fmt) / [`FromStr`].
+/// The scope a memory item carries. String forms: `shared`, `public`,
+/// `channel:<id>`, `user:<id>`, round-tripping through
+/// [`Display`](Scope::fmt) / [`FromStr`].
+///
+/// [`Public`](Scope::Public) is the customer-safe scope (issue #51): pages
+/// enter it only through an explicit publication by a workspace owner, and
+/// **no asker is ever granted it by [`scopes_for`]** — it is read only by the
+/// public-answer path, which names it itself. A scope nobody can ask for
+/// cannot leak into an ordinary read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Scope {
     Shared,
+    Public,
     Channel(ChannelId),
     User(UserId),
 }
@@ -74,6 +82,7 @@ impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Scope::Shared => f.write_str("shared"),
+            Scope::Public => f.write_str("public"),
             Scope::Channel(id) => write!(f, "channel:{id}"),
             Scope::User(id) => write!(f, "user:{id}"),
         }
@@ -85,6 +94,9 @@ impl FromStr for Scope {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "shared" {
             return Ok(Scope::Shared);
+        }
+        if s == "public" {
+            return Ok(Scope::Public);
         }
         if let Some(rest) = s.strip_prefix("channel:") {
             return if rest.is_empty() {
@@ -104,7 +116,7 @@ impl FromStr for Scope {
     }
 }
 
-/// A scope string that is not `shared`, `channel:<id>` or `user:<id>`.
+/// A scope string that is not `shared`, `public`, `channel:<id>` or `user:<id>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeParseError {
     Malformed,
