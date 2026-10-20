@@ -20,6 +20,26 @@ final class SyncStateTests: XCTestCase {
         XCTAssertEqual(state.lastReport?.uploaded, 2)
     }
 
+    /// The newer-format refusal shows what to do, and an old CLI's refusal of a
+    /// newer file (the "upgrade the CLI" wording) shows the update hint too.
+    func testOptInFileErrorsCarryAHint() {
+        var newer = SyncState()
+        newer.begin()
+        newer.fail(stderr: #"{"error":"/x/logs-allow.json: opt-in file was written by a newer livingbrain (format version 3; this build reads versions 1 and 2): update the Living Brain Mac app or the livingbrain CLI, then sync again. Nothing was synced and the file was not changed"}"#, status: 1)
+        XCTAssertEqual(newer.errorHint, "Written by a newer livingbrain. Update Living Brain, then Sync Now.")
+        XCTAssertFalse(newer.needsSignIn)
+
+        var old = SyncState()
+        old.begin()
+        old.fail(stderr: "error: /x/logs-allow.json: opt-in file version 2 is not 1 (this build's); upgrade the CLI or fix the file", status: 1)
+        XCTAssertNotNil(old.errorHint)
+
+        var other = SyncState()
+        other.begin()
+        other.fail(stderr: "error: network down", status: 1)
+        XCTAssertNil(other.errorHint)
+    }
+
     func testNotLoggedInFailureAsksForSignIn() {
         var state = SyncState()
         state.begin()

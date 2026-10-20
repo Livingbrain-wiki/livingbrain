@@ -229,7 +229,25 @@ struct SyncFooter: View {
                     .lineLimit(1)
             }
             if let error = bar.state.errorMessage {
-                Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
+                // Never truncated: the full line is selectable, shows as a
+                // tooltip, and has a button that copies it.
+                Text(error)
+                    .font(.caption2).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .help(error)
+                Button {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(error, forType: .string)
+                } label: {
+                    Label("Copy error", systemImage: "doc.on.doc")
+                }
+                .controlSize(.mini)
+                .buttonStyle(.borderless)
+            }
+            if let hint = bar.state.errorHint {
+                Text(hint).font(.caption2).foregroundStyle(.secondary).lineLimit(3)
             }
             Button {
                 bar.syncNow()
