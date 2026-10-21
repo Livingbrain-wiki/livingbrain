@@ -378,6 +378,8 @@ async fn read(
         .await
         .map_err(fact_error)?
         .into_iter()
+        // A timeline that is retracted-only is not a fact anyone can read.
+        .filter(Timeline::has_live_facts)
         .filter(|timeline| {
             plan.allows(
                 KIND_FACTS,

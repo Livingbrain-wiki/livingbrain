@@ -11,8 +11,11 @@
 //! state, and which duplicate another.
 //!
 //! A subject is worked through in windows of [`DREAM_WINDOW`] current facts,
-//! in a fixed order (`created_at`, then `id`). A pass that leaves facts behind
-//! stores its cursor and the subject is queued again for the next tick, so a
+//! in a fixed order (`created_at`, then `id`). A window is widened to the
+//! whole attribute family of each key it holds (`auth_provider_*` for
+//! `auth_provider_github`), so two keys for one property are judged together,
+//! never one in a window and its replacement in another. A pass that leaves
+//! facts behind stores its cursor and the subject is queued again for the next tick, so a
 //! long subject is covered in a few ticks rather than one window a week. The
 //! sweep is complete when a window reaches the end; only then does the
 //! recheck interval start.
@@ -34,7 +37,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use cratefield_core::ScheduledBudget;
 use livingbrain_pages::{
-    CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, RuleFact, SWEEP_END,
+    CursorUpdate, DreamCandidate, DreamDecisionRow, DreamFinish, RuleFact, SWEEP_END, family_of,
 };
 use livingbrain_redact::{Policy, redact};
 use serde::Deserialize;
@@ -45,6 +48,7 @@ use crate::compile::{Budget, COMPILE_ROLE, Call, Compiler, ModelFailure};
 use crate::dream_settings::DreamSettings;
 use crate::facts::{self, Fact, HeldFact, attribute_rule, refusal};
 use crate::prompt;
+use crate::subject_aliases::{self, Aliases};
 
 /// A subject needs at least this many current facts before it is tidied: a
 /// short list has little to reconcile.
@@ -58,6 +62,9 @@ pub const FRESH_TRIGGER: usize = 10;
 const RETRY_HOURS: i64 = 24;
 /// The most current facts of one subject a pass shows the model at once.
 pub const DREAM_WINDOW: usize = 60;
+/// The most facts a window adds from the attribute families it touches: a
+/// family is shown whole, but a family-wide key never doubles a window.
+pub const FAMILY_EXTRA: usize = 20;
 /// The most candidate subjects read in one sweep.
 const CANDIDATE_LIMIT: usize = 200;
 /// The most decisions one answer may carry; the rest are refused.
@@ -151,6 +158,30 @@ pub trait Dreams: Send + Sync {
         scope: &str,
         subject: &str,
     ) -> Result<Vec<(String, i64, String)>, String>;
+    /// The subject's current facts in the attribute `families` that are not
+    /// in `skip`, at most `limit`: the rest of the families a window touches.
+    /// The default has none, so a store that cannot read families reviews
+    /// windows as they fall.
+    async fn family(
+        &self,
+        _scope: &str,
+        _subject: &str,
+        _families: &[String],
+        _skip: &[String],
+        _limit: usize,
+    ) -> Result<Vec<HeldFact>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// The attribute families of `facts`, each once, sorted.
+#[must_use]
+pub fn families_of(facts: &[HeldFact]) -> Vec<String> {
+    let set: BTreeSet<String> = facts
+        .iter()
+        .filter_map(|fact| family_of(&fact.attribute).map(str::to_owned))
+        .collect();
+    set.into_iter().collect()
 }
 
 /// What one sweep did.
@@ -398,6 +429,7 @@ struct WorkspacePlan {
     workspaces: HashMap<String, Option<String>>,
     settings: HashMap<String, DreamSettings>,
     asked: HashMap<String, bool>,
+    aliases: HashMap<String, Aliases>,
 }
 
 impl WorkspacePlan {
@@ -426,6 +458,19 @@ impl WorkspacePlan {
         }
         let read = compiler.dream_settings(workspace).await;
         self.settings.insert(workspace.to_owned(), read.clone());
+        read
+    }
+
+    /// The workspace's subject aliases, read once per tick. A read that
+    /// fails leaves every subject as it is this tick.
+    async fn aliases(&mut self, compiler: &Compiler, workspace: &str) -> Aliases {
+        if let Some(known) = self.aliases.get(workspace) {
+            return known.clone();
+        }
+        let read = subject_aliases::load(&*compiler.queue.db, workspace)
+            .await
+            .unwrap_or_default();
+        self.aliases.insert(workspace.to_owned(), read.clone());
         read
     }
 
@@ -616,7 +661,9 @@ impl Compiler {
     }
 
     /// The rule pass: reads the next batch of current facts and retracts each
-    /// one the shared attribute rules refuse, logging every retraction. Its
+    /// one the shared attribute rules refuse, or that is filed under a subject
+    /// that is no entity; a fact under an alias moves to its canonical
+    /// subject. Every change is logged. Its
     /// position is kept by the store, so successive ticks cover the whole
     /// fact set in bounded batches.
     ///
@@ -637,9 +684,10 @@ impl Compiler {
             if fact.written_by != facts::COMPILER_WRITER {
                 continue;
             }
-            let Some(rule) = attribute_rule(&fact.attribute) else {
-                continue;
-            };
+            let rule = attribute_rule(&fact.attribute);
+            // A subject that is no entity (a date-named import folder) is
+            // refused like a per-item key.
+            let misfiled = !facts::subject_ok(&fact.subject);
             // A workspace with the rules off keeps its facts; a scope with no
             // compiler job is no workspace's, and nothing the compiler wrote.
             let Some(workspace) = plan.workspace(self, &fact.scope).await? else {
@@ -650,9 +698,32 @@ impl Compiler {
             if !settings.enabled || !settings.rules_enabled {
                 continue;
             }
-            let applied = matches!(self.facts.retract(&fact.scope, &fact.id).await, Ok(true));
+            let aliases = plan.aliases(self, &workspace).await;
+            let target = subject_aliases::canonical(&aliases, &fact.subject).to_owned();
+            let moving = rule.is_none() && !misfiled && target != fact.subject;
+            if rule.is_none() && !misfiled && !moving {
+                continue;
+            }
+            let (applied, reason, by) = if moving {
+                // An alias: the fact moves to its canonical subject (a copy
+                // there, then the original is retracted), so one entity keeps
+                // one timeline per attribute.
+                match self
+                    .move_to_subject(&fact.scope, &workspace, &fact.id, &fact.subject, &target)
+                    .await
+                {
+                    Ok(copy) => (true, "alias".to_owned(), copy),
+                    Err(_) => (false, "alias".to_owned(), None),
+                }
+            } else {
+                let reason = match rule {
+                    Some(rule) => format!("rule:{rule}"),
+                    None => "rule:subject".to_owned(),
+                };
+                let applied = matches!(self.facts.retract(&fact.scope, &fact.id).await, Ok(true));
+                (applied, reason, None)
+            };
             let input_ids = serde_json::to_string(&[&fact.id]).map_err(|e| e.to_string())?;
-            let reason = format!("rule:{rule}");
             dreams
                 .log(DreamDecisionRow {
                     scope: &fact.scope,
@@ -661,7 +732,7 @@ impl Compiler {
                     subject: &fact.subject,
                     op: "retract",
                     fact_id: &fact.id,
-                    by_fact_id: None,
+                    by_fact_id: by.as_deref(),
                     new_valid_to: None,
                     new_attribute: None,
                     reason: Some(&reason),
@@ -752,10 +823,22 @@ impl Compiler {
         }
 
         let vocabulary = dreams.vocabulary(scope, subject).await?;
+        // The window, widened to the attribute families it touches: a
+        // property under several keys is shown whole.
+        let mut shown_facts = window.facts.clone();
+        let families = families_of(&window.facts);
+        if !families.is_empty() {
+            let skip: Vec<String> = window.facts.iter().map(|f| f.id.clone()).collect();
+            shown_facts.extend(
+                dreams
+                    .family(scope, subject, &families, &skip, FAMILY_EXTRA)
+                    .await?,
+            );
+        }
         // Redacted on the way out, as a compile's message is: the facts were
         // redacted at write, but the subject and the ids are the model's input.
         let Ok((user, _)) = redact(
-            &message(subject, &window.facts, &vocabulary, window.more),
+            &message(subject, &shown_facts, &vocabulary, window.more),
             Policy::Redact,
         ) else {
             return Ok(Pass::Failed("not-redactable"));
@@ -815,10 +898,10 @@ impl Compiler {
 
         // Every decision is logged, applied or not, under this pass's key.
         let key = at.format(&Rfc3339).map_err(|_| "clock".to_owned())?;
-        let ids: Vec<&str> = window.facts.iter().map(|fact| fact.id.as_str()).collect();
+        let ids: Vec<&str> = shown_facts.iter().map(|fact| fact.id.as_str()).collect();
         let input_ids = serde_json::to_string(&ids).map_err(|e| e.to_string())?;
         let shown: HashMap<&str, &HeldFact> =
-            window.facts.iter().map(|f| (f.id.as_str(), f)).collect();
+            shown_facts.iter().map(|f| (f.id.as_str(), f)).collect();
         let decided_at = done_at.format(&Rfc3339).map_err(|_| "clock".to_owned())?;
         let mut applied = 0usize;
         let mut touched: HashSet<String> = HashSet::new();
@@ -882,6 +965,44 @@ impl Compiler {
             more: window.more,
             cursor: window.cursor,
         })
+    }
+
+    /// Moves one fact from `subject` to `target` in `scope`: a copy under
+    /// `target` with the same value and dates, then the original retracted.
+    /// Answers the copy's id when this call stored it. The copy takes the
+    /// store's default cardinality, so an attribute that is many-valued by
+    /// design is moved as one-valued: a move is refused rather than made
+    /// when the target already holds the attribute.
+    async fn move_to_subject(
+        &self,
+        scope: &str,
+        workspace: &str,
+        id: &str,
+        subject: &str,
+        target: &str,
+    ) -> Result<Option<String>, &'static str> {
+        let held = self
+            .facts
+            .held(scope, &[subject.to_owned()])
+            .await
+            .map_err(|_| "store-refused")?;
+        let old = held.iter().find(|fact| fact.id == id).ok_or("not-live")?;
+        let target_held = self
+            .facts
+            .held(scope, &[target.to_owned()])
+            .await
+            .map_err(|_| "store-refused")?;
+        if target_held
+            .iter()
+            .any(|fact| fact.attribute == old.attribute)
+        {
+            return Err("already-held");
+        }
+        let mut copy = copy_of(old, &old.attribute, old.valid_to.clone());
+        copy.subject = target.to_owned();
+        let copied = self.emit_copy(workspace, scope, &copy).await?;
+        self.retract_or_undo(scope, id, copied.as_deref()).await?;
+        Ok(copied)
     }
 
     /// Applies one decision through the store's own operations. Every id

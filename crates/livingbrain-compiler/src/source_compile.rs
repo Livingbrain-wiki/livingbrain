@@ -121,6 +121,8 @@ pub struct UnitRun {
 struct Plan {
     source_id: String,
     created_at: String,
+    /// An import's own day, when its text or its path names one.
+    document_day: Option<String>,
     pieces: Vec<String>,
     /// Pieces already compiled (before this run, then as chunks apply).
     done: usize,
@@ -128,6 +130,44 @@ struct Plan {
 
 /// The pieces one model call sends: `(plan index, piece index)`, in order.
 type Chunk = Vec<(usize, usize)>;
+
+/// The day a document is about, `YYYY-MM-DD`: its front matter's `date:` or
+/// `created:` when it has one, else the first day-named part of its path,
+/// file name first (`notes/2026-08-14-standup.md`). `None` when neither
+/// names a real day.
+#[must_use]
+pub(crate) fn document_day(origin: Option<&str>, body: &str) -> Option<String> {
+    front_matter_day(body).or_else(|| origin.and_then(|path| path.rsplit('/').find_map(day_prefix)))
+}
+
+fn front_matter_day(body: &str) -> Option<String> {
+    let mut lines = body.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines.take(40) {
+        let line = line.trim();
+        if line == "---" {
+            break;
+        }
+        if let Some(value) = line
+            .strip_prefix("date:")
+            .or_else(|| line.strip_prefix("created:"))
+            && let Some(day) = day_prefix(value.trim().trim_matches(['"', '\'']))
+        {
+            return Some(day);
+        }
+    }
+    None
+}
+
+/// The `YYYY-MM-DD` that `text` starts with, when it is a real day.
+fn day_prefix(text: &str) -> Option<String> {
+    let day = text.get(..10)?;
+    time::Date::parse(day, &time::format_description::well_known::Iso8601::DATE)
+        .ok()
+        .map(|_| day.to_owned())
+}
 
 /// Cuts text into pieces of at most `max` characters, at line boundaries
 /// where a line fits, else at the character.
@@ -573,6 +613,9 @@ impl Compiler {
             plans.push(Plan {
                 source_id: member.source_id,
                 created_at: member.created_at,
+                document_day: (kind == "import")
+                    .then(|| document_day(source.origin_ref.as_deref(), &body))
+                    .flatten(),
                 pieces,
                 done: member.pieces_done,
             });
@@ -844,6 +887,12 @@ impl Compiler {
                         accepted.push(fact);
                     }
                 }
+                crate::subject_aliases::canonicalize(
+                    &*self.queue.db,
+                    &unit.workspace,
+                    &mut accepted,
+                )
+                .await;
                 if let Ok(emitted) = self
                     .facts
                     .emit(&unit.workspace, &unit.scope, &accepted)
@@ -930,6 +979,10 @@ impl Compiler {
                 created.push(plan.created_at.as_str());
             }
         }
+        // A chunk of an import is one file: its day is the file's own.
+        let document_day = chunk
+            .first()
+            .and_then(|(plan_index, _)| plans[*plan_index].document_day.clone());
         Cite {
             label: format!(
                 "{} {} · {}",
@@ -939,6 +992,7 @@ impl Compiler {
             ),
             source_ids,
             started_at: observed_at(&unit.unit_day, &created),
+            document_day,
         }
     }
 }
@@ -1033,6 +1087,48 @@ fn unit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_import_is_dated_by_its_document_not_the_day_it_was_imported() {
+        // The file's own name, then its front matter (which wins), then none.
+        assert_eq!(
+            document_day(Some("notes/2026-08-14-standup.md"), "plain text").as_deref(),
+            Some("2026-08-14")
+        );
+        assert_eq!(
+            document_day(
+                Some("notes/standup.md"),
+                "---\ntitle: Standup\ndate: \"2026-03-02\"\n---\nbody"
+            )
+            .as_deref(),
+            Some("2026-03-02")
+        );
+        assert_eq!(document_day(Some("notes/plan.md"), "no date here"), None);
+        assert_eq!(
+            document_day(Some("project/2026-13-40/a.md"), "x"),
+            None,
+            "not a real day"
+        );
+
+        // The fact the model leaves undated is valid from the document's day.
+        let cite = Cite {
+            label: "imports notes".to_owned(),
+            source_ids: vec!["01B".to_owned()],
+            started_at: Some("2026-10-21T09:00:00Z".to_owned()),
+            document_day: document_day(Some("notes/2026-08-14-standup.md"), ""),
+        };
+        let now = OffsetDateTime::parse(
+            "2026-10-21T10:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("a time");
+        let (observed, default_from) = crate::compile::cite_times(&cite, now);
+        assert_eq!(default_from.as_deref(), Some("2026-08-14"));
+        assert_eq!(
+            observed, "2026-10-21T09:00:00Z",
+            "observed is still when it was imported"
+        );
+    }
 
     #[test]
     fn pieces_respect_the_limit_and_keep_every_character() {

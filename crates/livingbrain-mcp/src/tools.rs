@@ -789,6 +789,8 @@ async fn read_facts(
         .await
         .map_err(facts_failed)?
         .into_iter()
+        // A timeline that is retracted-only has no fact to say.
+        .filter(Timeline::has_live_facts)
         // A subject-prefix grant: timelines outside it are dropped before
         // anything is rendered or cited.
         .filter(|timeline| {

@@ -450,3 +450,73 @@ fn a_subject_or_attribute_carrying_personal_data_is_refused() {
         assert!(kit.facts.check(&shoe("40", Some("someday"))).is_err());
     });
 }
+
+#[test]
+fn a_retracted_only_timeline_is_not_searched_or_briefed() {
+    pollster::block_on(async {
+        let kit = kit();
+        // Shoe size is retracted outright; a live fact sits beside it.
+        let shoe_fact = kit
+            .facts
+            .record("user-a", shoe("40", None), "u-a")
+            .await
+            .unwrap()
+            .fact
+            .id;
+        kit.facts.retract(&["user-a"], &shoe_fact).await.unwrap();
+        kit.facts
+            .record(
+                "user-a",
+                FactInput {
+                    subject: "project/aura".to_owned(),
+                    attribute: "deploy_target".to_owned(),
+                    value: "Workers".to_owned(),
+                    valid_from: None,
+                    ..FactInput::default()
+                },
+                "u-a",
+            )
+            .await
+            .unwrap();
+
+        // The index, the search and the brief all skip the retracted-only key.
+        let index = kit.facts.index(&["user-a"]).await.unwrap();
+        assert_eq!(
+            index.len(),
+            1,
+            "only the live timeline is listed: {index:?}"
+        );
+        assert_eq!(index[0].2, "deploy_target");
+
+        let asked = livingbrain_pages::relevant(
+            &kit.facts,
+            "u-a",
+            &["user-a".to_owned()],
+            "what is my shoe size",
+        )
+        .await
+        .unwrap();
+        assert!(
+            asked.is_empty(),
+            "no brief timeline for a retracted-only key"
+        );
+
+        let all = kit.facts.timelines(&["user-a"], None, None).await.unwrap();
+        let live: Vec<_> = all.iter().filter(|t| t.has_live_facts()).collect();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].attribute, "deploy_target");
+    });
+}
+
+#[test]
+fn a_family_is_the_key_without_its_last_segment() {
+    assert_eq!(
+        livingbrain_pages::family_of("auth_provider_github"),
+        Some("auth_provider")
+    );
+    assert_eq!(
+        livingbrain_pages::family_of("auth_provider_oidc"),
+        Some("auth_provider")
+    );
+    assert_eq!(livingbrain_pages::family_of("shoe"), None);
+}
