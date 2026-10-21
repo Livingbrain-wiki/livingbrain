@@ -88,17 +88,45 @@ function enqueue(task) {
   return run;
 }
 
+/**
+ * While Mermaid renders, a `style` attribute it writes into its own render
+ * container is applied through the CSS object model instead. The page's policy
+ * refuses a `style` attribute (`style-src 'self'`) but allows `element.style`,
+ * so the drawing is the same and the console stays clean. Only elements inside
+ * that container are touched, and only for the length of one render.
+ */
+function styleThroughCssom(id) {
+  const originalSet = Element.prototype.setAttribute;
+  const container = () => document.getElementById(`d${id}`);
+  Element.prototype.setAttribute = function setAttribute(name, value) {
+    if (String(name).toLowerCase() === "style") {
+      const box = container();
+      if (box && box.contains(this)) {
+        this.style.cssText = String(value);
+        return undefined;
+      }
+    }
+    return originalSet.call(this, name, value);
+  };
+  return () => {
+    Element.prototype.setAttribute = originalSet;
+  };
+}
+
 async function drawSource(source, colours) {
   const mermaid = await loadMermaid();
   const id = `lbd-${++counter}`;
   return enqueue(async () => {
     mermaid.initialize(mermaidConfig(colours, FONT_FAMILY));
+    const restore = styleThroughCssom(id);
     try {
       const { svg } = await mermaid.render(id, source);
       return svg;
     } catch (error) {
       document.getElementById(`d${id}`)?.remove();
       throw error;
+    } finally {
+      restore();
     }
   });
 }
@@ -114,29 +142,27 @@ async function drawSource(source, colours) {
  * clash. The SVG text itself is kept whole for the exports.
  */
 function svgNode(svgText) {
-  const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+  // Parsing a `style` attribute is refused by the page policy too, so the
+  // attribute is renamed for the parse and its value applied via the CSSOM.
+  const markup = String(svgText).replace(/\sstyle="([^"]*)"/g, ' data-lbd-style="$1"');
+  const doc = new DOMParser().parseFromString(markup, "image/svg+xml");
   const root = doc.documentElement;
   if (!root || root.localName !== "svg" || doc.getElementsByTagName("parsererror").length) {
     throw new Error("not an svg");
   }
   const css = [...root.getElementsByTagName("style")].map((el) => el.textContent).join("\n");
   for (const el of [...root.getElementsByTagName("style")]) el.remove();
+  // One entry per element, in document order, so each style meets its own element.
   const inline = [];
-  for (const el of [root, ...root.querySelectorAll("[style]")]) {
-    if (el.hasAttribute("style")) {
-      inline.push(el.getAttribute("style"));
-      el.removeAttribute("style");
-    } else {
-      inline.push(null);
-    }
+  for (const el of [root, ...root.querySelectorAll("*")]) {
+    inline.push(el.getAttribute("data-lbd-style"));
+    el.removeAttribute("data-lbd-style");
   }
   const node = document.importNode(root, true);
-  const targets = [node, ...node.querySelectorAll("*")].filter((el) => el.namespaceURI === root.namespaceURI);
-  let index = 0;
-  for (const el of targets) {
-    if (index < inline.length && inline[index] != null) el.style.cssText = inline[index];
-    index += 1;
-  }
+  const targets = [node, ...node.querySelectorAll("*")];
+  targets.forEach((el, index) => {
+    if (inline[index] != null) el.style.cssText = inline[index];
+  });
   return { node, css };
 }
 
@@ -167,8 +193,37 @@ function bindLinks(svg, links, go) {
   }
 }
 
+/**
+ * A timeline keeps its columns readable: it is as wide as the card, or as
+ * wide as seven-ish rems per event when there are many, and only then
+ * scrolls sideways inside the stage.
+ */
+function sizeTimeline(svg, spec) {
+  if (!spec.events) return;
+  svg.style.setProperty("width", "100%");
+  svg.style.setProperty("height", "auto");
+  svg.style.setProperty("min-width", `${spec.events.length * 6.5}rem`);
+}
+
 /** Paints the focus node of a relationship map with the accent, through the CSSOM. */
 function highlightNode(svg, highlight) {
+  // Every cluster gets the same outline and fill, whatever Mermaid picked for it.
+  if (highlight) {
+    for (const cluster of svg.querySelectorAll("g.cluster rect")) {
+      cluster.style.setProperty("stroke", highlight.line);
+      cluster.style.setProperty("stroke-width", "1px");
+    }
+    // Mermaid strokes cluster titles (which reads as bold); the text is drawn plain.
+    for (const label of svg.querySelectorAll("g.cluster-label text, g.cluster-label tspan")) {
+      label.style.setProperty("fill", highlight.clusterInk);
+      label.style.setProperty("stroke", "none");
+      label.style.setProperty("font-weight", "400");
+    }
+    for (const box of svg.querySelectorAll("g.cluster-label rect")) {
+      box.style.setProperty("fill", "none");
+      box.style.setProperty("stroke", "none");
+    }
+  }
   if (!highlight) return;
   const pattern = new RegExp(`-${highlight.id}-\\d+$`);
   const group = [...svg.querySelectorAll("g.node")].find((g) => pattern.test(g.id || ""));
@@ -401,7 +456,12 @@ function listLinks(card) {
       "ul",
       {},
       items.map((item) =>
-        h("li", {}, h("a", { href: `wiki.html?slug=${encodeURIComponent(item.slug)}` }, item.label), ` · ${item.group}`),
+        h(
+          "li",
+          {},
+          item.slug ? h("a", { href: `wiki.html?slug=${encodeURIComponent(item.slug)}` }, item.label) : item.label,
+          item.group ? ` · ${item.group}` : "",
+        ),
       ),
     ),
   );
@@ -413,13 +473,15 @@ async function draw(card) {
   if (!card.spec) return;
   const colours = currentPalette();
   try {
-    const svgText = await drawSource(card.spec.source, colours);
+    // A drawn spec (the timeline) is already SVG: it needs no Mermaid.
+    const svgText = card.spec.svg || (await drawSource(card.spec.source, colours));
     const { node: svg, css } = svgNode(svgText);
     card.svgText = svgText;
     card.css = css;
     card.colours = colours;
     adoptSheet(card, css);
     card.stage.replaceChildren(svg);
+    sizeTimeline(svg, card.spec);
     highlightNode(svg, card.spec.highlight);
     bindLinks(svg, card.spec.links || {}, (slug) => {
       window.location.assign(`wiki.html?slug=${encodeURIComponent(slug)}`);
@@ -563,8 +625,12 @@ export async function mountPageDiagrams(container, { api, slug, scope, title, en
     diagramsForPage({ entityType, title, markdown, graph, focusId, facts: flattenFacts(facts), colours });
   const specs = generate(currentPalette());
   if (!specs.length || !isCurrent()) return;
-  await loadMermaid().catch(() => null);
-  if (!globalThis.mermaid || !isCurrent()) return;
+  // Mermaid is needed only for a Mermaid-drawn spec (a timeline is already SVG).
+  if (specs.some((spec) => !spec.svg)) {
+    await loadMermaid().catch(() => null);
+    if (!globalThis.mermaid) return;
+  }
+  if (!isCurrent()) return;
   listenForTheme();
   const heading = h("h2", { class: "diagrams__title" }, "Diagrams");
   container.append(heading);

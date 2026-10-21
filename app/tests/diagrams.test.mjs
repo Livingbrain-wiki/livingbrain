@@ -18,9 +18,12 @@ import {
   relationshipMap,
   sanitizeLabel,
   serializeSvg,
+  shortDate,
   slugify,
   stepsFromMarkdown,
   timelineFromFacts,
+  timelineSvg,
+  wrapText,
 } from "../assets/diagrams.js";
 import { renderMarkdown } from "../assets/markdown.js";
 
@@ -343,4 +346,63 @@ test("other fences are unchanged, and a mermaid body stays text", () => {
   const leaf = block.children[0].children[0].children[0];
   assert.equal(leaf.type, "text", "the body is one text node, never markup");
   assert.equal(leaf.value, "<script>alert(1)</script>");
+});
+
+/* ------------------------------------------------------------ timeline drawing */
+
+test("dates are short: year, month and year, or day month year", () => {
+  assert.equal(shortDate("1842"), "1842");
+  assert.equal(shortDate("1842-07"), "Jul 1842");
+  assert.equal(shortDate("2024-03-15"), "15 Mar 2024");
+});
+
+test("text wraps to a width and ends with an ellipsis past the last line", () => {
+  assert.deepEqual(wrapText("joined project Notes", 12, 3), ["joined", "project", "Notes"]);
+  const lines = wrapText("one two three four five six seven eight nine ten", 10, 2);
+  assert.equal(lines.length, 2);
+  assert.ok(lines[1].endsWith("…"));
+  assert.ok(lines.every((line) => line.length <= 10));
+  assert.deepEqual(wrapText("short", 17, 3), ["short"]);
+});
+
+test("the timeline SVG has one dot and one date per event, no style attributes, and an exact viewBox", () => {
+  const events = [
+    { short: "1 Jan 1840", text: "role Student" },
+    { short: "Jul 1842", text: "role <b>Analyst</b> & more" },
+    { short: "1843", text: "first algorithm" },
+  ];
+  const svg = timelineSvg(events, { line: "#111111", accent: "#22cc88", background: "#000000", ink: "#ffffff", ink2: "#cccccc" });
+  assert.equal(svg.match(/<circle /g).length, 3, "one dot per event");
+  assert.ok(svg.includes('viewBox="0 0 390 158"'), "three columns of 130 and the fixed height");
+  assert.equal(svg.includes("style="), false, "presentation attributes only, so the page policy allows it");
+  assert.equal(svg.includes("<b>"), false, "event text is escaped");
+  assert.ok(svg.includes("&lt;b&gt;"));
+  assert.equal(svg.includes("<title"), false);
+  assert.equal(timelineSvg([], { line: "#000" }), null);
+});
+
+test("the timeline from facts carries events, and its diagram is drawn SVG", () => {
+  const out = diagramsForPage({
+    entityType: "topic",
+    title: "History",
+    markdown: "",
+    graph: null,
+    focusId: null,
+    facts: [fact("a", "2025-01"), fact("b", "2025-02-03"), fact("c", "2025")],
+    colours: palette({}),
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].label, "Timeline");
+  assert.equal(out[0].events.length, 3);
+  assert.deepEqual(out[0].events.map((e) => e.short), ["2025", "Jan 2025", "3 Feb 2025"]);
+  assert.ok(out[0].svg.startsWith("<svg"));
+  assert.equal(out[0].items[0].group, "");
+});
+
+test("every relationship arrow leaves the focus, so the map is a fan with no crossings", () => {
+  const map = relationshipMap({ focusId: "page:shared:ada", ...fixtureGraph({ count: 5 }), colours: palette({}) });
+  const edges = map.source.split("\n").filter((line) => line.includes("-->"));
+  assert.equal(edges.length, 5);
+  for (const line of edges) assert.match(line, /^ {2}n0 --> n\d+$/);
+  assert.equal(map.highlight.id, "n0");
 });

@@ -274,11 +274,6 @@ export function relationshipMap({ focusId, nodes, edges, max = MAX_NEIGHBOURS, c
   name.set(focusId, "n0");
   ranked.forEach((node, index) => name.set(node.id, `n${index + 1}`));
 
-  // One arrow per neighbour: out of the focus when any edge leaves it, else into it.
-  const outgoing = new Set();
-  for (const edge of uniqueEdges) {
-    if (edge.source === focusId && chosen.has(edge.target)) outgoing.add(edge.target);
-  }
 
   const groups = new Map();
   for (const node of ranked) {
@@ -305,7 +300,8 @@ export function relationshipMap({ focusId, nodes, edges, max = MAX_NEIGHBOURS, c
   });
   for (const node of ranked) {
     const id = name.get(node.id);
-    lines.push(outgoing.has(node.id) ? `  ${name.get(focusId)} --> ${id}` : `  ${id} --> ${name.get(focusId)}`);
+    // Every arrow leaves the focus: one direction keeps the map a fan, with no crossings.
+    lines.push(`  ${name.get(focusId)} --> ${id}`);
   }
   // The focus node is painted after render (diagram-view.js), not with a
   // Mermaid style directive: a `style` line here also reached a subgraph.
@@ -314,7 +310,9 @@ export function relationshipMap({ focusId, nodes, edges, max = MAX_NEIGHBOURS, c
   const items = ranked
     .filter((node) => node.slug)
     .map((node) => ({ label: sanitizeLabel(node.label), slug: node.slug, group: groupLabel(node.kind) }));
-  const highlight = colours ? { id: name.get(focusId), fill: colours.accent, ink: colours.accentInk } : null;
+  const highlight = colours
+    ? { id: name.get(focusId), fill: colours.accent, ink: colours.accentInk, line: colours.line2, clusterInk: colours.ink2 }
+    : null;
   return { type: "relationship", source: lines.join("\n"), links, items, highlight, count: ranked.length, groups: groupIndex.length };
 }
 
@@ -411,7 +409,73 @@ export function timelineFromFacts(facts, { title = "Timeline" } = {}) {
     }
     lines.push(`    ${event.date} : ${event.label}`);
   }
-  return { type: "timeline", source: lines.join("\n"), links: {}, count: shown.length };
+  // The drawn timeline is an SVG (timelineSvg); the Mermaid source is what "Copy Mermaid source" gives.
+  const drawn = shown.map((event) => ({ date: event.date, short: shortDate(event.date), text: event.label }));
+  return { type: "timeline", source: lines.join("\n"), events: drawn, links: {}, count: shown.length };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `1842`, `Jul 1842` or `15 Mar 2024`, from a `YYYY`, `YYYY-MM` or `YYYY-MM-DD` date. */
+export function shortDate(date) {
+  const [year, month, day] = String(date).split("-");
+  if (!month) return year;
+  const name = MONTHS[Number(month) - 1] || "";
+  return day ? `${Number(day)} ${name} ${year}` : `${name} ${year}`;
+}
+
+/** Word-wraps `text` to `width` characters over at most `maxLines` lines, ending the last with an ellipsis if cut. */
+export function wrapText(text, width = 17, maxLines = 3) {
+  const words = String(text || "").split(" ").filter(Boolean);
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length <= width) {
+      current = next;
+      continue;
+    }
+    if (current) lines.push(current);
+    current = word.length > width ? `${word.slice(0, width - 1)}…` : word;
+  }
+  if (current) lines.push(current);
+  if (lines.length <= maxLines) return lines;
+  const kept = lines.slice(0, maxLines);
+  const last = kept[maxLines - 1];
+  kept[maxLines - 1] = `${last.slice(0, Math.max(0, width - 1)).trimEnd()}…`;
+  return kept;
+}
+
+const SVG_FONT = "Hanken Grotesk, system-ui, sans-serif";
+
+/** The timeline drawn as one row: a date above each dot on a clean axis, the event below, wrapped. */
+export function timelineSvg(events, colours) {
+  const list = Array.isArray(events) ? events : [];
+  if (!list.length || !colours) return null;
+  const column = 130;
+  const axis = 78;
+  const height = 158;
+  const width = list.length * column;
+  const parts = [
+    `<line x1="0" y1="${axis}" x2="${width}" y2="${axis}" stroke="${colours.line}" stroke-width="2" stroke-linecap="round"/>`,
+  ];
+  list.forEach((event, index) => {
+    const cx = index * column + column / 2;
+    parts.push(
+      `<text x="${cx}" y="40" text-anchor="middle" font-family="${SVG_FONT}" font-size="12" font-weight="600" fill="${colours.ink}">${xmlText(event.short)}</text>`,
+      `<circle cx="${cx}" cy="${axis}" r="6" fill="${colours.accent}" stroke="${colours.background}" stroke-width="2"/>`,
+    );
+    wrapText(event.text, 17, 3).forEach((line, row) => {
+      parts.push(
+        `<text x="${cx}" y="${axis + 32 + row * 18}" text-anchor="middle" font-family="${SVG_FONT}" font-size="13" fill="${colours.ink2}">${xmlText(line)}</text>`,
+      );
+    });
+  });
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" class="lbd-timeline">${parts.join("")}</svg>`;
+}
+
+function xmlText(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 /* ------------------------------------------------------------ page */
@@ -435,7 +499,10 @@ export function diagramsForPage({ entityType, title, markdown, graph, focusId, f
     if (flow) out.push({ ...flow, label: "Flow" });
   }
   const timeline = timelineFromFacts(facts, { title: title || "Timeline" });
-  if (timeline) out.push({ ...timeline, label: "Timeline" });
+  if (timeline) {
+    const items = timeline.events.map((event) => ({ label: `${event.short}: ${event.text}`, group: "" }));
+    out.push({ ...timeline, label: "Timeline", items, svg: timelineSvg(timeline.events, colours) });
+  }
   return out.slice(0, MAX_PAGE_DIAGRAMS);
 }
 
