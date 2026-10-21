@@ -53,10 +53,14 @@ livingbrain-tokens = { path = "../livingbrain-tokens" }
 # Request bodies, and the SHA-256 behind a note slug.
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `stream::iter`, for the map's chunked JSON body (`graph::streamed_json`).
+futures-util = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
 time = { workspace = true }
 
 [dev-dependencies]
+# The D1 bound-parameter ceiling the map's reads are tested under.
+livingbrain-d1-fake = { path = "../livingbrain-d1-fake" }
 # The grants tables a test harness needs beside the routes (ADR 0004).
 livingbrain-accounts = { path = "../livingbrain-accounts" }
 # The `postgres` feature unlocks the Postgres leg of the conformance suite
