@@ -31,6 +31,7 @@ import {
   renderMarkdown,
   isSafeHref,
 } from "./markdown.js";
+import { mountMermaidBlocks, mountPageDiagrams } from "./diagram-view.js";
 import { applyHeader, checkSession } from "./session.js";
 import {
   buildFactsView,
@@ -3273,6 +3274,7 @@ export async function wikiPage(api) {
     if (facts.length) els.pageMeta.appendChild(document.createTextNode(facts.join(" · ")));
     renderInto(els.pageBody, renderMarkdown(stripFrontmatter(page.markdown || "")));
     linkWikilinks(els.pageBody);
+    mountMermaidBlocks(els.pageBody, { title }).catch(() => {});
     wireHeadingsAndToc();
     const backlinks = Array.isArray(page.backlinks) ? page.backlinks : [];
     const citations = Array.isArray(page.citations) ? page.citations : [];
@@ -3281,8 +3283,26 @@ export async function wikiPage(api) {
     paintCards(backlinks, citations);
     if (els.pageFactsAsOf) els.pageFactsAsOf.value = "";
     paintPageFacts(page.facts);
+    paintPageDiagrams(page, title, where);
     paintPin();
     resetPageAccess();
+  }
+
+  /** The diagrams generated from this page's graph, links and facts (diagrams.js). */
+  function paintPageDiagrams(page, title, where) {
+    const container = $("#page-diagrams");
+    if (!container) return;
+    const slug = page.slug || state.slug;
+    mountPageDiagrams(container, {
+      api,
+      slug,
+      scope: where && where.scope,
+      title,
+      entityType: page.entity_type,
+      markdown: stripFrontmatter(page.markdown || ""),
+      facts: page.facts,
+      isCurrent: () => state.page === page,
+    }).catch(() => {});
   }
 
   /* -- who can see this (ADR 0004) ----------------------------------- */

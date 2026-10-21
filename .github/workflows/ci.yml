@@ -121,16 +121,17 @@ jobs:
           node --check app/sw.js
           # The three modules, each imported the way a page or a test loads
           # it, so an import-time error fails here and not only in a browser.
-          for file in app/assets/markdown.js app/assets/settings.js app/assets/session.js app/assets/models.js app/assets/marks.js app/assets/tokens.js app/assets/budgets.js app/assets/profile.js app/assets/nav.js app/assets/shell.js app/assets/graph.js app/assets/update.js app/assets/app.js; do
+          for file in app/assets/markdown.js app/assets/diagrams.js app/assets/diagram-view.js app/assets/settings.js app/assets/session.js app/assets/models.js app/assets/marks.js app/assets/tokens.js app/assets/budgets.js app/assets/profile.js app/assets/nav.js app/assets/shell.js app/assets/graph.js app/assets/update.js app/assets/app.js; do
             node --input-type=module -e "import('./$file').then(() => process.exit(0))"
           done
       - name: No HTML is ever assigned from content
         # The wiki body is user content and reaches the DOM only as text nodes,
-        # so any *assignment* of HTML is a bug. Prose mentions in comments and
+        # so any *assignment* of HTML is a bug (vendored libraries excluded). Prose mentions in comments and
         # in the README are matched by the `-n` search too, hence the pattern
         # looks for the call, not the word.
         run: |
-          if grep -rnE "\.(inner|outer)HTML *=|insertAdjacentHTML *\(|document\.write *\(" app/; then
+          # assets/vendor/ is third-party code (Mermaid), not the app's own.
+          if grep -rnE --exclude-dir=vendor "\.(inner|outer)HTML *=|insertAdjacentHTML *\(|document\.write *\(" app/; then
             echo "::error::user content must never be assigned as HTML"
             exit 1
           fi
