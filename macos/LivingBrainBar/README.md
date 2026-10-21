@@ -205,8 +205,8 @@ The one you pick under **CLI**, if it is executable. Otherwise the first of
 these that is:
 
 1. the copy inside the app, `Living Brain.app/Contents/Resources/livingbrain`
-   (release builds from `scripts/release.sh` ship one; a plain
-   `scripts/build-app.sh` build does not)
+   (built from this checkout so the app and CLI agree on the opt-in file
+   format; included by default, disabled with `BUNDLE_CLI=0`)
 2. `~/bin/livingbrain`
 3. `/opt/homebrew/bin/livingbrain`
 4. `/usr/local/bin/livingbrain`
@@ -315,7 +315,9 @@ and signs it.
   identity (hardened runtime and a timestamp are added). An ad-hoc build
   runs on the machine that built it; to hand it to others, sign and notarize it.
 - **Other knobs:** `UNIVERSAL=1` (arm64 + x86_64), `OUTPUT_DIR=…`,
-  `APP_VERSION=…`, `BUILD_NUMBER=…`, `BUNDLE_ID=…`.
+  `APP_VERSION=…`, `BUILD_NUMBER=…`, `BUNDLE_ID=…`, `BUNDLE_CLI=0` (app
+  only, no CLI inside; default is 1), `CARGO_TARGET_DIR=…` (cargo target dir
+  for the bundled CLI; default `<repo>/target`).
 - **Launch at Login** registers whichever copy is running, so install to
   `/Applications` first and turn it on from there.
 
