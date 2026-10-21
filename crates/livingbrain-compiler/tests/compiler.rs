@@ -2387,6 +2387,15 @@ impl livingbrain_compiler::Dreams for Store {
             .await
             .map_err(|e| e.to_string())
     }
+    async fn subject_families(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<(String, Vec<String>, i64)>, String> {
+        self.0
+            .dream_subject_families(scope)
+            .await
+            .map_err(|e| e.to_string())
+    }
     async fn family(
         &self,
         scope: &str,
@@ -2925,21 +2934,26 @@ fn a_workspace_alias_files_its_facts_under_the_canonical_subject() {
     let now = world.clock.now();
     let db: &dyn cratefield_core::Database = &*world.db;
     let set = |alias: &str, canonical: &str| {
-        pollster::block_on(subject_aliases::set(db, WORKSPACE, alias, canonical, now))
+        pollster::block_on(subject_aliases::set(
+            db, WORKSPACE, alias, canonical, "u1", now,
+        ))
     };
     assert_eq!(set("project/world369", "project/earthos"), Ok(()));
     assert_eq!(set("project/aura", "project/earthos"), Ok(()));
     // One hop only: a canonical name cannot itself be an alias, and an alias
     // cannot be a canonical name of others.
-    assert_eq!(set("project/x", "project/aura"), Err("canonical-is-alias"));
+    assert_eq!(
+        set("project/x", "project/aura"),
+        Err(subject_aliases::Refused::CanonicalIsAlias)
+    );
     assert_eq!(
         set("project/earthos", "project/y"),
-        Err("alias-is-canonical")
+        Err(subject_aliases::Refused::AliasIsCanonical)
     );
     // A date-named folder is no subject, so it is no alias either.
     assert_eq!(
         set("project/2026-08-14", "project/earthos"),
-        Err("bad-subject")
+        Err(subject_aliases::Refused::BadSubject)
     );
 
     let fact = |subject: &str| Fact {
@@ -2975,6 +2989,118 @@ fn a_workspace_alias_files_its_facts_under_the_canonical_subject() {
         &mut other,
     ));
     assert_eq!(other[0].subject, "project/world369");
+}
+
+#[test]
+fn a_dream_proposes_an_alias_that_applies_only_when_accepted_and_stays_dismissed() {
+    use livingbrain_compiler::subject_aliases::{self, Refused};
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    // Twenty facts so the scope is swept at all.
+    seed_tools(&world, &store, &scope, 20);
+    // Two subjects with the same three families (host, db, auth), and one more
+    // family on the second: the same entity, written under two names.
+    let about = |subject: &str, attribute: &str| {
+        pollster::block_on(store.0.record(
+            &scope,
+            livingbrain_pages::FactInput {
+                subject: subject.to_owned(),
+                attribute: attribute.to_owned(),
+                value: "v".to_owned(),
+                valid_from: Some("2025".to_owned()),
+                source: Some("source:seed".to_owned()),
+                ..livingbrain_pages::FactInput::default()
+            },
+            livingbrain_compiler::COMPILER_WRITER,
+        ))
+        .expect("a seeded fact");
+    };
+    let shared = [
+        "host_provider",
+        "host_region",
+        "db_engine",
+        "auth_provider",
+        "auth_mode",
+    ];
+    for attribute in shared {
+        about("project/world369", attribute);
+    }
+    for attribute in shared.iter().chain(["brand_name"].iter()) {
+        about("project/earthos", attribute);
+    }
+
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let db: &dyn cratefield_core::Database = &*world.db;
+    pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 0)).expect("a sweep");
+
+    // Proposed, under the subject with more facts, and not applied.
+    let rows = pollster::block_on(subject_aliases::rows(db, WORKSPACE)).expect("rows");
+    assert_eq!(rows.len(), 1, "one proposal: {rows:?}");
+    assert_eq!(rows[0].alias, "project/world369");
+    assert_eq!(rows[0].canonical, "project/earthos");
+    assert_eq!(rows[0].state, "proposed");
+    assert!(rows[0].shared >= 3);
+    assert!(
+        pollster::block_on(subject_aliases::load(db, WORKSPACE))
+            .expect("load")
+            .is_empty()
+    );
+
+    // Accepted by an owner: in force, and the next sweep files it canonically.
+    pollster::block_on(subject_aliases::accept(
+        db,
+        WORKSPACE,
+        "project/world369",
+        "u1",
+        now,
+    ))
+    .expect("accepted");
+    let in_force = pollster::block_on(subject_aliases::load(db, WORKSPACE)).expect("load");
+    assert_eq!(
+        in_force,
+        vec![("project/world369".to_owned(), "project/earthos".to_owned())]
+    );
+    assert_eq!(
+        pollster::block_on(subject_aliases::accept(
+            db,
+            WORKSPACE,
+            "project/world369",
+            "u1",
+            now
+        )),
+        Err(Refused::NotProposed),
+        "an accepted proposal is no longer a proposal"
+    );
+
+    // Dismissed: not in force, and never proposed again.
+    pollster::block_on(subject_aliases::remove(
+        db,
+        WORKSPACE,
+        "project/world369",
+        "u1",
+        now,
+    ))
+    .expect("dismissed");
+    pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 0)).expect("a sweep");
+    let after = pollster::block_on(subject_aliases::rows(db, WORKSPACE)).expect("rows");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].state, "dismissed");
+    assert!(
+        pollster::block_on(subject_aliases::load(db, WORKSPACE))
+            .expect("load")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -3199,6 +3325,7 @@ fn the_rule_pass_files_a_date_named_subject_out_and_moves_an_alias_to_its_subjec
         WORKSPACE,
         "project/world369",
         "project/earthos",
+        "u1",
         now,
     ))
     .expect("the alias is set");

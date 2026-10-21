@@ -13,10 +13,12 @@ use cratefield_core::{Database, MapConfig, Ports, Signer, Statement, UlidIdGen};
 use cratefield_kms::{Dek, Kms, LocalFileKms};
 use cratefield_testing::TestHarness;
 use livingbrain_access::{Scope, UserId};
-use livingbrain_api::{BudgetSettings, CodingAgents, Dreaming, Wiki};
+use livingbrain_api::{BudgetSettings, CodingAgents, Dreaming, Facts, Wiki};
+use livingbrain_compiler::subject_aliases;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, SessionAuth, page_scope};
 use livingbrain_pages::{DreamDecisionRow, FactInput, FactStore, Pages};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use tower::ServiceExt;
 
 const WORKSPACE: &str = "T0DREAMING";
@@ -86,6 +88,7 @@ fn kit() -> Kit {
             Box::new(livingbrain_accounts::Access::new()),
             Box::new(Pages::new()),
             Box::new(CodingAgents::new(wiki.clone())),
+            Box::new(Facts::new(wiki.clone())),
             Box::new(Dreaming::new(wiki)),
             Box::new(BudgetSettings::new()),
         ],
@@ -497,4 +500,256 @@ fn the_status_strip_counts_this_workspaces_changes() {
         changes.get("end").is_none(),
         "a refused end is not a change"
     );
+}
+
+/// `PUT /v1/facts/aliases` with `alias` and `canonical`.
+fn alias_put(alias: &str, canonical: &str) -> Option<Value> {
+    Some(json!({"alias": alias, "canonical": canonical}))
+}
+
+#[test]
+fn alias_routes_are_read_by_members_and_changed_only_by_an_owner() {
+    let kit = kit();
+    let plain = kit.send(Method::GET, "/v1/facts/aliases", PLAIN, None);
+    assert_eq!(plain.status, StatusCode::OK, "{}", plain.body);
+    assert_eq!(plain.body["editable"], json!(false));
+
+    let refused = kit.send(
+        Method::PUT,
+        "/v1/facts/aliases",
+        PLAIN,
+        alias_put("project/world369", "project/earthos"),
+    );
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert!(slug_is(&refused.body, "facts/aliases/forbidden"));
+
+    let set = kit.send(
+        Method::PUT,
+        "/v1/facts/aliases",
+        OWNER,
+        alias_put("project/world369", "project/earthos"),
+    );
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    let listed = kit.send(Method::GET, "/v1/facts/aliases", OWNER, None);
+    let aliases = listed.body["aliases"].as_array().expect("a list");
+    assert_eq!(aliases.len(), 1, "{}", listed.body);
+    assert_eq!(aliases[0]["state"], json!("set"));
+    assert_eq!(aliases[0]["set_by"], json!(OWNER));
+
+    let gone = kit.send(
+        Method::DELETE,
+        "/v1/facts/aliases?alias=project/world369",
+        PLAIN,
+        None,
+    );
+    assert_eq!(gone.status, StatusCode::FORBIDDEN, "{}", gone.body);
+    let removed = kit.send(
+        Method::DELETE,
+        "/v1/facts/aliases?alias=project/world369",
+        OWNER,
+        None,
+    );
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+    let again = kit.send(
+        Method::DELETE,
+        "/v1/facts/aliases?alias=project/world369",
+        OWNER,
+        None,
+    );
+    assert_eq!(again.status, StatusCode::NOT_FOUND, "{}", again.body);
+    assert!(slug_is(&again.body, "facts/aliases/not-found"));
+}
+
+#[test]
+fn an_alias_must_be_two_entities_with_no_date_folder_and_no_chain() {
+    let kit = kit();
+    let put = |body: Option<Value>| kit.send(Method::PUT, "/v1/facts/aliases", OWNER, body);
+
+    let date = put(alias_put("project/2026-08-14", "project/earthos"));
+    assert_eq!(
+        date.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{}",
+        date.body
+    );
+    assert!(slug_is(&date.body, "facts/aliases/refused"));
+    assert!(
+        date.body.to_string().contains("bad-subject"),
+        "{}",
+        date.body
+    );
+
+    let same = put(alias_put("project/x", "project/x"));
+    assert!(
+        same.body.to_string().contains("same-subject"),
+        "{}",
+        same.body
+    );
+    let kind = put(alias_put("widget/x", "project/earthos"));
+    assert!(
+        kind.body.to_string().contains("bad-subject"),
+        "{}",
+        kind.body
+    );
+    let partial = put(Some(json!({"alias": "project/a"})));
+    assert!(partial.status.is_client_error(), "{}", partial.body);
+
+    let first = put(alias_put("project/world369", "project/earthos"));
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    // `earthos` is now a canonical name: it cannot also be an alias.
+    let chain = put(alias_put("project/earthos", "project/other"));
+    assert!(
+        chain.body.to_string().contains("alias-is-canonical"),
+        "{}",
+        chain.body
+    );
+    // And an alias in force cannot be the name others are filed under.
+    let to_alias = put(alias_put("project/aura", "project/world369"));
+    assert!(
+        to_alias.body.to_string().contains("canonical-is-alias"),
+        "{}",
+        to_alias.body
+    );
+}
+
+#[test]
+fn another_workspace_neither_reads_nor_changes_these_aliases() {
+    let kit = kit();
+    let set = kit.send(
+        Method::PUT,
+        "/v1/facts/aliases",
+        OWNER,
+        alias_put("project/world369", "project/earthos"),
+    );
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+
+    let other = kit.send_in(OTHER, Method::GET, "/v1/facts/aliases", OWNER, None);
+    assert_eq!(other.status, StatusCode::OK, "{}", other.body);
+    assert_eq!(other.body["aliases"], json!([]), "{}", other.body);
+
+    let dismiss = kit.send_in(
+        OTHER,
+        Method::DELETE,
+        "/v1/facts/aliases?alias=project/world369",
+        OWNER,
+        None,
+    );
+    assert_eq!(dismiss.status, StatusCode::NOT_FOUND, "{}", dismiss.body);
+
+    // The other workspace may map the same name its own way; ours is unchanged.
+    let theirs = kit.send_in(
+        OTHER,
+        Method::PUT,
+        "/v1/facts/aliases",
+        OWNER,
+        alias_put("project/world369", "project/elsewhere"),
+    );
+    assert_eq!(theirs.status, StatusCode::OK, "{}", theirs.body);
+    let ours = kit.send(Method::GET, "/v1/facts/aliases", OWNER, None);
+    assert_eq!(
+        ours.body["aliases"][0]["canonical"],
+        json!("project/earthos")
+    );
+}
+
+#[test]
+fn a_proposal_is_shown_and_applies_only_when_an_owner_accepts_it() {
+    let kit = kit();
+    let now = OffsetDateTime::from_unix_timestamp(NOW).expect("a time");
+    let db = kit.db();
+    pollster::block_on(subject_aliases::propose(
+        &*db,
+        WORKSPACE,
+        "project/world369",
+        "project/earthos",
+        3,
+        now,
+    ))
+    .expect("proposed");
+    pollster::block_on(subject_aliases::propose(
+        &*db,
+        WORKSPACE,
+        "project/aura",
+        "project/earthos",
+        4,
+        now,
+    ))
+    .expect("proposed");
+
+    let view = kit.send(Method::GET, PATH, PLAIN, None);
+    assert_eq!(view.status, StatusCode::OK, "{}", view.body);
+    assert_eq!(
+        view.body["alias_suggestions"].as_array().map(Vec::len),
+        Some(2),
+        "{}",
+        view.body
+    );
+    assert!(
+        pollster::block_on(subject_aliases::load(&*db, WORKSPACE))
+            .expect("load")
+            .is_empty(),
+        "nothing applied"
+    );
+
+    // A member cannot accept; an owner can, and it is then in force.
+    let member = kit.send(
+        Method::PUT,
+        "/v1/facts/aliases",
+        PLAIN,
+        alias_put("project/world369", "project/earthos"),
+    );
+    assert_eq!(member.status, StatusCode::FORBIDDEN, "{}", member.body);
+    let accepted = kit.send(
+        Method::PUT,
+        "/v1/facts/aliases",
+        OWNER,
+        alias_put("project/world369", "project/earthos"),
+    );
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.body);
+    let listed = kit.send(Method::GET, "/v1/facts/aliases", OWNER, None);
+    let states: Vec<(String, String)> = listed.body["aliases"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|row| (row["alias"].to_string(), row["state"].to_string()))
+        .collect();
+    assert!(
+        states.contains(&("\"project/world369\"".to_owned(), "\"set\"".to_owned())),
+        "{states:?}"
+    );
+    assert!(
+        states.contains(&("\"project/aura\"".to_owned(), "\"proposed\"".to_owned())),
+        "{states:?}"
+    );
+
+    // Dismissing the other proposal takes it off the page for good.
+    let dismissed = kit.send(
+        Method::DELETE,
+        "/v1/facts/aliases?alias=project/aura",
+        OWNER,
+        None,
+    );
+    assert_eq!(dismissed.status, StatusCode::OK, "{}", dismissed.body);
+    let after = kit.send(Method::GET, PATH, OWNER, None);
+    assert_eq!(after.body["alias_suggestions"], json!([]), "{}", after.body);
+}
+
+#[test]
+fn the_alias_table_is_declared_erasable_by_the_user_who_set_it() {
+    use cratefield_core::{Disposition, Module};
+    let kms: Arc<dyn Kms> = Arc::new(
+        LocalFileKms::from_key(Dek::generate().expect("a key"), "test", "test")
+            .expect("a well-formed key"),
+    );
+    let module = CodingAgents::new(Wiki::new(kms, Arc::new(Nobody)));
+    let declared = module
+        .personal_data()
+        .iter()
+        .find(|set| set.table == "fact_subject_aliases")
+        .expect("the alias table is declared");
+    assert_eq!(
+        declared.subject, "set_by",
+        "erasure matches the user who set it"
+    );
+    assert!(matches!(declared.disposition, Disposition::Erase));
 }

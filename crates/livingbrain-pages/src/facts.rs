@@ -1278,6 +1278,44 @@ impl FactStore {
         })
     }
 
+    /// Each subject of `scope` with its current attribute families and how
+    /// many current facts it has: plaintext columns only. Dreaming compares
+    /// subjects by these to propose an alias.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_subject_families(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<(String, Vec<String>, i64)>, FactError> {
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT subject, attribute, COUNT(*) AS n FROM facts \
+                 WHERE scope = ? AND status = 'current' \
+                 GROUP BY subject, attribute ORDER BY subject ASC, attribute ASC LIMIT 5000",
+                vec![text(scope)],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let mut by_subject: BTreeMap<String, (BTreeSet<String>, i64)> = BTreeMap::new();
+        for row in &rows.rows {
+            let subject = row.get::<String>("subject").unwrap_or_default();
+            let attribute = row.get::<String>("attribute").unwrap_or_default();
+            let n = row.get::<i64>("n").unwrap_or_default();
+            let entry = by_subject.entry(subject).or_default();
+            if let Some(family) = family_of(&attribute) {
+                entry.0.insert(family.to_owned());
+            }
+            entry.1 += n;
+        }
+        Ok(by_subject
+            .into_iter()
+            .map(|(subject, (families, n))| (subject, families.into_iter().collect(), n))
+            .collect())
+    }
+
     /// The current facts of `subject` in the attribute families `families`
     /// (see [`family_of`]) that are not in `skip`, oldest first, at most
     /// `limit`. Dreaming reads a window's families whole, so a property
