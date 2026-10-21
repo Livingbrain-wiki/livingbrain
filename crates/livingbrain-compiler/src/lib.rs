@@ -43,6 +43,7 @@ pub mod dream;
 pub mod dream_settings;
 pub mod edits;
 pub mod facts;
+pub mod hubs;
 pub mod layout;
 pub mod merge;
 pub mod pool;

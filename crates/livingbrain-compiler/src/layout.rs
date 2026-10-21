@@ -163,11 +163,24 @@ pub fn in_collection(slug: &str) -> bool {
     place(slug).is_some()
 }
 
-/// The slugs one session's compile may write, and nothing else: the index,
-/// its agent's two pages, its own agent-in-project folder (the fixed pages
-/// and any topic page in it), and its project's rollup. The log is written
-/// by the server alone, and the schema is the person's — neither is ever
-/// the model's to edit.
+/// Whether `slug` is a hub page: the top index, an agent's index or a
+/// project's rollup. The server writes these from the scope's pages (see
+/// [`crate::hubs`]); the model never does.
+#[must_use]
+pub fn is_hub(slug: &str) -> bool {
+    match place(slug) {
+        Some(Place::Top(page) | Place::Agent { page, .. }) => page == "index",
+        Some(Place::Rollup { .. }) => true,
+        _ => false,
+    }
+}
+
+/// The slugs one session's compile may write, and nothing else: its agent's
+/// `patterns` page, its own agent-in-project folder (the fixed pages and any
+/// topic page in it). The hub pages (the index, the agent indexes, the
+/// rollups) are the server's, written from the pages; the log is written by
+/// the server alone, and the schema is the person's — none is ever the
+/// model's to edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Allowed {
     pub agent: String,
@@ -178,18 +191,17 @@ impl Allowed {
     /// Whether the model may write `slug` for this session.
     #[must_use]
     pub fn permits(&self, slug: &str) -> bool {
+        if is_hub(slug) {
+            return false;
+        }
         match place(slug) {
-            Some(Place::Top(page)) => page == "index",
-            Some(Place::Agent { agent, page }) => {
-                agent == self.agent && (page == "index" || page == "patterns")
-            }
-            Some(Place::Rollup { project }) => project == self.project,
+            Some(Place::Agent { agent, page }) => agent == self.agent && page == "patterns",
             Some(Place::Project {
                 agent,
                 project,
                 page,
             }) => agent == self.agent && project == self.project && segment(&page) == Some(page),
-            None => false,
+            Some(Place::Top(_) | Place::Rollup { .. }) | None => false,
         }
     }
 
@@ -275,24 +287,39 @@ mod tests {
     }
 
     #[test]
+    fn the_hubs_are_the_servers_and_say_so() {
+        for hub in [
+            INDEX.to_owned(),
+            agent_page("claude", "index"),
+            rollup_page("demo"),
+        ] {
+            assert!(is_hub(&hub), "{hub}");
+        }
+        assert!(!is_hub(&agent_page("claude", "patterns")));
+        assert!(!is_hub(&project_page("claude", "demo", "index")));
+        assert!(!is_hub(LOG));
+    }
+
+    #[test]
     fn a_session_may_write_only_its_own_folder() {
         let allowed = Allowed {
             agent: "claude".to_owned(),
             project: "demo".to_owned(),
         };
         for ok in [
-            INDEX.to_owned(),
-            agent_page("claude", "index"),
             agent_page("claude", "patterns"),
             project_page("claude", "demo", "decisions"),
             project_page("claude", "demo", "d1-migration"),
-            rollup_page("demo"),
         ] {
             assert!(allowed.permits(&ok), "{ok}");
         }
         for refused in [
             LOG.to_owned(),
             SCHEMA.to_owned(),
+            // The hubs are the server's: written from the pages, never the model's.
+            INDEX.to_owned(),
+            agent_page("claude", "index"),
+            rollup_page("demo"),
             agent_page("codex", "index"),
             agent_page("claude", "secrets"),
             project_page("codex", "demo", "decisions"),

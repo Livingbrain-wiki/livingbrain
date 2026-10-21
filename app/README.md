@@ -130,6 +130,20 @@ drawer behind the ☰ button; on wider ones it collapses to an icon rail.
   list), `?view=imports` (`GET /v1/sources?kind=import`, each readable in
   place) and `?view=new`.
 
+## Diagrams
+
+A ```` ```mermaid ```` fence in a page is drawn as a diagram; a source that
+fails keeps its code block. Each entity page also gets up to two diagrams
+generated from data the app already reads (`assets/diagrams.js`, pure and
+unit-tested): a relationship map from `GET /v1/graph` (the page in the middle,
+its strongest neighbours grouped by kind), a flow from a system page's ordered
+steps, and a timeline from its dated facts (three or more). Nothing is written
+by a model and nothing is stored: the source is built on each read, so the
+same data gives the same diagram. The Mermaid build is vendored and loaded
+lazily (`assets/diagram-view.js`); each card has an export menu (copy as
+image, copy the Mermaid source, download SVG or PNG). The diagrams are not part
+of the page's Markdown, so search, `ask` and the MCP tools never see them.
+
 ## The Brain map
 
 `brain.html` (Brain → Brain map) draws `GET /v1/graph` as a 3D graph in the

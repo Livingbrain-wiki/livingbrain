@@ -108,6 +108,10 @@ function resolveSpec(from, spec) {
  */
 export function findRefs(path, text) {
   const refs = [];
+  // A vendored library (assets/vendor/…) is copied as it is: its minified code
+  // is not ES-module source, and its import-looking text (`from"…"`) is not a
+  // reference to a file in the app. Nothing in it is ever rewritten.
+  if (path.startsWith("assets/vendor/")) return refs;
   const push = (match, spec, kind) => {
     const index = match.index + match[0].lastIndexOf(spec);
     refs.push({ index, length: spec.length, spec, kind });

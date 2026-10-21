@@ -370,18 +370,11 @@ fn a_session_compiles_into_its_folder_and_the_log() {
     let model = {
         let decisions = decisions.clone();
         Fake::answering(move |_, _| {
-            Ok(reply(&[
-                (
-                    &decisions,
-                    None,
-                    "# Decisions\n\n- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15",
-                ),
-                (
-                    layout::INDEX,
-                    None,
-                    "# Coding agents\n\n- [[coding-agents--claude--demo--decisions]]",
-                ),
-            ]))
+            Ok(reply(&[(
+                &decisions,
+                None,
+                "# Decisions\n\n- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15",
+            )]))
         })
     };
     let processed = world.drain(&world.compiler(&model));
@@ -4672,4 +4665,171 @@ fn requeue_parked_units_no_model_resumes_a_parked_unit_of_its_workspace() {
         Some("queued")
     );
     assert_eq!(status.rows[0].get::<i64>("attempts"), Some(0));
+}
+
+/// Writes `body` as a page of `scope`, as the brain would.
+fn seed_page(world: &World, scope: &str, slug: &str, body: &str) {
+    pollster::block_on(world.pages().write(
+        scope,
+        slug,
+        PageWrite {
+            entity_type: EntityType::Topic,
+            markdown: format!("---\ntype: topic\ntitle: Seeded\n---\n\n{body}"),
+            author: Author::Brain { reconciles: None },
+            base_version: None,
+        },
+    ))
+    .expect("a seeded page");
+}
+
+/// A session record from a Codex agent in the same project.
+fn codex_record(session_id: &str, text: &str) -> String {
+    serde_json::json!({
+        "schema_version": 1, "agent": "codex", "collector_version": 1,
+        "session_id": session_id, "repo": "~/code/demo", "branch": "main",
+        "models": ["m"], "started_at": "2026-10-16T01:00:00Z",
+        "ended_at": "2026-10-16T02:00:00Z",
+        "turns": [
+            {"role": "user", "at": "2026-10-16T01:00:00Z", "text": text, "tool_calls": []},
+            {"role": "assistant", "at": "2026-10-16T01:05:00Z", "text": "Done.",
+             "tool_calls": [{"name": "Bash"}]}
+        ],
+        "totals": {"input_tokens": 10}, "outcome": null, "truncated": false
+    })
+    .to_string()
+}
+
+#[test]
+fn a_34_kb_index_still_leaves_decisions_and_learnings_editable() {
+    let world = world();
+    let scope = personal(WORKSPACE, "u1");
+    let decisions = decisions();
+    let learnings = layout::project_page("claude", "demo", "learnings");
+    // The frozen top index the bug left behind: 34 KB of repeated lines.
+    let frozen = format!(
+        "# Coding agents\n\n{}",
+        "- colonizer · 3 sessions · [[coding-agents--claude--demo--decisions]]\n".repeat(600)
+    );
+    assert!(frozen.len() > 34_000);
+    seed_page(&world, &scope, layout::INDEX, &frozen);
+    seed_page(
+        &world,
+        &scope,
+        &decisions,
+        "# Decisions\n\n- **2026-10-01** · Use D1 · decided_at 2026-10-01\n",
+    );
+    seed_page(
+        &world,
+        &scope,
+        &learnings,
+        "# Learnings\n\n- **Gotcha:** wrangler needs --remote in CI · first_seen 2026-10-02\n",
+    );
+    world.sync(
+        WORKSPACE,
+        "u1",
+        "s-1",
+        "we decided to use D1 instead of Supabase",
+    );
+    let model = {
+        let decisions = decisions.clone();
+        let learnings = learnings.clone();
+        Fake::answering(move |user, _| {
+            // Both are shown whole and writable, though the index is 34 KB.
+            assert!(user.contains(&format!("{decisions} → 1")), "{user}");
+            assert!(user.contains(&format!("{learnings} → 1")), "{user}");
+            assert!(
+                !user.contains(&format!("slug=\"{decisions}\" version=\"1\" read-only")),
+                "{user}"
+            );
+            Ok(reply(&[(
+                &decisions,
+                Some(1),
+                "# Decisions\n\n- **2026-10-01** · Use D1 · decided_at 2026-10-01\n- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15",
+            )]))
+        })
+    };
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    let page = pollster::block_on(world.pages().read(&scope, &decisions))
+        .expect("a read")
+        .expect("the decisions page");
+    assert_eq!(page.version, 2, "the decisions were edited");
+    assert!(page.markdown.contains("Use D1 instead of Supabase"));
+
+    // The hub is the server's: the frozen 34 KB body is replaced by the
+    // generated one, which names the session's folder once.
+    let index = pollster::block_on(world.pages().read(&scope, layout::INDEX))
+        .expect("a read")
+        .expect("the index");
+    assert!(
+        index.markdown.len() < 2_000,
+        "{} bytes",
+        index.markdown.len()
+    );
+    assert!(!index.markdown.contains("colonizer"));
+    assert_eq!(
+        index
+            .markdown
+            .matches("[[coding-agents--claude--index|claude]]")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn hub_pages_are_server_written_stable_and_list_each_entry_once() {
+    let world = world();
+    let scope = personal(WORKSPACE, "u1");
+    let decisions = decisions();
+    let codex_decisions = layout::project_page("codex", "demo", "decisions");
+    // A model that tries to write a hub is refused; the hub is the server's.
+    world.sync(
+        WORKSPACE,
+        "u1",
+        "s-1",
+        "we decided to use D1 instead of Supabase",
+    );
+    world.sync_record("u1", "s-2", codex_record("s-2", "D1 again, from codex"));
+    let model = {
+        let decisions = decisions.clone();
+        let codex_decisions = codex_decisions.clone();
+        Fake::answering(move |user, _| {
+            let line = "- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15";
+            if user.contains("- agent: codex") {
+                Ok(reply(&[
+                    (&codex_decisions, None, line),
+                    (&layout::rollup_page("demo"), None, "# The model's rollup"),
+                ]))
+            } else {
+                Ok(reply(&[
+                    (&decisions, None, line),
+                    (layout::INDEX, None, "# The model's index"),
+                ]))
+            }
+        })
+    };
+    let mut processed = world.drain(&world.compiler(&model));
+    processed.extend(world.drain(&world.compiler(&model)));
+    assert_eq!(processed.len(), 2, "{processed:?}");
+    let read = |slug: &str| {
+        pollster::block_on(world.pages().read(&scope, slug))
+            .expect("a read")
+            .unwrap_or_else(|| panic!("{slug} is written"))
+            .markdown
+    };
+    let rollup = read(&layout::rollup_page("demo"));
+    let top = read(layout::INDEX);
+    assert!(!rollup.contains("model's rollup"), "{rollup}");
+    assert!(!top.contains("model's index"), "{top}");
+    // One decision, cited by two sessions, is one line in the rollup.
+    assert_eq!(
+        rollup.matches("Use D1 instead of Supabase").count(),
+        1,
+        "{rollup}"
+    );
+    assert!(
+        top.contains("[[coding-agents--projects--demo|demo]] · 2 sessions in 2 agents"),
+        "{top}"
+    );
+    assert!(read(&layout::agent_page("codex", "index")).contains("1 session in 1 project"));
 }
