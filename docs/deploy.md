@@ -28,6 +28,14 @@ cookie the Worker signs as `{HARNESS_VENTURE}|{ENV}`, so a session minted in
 staging never verifies in production. It must match the `ENV` the minting
 side uses, which is why the smoke test passes it explicitly.
 
+The build compiles the same environment. Each deployed environment's
+`[env.*.build]` in `crates/livingbrain-venture/wrangler.toml` passes its cargo
+feature (`--features staging` or `--features production`), which sets the
+venture's compiled `VentureEnv`, so the production readiness gate runs at build
+time against the environment being deployed (issue #143). The two must agree:
+a build that compiles `Development` while `ENV` says `production` still serves,
+but logs a warning on every request, and the stricter answer wins at boot.
+
 ## Staging resources (created 2026-10-08)
 
 D1 `livingbrain-staging` (`f3a32632-ca97-4038-b094-2a9e1d7f413d`), R2
