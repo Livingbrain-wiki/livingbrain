@@ -50,7 +50,7 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 7] = [
+        const SET: [cratefield_core::SqlMigration; 8] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
@@ -58,6 +58,7 @@ impl Module for QueueTables {
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS,
             livingbrain_compiler::MIGRATION_SUBJECT_ALIASES,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIAS_STATE,
         ];
         Migrations {
             sqlite: &SET,

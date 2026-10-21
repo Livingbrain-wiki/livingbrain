@@ -44,6 +44,7 @@ time = { workspace = true }
 # D1's bind ceiling as a test double. Dev-only.
 livingbrain-d1-fake = { path = "../livingbrain-d1-fake" }
 cratefield-testing = { workspace = true, features = ["postgres"] }
+cratefield-adapter-sqlite = { workspace = true }
 cratefield-kms = { workspace = true }
 livingbrain-access = { path = "../livingbrain-access" }
 pollster = { workspace = true }
