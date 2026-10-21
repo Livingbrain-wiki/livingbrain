@@ -10,11 +10,11 @@ use std::collections::BTreeSet;
 
 use common::{
     OTHER_WORKSPACE, TOKEN_A, TOKEN_A_ELSEWHERE, TOKEN_A_NARROW, TOKEN_B, WORKSPACE, body_text,
-    fixture, get, get_anon, is_problem, scope_of, seed, status_of, user,
+    fixture, get, get_anon, is_problem, post, scope_of, seed, status_of, user,
 };
 use livingbrain_access::Scope;
 use livingbrain_pages::{SourceKind, SourceWrite};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// One agent session, filed in `scope` of `workspace` under `project`.
 fn session(
@@ -343,4 +343,144 @@ fn the_live_feed_records_reads_shows_only_what_the_asker_reads_and_moves_its_cur
         400
     );
     assert_eq!(get_anon(&fixture, "/v1/graph/activity").status, 401);
+}
+
+/// Pages in the large brain: each links to the next two, so the link table
+/// is as wide as the page table.
+const BIG_PAGES: usize = 2_100;
+/// Fact subjects in the large brain. Every fifth names a page (and is
+/// counted onto it); the rest are fact nodes of their own.
+const BIG_SUBJECTS: usize = 400;
+/// The fact subjects that name no page of the brain.
+const BIG_FACT_NODES: usize = BIG_SUBJECTS - BIG_SUBJECTS / 5;
+/// Each page links to two others.
+const BIG_LINKS: usize = 2 * BIG_PAGES;
+/// What a Worker's buffered response bridge will carry: an ordinary body past
+/// this is refused with `length limit exceeded`.
+const BRIDGE_BUFFER: usize = 1024 * 1024;
+
+/// A brain past the size every earlier map was tested at: [`BIG_PAGES`] linked
+/// pages and [`BIG_SUBJECTS`] fact subjects in user-a's own scope, written
+/// through the routes, read through a database that enforces D1's bound
+/// ceiling.
+fn big_brain() -> common::Fixture {
+    let fixture = common::fixture_bind_limited();
+    let scope = user("user-a");
+    for i in 0..BIG_PAGES {
+        let body = format!(
+            "---\ntitle: Page {i}\n---\nSee [[p-{:04}]] and [[p-{:04}]].",
+            (i + 1) % BIG_PAGES,
+            (i + 2) % BIG_PAGES,
+        );
+        seed(&fixture, WORKSPACE, &scope, &format!("p-{i:04}"), &body);
+    }
+    let facts: Vec<Value> = (0..BIG_SUBJECTS)
+        .map(|i| {
+            let subject = if i % 5 == 0 {
+                format!("person/p-{i:04}")
+            } else {
+                format!("customer/c-{i:04}")
+            };
+            json!({
+                "subject": subject,
+                "attribute": "tier",
+                "value": "gold",
+                "observed_at": "2026-10-01T00:00:00Z",
+            })
+        })
+        .collect();
+    for batch in facts.chunks(50) {
+        let response = post(&fixture, TOKEN_A, "/v1/facts", json!({ "facts": batch }));
+        assert_eq!(response.status, 201, "a fact batch is refused");
+    }
+    fixture
+}
+
+/// The map as the Worker bridge reads it: the route's body must be a
+/// streamed body (a `ResponseStream`), which the bridge takes as its stream
+/// without the ceiling an ordinary body is held to. Returns the parsed answer
+/// and how many bytes it streamed.
+fn streamed_map(fixture: &common::Fixture, token: &str, query: &str) -> (Value, usize) {
+    use cratefield_core::ResponseStream;
+    use cratefield_core::axum::body::Body;
+    use cratefield_core::axum::http::{Method, Request, header};
+    use futures_util::StreamExt;
+    use tower::ServiceExt;
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/v1/graph{query}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("a request");
+    let response = pollster::block_on(fixture.router.clone().oneshot(request)).expect("answers");
+    assert_eq!(response.status(), 200, "the map answers 200");
+    let (parts, _) = response.into_parts();
+    assert_eq!(
+        parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.as_bytes()),
+        Some(b"application/json".as_slice())
+    );
+    let stream = parts
+        .extensions
+        .get::<ResponseStream>()
+        .and_then(ResponseStream::take)
+        .expect("the map is a streamed body, not one buffered under the bridge's ceiling");
+    let chunks: Vec<_> = pollster::block_on(stream.collect());
+    let bytes: Vec<u8> = chunks
+        .into_iter()
+        .flat_map(|chunk| chunk.expect("a clean chunk").to_vec())
+        .collect();
+    let len = bytes.len();
+    (serde_json::from_slice(&bytes).expect("JSON"), len)
+}
+
+#[test]
+fn a_large_brain_maps_within_the_d1_ceiling_and_past_the_bridge_buffer() {
+    let fixture = big_brain();
+    let (answer, len) = streamed_map(&fixture, TOKEN_A, "?limit=2000");
+
+    // Past the ceiling an ordinary body is refused at: the answer is streamed
+    // because it has to be. A buffered answer of this size is the 500.
+    assert!(
+        len > BRIDGE_BUFFER,
+        "the answer is {len} bytes, past the bridge's {BRIDGE_BUFFER}"
+    );
+
+    let counts = &answer["counts"];
+    assert_eq!(counts["nodes"], 2000, "clamped to the asked limit");
+    assert_eq!(answer["nodes"].as_array().unwrap().len(), 2000);
+    assert_eq!(counts["matched"], BIG_PAGES + BIG_FACT_NODES);
+    assert_eq!(counts["nodes_total"], BIG_PAGES + BIG_FACT_NODES);
+    assert_eq!(counts["edges_total"], BIG_LINKS);
+    assert_eq!(answer["truncated"], true);
+
+    // Every kept edge joins two kept nodes.
+    let kept = ids(&answer);
+    assert_eq!(kept.len(), 2000);
+    for edge in answer["edges"].as_array().unwrap() {
+        assert!(kept.contains(edge["source"].as_str().unwrap()), "{edge}");
+        assert!(kept.contains(edge["target"].as_str().unwrap()), "{edge}");
+    }
+
+    // The bind ceiling held for every statement the map ran.
+    let limited = fixture.limited.as_ref().expect("a bind-limited fixture");
+    assert!(
+        limited.widest() > 0,
+        "the map read through the limited view"
+    );
+    assert!(
+        limited.widest() <= livingbrain_d1_fake::D1_MAX_BINDS,
+        "widest statement bound {} values",
+        limited.widest()
+    );
+
+    // A filter still finds its nodes past the cap: the fact nodes are all
+    // there, counted, when asked for by kind.
+    let (facts, _) = streamed_map(&fixture, TOKEN_A, "?kind=fact&limit=2000");
+    assert_eq!(facts["counts"]["matched"], BIG_FACT_NODES);
+    assert_eq!(facts["counts"]["nodes"], BIG_FACT_NODES);
+    assert_eq!(facts["truncated"], false);
 }

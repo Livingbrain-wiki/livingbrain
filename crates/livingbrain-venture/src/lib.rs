@@ -36,17 +36,18 @@ use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
 use cratefield_adapter_typesafe::TypeSafe;
 use cratefield_core::axum::Router;
-use cratefield_core::axum::body::{Body, to_bytes};
+use cratefield_core::axum::body::{Body, Bytes, to_bytes};
 use cratefield_core::axum::extract::State as AxumState;
+use cratefield_core::axum::http::Extensions;
 use cratefield_core::axum::http::{
     HeaderMap, HeaderValue, Method as HttpMethod, Request as HttpRequest, header,
 };
 use cratefield_core::axum::middleware::{Next, from_fn_with_state};
 use cratefield_core::axum::response::{IntoResponse as _, Response as AxumResponse};
 use cratefield_core::{
-    Blob, Classifier, Database, Harness, HarnessBuilder, Module, ModuleContext, Ports, Problem,
-    RandomBytes, RandomError, Rendered, ScheduledBudget, ScheduledLimits, ScheduledSplit, Template,
-    Venture,
+    Blob, BoxStream, Classifier, Database, Harness, HarnessBuilder, Module, ModuleContext, Ports,
+    Problem, RandomBytes, RandomError, Rendered, ResponseStream, ScheduledBudget, ScheduledLimits,
+    ScheduledSplit, StreamError, Template, Venture,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
@@ -55,6 +56,7 @@ use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
+use futures_util::StreamExt;
 use livingbrain_accounts::{Access, Agents, Audit};
 use livingbrain_api::{
     AppTools, Apps, Ask, BudgetSettings, CodingAgents, Dreaming, Export, Facts, Graph, ModelJobs,
@@ -1674,17 +1676,107 @@ async fn serve_cli(
     response_to_worker(response).await
 }
 
-/// The buffered response bridge, mirroring the runtime's own: 1 MiB is a
-/// generous ceiling for what the CLI routes answer (JSON, one zip).
+/// The most an ordinary (buffered) CLI response body may be: 1 MiB, a
+/// generous ceiling for JSON and one zip. A streamed body is not held to it.
+const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
+
+/// What the Worker bridge sends for a response body.
+enum BridgeBody {
+    /// The chunks of a [`ResponseStream`], passed through as they come.
+    Streamed(BoxStream<'static, Result<Bytes, StreamError>>),
+    /// An ordinary body, read whole under [`MAX_RESPONSE_BUFFER`].
+    Buffered(Bytes),
+}
+
+/// Takes a response body for the Worker bridge, the way the runtime's own
+/// bridge does: a [`ResponseStream`] hands over its stream unbuffered, and
+/// any other body is buffered under the ceiling. A large map answered as a
+/// streamed body would otherwise fail at the ceiling with a bare
+/// `length limit exceeded`.
+async fn bridge_body(
+    extensions: &Extensions,
+    body: Body,
+) -> Result<BridgeBody, cratefield_core::axum::Error> {
+    if let Some(stream) = extensions
+        .get::<ResponseStream>()
+        .and_then(ResponseStream::take)
+    {
+        return Ok(BridgeBody::Streamed(stream));
+    }
+    to_bytes(body, MAX_RESPONSE_BUFFER)
+        .await
+        .map(BridgeBody::Buffered)
+}
+
+/// The response bridge: a streamed body is carried chunk by chunk, an
+/// ordinary one buffered (see [`bridge_body`]).
 async fn response_to_worker(response: AxumResponse) -> worker::Result<Response> {
-    const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
     let (parts, body) = response.into_parts();
-    let bytes = to_bytes(body, MAX_RESPONSE_BUFFER)
+    let bridged = bridge_body(&parts.extensions, body)
         .await
         .map_err(|err| worker::Error::RustError(err.to_string()))?;
-    let mut out = Response::from_bytes(bytes.as_ref().to_vec())?.with_status(parts.status.as_u16());
+    let mut out = match bridged {
+        BridgeBody::Streamed(stream) => Response::from_stream(stream.map(|chunk| {
+            chunk
+                .map(Vec::from)
+                .map_err(|err| worker::Error::RustError(err.to_string()))
+        }))?,
+        BridgeBody::Buffered(bytes) => Response::from_bytes(bytes.to_vec())?,
+    }
+    .with_status(parts.status.as_u16());
     copy_headers(out.headers_mut(), &parts.headers);
     Ok(out)
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use std::convert::Infallible;
+
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+
+    async fn drain(body: BridgeBody) -> Vec<u8> {
+        match body {
+            BridgeBody::Streamed(stream) => {
+                let chunks: Vec<Result<Bytes, StreamError>> = stream.collect().await;
+                chunks
+                    .into_iter()
+                    .flat_map(|chunk| chunk.expect("a clean chunk").to_vec())
+                    .collect()
+            }
+            BridgeBody::Buffered(bytes) => bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_streamed_body_past_the_buffer_ceiling_is_carried_whole() {
+        let chunks = (0..TWO_MIB).step_by(64 * 1024).map(|start| {
+            Ok::<Bytes, Infallible>(Bytes::from(vec![7u8; (TWO_MIB - start).min(64 * 1024)]))
+        });
+        let response = ResponseStream::new(futures_util::stream::iter(chunks)).into_response();
+        let (parts, body) = response.into_parts();
+        let bridged = pollster::block_on(bridge_body(&parts.extensions, body))
+            .expect("a streamed body is not read under the ceiling");
+        let bytes = pollster::block_on(drain(bridged));
+        assert_eq!(bytes.len(), TWO_MIB);
+    }
+
+    #[test]
+    fn an_ordinary_body_past_the_buffer_ceiling_is_refused_as_before() {
+        let response = AxumResponse::new(Body::from(vec![1u8; TWO_MIB]));
+        let (parts, body) = response.into_parts();
+        let refused = pollster::block_on(bridge_body(&parts.extensions, body));
+        let err = refused.err().expect("an over-ceiling buffer is refused");
+        assert_eq!(err.to_string(), "length limit exceeded");
+    }
+
+    #[test]
+    fn an_ordinary_small_body_is_buffered_intact() {
+        let response = AxumResponse::new(Body::from(b"{\"ok\":true}".to_vec()));
+        let (parts, body) = response.into_parts();
+        let bridged = pollster::block_on(bridge_body(&parts.extensions, body)).expect("buffered");
+        assert_eq!(pollster::block_on(drain(bridged)), b"{\"ok\":true}");
+    }
 }
 
 /// Copies every response header onto the Worker response, per name: drop
