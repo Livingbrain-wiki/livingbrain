@@ -50,13 +50,14 @@ impl Module for QueueTables {
         &livingbrain_compiler::TABLES
     }
     fn migrations(&self) -> Migrations {
-        const SET: [cratefield_core::SqlMigration; 6] = [
+        const SET: [cratefield_core::SqlMigration; 7] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
             livingbrain_compiler::MIGRATION_PARALLEL,
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIASES,
         ];
         Migrations {
             sqlite: &SET,
@@ -369,18 +370,11 @@ fn a_session_compiles_into_its_folder_and_the_log() {
     let model = {
         let decisions = decisions.clone();
         Fake::answering(move |_, _| {
-            Ok(reply(&[
-                (
-                    &decisions,
-                    None,
-                    "# Decisions\n\n- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15",
-                ),
-                (
-                    layout::INDEX,
-                    None,
-                    "# Coding agents\n\n- [[coding-agents--claude--demo--decisions]]",
-                ),
-            ]))
+            Ok(reply(&[(
+                &decisions,
+                None,
+                "# Decisions\n\n- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15",
+            )]))
         })
     };
     let processed = world.drain(&world.compiler(&model));
@@ -2393,6 +2387,24 @@ impl livingbrain_compiler::Dreams for Store {
             .await
             .map_err(|e| e.to_string())
     }
+    async fn family(
+        &self,
+        scope: &str,
+        subject: &str,
+        families: &[String],
+        skip: &[String],
+        limit: usize,
+    ) -> Result<Vec<livingbrain_compiler::HeldFact>, String> {
+        let facts = self
+            .0
+            .dream_family(scope, subject, families, skip, limit)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(facts
+            .iter()
+            .map(|fact| held_from_json(&livingbrain_pages::fact_json(fact)))
+            .collect())
+    }
 }
 
 /// A fact as the compiler reads it, from its wire shape.
@@ -2673,12 +2685,16 @@ fn a_subject_is_worked_through_in_windows_and_is_due_again_until_its_sweep_ends(
     assert_eq!((second.enqueued, second.passes), (0, 1));
     assert_eq!(model.calls(), 2);
     let inputs = model.inputs();
-    assert_eq!(fact_lines(&inputs[0]), 60, "the first window shows 60");
-    assert!(inputs[0].contains("more follow in a later window"));
+    // The window's 60 facts, and the 5 of its `tool` family it does not hold.
     assert_eq!(
-        fact_lines(&inputs[1]),
-        5,
-        "the second window shows the rest"
+        fact_lines(&inputs[0]),
+        65,
+        "the first window shows 60 and its family"
+    );
+    assert!(inputs[0].contains("more follow in a later window"));
+    assert!(
+        fact_lines(&inputs[1]) >= 5 && inputs[1].contains("tool_x64 ="),
+        "the second window shows the rest, and its family"
     );
     assert!(inputs[1].contains("reaches the end"));
     assert!(
@@ -2889,8 +2905,8 @@ fn a_subject_left_part_way_by_an_old_pass_is_swept_to_the_end_on_the_next_ticks(
     assert_eq!(second.passes, 1);
     assert_eq!(model.calls(), 2);
     let inputs = model.inputs();
-    assert_eq!(fact_lines(&inputs[0]), 60);
-    assert_eq!(fact_lines(&inputs[1]), 5);
+    assert_eq!(fact_lines(&inputs[0]), 65);
+    assert!(fact_lines(&inputs[1]) >= 5);
     assert!(inputs[1].contains("reaches the end"));
     let rested = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
     assert_eq!((rested.enqueued, rested.passes), (0, 0));
@@ -2902,6 +2918,146 @@ fn a_subject_left_part_way_by_an_old_pass_is_swept_to_the_end_on_the_next_ticks(
 }
 
 /// One current fact per attribute, in `scope`, a second apart.
+#[test]
+fn a_workspace_alias_files_its_facts_under_the_canonical_subject() {
+    use livingbrain_compiler::{Fact, subject_aliases};
+    let world = world();
+    let now = world.clock.now();
+    let db: &dyn cratefield_core::Database = &*world.db;
+    let set = |alias: &str, canonical: &str| {
+        pollster::block_on(subject_aliases::set(db, WORKSPACE, alias, canonical, now))
+    };
+    assert_eq!(set("project/world369", "project/earthos"), Ok(()));
+    assert_eq!(set("project/aura", "project/earthos"), Ok(()));
+    // One hop only: a canonical name cannot itself be an alias, and an alias
+    // cannot be a canonical name of others.
+    assert_eq!(set("project/x", "project/aura"), Err("canonical-is-alias"));
+    assert_eq!(
+        set("project/earthos", "project/y"),
+        Err("alias-is-canonical")
+    );
+    // A date-named folder is no subject, so it is no alias either.
+    assert_eq!(
+        set("project/2026-08-14", "project/earthos"),
+        Err("bad-subject")
+    );
+
+    let fact = |subject: &str| Fact {
+        subject: subject.to_owned(),
+        attribute: "hosting".to_owned(),
+        value: "Workers".to_owned(),
+        unit: None,
+        valid_from: Some("2026".to_owned()),
+        valid_to: None,
+        observed_at: None,
+        source: Some("source:seed".to_owned()),
+        quote: None,
+        confidence: None,
+        cardinality: None,
+    };
+    let mut facts = vec![
+        fact("project/world369"),
+        fact("project/aura"),
+        fact("project/demo"),
+    ];
+    pollster::block_on(subject_aliases::canonicalize(db, WORKSPACE, &mut facts));
+    let subjects: Vec<&str> = facts.iter().map(|f| f.subject.as_str()).collect();
+    assert_eq!(
+        subjects,
+        ["project/earthos", "project/earthos", "project/demo"]
+    );
+
+    // Another workspace has its own table: nothing is aliased there.
+    let mut other = vec![fact("project/world369")];
+    pollster::block_on(subject_aliases::canonicalize(
+        db,
+        "other-workspace",
+        &mut other,
+    ));
+    assert_eq!(other[0].subject, "project/world369");
+}
+
+#[test]
+fn two_current_keys_for_one_property_resolve_to_one_after_a_dream_pass() {
+    // The audit's case: one property (the auth provider) under two keys, both
+    // current. The older key sits in the first window; its replacement is in
+    // the second. A window shows its attribute families whole, so the dream
+    // decides the pair together in the first window.
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    let auth = |attribute: &str, value: &str, from: &str| livingbrain_pages::FactInput {
+        subject: "project/demo".to_owned(),
+        attribute: attribute.to_owned(),
+        value: value.to_owned(),
+        valid_from: Some(from.to_owned()),
+        source: Some("source:seed".to_owned()),
+        ..livingbrain_pages::FactInput::default()
+    };
+    seed_tools(&world, &store, &scope, 59);
+    pollster::block_on(store.0.record(
+        &scope,
+        auth("auth_provider_github", "github", "2025"),
+        livingbrain_compiler::COMPILER_WRITER,
+    ))
+    .expect("seed");
+    world.clock.advance(Duration::seconds(1));
+    pollster::block_on(store.0.record(
+        &scope,
+        auth("auth_provider_keycloak", "keycloak", "2026"),
+        livingbrain_compiler::COMPILER_WRITER,
+    ))
+    .expect("seed");
+
+    // The model supersedes the older key only when it is shown both keys.
+    let model = Fake::answering(|user, _| {
+        let both = user.contains("| project/demo | auth_provider_github =")
+            && user.contains("| project/demo | auth_provider_keycloak =");
+        if !both {
+            return Ok(reply_text(r#"{"decisions":[]}"#));
+        }
+        let old = shown_id(user, "auth_provider_github");
+        let newer = shown_id(user, "auth_provider_keycloak");
+        Ok(reply_text(
+            &serde_json::json!({"decisions": [
+                {"op": "supersede", "id": old, "by": newer},
+            ]})
+            .to_string(),
+        ))
+    });
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let unbounded = ScheduledBudget::unbounded();
+    let first = pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+    assert_eq!(
+        first.applied, 1,
+        "the older key is superseded in window one"
+    );
+    pollster::block_on(compiler.dream(&unbounded, 2)).expect("a sweep");
+
+    let timelines = pollster::block_on(store.0.timelines(
+        &[scope.as_str()],
+        Some("project/demo"),
+        None,
+    ))
+    .expect("timelines");
+    let current: Vec<String> = timelines
+        .iter()
+        .flat_map(|t| t.facts.iter())
+        .filter(|f| f.attribute.starts_with("auth_provider") && f.status.as_str() == "current")
+        .map(|f| f.value.clone())
+        .collect();
+    assert_eq!(current, vec!["keycloak".to_owned()], "one current value");
+}
+
 fn seed_attributes(world: &World, store: &Store, scope: &str, attributes: &[&str]) {
     seed_attributes_by(
         world,
@@ -3002,6 +3158,87 @@ fn the_rule_pass_retracts_what_the_rules_refuse_and_keeps_state_without_a_model_
     }
     // Every retraction is logged with its rule, under the rules role.
     assert_eq!(world.count("fact_dream_decisions"), drop.len() as i64);
+}
+
+#[test]
+fn the_rule_pass_files_a_date_named_subject_out_and_moves_an_alias_to_its_subject() {
+    // The repair of facts stored before the write-time rules: no model call,
+    // run by the same cron pass as the attribute rules.
+    use livingbrain_compiler::subject_aliases;
+    let world = world();
+    world.sync(WORKSPACE, "u1", "s-1", "switch the demo to D1");
+    let now = world.clock.now();
+    pollster::block_on(Queue::new(world.db.clone()).enqueue_from_ledger(now, None))
+        .expect("an enqueue");
+    let scope = personal(WORKSPACE, "u1");
+    let store = Arc::new(Store(livingbrain_pages::FactStore::new(
+        world.db.clone(),
+        world.kms.clone(),
+        Arc::new(world.clock.clone()),
+        Arc::new(UlidIdGen),
+    )));
+    let seed = |subject: &str, attribute: &str| {
+        pollster::block_on(store.0.record(
+            &scope,
+            livingbrain_pages::FactInput {
+                subject: subject.to_owned(),
+                attribute: attribute.to_owned(),
+                value: "Workers".to_owned(),
+                valid_from: Some("2025".to_owned()),
+                source: Some("source:seed".to_owned()),
+                ..livingbrain_pages::FactInput::default()
+            },
+            livingbrain_compiler::COMPILER_WRITER,
+        ))
+        .expect("a seeded fact");
+    };
+    seed("project/2026-08-14", "deploy_target");
+    seed("project/world369", "hosting");
+    pollster::block_on(subject_aliases::set(
+        &*world.db,
+        WORKSPACE,
+        "project/world369",
+        "project/earthos",
+        now,
+    ))
+    .expect("the alias is set");
+
+    let model = Fake::answering(|_, _| Ok(reply_text(r#"{"decisions":[]}"#)));
+    let compiler = dream_compiler(&world, &store, &model, Settings::default());
+    let sweep =
+        pollster::block_on(compiler.dream(&ScheduledBudget::unbounded(), 0)).expect("a sweep");
+    assert_eq!(sweep.retracted, 2, "the day-named fact and the alias fact");
+    assert_eq!(model.calls(), 0, "no model call for the rule pass");
+
+    let timelines = |subject: &str| {
+        pollster::block_on(store.0.timelines(&[scope.as_str()], Some(subject), None))
+            .expect("timelines")
+    };
+    let day: Vec<_> = timelines("project/2026-08-14")
+        .into_iter()
+        .flat_map(|t| t.facts)
+        .map(|f| f.status.as_str().to_owned())
+        .collect();
+    assert_eq!(day, vec!["retracted".to_owned()], "a day is no subject");
+
+    let moved: Vec<String> = timelines("project/earthos")
+        .into_iter()
+        .flat_map(|t| t.facts)
+        .filter(|f| f.status.as_str() == "current")
+        .map(|f| f.attribute)
+        .collect();
+    assert_eq!(
+        moved,
+        vec!["hosting".to_owned()],
+        "the alias fact now lives under the canonical subject"
+    );
+    assert!(
+        timelines("project/world369")
+            .iter()
+            .flat_map(|t| t.facts.iter())
+            .all(|f| f.status.as_str() == "retracted"),
+        "the alias keeps no current fact"
+    );
 }
 
 #[test]
@@ -4301,4 +4538,171 @@ fn requeue_parked_units_no_model_resumes_a_parked_unit_of_its_workspace() {
         Some("queued")
     );
     assert_eq!(status.rows[0].get::<i64>("attempts"), Some(0));
+}
+
+/// Writes `body` as a page of `scope`, as the brain would.
+fn seed_page(world: &World, scope: &str, slug: &str, body: &str) {
+    pollster::block_on(world.pages().write(
+        scope,
+        slug,
+        PageWrite {
+            entity_type: EntityType::Topic,
+            markdown: format!("---\ntype: topic\ntitle: Seeded\n---\n\n{body}"),
+            author: Author::Brain { reconciles: None },
+            base_version: None,
+        },
+    ))
+    .expect("a seeded page");
+}
+
+/// A session record from a Codex agent in the same project.
+fn codex_record(session_id: &str, text: &str) -> String {
+    serde_json::json!({
+        "schema_version": 1, "agent": "codex", "collector_version": 1,
+        "session_id": session_id, "repo": "~/code/demo", "branch": "main",
+        "models": ["m"], "started_at": "2026-10-16T01:00:00Z",
+        "ended_at": "2026-10-16T02:00:00Z",
+        "turns": [
+            {"role": "user", "at": "2026-10-16T01:00:00Z", "text": text, "tool_calls": []},
+            {"role": "assistant", "at": "2026-10-16T01:05:00Z", "text": "Done.",
+             "tool_calls": [{"name": "Bash"}]}
+        ],
+        "totals": {"input_tokens": 10}, "outcome": null, "truncated": false
+    })
+    .to_string()
+}
+
+#[test]
+fn a_34_kb_index_still_leaves_decisions_and_learnings_editable() {
+    let world = world();
+    let scope = personal(WORKSPACE, "u1");
+    let decisions = decisions();
+    let learnings = layout::project_page("claude", "demo", "learnings");
+    // The frozen top index the bug left behind: 34 KB of repeated lines.
+    let frozen = format!(
+        "# Coding agents\n\n{}",
+        "- colonizer · 3 sessions · [[coding-agents--claude--demo--decisions]]\n".repeat(600)
+    );
+    assert!(frozen.len() > 34_000);
+    seed_page(&world, &scope, layout::INDEX, &frozen);
+    seed_page(
+        &world,
+        &scope,
+        &decisions,
+        "# Decisions\n\n- **2026-10-01** · Use D1 · decided_at 2026-10-01\n",
+    );
+    seed_page(
+        &world,
+        &scope,
+        &learnings,
+        "# Learnings\n\n- **Gotcha:** wrangler needs --remote in CI · first_seen 2026-10-02\n",
+    );
+    world.sync(
+        WORKSPACE,
+        "u1",
+        "s-1",
+        "we decided to use D1 instead of Supabase",
+    );
+    let model = {
+        let decisions = decisions.clone();
+        let learnings = learnings.clone();
+        Fake::answering(move |user, _| {
+            // Both are shown whole and writable, though the index is 34 KB.
+            assert!(user.contains(&format!("{decisions} → 1")), "{user}");
+            assert!(user.contains(&format!("{learnings} → 1")), "{user}");
+            assert!(
+                !user.contains(&format!("slug=\"{decisions}\" version=\"1\" read-only")),
+                "{user}"
+            );
+            Ok(reply(&[(
+                &decisions,
+                Some(1),
+                "# Decisions\n\n- **2026-10-01** · Use D1 · decided_at 2026-10-01\n- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15",
+            )]))
+        })
+    };
+    let processed = world.drain(&world.compiler(&model));
+    assert_eq!(processed[0].status, JobStatus::Done, "{processed:?}");
+    let page = pollster::block_on(world.pages().read(&scope, &decisions))
+        .expect("a read")
+        .expect("the decisions page");
+    assert_eq!(page.version, 2, "the decisions were edited");
+    assert!(page.markdown.contains("Use D1 instead of Supabase"));
+
+    // The hub is the server's: the frozen 34 KB body is replaced by the
+    // generated one, which names the session's folder once.
+    let index = pollster::block_on(world.pages().read(&scope, layout::INDEX))
+        .expect("a read")
+        .expect("the index");
+    assert!(
+        index.markdown.len() < 2_000,
+        "{} bytes",
+        index.markdown.len()
+    );
+    assert!(!index.markdown.contains("colonizer"));
+    assert_eq!(
+        index
+            .markdown
+            .matches("[[coding-agents--claude--index|claude]]")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn hub_pages_are_server_written_stable_and_list_each_entry_once() {
+    let world = world();
+    let scope = personal(WORKSPACE, "u1");
+    let decisions = decisions();
+    let codex_decisions = layout::project_page("codex", "demo", "decisions");
+    // A model that tries to write a hub is refused; the hub is the server's.
+    world.sync(
+        WORKSPACE,
+        "u1",
+        "s-1",
+        "we decided to use D1 instead of Supabase",
+    );
+    world.sync_record("u1", "s-2", codex_record("s-2", "D1 again, from codex"));
+    let model = {
+        let decisions = decisions.clone();
+        let codex_decisions = codex_decisions.clone();
+        Fake::answering(move |user, _| {
+            let line = "- **2026-10-15** · Use D1 instead of Supabase · decided_at 2026-10-15";
+            if user.contains("- agent: codex") {
+                Ok(reply(&[
+                    (&codex_decisions, None, line),
+                    (&layout::rollup_page("demo"), None, "# The model's rollup"),
+                ]))
+            } else {
+                Ok(reply(&[
+                    (&decisions, None, line),
+                    (layout::INDEX, None, "# The model's index"),
+                ]))
+            }
+        })
+    };
+    let mut processed = world.drain(&world.compiler(&model));
+    processed.extend(world.drain(&world.compiler(&model)));
+    assert_eq!(processed.len(), 2, "{processed:?}");
+    let read = |slug: &str| {
+        pollster::block_on(world.pages().read(&scope, slug))
+            .expect("a read")
+            .unwrap_or_else(|| panic!("{slug} is written"))
+            .markdown
+    };
+    let rollup = read(&layout::rollup_page("demo"));
+    let top = read(layout::INDEX);
+    assert!(!rollup.contains("model's rollup"), "{rollup}");
+    assert!(!top.contains("model's index"), "{top}");
+    // One decision, cited by two sessions, is one line in the rollup.
+    assert_eq!(
+        rollup.matches("Use D1 instead of Supabase").count(),
+        1,
+        "{rollup}"
+    );
+    assert!(
+        top.contains("[[coding-agents--projects--demo|demo]] · 2 sessions in 2 agents"),
+        "{top}"
+    );
+    assert!(read(&layout::agent_page("codex", "index")).contains("1 session in 1 project"));
 }
