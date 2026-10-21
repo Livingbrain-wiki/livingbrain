@@ -232,15 +232,17 @@ pub fn valid(fact: &Fact) -> bool {
             .is_none_or(|c| c == "one" || c == "many")
 }
 
-/// `me`, or `<entity type>/<slug>`.
-fn subject_ok(subject: &str) -> bool {
+/// `me`, or `<entity type>/<slug>`. A slug that is a date is refused: an
+/// import's folder named for its day (`project/2026-08-14`) is a place, not
+/// an entity, and a timeline per day would never be ended.
+pub(crate) fn subject_ok(subject: &str) -> bool {
     if subject == "me" {
         return true;
     }
     let Some((kind, slug)) = subject.split_once('/') else {
         return false;
     };
-    SUBJECT_TYPES.contains(&kind) && livingbrain_pages::is_slug(slug)
+    SUBJECT_TYPES.contains(&kind) && livingbrain_pages::is_slug(slug) && !partial_date(slug)
 }
 
 /// `YYYY`, `YYYY-MM`, `YYYY-MM-DD` or a full RFC 3339 instant.
@@ -476,6 +478,15 @@ mod tests {
         }
         assert_eq!(attribute_rule("issue_335_status"), Some("per-item"));
         assert_eq!(attribute_rule("session_cost"), Some("event"));
+    }
+
+    #[test]
+    fn a_date_named_folder_is_not_a_subject() {
+        assert!(subject_ok("project/earthos"));
+        assert!(subject_ok("person/nick"));
+        assert!(!subject_ok("project/2026-08-14"), "a day is not an entity");
+        assert!(!subject_ok("project/2026-08"));
+        assert!(!subject_ok("system/2026"));
     }
 
     #[test]
