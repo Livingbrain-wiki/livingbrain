@@ -8,7 +8,7 @@
 //! the constants below must keep the original values.
 
 use livingbrain_pages::access::ScopeFilter;
-use livingbrain_pages::{Page, PageStore, parse_frontmatter};
+use livingbrain_pages::{MatchMode, Page, PageStore, SearchOptions, parse_frontmatter};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -101,6 +101,10 @@ impl Found {
 /// Search the asker's scopes and read back each hit — the MCP server's
 /// `find`, over the same store calls with exactly the asker's scopes.
 ///
+/// Returns the hits and how they matched (issue #281): `None` is "no
+/// confident match", and the hits are then empty. Session pages are left
+/// out unless `options` include them.
+///
 /// A hit whose page is gone — a scope shredded between the search and the
 /// read — is skipped rather than failing the whole call; a store failure is.
 ///
@@ -113,20 +117,31 @@ pub(crate) async fn find(
     filters: &[ScopeFilter],
     query: &str,
     limit: usize,
-) -> Result<Vec<Found>, Problem> {
-    let hits = store
-        .search_in(filters, query, limit)
+    options: SearchOptions,
+) -> Result<(Vec<Found>, Option<MatchMode>), Problem> {
+    let outcome = store
+        .search_outcome(filters, query, limit, options)
         .await
         .map_err(page_read_error)?;
-    let mut found = Vec::with_capacity(hits.len());
-    for hit in hits {
+    let mut found = Vec::with_capacity(outcome.hits.len());
+    for hit in outcome.hits {
         match store.read(&hit.scope, &hit.slug).await {
             Ok(None) => {}
             Ok(Some(page)) => found.push(Found::of(base, &page)),
             Err(error) => return Err(page_read_error(error)),
         }
     }
-    Ok(found)
+    Ok((found, outcome.mode))
+}
+
+/// The `match` a search answers with: `all` (every word), `any` (the
+/// fallback), or `none` (no confident match).
+pub(crate) fn match_label(mode: Option<MatchMode>) -> &'static str {
+    match mode {
+        Some(MatchMode::All) => "all",
+        Some(MatchMode::Any) => "any",
+        None => "none",
+    }
 }
 
 /// How many search hits a project-filtered query examines before giving
@@ -158,12 +173,13 @@ pub(crate) async fn find_in_project(
     query: &str,
     limit: usize,
     project: Option<&str>,
-) -> Result<Vec<Found>, Problem> {
+    options: SearchOptions,
+) -> Result<(Vec<Found>, Option<MatchMode>), Problem> {
     let Some(project) = project else {
-        return find(store, base, filters, query, limit).await;
+        return find(store, base, filters, query, limit, options).await;
     };
-    let hits = store
-        .search_in(filters, query, PROJECT_SCAN.max(limit))
+    let outcome = store
+        .search_outcome(filters, query, PROJECT_SCAN.max(limit), options)
         .await
         .map_err(page_read_error)?;
     let want = livingbrain_pages::project_key(project);
@@ -173,7 +189,7 @@ pub(crate) async fn find_in_project(
         (_, None) => false,
     };
     let mut found = Vec::with_capacity(limit);
-    for hit in hits {
+    for hit in outcome.hits {
         if found.len() >= limit {
             break;
         }
@@ -186,7 +202,7 @@ pub(crate) async fn find_in_project(
             Err(error) => return Err(page_read_error(error)),
         }
     }
-    Ok(found)
+    Ok((found, outcome.mode))
 }
 
 /// A body with its whitespace collapsed, cut to [`SNIPPET_CHARS`] on a

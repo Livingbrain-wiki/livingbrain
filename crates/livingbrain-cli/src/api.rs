@@ -234,12 +234,14 @@ impl Client {
         }
     }
 
-    /// `GET /v1/search`.
+    /// `GET /v1/search`. Session transcripts are left out unless
+    /// `include_sessions` (issue #281).
     pub fn search(
         &self,
         query: &str,
         project: Option<&str>,
         limit: Option<u32>,
+        include_sessions: bool,
     ) -> CliResult<Value> {
         let mut request = self.get("/v1/search").query("q", query);
         if let Some(project) = project {
@@ -248,7 +250,41 @@ impl Client {
         if let Some(limit) = limit {
             request = request.query("limit", limit.to_string());
         }
+        if include_sessions {
+            request = request.query("include_sessions", "true");
+        }
         read_json(request.call().map_err(transport)?)
+    }
+
+    /// A tool on the remote MCP endpoint (`POST /v1/pages/mcp`), called with
+    /// the same bearer the other commands use. The answer is the tool's MCP
+    /// `result` object as it came back — its `content` text and its
+    /// `structuredContent` — and a JSON-RPC error or a tool `isError` is
+    /// the error, so the stdio server answers with exactly what the remote
+    /// one would.
+    pub fn mcp_tool(&self, name: &str, arguments: Value) -> CliResult<Value> {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments },
+        });
+        let response = self.send_json("POST", "/v1/pages/mcp", Some(&message))?;
+        if let Some(error) = response.get("error") {
+            let detail = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            return Err(err(detail.to_owned()));
+        }
+        let result = response.get("result").cloned().unwrap_or(Value::Null);
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            let text = result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("the tool failed");
+            return Err(err(text.to_owned()));
+        }
+        Ok(result)
     }
 
     /// `POST /v1/notes`.

@@ -71,6 +71,7 @@ use crate::Wiki;
 use crate::facts::{as_of, brief_lines, brief_section, relevant};
 use crate::recipes::{CONTEXT_PAGES, Found, find_in_project, snippet};
 use crate::service::Service;
+use livingbrain_pages::SearchOptions;
 
 /// What an ask answers with when nothing in the asker's pages mentions the
 /// question. Honest by design, and no model is asked to embroider it.
@@ -392,6 +393,11 @@ struct AskRequest {
     #[serde(default)]
     #[allow(dead_code)]
     job: Option<String>,
+    /// Let coding-agent session transcripts into the sources (issue #281).
+    /// Off by default: a session is a 30–45 KB transcript, not a page a
+    /// person wrote, and it crowds the brief out.
+    #[serde(default)]
+    include_sessions: bool,
 }
 
 /// `POST /` — a cited answer from the asker's own pages and facts.
@@ -425,13 +431,17 @@ async fn ask(
     // search itself, before anything is ranked, limited or quoted.
     let plan = service.access(&asker).await?;
     let filters = plan.filters(KIND_PAGES, Permission::Read);
-    let found = find_in_project(
+    let (found, _) = find_in_project(
         &store,
         &service.base(),
         &filters,
         question,
         CONTEXT_PAGES,
         request.project.as_deref(),
+        SearchOptions {
+            include_sessions: request.include_sessions,
+            ..SearchOptions::default()
+        },
     )
     .await?;
 

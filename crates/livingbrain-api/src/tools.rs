@@ -56,9 +56,10 @@ use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Po
 use cratefield_module_orgs::grants::{self, Permission, Resource};
 use livingbrain_access::Scope;
 use livingbrain_mcp::Asker;
+use livingbrain_pages::access::ScopeFilter;
 use livingbrain_pages::{
     MAX_ANSWER_CHARS, MAX_MEMORY_CHARS, MAX_PASSAGES, MAX_SOURCE_CHARS, MemoryError, Publication,
-    clip, extract, is_memory_id, page_scope,
+    SearchOptions, clip, extract, is_memory_id, page_scope,
 };
 use livingbrain_radar::screen::screen_text;
 use serde::Deserialize;
@@ -247,10 +248,18 @@ async fn answer_public(state: &Service, asker: &Asker, value: Value) -> Result<V
         return Ok(none);
     }
     let store = state.store()?;
+    // The store's candidates, with no score floor: the passages below judge
+    // each one against the question (`extract`), at 60% of its terms.
     let hits = store
-        .search(&[scope.as_str()], &question, CANDIDATES)
+        .search_outcome(
+            &[ScopeFilter::whole(scope.as_str(), "")],
+            &question,
+            CANDIDATES,
+            SearchOptions::candidates(),
+        )
         .await
-        .map_err(page_read_error)?;
+        .map_err(page_read_error)?
+        .hits;
     // (coverage, rank, passage, publication): best coverage first, the
     // search's own order breaking ties.
     let mut found: Vec<(f64, usize, String, &Publication)> = Vec::new();

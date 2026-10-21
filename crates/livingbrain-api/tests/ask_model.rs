@@ -410,9 +410,26 @@ fn a_natural_language_question_finds_the_session_it_is_about() {
         "---\ntitle: EarthOS issues in the codebase\n---\nb-only-kingfisher earthos issues codebase",
     );
 
-    let body = ask(
+    // Sessions are out of an ask unless the caller opts in (issue #281): the
+    // same question without the flag cites no transcript.
+    let plain = ask(
         &fx,
         json!({ "question": "What issues were found in the EarthOS codebase?" }),
+    );
+    let plain_citations = plain["citations"].as_array().expect("citations");
+    assert!(
+        plain_citations
+            .iter()
+            .all(|citation| citation["title"] != "claude_code session 3f2a9c1e"),
+        "a session was cited without the opt-in: {plain}"
+    );
+
+    let body = ask(
+        &fx,
+        json!({
+            "question": "What issues were found in the EarthOS codebase?",
+            "include_sessions": true,
+        }),
     );
     assert_eq!(body["mode"], "model", "{body}");
     let citations = body["citations"].as_array().expect("citations");
@@ -426,11 +443,12 @@ fn a_natural_language_question_finds_the_session_it_is_about() {
     );
     assert!(!call.user.contains("b-only-kingfisher"), "{}", call.user);
 
-    // The same question through search, and a question of only stopwords.
+    // The same question through search, with the opt-in: the session is the
+    // one page that holds every word of it.
     let search = common::get(
         &fx,
         TOKEN_A,
-        "/v1/search?q=What%20issues%20were%20found%20in%20the%20EarthOS%20codebase%3F",
+        "/v1/search?q=What%20issues%20were%20found%20in%20the%20EarthOS%20codebase%3F&include_sessions=true",
     );
     assert_eq!(search.status, StatusCode::OK);
     let results = search.json();

@@ -1,7 +1,8 @@
 //! The search route: the same recall `brain_search` gives an agent, as
-//! data — the pages in the asker's scopes that mention the query's words,
-//! best first, as a title, a citation URL and a snippet, with the optional
-//! `project` filter over the frontmatter a note carries.
+//! data — the pages in the asker's scopes that hold every word of the query
+//! (or, failing that, enough of its words), best first, as a title, a
+//! citation URL and a snippet, with the optional `project` filter over the
+//! frontmatter a note carries.
 
 mod common;
 
@@ -36,17 +37,18 @@ fn a_search_finds_the_pages_that_mention_the_words_best_first() {
     assert_eq!(harbour.len(), 1, "{harbour:?}");
     assert_eq!(harbour[0]["title"], "Kestrel routes", "{harbour:?}");
 
-    // Any word is enough, and the page holding more of them, and the rarer
-    // ones, comes first: "dusk harbour" is on no one page, but each word is
-    // on one.
+    // No page holds both "dusk" and "harbour", so the fallback answers with
+    // the pages that hold one of them, each holding half the query's weight.
     let either = results(&fixture, TOKEN_A, "/v1/search?q=dusk%20harbour");
     assert_eq!(either.len(), 2, "{either:?}");
+    // Every word first: of the question's words only the kestrel page holds
+    // all of "kestrel routes run near harbour", so it alone is the answer.
     let ranked = results(
         &fixture,
         TOKEN_A,
         "/v1/search?q=Which%20kestrel%20routes%20run%20near%20the%20harbour%3F",
     );
-    assert_eq!(ranked.len(), 2, "{ranked:?}");
+    assert_eq!(ranked.len(), 1, "{ranked:?}");
     assert_eq!(ranked[0]["title"], "Kestrel routes", "{ranked:?}");
 
     // A question of nothing but stopwords finds nothing, and is no error.
