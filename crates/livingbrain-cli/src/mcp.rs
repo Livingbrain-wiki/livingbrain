@@ -70,42 +70,74 @@ fn handle(client: &Client, line: &str) -> Option<Value> {
     }
 }
 
-/// The three tools, each a thin wrapper over one API call.
+/// The tools: three thin wrappers over one API call each, and two (`brain_context_for`
+/// and `brain_facts`) that the remote MCP endpoint answers, so the stdio
+/// server gives the same brief and the same facts the remote server does.
 fn tools() -> Value {
-    fn tool(name: &str, description: &str, properties: Value, required: &str) -> Value {
+    fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
         json!({
             "name": name,
             "description": description,
             "inputSchema": {
                 "type": "object",
                 "properties": properties,
-                "required": [required],
+                "required": required,
             },
         })
     }
     json!([
         tool(
             "brain_search",
-            "Search the team brain and get matching pages.",
-            json!({ "query": { "type": "string" }, "project": { "type": "string" }, "limit": { "type": "integer" } }),
-            "query",
+            "Search the team brain and get matching pages. Pages holding every word of the \
+             query come first; otherwise pages holding enough of its words; otherwise the \
+             answer is no confident match. Session transcripts are left out unless \
+             include_sessions is true.",
+            json!({
+                "query": { "type": "string" },
+                "project": { "type": "string" },
+                "limit": { "type": "integer" },
+                "include_sessions": { "type": "boolean" },
+            }),
+            &["query"],
+        ),
+        tool(
+            "brain_context_for",
+            "A cited brief for a task in a repository: the sections of the pages that mention \
+             it, under a size cap, with the facts it is about.",
+            json!({
+                "repo": { "type": "string" },
+                "task": { "type": "string" },
+                "include_sessions": { "type": "boolean" },
+            }),
+            &["repo", "task"],
+        ),
+        tool(
+            "brain_facts",
+            "What is true about an entity, now or as of a date (YYYY, YYYY-MM or YYYY-MM-DD), \
+             with the history of earlier values.",
+            json!({
+                "subject": { "type": "string" },
+                "attribute": { "type": "string" },
+                "as_of": { "type": "string" },
+            }),
+            &[],
         ),
         tool(
             "brain_page",
             "Read a wiki page's Markdown by slug.",
             json!({ "slug": { "type": "string" } }),
-            "slug",
+            &["slug"],
         ),
         tool(
             "brain_note",
             "Add a note to the brain.",
             json!({ "body": { "type": "string" }, "project": { "type": "string" } }),
-            "body",
+            &["body"],
         ),
     ])
 }
 
-/// `tools/call` for one of the three tools.
+/// `tools/call` for one of the tools.
 fn call(client: &Client, id: Value, params: Option<&Value>) -> Value {
     let Some(params) = params else {
         return error_response(id, -32602, "tools/call needs params");
@@ -118,6 +150,16 @@ fn call(client: &Client, id: Value, params: Option<&Value>) -> Value {
         .cloned()
         .unwrap_or_else(|| json!({}));
     let project = arguments.get("project").and_then(Value::as_str);
+    // The two the remote endpoint answers are forwarded as they are.
+    if matches!(name, "brain_context_for" | "brain_facts") {
+        return match client.mcp_tool(name, arguments.clone()) {
+            Ok(result) => ok(id, result),
+            Err(error) => ok(
+                id,
+                json!({ "content": [{ "type": "text", "text": error.to_string() }], "isError": true }),
+            ),
+        };
+    }
     let result = match name {
         "brain_search" => match arguments.get("query").and_then(Value::as_str) {
             Some(query) => {
@@ -125,7 +167,11 @@ fn call(client: &Client, id: Value, params: Option<&Value>) -> Value {
                     .get("limit")
                     .and_then(Value::as_u64)
                     .and_then(|n| u32::try_from(n).ok());
-                client.search(query, project, limit)
+                let include_sessions = arguments
+                    .get("include_sessions")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                client.search(query, project, limit, include_sessions)
             }
             None => return error_response(id, -32602, "brain_search needs a query"),
         },

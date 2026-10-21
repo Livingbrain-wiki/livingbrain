@@ -12,9 +12,10 @@ use livingbrain_pages::access::{
     AccessPlan, KIND_FACTS, KIND_PAGES, ScopeFilter, personal, space_scope, subject_path,
 };
 use livingbrain_pages::{
-    Author, EntityType, FactError, FactInput, FactStore, Frontmatter, Page, PageError, PageStore,
-    PageWrite, Timeline, brief_lines, brief_section, fact_json, is_slug, page_url,
-    parse_frontmatter, person_subject, reference_url, relevant_where,
+    Author, BRIEF_TOKEN_CAP, EntityType, FactError, FactInput, FactStore, Frontmatter, MatchMode,
+    Page, PageError, PageStore, PageWrite, QueryTerm, SearchOptions, Timeline, brief_lines,
+    brief_section, estimate_tokens, fact_json, is_slug, matching_sections, pack_sections, page_url,
+    parse_frontmatter, person_subject, query_terms, reference_url, relevant_where,
 };
 use livingbrain_redact::{Policy, redact};
 use serde_json::{Value, json};
@@ -66,11 +67,13 @@ pub(crate) fn descriptors() -> Value {
     json!([
         tool(
             "brain_search",
-            "Search the pages you are allowed to read, best match first. A page matches \
-             when it holds any of the query's words (stopwords like \"what\" or \"the\" \
-             are ignored, plurals fold); pages holding more of the words, rarer ones, or \
-             the words in their title rank higher. With no query (or an empty one), it \
-             returns the most recently updated pages you can read instead.",
+            "Search the pages you are allowed to read, best match first. Pages holding \
+             every word of the query (stopwords like \"what\" or \"the\" are ignored, \
+             plurals fold) come first; only when none does, pages holding enough of its \
+             words are returned, and when none does either the answer says there is no \
+             confident match rather than guessing. Coding-agent session transcripts are \
+             left out unless include_sessions is true. With no query (or an empty one), \
+             it returns the most recently updated pages you can read instead.",
             json!({
                 "query": { "type": "string",
                            "description": "The words or question to look for. Leave it out, or \
@@ -78,6 +81,8 @@ pub(crate) fn descriptors() -> Value {
                                            pages you can read." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
                            "description": "How many pages to return." },
+                "include_sessions": { "type": "boolean",
+                           "description": "Also search coding-agent session transcripts. Off by default." },
             }),
             &[],
             true,
@@ -91,11 +96,15 @@ pub(crate) fn descriptors() -> Value {
         ),
         tool(
             "brain_context_for",
-            "A cited brief for a task: the pages that mention it, with their full text. \
-             Call this before you plan or write code in a repository.",
+            "A cited brief for a task: the sections of the pages that mention it, under a \
+             size cap, with the facts it is about. Call this before you plan or write code \
+             in a repository. Coding-agent session transcripts are left out unless \
+             include_sessions is true.",
             json!({
                 "repo": { "type": "string", "description": "The repository or component the work is in." },
                 "task": { "type": "string", "description": "What you are about to do, in words." },
+                "include_sessions": { "type": "boolean",
+                           "description": "Also draw on coding-agent session transcripts. Off by default." },
             }),
             &["repo", "task"],
             true,
@@ -183,6 +192,7 @@ pub(crate) enum Call {
     Search {
         query: String,
         limit: usize,
+        include_sessions: bool,
     },
     /// `brain_search` with no query: the most recently updated pages.
     Recent {
@@ -194,6 +204,7 @@ pub(crate) enum Call {
     ContextFor {
         repo: String,
         task: String,
+        include_sessions: bool,
     },
     Note {
         text: String,
@@ -232,8 +243,13 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
                 Some(_) => return Err("`query` must be a string".to_owned()),
             };
             let limit = limit(arguments)?;
+            let include_sessions = flag(arguments, "include_sessions")?;
             Ok(match query {
-                Some(query) => Call::Search { query, limit },
+                Some(query) => Call::Search {
+                    query,
+                    limit,
+                    include_sessions,
+                },
                 None => Call::Recent { limit },
             })
         }
@@ -243,6 +259,7 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Result<Call, String> {
         "brain_context_for" => Ok(Call::ContextFor {
             repo: required(arguments, "repo")?.to_owned(),
             task: required(arguments, "task")?.to_owned(),
+            include_sessions: flag(arguments, "include_sessions")?,
         }),
         "brain_note" => Ok(Call::Note {
             text: required(arguments, "text")?.to_owned(),
@@ -307,13 +324,50 @@ pub(crate) async fn run(
         Call::Facts { .. } => "",
     };
     let outcome = match call {
-        Call::Search { query, limit } => search(store, base, &filters, &query, limit).await,
+        Call::Search {
+            query,
+            limit,
+            include_sessions,
+        } => {
+            search(
+                store,
+                base,
+                &filters,
+                &query,
+                limit,
+                SearchOptions {
+                    include_sessions,
+                    ..SearchOptions::default()
+                },
+                &asker.workspace_id,
+            )
+            .await
+        }
         Call::Recent { limit } => recent(store, base, &filters, limit).await,
         Call::Page { slug } => page(store, base, &filters, &slug).await,
-        Call::ChatSearch { query } => chat_search(store, base, &filters, &query).await,
+        Call::ChatSearch { query } => {
+            chat_search(store, base, &filters, &query, &asker.workspace_id).await
+        }
         Call::ChatFetch { scope, slug } => chat_fetch(store, base, &filters, &scope, &slug).await,
-        Call::ContextFor { repo, task } => {
-            context_for(store, facts, base, asker, plan, &repo, &task).await
+        Call::ContextFor {
+            repo,
+            task,
+            include_sessions,
+        } => {
+            context_for(
+                store,
+                facts,
+                base,
+                asker,
+                plan,
+                &repo,
+                &task,
+                SearchOptions {
+                    include_sessions,
+                    ..SearchOptions::default()
+                },
+            )
+            .await
         }
         Call::Note {
             text,
@@ -419,12 +473,16 @@ async fn recent(
             Err(error) => return Err(store_failed(error)),
         }
     }
-    Ok(pages_answer(&found, "You have no readable pages yet.\n"))
+    Ok(pages_answer(
+        &found,
+        "You have no readable pages yet.\n",
+        json!({}),
+    ))
 }
 
 /// The answer a page listing gives: one numbered line per page with its
 /// snippet, then the citations the model is told to use.
-fn pages_answer(found: &[Found], empty: &str) -> Value {
+fn pages_answer(found: &[Found], empty: &str, extra: Value) -> Value {
     let mut text = String::new();
     for (index, page) in found.iter().enumerate() {
         text.push_str(&format!(
@@ -438,34 +496,53 @@ fn pages_answer(found: &[Found], empty: &str) -> Value {
     if found.is_empty() {
         text.push_str(empty);
     }
-    answer(
-        append_citations(&text, found),
-        json!({
-            "results": found.iter().map(|page| json!({
-                "title": page.title,
-                "ref": page.reference(),
-                "url": page.url,
-                "snippet": snippet(&page.body),
-            })).collect::<Vec<_>>(),
-        }),
-    )
+    let mut structured = json!({
+        "results": found.iter().map(|page| json!({
+            "title": page.title,
+            "ref": page.reference(),
+            "url": page.url,
+            "snippet": snippet(&page.body),
+        })).collect::<Vec<_>>(),
+    });
+    if let (Some(target), Some(extra)) = (structured.as_object_mut(), extra.as_object()) {
+        target.extend(extra.clone());
+    }
+    answer(append_citations(&text, found), structured)
 }
 
-/// `brain_search`: every page in the asker's scopes holding **every** word
-/// of `query`.
+/// `brain_search`: the pages in the asker's scopes that match `query` — every
+/// word of it first, else enough of its weight (issue #281). When nothing
+/// matches confidently the answer says so, and carries `match: "none"`.
 async fn search(
     store: &PageStore,
     base: &str,
     filters: &[ScopeFilter],
     query: &str,
     limit: usize,
+    options: SearchOptions,
+    workspace: &str,
 ) -> Result<Value, String> {
-    let found = find(store, base, filters, query, limit).await?;
+    let (found, mode) = find(store, base, filters, query, limit, options).await?;
     Ok(pages_answer(
         &found,
-        "No page you can read mentions any word of that query. Try other, \
-         more specific words, or call brain_context_for instead.\n",
+        NO_CONFIDENT_MATCH,
+        json!({ "match": match_label(mode), "workspace": workspace }),
     ))
+}
+
+/// What a search says when no page matches confidently. It says so plainly,
+/// and it does not claim the brain holds nothing about the question.
+const NO_CONFIDENT_MATCH: &str = "No confident match: no page you can read holds every word of \
+     that query, nor enough of its words to be a likely answer. Try other, more \
+     specific words, or ask about a repository with brain_context_for.\n";
+
+/// The label a search's `match` field takes.
+fn match_label(mode: Option<MatchMode>) -> &'static str {
+    match mode {
+        Some(MatchMode::All) => "all",
+        Some(MatchMode::Any) => "any",
+        None => "none",
+    }
 }
 
 /// The read behind `brain_page` and `fetch`: the first of the asker's scopes
@@ -535,14 +612,25 @@ async fn chat_search(
     base: &str,
     filters: &[ScopeFilter],
     query: &str,
+    workspace: &str,
 ) -> Result<Value, String> {
-    let found = find(store, base, filters, query, DEFAULT_LIMIT).await?;
+    let (found, mode) = find(
+        store,
+        base,
+        filters,
+        query,
+        DEFAULT_LIMIT,
+        SearchOptions::default(),
+    )
+    .await?;
     Ok(json_answer(json!({
         "results": found.iter().map(|page| json!({
             "id": page.id(),
             "title": page.title,
             "url": page.url,
         })).collect::<Vec<_>>(),
+        "match": match_label(mode),
+        "workspace": workspace,
     })))
 }
 
@@ -575,9 +663,13 @@ async fn chat_fetch(
 /// `brain_context_for`: a brief for a task, out of the asker's own pages.
 ///
 /// Two queries — the task's own words, then the repository's — and the union
-/// of their hits, the task's first: the store ranks pages by how many of a
-/// query's words they hold, so a page about the repository but not the
-/// task's words would otherwise sort below every task match.
+/// of their hits, the task's first. The brief quotes the **sections** of
+/// those pages that mention the words, not the pages whole (issue #281): a
+/// page is a few thousand tokens and a session transcript is tens of
+/// thousands, so the old five-page brief could run to ~50k tokens. Sections
+/// are packed in order into [`BRIEF_TOKEN_CAP`]; a page that gets no room is
+/// not cited.
+#[allow(clippy::too_many_arguments)]
 async fn context_for(
     store: &PageStore,
     facts: &FactStore,
@@ -586,10 +678,14 @@ async fn context_for(
     plan: &AccessPlan,
     repo: &str,
     task: &str,
+    options: SearchOptions,
 ) -> Result<Value, String> {
     let filters = plan.filters(KIND_PAGES, Permission::Read);
-    let mut found = find(store, base, &filters, task, CONTEXT_PAGES).await?;
-    for page in find(store, base, &filters, repo, CONTEXT_PAGES).await? {
+    let (mut found, mode) = find(store, base, &filters, task, CONTEXT_PAGES, options).await?;
+    for page in find(store, base, &filters, repo, CONTEXT_PAGES, options)
+        .await?
+        .0
+    {
         if !found.contains(&page) {
             found.push(page);
         }
@@ -611,29 +707,61 @@ async fn context_for(
     .map_err(facts_failed)?;
     let (lines, fact_citations) = brief_lines(&timelines, now);
     let mut text = brief_section(&lines, now);
-    for (index, page) in found.iter().enumerate() {
-        text.push_str(&format!(
-            "\n[{}] {} — {}\n\n{}\n",
-            index + 1,
+
+    // The words both queries were asked with, each page's sections that hold
+    // them, packed under the cap after the facts and each page's citation.
+    let terms: Vec<QueryTerm> = query_terms(task)
+        .into_iter()
+        .chain(query_terms(repo))
+        .collect();
+    let mut cited: Vec<Found> = Vec::new();
+    for page in &found {
+        let header = format!(
+            "\n[{}] {} — {}\n\n",
+            cited.len() + 1,
             page.title,
-            page.reference(),
-            page.body.trim(),
-        ));
-    }
-    if found.is_empty() && lines.is_empty() {
-        text.push_str(
-            "Nothing in the pages you can read mentions this. Say so rather than \
-             guessing, and ask for the repository name you are working in if it \
-             was a guess.\n",
+            page.reference()
         );
+        let room = BRIEF_TOKEN_CAP
+            .saturating_sub(estimate_tokens(&text))
+            .saturating_sub(estimate_tokens(&header));
+        let packed = pack_sections(&matching_sections(&page.body, &terms), room);
+        if packed.is_empty() {
+            continue;
+        }
+        text.push_str(&header);
+        text.push_str(&packed);
+        text.push('\n');
+        cited.push(page.clone());
     }
-    let pages = found
+    if cited.is_empty() && lines.is_empty() {
+        text.push_str(match mode {
+            None => {
+                "Nothing in the pages you can read confidently matches this: no confident \
+                 match. Say so rather than guessing, and ask for the repository name you \
+                 are working in if it was a guess.\n"
+            }
+            Some(_) => {
+                "The pages that match this have no room in the brief. Say so rather than \
+                 guessing, and ask for the specific page if it matters.\n"
+            }
+        });
+    }
+    let pages = cited
         .iter()
         .map(|page| json!({ "title": page.title, "ref": page.reference(), "url": page.url }))
         .collect::<Vec<_>>();
     Ok(answer(
-        append_citations(&text, &found),
-        json!({ "repo": repo, "task": task, "pages": pages, "facts": fact_citations }),
+        append_citations(&text, &cited),
+        json!({
+            "repo": repo,
+            "task": task,
+            "pages": pages,
+            "facts": fact_citations,
+            "match": match_label(mode),
+            "workspace": asker.workspace_id,
+            "token_cap": BRIEF_TOKEN_CAP,
+        }),
     ))
 }
 
@@ -895,7 +1023,7 @@ fn facts_failed(error: FactError) -> String {
 
 /// One page a tool quoted, prepared once: the tools print a title, a
 /// reference and a body and never re-parse the frontmatter.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Found {
     title: String,
     scope: String,
@@ -941,21 +1069,24 @@ impl Found {
     }
 }
 
-/// Search the asker's scopes and read back each hit. The scopes are the
-/// `&[&str]` the store binds — the only place a query meets a scope list.
+/// Search the asker's scopes and read back each hit, with how they matched
+/// (`None` for no confident match). The scopes are the grant filters the
+/// store binds — the only place a query meets a scope list.
 async fn find(
     store: &PageStore,
     base: &str,
     filters: &[ScopeFilter],
     query: &str,
     limit: usize,
-) -> Result<Vec<Found>, String> {
-    let hits = store
-        .search_in(filters, query, limit)
+    options: SearchOptions,
+) -> Result<(Vec<Found>, Option<MatchMode>), String> {
+    let outcome = store
+        .search_outcome(filters, query, limit, options)
         .await
         .map_err(store_failed)?;
-    let mut found = Vec::with_capacity(hits.len());
-    for hit in hits {
+    let mode = outcome.mode;
+    let mut found = Vec::with_capacity(outcome.hits.len());
+    for hit in outcome.hits {
         match store.read(&hit.scope, &hit.slug).await {
             // A hit whose page is gone — a scope shredded between the search
             // and the read — is skipped rather than failing the whole call.
@@ -964,7 +1095,7 @@ async fn find(
             Err(error) => return Err(store_failed(error)),
         }
     }
-    Ok(found)
+    Ok((found, mode))
 }
 
 /// What a `brain_note` call says: the text, its title, and the facts it
@@ -1089,6 +1220,15 @@ fn optional<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>, Stri
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value)),
         Some(_) => Err(format!("`{key}` must be a string")),
+    }
+}
+
+/// An optional boolean argument: absent is `false`, wrong-typed is an error.
+fn flag(arguments: &Value, key: &str) -> Result<bool, String> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("`{key}` must be a boolean")),
     }
 }
 

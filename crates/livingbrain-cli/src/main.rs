@@ -133,6 +133,9 @@ enum Command {
         /// Maximum number of results
         #[arg(long)]
         limit: Option<u32>,
+        /// Also search coding-agent session transcripts (off by default)
+        #[arg(long)]
+        include_sessions: bool,
         /// The search query
         #[arg(required = true)]
         query: Vec<String>,
@@ -267,9 +270,15 @@ fn run(cli: &Cli, out: &Out) -> CliResult<()> {
         Command::Search {
             project,
             limit,
+            include_sessions,
             query,
         } => {
-            let value = client(cli)?.search(&query.join(" "), project.as_deref(), *limit)?;
+            let value = client(cli)?.search(
+                &query.join(" "),
+                project.as_deref(),
+                *limit,
+                *include_sessions,
+            )?;
             out.json_or(&value, || render_search(&value));
             Ok(())
         }
@@ -424,7 +433,11 @@ fn render_search(value: &Value) {
         .and_then(Value::as_array)
         .unwrap_or(&empty);
     if results.is_empty() {
-        println!("No results.");
+        if value.get("match").and_then(Value::as_str) == Some("none") {
+            println!("No confident match.");
+        } else {
+            println!("No results.");
+        }
     }
     for (index, result) in results.iter().enumerate() {
         println!("[{}] {}", index + 1, text(result, "title"));

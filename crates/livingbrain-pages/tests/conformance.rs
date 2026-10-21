@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use cratefield_core::UlidIdGen;
 use cratefield_testing::{FixedClock, MemoryBlob, TestHarness, assert_wasm_safe_deps, conformance};
+use livingbrain_pages::access::ScopeFilter;
 use livingbrain_pages::{
-    Author, EntityType, PageStore, PageWrite, Pages, ProjectCount, SearchHit, SourceError,
-    SourceFilter, SourceKind, SourceStore, SourceWrite,
+    Author, EntityType, PageStore, PageWrite, Pages, ProjectCount, SearchHit, SearchOptions,
+    SourceError, SourceFilter, SourceKind, SourceStore, SourceWrite,
 };
 
 #[test]
@@ -470,16 +471,34 @@ fn the_ranked_search_holds_on_every_dialect() {
                 }
             };
 
-            // The production failure: a question full of stopwords.
+            // The production failure: a question full of stopwords. The only
+            // page that holds `earthos` and `codebase` is a session, which a
+            // default search leaves out, so nothing matches confidently.
             let found = search("What issues were found in the EarthOS codebase?", 10).await;
+            assert!(found.is_empty(), "{dialect}: {found:?}");
+            let included = store
+                .search_outcome(
+                    &[
+                        ScopeFilter::whole(A_SCOPE, ""),
+                        ScopeFilter::whole(SHARED_ONE, ""),
+                    ],
+                    "What issues were found in the EarthOS codebase?",
+                    10,
+                    SearchOptions {
+                        include_sessions: true,
+                        ..SearchOptions::default()
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{dialect}: {error}"));
             assert_eq!(
-                found.first(),
+                included.hits.first(),
                 Some(&hit(A_SCOPE, "agent-log-earthos")),
-                "{dialect}: {found:?}"
+                "{dialect}: {included:?}"
             );
             assert!(
-                found.iter().all(|hit| hit.scope == A_SCOPE),
-                "{dialect}: another member's page entered the candidates: {found:?}"
+                included.hits.iter().all(|hit| hit.scope == A_SCOPE),
+                "{dialect}: another member's page entered the candidates: {included:?}"
             );
 
             // Only stopwords: nothing, and no error.
@@ -510,9 +529,27 @@ fn the_ranked_search_holds_on_every_dialect() {
                 "{dialect}"
             );
 
-            // The limit comes after the ranking, not before it.
+            // Sessions are out of a default search, and the limit comes after
+            // the ranking, not before it: the one page holding every word of
+            // the query, a session, comes first when sessions are asked for.
+            assert!(
+                search("issues earthos lockfile", 1).await.is_empty(),
+                "{dialect}"
+            );
             assert_eq!(
-                search("issues earthos lockfile", 1).await,
+                store
+                    .search_outcome(
+                        &[ScopeFilter::whole(A_SCOPE, "")],
+                        "issues earthos lockfile",
+                        1,
+                        SearchOptions {
+                            include_sessions: true,
+                            ..SearchOptions::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{dialect}: {error}"))
+                    .hits,
                 vec![hit(A_SCOPE, "agent-log-earthos")],
                 "{dialect}"
             );

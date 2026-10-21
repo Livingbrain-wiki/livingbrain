@@ -1212,3 +1212,54 @@ fn a_tool_read_lands_on_the_live_feed_of_its_own_workspace_only() {
         "another workspace's feed is its own"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #281: bounded briefs, sessions out of the default
+
+/// A brief quotes the sections of the pages that match, under a token cap,
+/// and a coding-agent transcript is left out unless the caller asks for it.
+#[test]
+fn a_brief_quotes_sections_under_the_cap_and_leaves_sessions_out() {
+    let fixture = world();
+    seed(&fixture, "ws-one", &user("u-a"), "kestrel", KESTREL);
+    // A transcript far larger than the brief's cap, every line about the task.
+    let transcript: String = (0..600)
+        .map(|i| format!("Turn {i}: ledger reconciliation transcript line with detail.\n"))
+        .collect();
+    seed(
+        &fixture,
+        "ws-one",
+        &user("u-a"),
+        "agent-log-claude-code-abc",
+        &format!("---\ntitle: Session\n---\n{transcript}"),
+    );
+
+    let brief = |include: Option<bool>| {
+        let mut args = json!({ "repo": "ledger", "task": "ledger reconciliation" });
+        if let Some(include) = include {
+            args["include_sessions"] = json!(include);
+        }
+        post(&fixture, "token-a", call("brain_context_for", args))
+    };
+
+    let default = brief(None);
+    let text = text_of(&default);
+    assert!(text.contains("Reykjavik"), "{text}");
+    assert!(!text.contains("Turn 5:"), "a session leaked into the brief");
+    assert!(!text.contains("agent-log-"), "{text}");
+    assert!(
+        text.len() < 12_000,
+        "the brief is {} bytes: over the cap",
+        text.len()
+    );
+    assert_eq!(result_of(&default)["structuredContent"]["token_cap"], 2_000);
+
+    let opted = brief(Some(true));
+    let text = text_of(&opted);
+    assert!(text.contains("agent-log-claude-code-abc"), "{text}");
+    assert!(
+        text.len() < 12_000,
+        "the opted-in brief is {} bytes: over the cap",
+        text.len()
+    );
+}

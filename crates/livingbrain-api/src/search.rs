@@ -1,10 +1,12 @@
 //! The `search` module: `GET /v1/search`, the route the CLI's
 //! `livingbrain search` speaks.
 //!
-//! The same recall `brain_search` gives an agent — every page in the
-//! asker's scopes whose body holds **every** word of the query — as data:
-//! a title, a citation URL and a snippet per hit, and the optional
-//! `project` filter over the frontmatter a note carries.
+//! The same recall `brain_search` gives an agent — the pages in the asker's
+//! scopes that hold every word of the query, or, failing that, enough of its
+//! weight (issue #281) — as data: a title, a citation URL and a snippet per
+//! hit, the workspace they came from, how they matched, and the optional
+//! `project` filter over the frontmatter a note carries. Coding-agent session
+//! pages are left out unless `include_sessions=true`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,12 +17,13 @@ use cratefield_core::axum::http::{HeaderMap, Method};
 use cratefield_core::axum::routing::get;
 use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
 use cratefield_module_orgs::grants::Permission;
+use livingbrain_pages::SearchOptions;
 use livingbrain_pages::access::KIND_PAGES;
 use serde_json::{Value, json};
 
 use crate::Wiki;
 use crate::facts::{relevant, timeline_json};
-use crate::recipes::{DEFAULT_LIMIT, MAX_LIMIT, find_in_project, result_json};
+use crate::recipes::{DEFAULT_LIMIT, MAX_LIMIT, find_in_project, match_label, result_json};
 use crate::service::Service;
 
 /// The `search` module, constructed with the pages access the venture
@@ -80,9 +83,10 @@ impl Module for Search {
     }
 }
 
-/// `GET /?q=…&project=…&limit=…` — the pages in the asker's scopes whose
-/// body holds every word of `q`, newest index first, each as a title, a
-/// citation URL and a snippet.
+/// `GET /?q=…&project=…&limit=…&include_sessions=…` — the pages in the asker's
+/// scopes that match `q` (every word first, else enough of its weight), best
+/// first, each as a title, a citation URL and a snippet. `match` says which:
+/// `all`, `any`, or `none` for no confident match.
 ///
 /// `project`, when sent, keeps only the pages whose frontmatter names it —
 /// the key a filed note carries — and it is applied **before** the limit,
@@ -114,11 +118,18 @@ async fn search(
         })?),
     };
     let project = query.get("project").map(String::as_str);
+    let options = SearchOptions {
+        include_sessions: query
+            .get("include_sessions")
+            .is_some_and(|raw| raw == "true" || raw == "1"),
+        ..SearchOptions::default()
+    };
 
     let store = state.store()?;
     let plan = state.access(&asker).await?;
     let filters = plan.filters(KIND_PAGES, Permission::Read);
-    let found = find_in_project(&store, &state.base(), &filters, q, limit, project).await?;
+    let (found, mode) =
+        find_in_project(&store, &state.base(), &filters, q, limit, project, options).await?;
     let results: Vec<Value> = found.iter().map(result_json).collect();
     // The facts `q` is about, as of now (docs/temporal-facts.md §5): what
     // holds today, with the history beside it.
@@ -129,7 +140,12 @@ async fn search(
         .iter()
         .map(|timeline| timeline_json(timeline, now, &|fact| fact.source.clone()))
         .collect();
-    Ok(Json(json!({ "results": results, "facts": fact_keys })))
+    Ok(Json(json!({
+        "results": results,
+        "match": match_label(mode),
+        "workspace": asker.workspace_id,
+        "facts": fact_keys,
+    })))
 }
 
 /// A caller-supplied limit, capped rather than refused: 1..=[`MAX_LIMIT`],

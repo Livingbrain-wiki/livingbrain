@@ -41,6 +41,7 @@ mod memories;
 mod public;
 mod query;
 mod scope;
+mod sections;
 mod sources;
 mod store;
 mod titles;
@@ -76,14 +77,16 @@ pub use public::{
 };
 pub use query::{MAX_QUERY_TERMS, QueryTerm, is_stopword, query_terms};
 pub use scope::{page_scope, page_scopes_for};
+pub use sections::{BRIEF_TOKEN_CAP, Section, estimate_tokens, matching_sections, pack_sections};
 pub use sources::{
     MAX_PROJECT_LEN, MAX_SOURCE_BODY_BYTES, ProjectCount, Released, Source, SourceError,
     SourceFilter, SourceKind, SourceStore, SourceSummary, SourceWrite, extract_wikilinks,
     is_project,
 };
 pub use store::{
-    ActivityRow, Author, AuthorKind, Page, PageError, PageFilter, PageStore, PageSummary,
-    PageWrite, ReencryptReport, SearchHit, TitleCandidate, VersionMeta, activity_rows,
+    ActivityRow, Author, AuthorKind, MatchMode, Page, PageError, PageFilter, PageStore,
+    PageSummary, PageWrite, ReencryptReport, SEARCH_FLOOR_PERCENT, SearchHit, SearchOptions,
+    SearchOutcome, TitleCandidate, VersionMeta, activity_rows,
 };
 pub use titles::{
     SESSION_SLUG_PREFIX, agent_label, frontmatter_title, is_placeholder_title, is_session_slug,
