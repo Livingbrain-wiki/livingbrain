@@ -53,7 +53,7 @@ pub use facts::{
     CursorUpdate, DreamCandidate, DreamDecisionRecord, DreamDecisionRow, DreamFinish,
     DreamOutcomes, DreamPass, DreamWindow, FactError, FactInput, FactOutcome, FactStore,
     MAX_BRIEF_TIMELINES, MAX_FACT_ROWS, MAX_FACT_TEXT, MAX_INDEX_KEYS, Recorded, RuleFact,
-    SWEEP_END, Timeline, brief_lines, brief_section, date_start, fact_json, is_subject,
+    SWEEP_END, Timeline, brief_lines, brief_section, date_start, fact_json, family_of, is_subject,
     person_subject, relevant, relevant_where,
 };
 pub use graph::{

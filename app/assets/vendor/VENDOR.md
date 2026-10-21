@@ -23,3 +23,16 @@ no WebGL to fall back from — and is the look the brief asked for.
 
 Re-sync the look from the website by comparing its `brain.js` against the
 kept parts above; there is no build step and no copy to update.
+
+## Mermaid (diagrams)
+
+`assets/vendor/mermaid/mermaid-11.17.2.min.js` is the UMD build of
+[mermaid](https://github.com/mermaid-js/mermaid) **11.17.2**, copied unchanged
+from the npm tarball (`npm pack mermaid@11.17.2`, `dist/mermaid.min.js`). Its
+licence is alongside it (`LICENSE`, MIT). It is loaded only when a page has a
+diagram to draw (`assets/diagram-view.js`), with
+`integrity="sha384-…"` set to the file's hash (the constant `MERMAID_SRI` in
+`assets/diagrams.js`). To update it: pack the new version, copy the file under
+its new name, update `MERMAID_URL` and `MERMAID_SRI`, and delete the old file.
+The build is not rewritten, so `tools/stamp-assets.mjs` skips
+`assets/vendor/` when it looks for references.

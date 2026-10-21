@@ -32,7 +32,7 @@ every fact, and neither is ever rewritten to mean the other.
 | `attribute` | string | writer | The predicate, normalised: lowercase `snake_case`, `[a-z0-9_]`, 1..=64 chars, e.g. `shoe_size`, `employer`, `uses_tool`, `lives_in`. The server normalises `Shoe Size` and `shoe-size` to `shoe_size`; emitters should send the normal form. |
 | `value` | string | writer | The object, as text: `41`, `Acme GmbH`, `ripgrep`. Not interpreted. A number stays a string so `41` and `41.0` are the writer's choice, not a float's. |
 | `unit` | string? | writer | The unit or system of the value, when it has one: `EU`, `kg`, `EUR/month`. Part of the value's identity: `41 EU` and `41 US` are different values. |
-| `valid_from` | partial date? | writer | When it became true in the world. Omitted means "not known": the server uses the observation time (precision `second`). |
+| `valid_from` | partial date? | writer | When it became true in the world. Omitted means "not known": the server uses the document's own day when an import has one (its front matter `date:` or a day in its path), else the observation time (precision `second`). |
 | `valid_to` | partial date? | writer, then server | When it stopped being true, **exclusive**. Omitted and nothing later = still true (open-ended, rendered `now`). The server sets it when a later fact supersedes this one. |
 | `observed_at` | RFC 3339 | writer or server | When the brain learned it — normally the time of the source message. Defaults to the time of the write. Never in the future. |
 | `source` | string? | writer | The citation: a page (`page:<scope>/<slug>`), a source (`source:<id>` or `source:<id>#<message-id>`), a note (`note:<scope>/<slug>`), a conversation (`conversation:<id>#<message-id>`). Notes fill it in themselves. |
@@ -410,6 +410,10 @@ Worker's cron tick, after the compile drain.
   monthly compile budget as a compile (reserve, then settle). It stops as soon
   as that budget is spent, leaves the subject queued, and a rate limit ends
   the tick. At most two passes run per tick.
+- **Windows.** A window is the next 60 current facts in `created_at` order, and
+  it also shows up to 20 more facts of each attribute family it touches (the key
+  without its last segment: `auth_provider_github` and `auth_provider_oidc` are
+  one family). A property under several keys is therefore judged together.
 - **Decisions.** The model sees every current fact of the one subject and may
   return `supersede` (an older fact replaced by a newer one, usually of the
   same attribute), `end` (stopped at a date), `retract` (an event, or a duplicate)
@@ -427,9 +431,18 @@ Worker's cron tick, after the compile drain.
   is retracted. If that retract fails, the copy just stored is retracted
   again and the move is refused with the retract's reason, so a failed move
   leaves no duplicate.
-- **Rule scope.** The rule pass (the first step of a dream) retracts only
+- **Rule scope.** The rule pass (the first step of a dream) acts only on
   facts the compiler wrote: `written_by` is `brain:coding-agents`. A fact a
-  person or the API wrote is never retracted by a rule, whatever its key.
+  person or the API wrote is never touched by a rule, whatever its key. The
+  rules refuse a per-item or event key, and a subject that is no entity (a
+  date-named import folder such as `project/2026-08-14`), by retracting the
+  fact. A fact under an alias of its workspace (see the alias table in
+  `subject_aliases`) moves to the canonical subject: a copy there with the same
+  value and dates, then the original is retracted. A move is refused when the
+  canonical subject already holds the attribute, and is retried each sweep.
+  A moved copy takes the store's default cardinality.
+- **Not listed.** A timeline whose every fact is retracted is not listed by
+  the facts index, the search route, the MCP search or a brief.
 - **Log.** Every decision is written to `fact_dream_decisions` whether or not
   it was applied: the pass key, the op, the fact ids, the new end or key, the
   reason (a short lowercase word), and the ids the model was shown as JSON.

@@ -66,9 +66,9 @@ This folder is written by Living Brain from your synced coding-agent sessions, o
 
 ## Layout
 
-- `coding-agents/index` — every agent and every project, one line each, with links.
+- `coding-agents/index` — every agent and every project, one line each, with links (written by the server from the pages, never by the model).
 - `coding-agents/log` — append-only: which session was processed when (written by the server, never edited by the model).
-- `coding-agents/<agent>/index` — what the agent has been used for: session count, projects, last active.
+- `coding-agents/<agent>/index` — what the agent has been used for: session count, projects, last active (written by the server).
 - `coding-agents/<agent>/patterns` — how the agent works for you: prompting patterns that worked, recurring failure modes and mistakes, tool-use habits, cost and token profile.
 - `coding-agents/<agent>/<project>/index` — what the project is and what was done in it, newest first.
 - `coding-agents/<agent>/<project>/decisions` — decisions with `decided_at`, the why, and `superseded_by` when reversed.
@@ -76,7 +76,7 @@ This folder is written by Living Brain from your synced coding-agent sessions, o
 - `coding-agents/<agent>/<project>/architecture` — how the system is put together, as the sessions revealed it.
 - `coding-agents/<agent>/<project>/open-questions` — unresolved questions; when answered, leave "answered YYYY-MM-DD →" and a link.
 - `coding-agents/<agent>/<project>/<topic>` — a page per topic when one grows big enough.
-- `coding-agents/projects/<project>` — one place per project across agents: links to each agent's pages and the current decisions, merged.
+- `coding-agents/projects/<project>` — one place per project across agents: links to each agent's pages and the current decisions, merged (written by the server).
 
 ## Entries
 

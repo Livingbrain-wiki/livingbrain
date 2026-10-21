@@ -112,6 +112,17 @@ pub struct Timeline {
     pub facts: Vec<TimedFact>,
 }
 
+impl Timeline {
+    /// Whether any fact in the timeline is still a fact (not retracted). A
+    /// timeline that is retracted-only has nothing to say to a reader.
+    #[must_use]
+    pub fn has_live_facts(&self) -> bool {
+        self.facts
+            .iter()
+            .any(|fact| fact.status != FactStatus::Retracted)
+    }
+}
+
 /// Everything a fact write or read can be refused for.
 #[derive(Debug)]
 pub enum FactError {
@@ -785,7 +796,9 @@ impl FactStore {
     /// Which timelines exist in `scopes`: `(scope, subject, attribute)`,
     /// sorted, without opening a single payload — the plaintext columns a
     /// reader matches a question against before it decrypts anything. At
-    /// most [`MAX_INDEX_KEYS`].
+    /// most [`MAX_INDEX_KEYS`]. A timeline whose every fact is retracted is
+    /// not listed: nothing in it can be read as a fact, so a question never
+    /// spends a slot on it.
     ///
     /// # Errors
     ///
@@ -804,7 +817,7 @@ impl FactStore {
                 .query(&Statement::with_values(
                     format!(
                         "SELECT DISTINCT scope, subject, attribute FROM facts \
-                         WHERE scope IN ({placeholders}) \
+                         WHERE scope IN ({placeholders}) AND status <> 'retracted' \
                          ORDER BY subject ASC, attribute ASC, scope ASC LIMIT ?"
                     ),
                     values,
@@ -1263,6 +1276,60 @@ impl FactStore {
             more,
             cursor,
         })
+    }
+
+    /// The current facts of `subject` in the attribute families `families`
+    /// (see [`family_of`]) that are not in `skip`, oldest first, at most
+    /// `limit`. Dreaming reads a window's families whole, so a property
+    /// spread over several keys (`auth_provider_*`) is decided in one
+    /// place rather than split across windows.
+    ///
+    /// # Errors
+    ///
+    /// [`FactError::Store`].
+    pub async fn dream_family(
+        &self,
+        scope: &str,
+        subject: &str,
+        families: &[String],
+        skip: &[String],
+        limit: usize,
+    ) -> Result<Vec<TimedFact>, FactError> {
+        if families.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // The plaintext columns pick the rows; only the kept ones are opened.
+        let rows = self
+            .db
+            .query(&Statement::with_values(
+                "SELECT * FROM facts WHERE scope = ? AND subject = ? AND status = 'current' \
+                 ORDER BY created_at ASC, id ASC LIMIT ?",
+                vec![
+                    text(scope),
+                    text(subject),
+                    SeaValue::BigInt(Some(MAX_FACT_ROWS as i64)),
+                ],
+            ))
+            .await
+            .map_err(PageError::Store)?;
+        let kept: Vec<Row> = rows
+            .rows
+            .into_iter()
+            .filter(|row| {
+                let attribute = row.get::<String>("attribute").unwrap_or_default();
+                let id = row.get::<String>("id").unwrap_or_default();
+                !skip.contains(&id)
+                    && family_of(&attribute)
+                        .is_some_and(|family| families.iter().any(|f| f == family))
+            })
+            .take(limit)
+            .collect();
+        Ok(self
+            .decode(&kept)
+            .await?
+            .into_iter()
+            .map(|(_, fact)| fact)
+            .collect())
     }
 
     /// The next batch of current facts for the rule pass, oldest first, after
@@ -1837,6 +1904,18 @@ fn about_self(text: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric() && c != '\'')
         .map(str::to_lowercase)
         .any(|w| matches!(w.as_str(), "my" | "me" | "i" | "mine" | "i'm" | "myself"))
+}
+
+/// The attribute family of `attribute`: the key without its last `_`
+/// segment (`auth_provider_github` → `auth_provider`, `auth_provider_oidc`
+/// → `auth_provider`). A key with no `_` is its own family and `None`
+/// here: nothing to cluster it with.
+#[must_use]
+pub fn family_of(attribute: &str) -> Option<&str> {
+    attribute
+        .rsplit_once('_')
+        .map(|(family, _)| family)
+        .filter(|f| !f.is_empty())
 }
 
 /// The timelines a question is about, read in full: those whose attribute

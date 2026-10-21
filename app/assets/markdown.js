@@ -160,6 +160,13 @@ export function renderMarkdown(markdown) {
       i += 1; // closing fence, or end of input
       const pre = element("pre", [element("code", [text(body.join("\n"))])]);
       if (fence[1]) pre.attrs = { "data-lang": fence[1] };
+      // A Mermaid fence is a figure whose code block is its fallback: the
+      // diagram viewer replaces the figure's content when it can draw it, and
+      // a page without the viewer (or a source that fails) keeps the code.
+      if (fence[1] === "mermaid") {
+        blocks.push(element("figure", [pre], { class: "mermaid-block", "data-lang": "mermaid" }));
+        continue;
+      }
       blocks.push(pre);
       continue;
     }

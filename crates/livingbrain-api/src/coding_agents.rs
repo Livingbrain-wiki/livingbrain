@@ -237,6 +237,12 @@ impl Module for CodingAgents {
                  or describes a person",
             ),
             PersonalDataSet::none(
+                "fact_subject_aliases",
+                "the row maps one entity name a workspace uses to the name its facts are \
+                 filed under — the names of projects and systems, chosen by the workspace, \
+                 and when it was set; nothing about a person's facts, sources or sessions",
+            ),
+            PersonalDataSet::none(
                 "coding_agent_pool",
                 "the row is one workspace's compile pool — how many compiles run at once, a \
                  rate-limit pause and an average call time; nothing about a person",
@@ -246,7 +252,7 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 7] = [
+        const SQLITE: [SqlMigration; 8] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
@@ -254,9 +260,10 @@ impl Module for CodingAgents {
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT,
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIASES,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 7] = [
+        const POSTGRES: [SqlMigration; 8] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
@@ -264,6 +271,7 @@ impl Module for CodingAgents {
             livingbrain_compiler::MIGRATION_REQUEUE_BAD_OUTPUT_POSTGRES,
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS_POSTGRES,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS_POSTGRES,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIASES_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -699,6 +707,22 @@ impl Dreams for StoreFacts {
             .dream_vocabulary(scope, subject)
             .await
             .map_err(|_| "store error".to_owned())
+    }
+
+    async fn family(
+        &self,
+        scope: &str,
+        subject: &str,
+        families: &[String],
+        skip: &[String],
+        limit: usize,
+    ) -> Result<Vec<HeldFact>, String> {
+        let facts = self
+            .store
+            .dream_family(scope, subject, families, skip, limit)
+            .await
+            .map_err(|_| "store error".to_owned())?;
+        Ok(facts.iter().map(held_fact).collect())
     }
 }
 

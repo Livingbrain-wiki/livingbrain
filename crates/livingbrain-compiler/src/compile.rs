@@ -17,7 +17,7 @@
 //! rest, so one person's sessions can never compile into another person's
 //! pages or into the shared wiki.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,6 +36,7 @@ use crate::dream::Dreams;
 use crate::dream_settings::{DreamSettings, DreamTuning};
 use crate::edits::{self, PageEdit};
 use crate::facts::{self, Fact, FactSink, HeldFact, newest_first, refusal};
+use crate::hubs;
 use crate::layout::{self, Allowed, Place};
 use crate::merge;
 use crate::pool::{CONCURRENCY_CEILING, MAX_IN_FLIGHT, Tick};
@@ -1293,6 +1294,8 @@ impl Compiler {
                 }
                 // A refusal is per fact, and a sink that cannot try at all
                 // is a note in the log: neither fails the job.
+                crate::subject_aliases::canonicalize(&*self.queue.db, &job.workspace, &mut facts)
+                    .await;
                 match self.facts.emit(&job.workspace, &job.scope, &facts).await {
                     Ok(emitted) => {
                         tally.facts = tally
@@ -1319,6 +1322,11 @@ impl Compiler {
         if self.append_log(&job.scope, &line, tick).await {
             tally.written(layout::LOG);
         }
+        if !tally.pages.is_empty() {
+            for slug in self.write_hubs(&job.scope, now, tick).await {
+                tally.written(&slug);
+            }
+        }
         let error = match (tally.conflicts, tally.rejected) {
             (0, 0) => None,
             (conflicts, rejected) => {
@@ -1329,6 +1337,79 @@ impl Compiler {
             chunks_done: Some(u32::try_from(parts).unwrap_or(u32::MAX)),
             ..self.with_tally(JobStatus::Done, error.as_deref(), tally)
         }
+    }
+
+    /// Rewrites the scope's hub pages (the top index, each agent's index,
+    /// each project's rollup) from the scope's pages, its log and its
+    /// decisions, and writes those that changed. The model never writes
+    /// them. A hub a person edited meanwhile is written over, as the server
+    /// owns it. Returns the slugs written.
+    async fn write_hubs(&self, scope: &str, now: OffsetDateTime, tick: &Tick) -> Vec<String> {
+        let Ok(listed) = self.pages.list(&[scope], 1_000).await else {
+            return Vec::new();
+        };
+        let slugs: BTreeSet<String> = listed.into_iter().map(|page| page.slug).collect();
+        let log = match self.pages.read(scope, layout::LOG).await {
+            Ok(Some(page)) => page.markdown,
+            _ => String::new(),
+        };
+        let mut decisions = BTreeMap::new();
+        for slug in &slugs {
+            if !hubs::is_decisions_slug(slug) {
+                continue;
+            }
+            if let Ok(Some(page)) = self.pages.read(scope, slug).await {
+                let lines = hubs::decision_lines(&strip_frontmatter(&page.markdown));
+                decisions.insert(slug.clone(), lines);
+            }
+        }
+        let rendered = hubs::render(hubs::Inputs {
+            slugs: &slugs,
+            log: &log,
+            decisions: &decisions,
+        });
+        let day = utc_day(now);
+        let mut written = Vec::new();
+        for hub in rendered {
+            let _turn = tick.page(scope, &hub.slug).await;
+            let Ok(current) = self.pages.read(scope, &hub.slug).await else {
+                continue;
+            };
+            if current
+                .as_ref()
+                .is_some_and(|page| strip_frontmatter(&page.markdown) == hub.body)
+            {
+                continue;
+            }
+            let Some(place) = layout::place(&hub.slug) else {
+                continue;
+            };
+            let markdown = frontmatter(&place, &hub.title, &day, &[]) + &hub.body;
+            let mut base_version = current.as_ref().map(|page| page.version);
+            let mut reconciles = None;
+            for _ in 0..2 {
+                let write = PageWrite {
+                    entity_type: EntityType::Topic,
+                    markdown: markdown.clone(),
+                    author: Author::Brain { reconciles },
+                    base_version,
+                };
+                match self.pages.write(scope, &hub.slug, write).await {
+                    Ok(_) => {
+                        written.push(hub.slug.clone());
+                        break;
+                    }
+                    // A person edited the hub: the server owns it, so the
+                    // brain says it has seen the edit and writes over it.
+                    Err(PageError::HumanEditPending { version }) if reconciles.is_none() => {
+                        reconciles = Some(version);
+                        base_version = Some(version);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        written
     }
 
     /// Appends a failed compile to the scope's log page, so the reason is
@@ -1555,44 +1636,22 @@ impl Compiler {
                 slugs.push(summary.slug.clone());
             }
         }
-        let mut left = self.settings.context_chars;
-        let mut shown = Vec::with_capacity(slugs.len());
+        let mut found = Vec::with_capacity(slugs.len());
         for slug in slugs {
-            let writable = allowed.permits(&slug);
-            match self.pages.read(scope, &slug).await? {
-                Some(page) => {
-                    let body = strip_frontmatter(&page.markdown);
-                    let length = body.chars().count();
-                    if length <= left {
-                        left -= length;
-                        shown.push(Shown {
-                            slug,
-                            version: Some(page.version),
-                            body,
-                            writable,
-                        });
-                    } else {
-                        // Shown cut, and so not writable this call: a body
-                        // the model only saw part of is a body it would
-                        // truncate if it rewrote it.
-                        let kept = record::cap(&body, left.max(400));
-                        left = left.saturating_sub(kept.chars().count());
-                        shown.push(Shown {
-                            slug,
-                            version: Some(page.version),
-                            body: kept,
-                            writable: false,
-                        });
-                    }
-                }
-                None => shown.push(Shown {
-                    slug,
-                    version: None,
-                    body: String::new(),
-                    writable,
-                }),
-            }
+            let page = self.pages.read(scope, &slug).await?;
+            found.push((slug, page));
         }
+        // Hubs last: the server's own pages, read-only, given what the
+        // folder's pages leave of the budget. The folder's pages each get
+        // their share first (see [`fair_shares`]), so no one page can take
+        // the budget from the others.
+        let (hubs, folder): (Vec<_>, Vec<_>) = found
+            .into_iter()
+            .partition(|(slug, _)| layout::is_hub(slug));
+        let budget = self.settings.context_chars;
+        let (mut shown, used) = share(folder, allowed, budget);
+        let (hub_shown, _) = share(hubs, allowed, budget.saturating_sub(used));
+        shown.extend(hub_shown);
         Ok(shown)
     }
 
@@ -1797,7 +1856,7 @@ impl Compiler {
         me: Option<&str>,
         now: OffsetDateTime,
     ) -> Vec<Fact> {
-        let (observed, default_from) = fact_times(cite.started_at.as_deref(), now);
+        let (observed, default_from) = cite_times(cite, now);
         facts
             .iter()
             .map(|fact| Fact {
@@ -2257,6 +2316,10 @@ pub(crate) struct Cite {
     pub source_ids: Vec<String>,
     /// When the material happened, RFC 3339: facts are observed then.
     pub started_at: Option<String>,
+    /// The day the document itself is about (`YYYY-MM-DD`), when it has one.
+    /// A fact the model leaves undated is valid from this day, not from the
+    /// day the document was imported.
+    pub document_day: Option<String>,
 }
 
 /// How many citation lines one page gains when its body names none of the
@@ -2270,6 +2333,7 @@ impl Cite {
             label: format!("session {} · {}", head.day, head.agent_folder),
             source_ids: vec![head.source_id.clone()],
             started_at: head.started_at.clone(),
+            document_day: None,
         }
     }
 }
@@ -2336,6 +2400,14 @@ pub(crate) fn fact_times(
         }
         None => (now_text, None),
     }
+}
+
+/// When a citation's facts are observed, and the day an undated one is
+/// valid from: the document's own day when the citation has one, else the
+/// day the material happened.
+pub(crate) fn cite_times(cite: &Cite, now: OffsetDateTime) -> (String, Option<String>) {
+    let (observed, default_from) = fact_times(cite.started_at.as_deref(), now);
+    (observed, cite.document_day.clone().or(default_from))
 }
 
 fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTime) -> String {
@@ -2502,6 +2574,78 @@ impl CompilePlan {
     }
 }
 
+/// How `budget` characters are shared among pages of the given lengths:
+/// max-min fair, so a page no longer than its share is shown whole and the
+/// rest split what is left, evenly. Returns each page's allowance, in the
+/// order given.
+#[must_use]
+pub fn fair_shares(lengths: &[usize], budget: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&index| (lengths[index], index));
+    let mut shares = vec![0; lengths.len()];
+    let mut left = budget;
+    for (rank, &index) in order.iter().enumerate() {
+        let share = left / (order.len() - rank);
+        let take = lengths[index].min(share);
+        shares[index] = take;
+        left -= take;
+    }
+    shares
+}
+
+/// The pages shown within `budget`: each one within its fair share (see
+/// [`fair_shares`]), a page cut to its share read-only. Returns the pages
+/// and the characters they use. A page with no allowance is left out when
+/// it is a hub (context only) and shown empty when it does not exist yet.
+fn share(
+    pages: Vec<(String, Option<Page>)>,
+    allowed: &Allowed,
+    budget: usize,
+) -> (Vec<Shown>, usize) {
+    let bodies: Vec<Option<String>> = pages
+        .iter()
+        .map(|(_, page)| page.as_ref().map(|page| strip_frontmatter(&page.markdown)))
+        .collect();
+    let lengths: Vec<usize> = bodies
+        .iter()
+        .map(|body| body.as_ref().map_or(0, |body| body.chars().count()))
+        .collect();
+    let shares = fair_shares(&lengths, budget);
+    let mut used = 0;
+    let mut shown = Vec::with_capacity(pages.len());
+    for (index, ((slug, page), body)) in pages.into_iter().zip(bodies).enumerate() {
+        let writable = allowed.permits(&slug);
+        let Some((page, body)) = page.zip(body) else {
+            shown.push(Shown {
+                slug,
+                version: None,
+                body: String::new(),
+                writable,
+            });
+            continue;
+        };
+        if shares[index] == 0 && layout::is_hub(&slug) {
+            continue;
+        }
+        let length = lengths[index];
+        let (body, writable) = if length <= shares[index] {
+            (body, writable)
+        } else {
+            // Shown cut, and so not writable this call: a body the model
+            // only saw part of is a body it would truncate if it rewrote it.
+            (record::cap(&body, shares[index]), false)
+        };
+        used += body.chars().count();
+        shown.push(Shown {
+            slug,
+            version: Some(page.version),
+            body,
+            writable,
+        });
+    }
+    (shown, used)
+}
+
 /// The log line of a `summary-only` session: what it did, in counts, and
 /// how to compile it after all.
 fn summary_line(
@@ -2600,5 +2744,16 @@ mod tests {
             Some("2025-04-02T10:30:00Z")
         );
         assert_eq!(session_instant("last tuesday"), None);
+    }
+
+    #[test]
+    fn the_budget_is_shared_fairly_and_a_small_page_is_whole() {
+        assert_eq!(fair_shares(&[10, 100, 100], 60), vec![10, 25, 25]);
+        assert_eq!(fair_shares(&[10, 20], 100), vec![10, 20]);
+        assert_eq!(fair_shares(&[50, 50], 0), vec![0, 0]);
+        assert_eq!(
+            fair_shares(&[34_000, 3_000, 2_000], 32_000),
+            vec![27_000, 3_000, 2_000]
+        );
     }
 }
