@@ -11,12 +11,17 @@ name = "livingbrain"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-09-01"
 
-# `[build]` is inherited by every environment, so `wrangler deploy` (CI and
-# ~/lb-deploy.sh) and `wrangler deploy --dry-run` all run both steps: the
-# Worker, then the web app — `tools/stamp-assets.mjs` content-hashes `app/`
-# into `../../build/app`, which the environments' `[assets]` serve. Node is
-# already here (wrangler is run through npx), and the script needs nothing
-# but Node's standard library.
+# `[build]` is the local build: `wrangler dev --local` and the top-level dry
+# run. It compiles with no deployment feature, so the venture is
+# `VentureEnv::Development`. Each deployed environment below has its own
+# `[env.*.build]` (wrangler does not merge a build into an environment's
+# build, so each repeats the steps), which passes its feature to worker-build
+# (issue #143): the Worker then carries the `VentureEnv` it deploys as, and the
+# production readiness gate runs against it at build time. Both steps run in
+# every build: the Worker, then the web app — `tools/stamp-assets.mjs`
+# content-hashes `app/` into `../../build/app`, which the environments'
+# `[assets]` serve. Node is already here (wrangler is run through npx), and the
+# script needs nothing but Node's standard library.
 [build]
 command = "cargo install -q --locked worker-build && worker-build --release && node ../../tools/stamp-assets.mjs"
 
@@ -198,6 +203,11 @@ routes = [{ pattern = "staging-api.livingbrain.wiki", custom_domain = true }]
 [env.staging.assets]
 directory = "../../build/app"
 
+# The staging build compiles `VentureEnv::Staging` (`--features staging`, see
+# `Cargo.toml`), matching `ENV = "staging"` below.
+[env.staging.build]
+command = "cargo install -q --locked worker-build && worker-build --release --features staging && node ../../tools/stamp-assets.mjs"
+
 # Not inherited from the top level, so repeated here. Its own namespace, so
 # staging traffic never spends production's budget.
 [[env.staging.ratelimits]]
@@ -268,6 +278,12 @@ routes = [
 
 [env.production.assets]
 directory = "../../build/app"
+
+# The production build compiles `VentureEnv::Production` (`--features
+# production`), matching `ENV = "production"` below, so the production
+# readiness gate runs at build time against production's config.
+[env.production.build]
+command = "cargo install -q --locked worker-build && worker-build --release --features production && node ../../tools/stamp-assets.mjs"
 
 # Not inherited from the top level, so repeated here. Its own namespace, as
 # staging has its own, so neither environment spends the other's budget.

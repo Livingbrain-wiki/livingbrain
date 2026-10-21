@@ -36,17 +36,18 @@ use cratefield_adapter_owlpost::Owlpost;
 use cratefield_adapter_turnstile::Turnstile;
 use cratefield_adapter_typesafe::TypeSafe;
 use cratefield_core::axum::Router;
-use cratefield_core::axum::body::{Body, to_bytes};
+use cratefield_core::axum::body::{Body, Bytes, to_bytes};
 use cratefield_core::axum::extract::State as AxumState;
+use cratefield_core::axum::http::Extensions;
 use cratefield_core::axum::http::{
     HeaderMap, HeaderValue, Method as HttpMethod, Request as HttpRequest, header,
 };
 use cratefield_core::axum::middleware::{Next, from_fn_with_state};
 use cratefield_core::axum::response::{IntoResponse as _, Response as AxumResponse};
 use cratefield_core::{
-    Blob, Classifier, Database, Harness, HarnessBuilder, Module, ModuleContext, Ports, Problem,
-    RandomBytes, RandomError, Rendered, ScheduledBudget, ScheduledLimits, ScheduledSplit, Template,
-    Venture,
+    Blob, BoxStream, Classifier, Database, Harness, HarnessBuilder, Module, ModuleContext, Ports,
+    Problem, RandomBytes, RandomError, Rendered, ResponseStream, ScheduledBudget, ScheduledLimits,
+    ScheduledSplit, StreamError, Template, Venture, VentureEnv,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
@@ -55,6 +56,7 @@ use cratefield_module_waitlist::{Waitlist, themed_templates};
 use cratefield_runtime_cloudflare::{
     Cloudflare, ContextDefer, FetchClient, ScheduleDefer, WorkersClock, install_tracing, serve,
 };
+use futures_util::StreamExt;
 use livingbrain_accounts::{Access, Agents, Audit};
 use livingbrain_api::{
     AppTools, Apps, Ask, BudgetSettings, CodingAgents, Dreaming, Export, Facts, Graph, ModelJobs,
@@ -99,6 +101,23 @@ const API_BASE: &str = "https://api.livingbrain.wiki";
 /// the allow-list.
 const DEVICE_CLIENT: &str = "livingbrain-cli";
 
+/// The `VentureEnv` this build is compiled for (issue #143). Each deployed
+/// environment builds with its own cargo feature, set by its `[env.*.build]`
+/// command in `wrangler.toml`, so the production readiness gate `Harness::build`
+/// runs at build time judges the environment the Worker actually serves. The
+/// deployment's `ENV` binding still answers for itself at boot; the stricter of
+/// the two wins, so a build that disagrees with its `ENV` is refused, not
+/// silently weakened.
+#[cfg(all(feature = "production", feature = "staging"))]
+compile_error!("the `production` and `staging` features are mutually exclusive");
+
+#[cfg(feature = "production")]
+const COMPILED_ENV: VentureEnv = VentureEnv::Production;
+#[cfg(feature = "staging")]
+const COMPILED_ENV: VentureEnv = VentureEnv::Staging;
+#[cfg(not(any(feature = "production", feature = "staging")))]
+const COMPILED_ENV: VentureEnv = VentureEnv::Development;
+
 /// The venture as this Worker serves it, and as a native test mounts it.
 ///
 /// The second argument is the **apex** domain. The `waitlist` module derives
@@ -107,15 +126,17 @@ const DEVICE_CLIENT: &str = "livingbrain-cli";
 /// double the label (`api.api…`, `send.api…`). `public_url` is the API's own
 /// address, spelled out rather than derived.
 ///
-/// The environment is left to the deployment, which declares it through
-/// `ENV` in `wrangler.toml` (`[vars] ENV = "production"`), not hardcoded
-/// here: `Harness::build` takes no config, so a compiled-in production would
-/// refuse to build rather than serve and say what it is missing.
+/// The environment is the one this build was compiled for ([`COMPILED_ENV`]),
+/// so a production build compiles `VentureEnv::Production` and the gate runs
+/// against production config at build time. A compiled-in production is safe
+/// to serve from: `Harness::build` checks what it needs and refuses a
+/// composition that cannot serve production, rather than serving it open.
 #[must_use]
 pub fn venture() -> Venture {
     Venture::new("livingbrain", "livingbrain.wiki")
         .public_url(API_BASE)
         .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"])
+        .env(COMPILED_ENV)
 }
 
 /// The waitlist module as this venture configures it: the single product
@@ -1674,17 +1695,107 @@ async fn serve_cli(
     response_to_worker(response).await
 }
 
-/// The buffered response bridge, mirroring the runtime's own: 1 MiB is a
-/// generous ceiling for what the CLI routes answer (JSON, one zip).
+/// The most an ordinary (buffered) CLI response body may be: 1 MiB, a
+/// generous ceiling for JSON and one zip. A streamed body is not held to it.
+const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
+
+/// What the Worker bridge sends for a response body.
+enum BridgeBody {
+    /// The chunks of a [`ResponseStream`], passed through as they come.
+    Streamed(BoxStream<'static, Result<Bytes, StreamError>>),
+    /// An ordinary body, read whole under [`MAX_RESPONSE_BUFFER`].
+    Buffered(Bytes),
+}
+
+/// Takes a response body for the Worker bridge, the way the runtime's own
+/// bridge does: a [`ResponseStream`] hands over its stream unbuffered, and
+/// any other body is buffered under the ceiling. A large map answered as a
+/// streamed body would otherwise fail at the ceiling with a bare
+/// `length limit exceeded`.
+async fn bridge_body(
+    extensions: &Extensions,
+    body: Body,
+) -> Result<BridgeBody, cratefield_core::axum::Error> {
+    if let Some(stream) = extensions
+        .get::<ResponseStream>()
+        .and_then(ResponseStream::take)
+    {
+        return Ok(BridgeBody::Streamed(stream));
+    }
+    to_bytes(body, MAX_RESPONSE_BUFFER)
+        .await
+        .map(BridgeBody::Buffered)
+}
+
+/// The response bridge: a streamed body is carried chunk by chunk, an
+/// ordinary one buffered (see [`bridge_body`]).
 async fn response_to_worker(response: AxumResponse) -> worker::Result<Response> {
-    const MAX_RESPONSE_BUFFER: usize = 1024 * 1024;
     let (parts, body) = response.into_parts();
-    let bytes = to_bytes(body, MAX_RESPONSE_BUFFER)
+    let bridged = bridge_body(&parts.extensions, body)
         .await
         .map_err(|err| worker::Error::RustError(err.to_string()))?;
-    let mut out = Response::from_bytes(bytes.as_ref().to_vec())?.with_status(parts.status.as_u16());
+    let mut out = match bridged {
+        BridgeBody::Streamed(stream) => Response::from_stream(stream.map(|chunk| {
+            chunk
+                .map(Vec::from)
+                .map_err(|err| worker::Error::RustError(err.to_string()))
+        }))?,
+        BridgeBody::Buffered(bytes) => Response::from_bytes(bytes.to_vec())?,
+    }
+    .with_status(parts.status.as_u16());
     copy_headers(out.headers_mut(), &parts.headers);
     Ok(out)
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use std::convert::Infallible;
+
+    const TWO_MIB: usize = 2 * 1024 * 1024;
+
+    async fn drain(body: BridgeBody) -> Vec<u8> {
+        match body {
+            BridgeBody::Streamed(stream) => {
+                let chunks: Vec<Result<Bytes, StreamError>> = stream.collect().await;
+                chunks
+                    .into_iter()
+                    .flat_map(|chunk| chunk.expect("a clean chunk").to_vec())
+                    .collect()
+            }
+            BridgeBody::Buffered(bytes) => bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_streamed_body_past_the_buffer_ceiling_is_carried_whole() {
+        let chunks = (0..TWO_MIB).step_by(64 * 1024).map(|start| {
+            Ok::<Bytes, Infallible>(Bytes::from(vec![7u8; (TWO_MIB - start).min(64 * 1024)]))
+        });
+        let response = ResponseStream::new(futures_util::stream::iter(chunks)).into_response();
+        let (parts, body) = response.into_parts();
+        let bridged = pollster::block_on(bridge_body(&parts.extensions, body))
+            .expect("a streamed body is not read under the ceiling");
+        let bytes = pollster::block_on(drain(bridged));
+        assert_eq!(bytes.len(), TWO_MIB);
+    }
+
+    #[test]
+    fn an_ordinary_body_past_the_buffer_ceiling_is_refused_as_before() {
+        let response = AxumResponse::new(Body::from(vec![1u8; TWO_MIB]));
+        let (parts, body) = response.into_parts();
+        let refused = pollster::block_on(bridge_body(&parts.extensions, body));
+        let err = refused.err().expect("an over-ceiling buffer is refused");
+        assert_eq!(err.to_string(), "length limit exceeded");
+    }
+
+    #[test]
+    fn an_ordinary_small_body_is_buffered_intact() {
+        let response = AxumResponse::new(Body::from(b"{\"ok\":true}".to_vec()));
+        let (parts, body) = response.into_parts();
+        let bridged = pollster::block_on(bridge_body(&parts.extensions, body)).expect("buffered");
+        assert_eq!(pollster::block_on(drain(bridged)), b"{\"ok\":true}");
+    }
 }
 
 /// Copies every response header onto the Worker response, per name: drop
@@ -2005,7 +2116,12 @@ mod tests {
         let start = OffsetDateTime::UNIX_EPOCH;
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         let at = names
             .iter()
@@ -2073,6 +2189,42 @@ mod tests {
         }
     }
 
+    /// The captcha the Worker composes when `TURNSTILE_SECRET` is set
+    /// ([`build_captcha`]), over the kit's fakes. Every composition here
+    /// passes it, as a deployment does, so the same tests judge the build-time
+    /// production gate under `--features production` (`Harness::build` refuses
+    /// a production composition with no Captcha port) and under the default
+    /// build alike.
+    fn test_captcha() -> Option<Turnstile> {
+        Some(
+            Turnstile::new(
+                Arc::new(cratefield_testing::FakeHttpClient::ok_json(
+                    r#"{"success":true}"#,
+                )),
+                Arc::new(cratefield_testing::FixedClock(
+                    time::OffsetDateTime::UNIX_EPOCH,
+                )),
+                "test-secret",
+            )
+            .expected_hostname("livingbrain.wiki"),
+        )
+    }
+
+    /// The venture a build is compiled as is the one its deploy feature names
+    /// (`wrangler.toml`'s `[env.*.build]`): `production` for the production
+    /// Worker, `staging` for staging, neither for local development.
+    #[test]
+    fn the_venture_compiles_as_the_environment_its_feature_names() {
+        let expected = if cfg!(feature = "production") {
+            VentureEnv::Production
+        } else if cfg!(feature = "staging") {
+            VentureEnv::Staging
+        } else {
+            VentureEnv::Development
+        };
+        assert_eq!(venture().env, expected);
+    }
+
     /// `build()` panics if the composition is invalid, so reaching past it is
     /// the assertion: `workspaces` requires `Db`, `Signer`, `HttpClient`,
     /// `Clock` and `IdGen`, and `Harness::build` refuses a runtime that does
@@ -2081,7 +2233,12 @@ mod tests {
     fn the_composition_mounts_every_module() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let names: Vec<&str> = harness
             .modules()
             .iter()
@@ -2149,7 +2306,12 @@ mod tests {
     fn the_worker_composition_serves_the_tools_module_and_its_migration() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let module = harness
             .modules()
             .iter()
@@ -2188,7 +2350,12 @@ mod tests {
     fn every_module_migration_is_collected_for_d1() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let lock: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".harness-lock.json")).expect("the lock file"),
@@ -2227,6 +2394,355 @@ mod tests {
         );
     }
 
+    /// The lock as production last applied it (40b538f): every entry here
+    /// is in D1 under its file name, so its bytes are frozen. A later lock
+    /// may add entries; it may not repoint or re-hash one of these.
+    const APPLIED_LOCK: &[(&str, &str, &str)] = &[
+        (
+            "workspaces/0001",
+            "0001_workspaces_0001_init.sql",
+            "219fb61be95955e9eb48d18f4c44c7365128d91c517d85caa6c3e45da1baa24e",
+        ),
+        (
+            "pages/0001",
+            "0002_pages_0001_init.sql",
+            "cd0d65c9d2af2d6a0a6873a6cd04363ca910574d6ecf80c83cf2dd2257b96c34",
+        ),
+        (
+            "waitlist/0001",
+            "0003_waitlist_0001_init.sql",
+            "504c3e013f921975e286b27f6253ac5f2b9f884bf2b89f6d077c4931760c54ea",
+        ),
+        (
+            "waitlist/0002",
+            "0004_waitlist_0002_entry_generation.sql",
+            "33dc5cf8d71a3c484e3fc8f838f1a8b3a04f2cb8281b5b1e149ad9e4e7fb41d4",
+        ),
+        (
+            "waitlist/0003",
+            "0005_waitlist_0003_mail_cooldown.sql",
+            "8f8319f4f0613d9f08ec9f17e5a2356f33efedb4a49e3e5d4fb1805f878d3507",
+        ),
+        (
+            "waitlist/0004",
+            "0006_waitlist_0004_position_lock.sql",
+            "44eeab454a0a322e77a6cc81640ab25fb4fb038af9eea8458224925579c83414",
+        ),
+        (
+            "waitlist/0005",
+            "0007_waitlist_0005_anonymisable_entry.sql",
+            "2b129c62bcacc0c0db77e9af1f07d1034057d8a3ce1d4eee51ada0dfafec3c63",
+        ),
+        (
+            "waitlist/0006",
+            "0008_waitlist_0006_position_counter.sql",
+            "671812656c87303ee53fd845c3745bbe9d47d12ffecc9e7485d3395541cb821a",
+        ),
+        (
+            "pages/0002",
+            "0009_pages_0002_scope_keys.sql",
+            "8af0624508cb33d326fc87b37d6a11f4f06c12f6c04843b11a46c3f679219b37",
+        ),
+        (
+            "workspaces/0002",
+            "0010_workspaces_0002_identities.sql",
+            "de7f6811c3753bd643158130f3d46aa16cfe7159e8f0f942c3b669ea57519168",
+        ),
+        (
+            "models/0001",
+            "0011_models_0001_init.sql",
+            "f32f60c7db7c85c6cbf46f1fd69d6ba1ca9d57f832fc7d1bd8053de6282f23be",
+        ),
+        (
+            "workspaces/0003",
+            "0012_workspaces_0003_slack_app.sql",
+            "b6ad4a673b3ca4c04ee8853add253ee19036aa6ad33b61c5139cc9cc262825fb",
+        ),
+        (
+            "pages/0003",
+            "0013_pages_0003_sources.sql",
+            "88c9b9a47025b9403f13cae3cc7209913392a9653630d8d0e0ccbb2477119d8f",
+        ),
+        (
+            "device-auth/0001",
+            "0014_device-auth_0001_init.sql",
+            "e91aedf2fb661c50e9db080ad48e6daf5736fd02f3bfe32ae7a34d5ab1395c94",
+        ),
+        (
+            "tokens/0001",
+            "0015_tokens_0001_init.sql",
+            "0ea8243b2b7ab242454c815e5a6a4d9c114db8c997fbca96613b7115feef26e0",
+        ),
+        (
+            "models/0002",
+            "0016_models_0002_provider_wire.sql",
+            "0027f24324aa342d22e31df8ab965de17f566fb0665f91592a4fdd3e9ef43563",
+        ),
+        (
+            "pages/0004",
+            "0017_pages_0004_source_ledger.sql",
+            "75795d68d54db610bfbbad26ee4da5ed28b78553f7b9cca12be2e78f8eafba23",
+        ),
+        (
+            "tools/0001",
+            "0018_tools_0001_init.sql",
+            "0a4d2c03a8af4e1e8ae3d168fae7947858e893a9c59bb5d9334a58abb86b0307",
+        ),
+        (
+            "usage/0001",
+            "0019_usage_0001_init.sql",
+            "cdb8adf5ba7ab4697f77d5b20b7e2e315589d165c0bcadee0771a233f814d8cd",
+        ),
+        (
+            "pages/0005",
+            "0020_pages_0005_source_project.sql",
+            "9c186496a70a760cf6c22ecaafd028fdaddf61188b2c3ba734c6d1d2f4732e61",
+        ),
+        (
+            "coding-agents/0001",
+            "0021_coding-agents_0001_init.sql",
+            "950a2cbca645ab8c41d9559e8fd4a53548627291b50135952c9697ed884199b2",
+        ),
+        (
+            "pages/0006",
+            "0022_pages_0006_facts.sql",
+            "7eb6480af9e61e81e876a16e85e67cfd1742f6b2a87e74780ccab75905725533",
+        ),
+        (
+            "workspaces/0005",
+            "0023_workspaces_0005_members.sql",
+            "ae6fc1ffa6eed6f2db27d527be294dfa3bd77cff6ed842036c0cf4a18cca1da4",
+        ),
+        (
+            "models/0003",
+            "0024_models_0003_local_runner.sql",
+            "3b69b0af7ac7149c00ac5a7b6ea1390b445589d7e560a735f077dc9302ab95bf",
+        ),
+        (
+            "coding-agents/0002",
+            "0025_coding-agents_0002_waiting_runner.sql",
+            "acc417c7c2ef7d655c54ccc7cd87b5a639729f36a3e1d7eba511170d71663d46",
+        ),
+        (
+            "usage/0002",
+            "0026_usage_0002_budgets.sql",
+            "4ee61f19b0304b8c4708c43e5ef54e8523868039927af5a9bba3069af09b4eb6",
+        ),
+        (
+            "workspaces/0004",
+            "0027_workspaces_0004_turn.sql",
+            "59203b60ca937e502972dab8dbf4d7f04526c886147cd4927a5ba15883cf2151",
+        ),
+        (
+            "github/0001",
+            "0028_github_0001_init.sql",
+            "ca01e020082913bc302ef21d87940c15904755376bd16bdcf9633a2243d96706",
+        ),
+        (
+            "coding-agents/0003",
+            "0029_coding-agents_0003_triage.sql",
+            "017f7272d645464eeb587507942d1ef38263586a8788e327012ebec7d69237e2",
+        ),
+        (
+            "usage/0003",
+            "0030_usage_0003_triage.sql",
+            "17a0aad6f1281cc154c30dccdb5113562abe021adf8ab45a2558426a50c3dce8",
+        ),
+        (
+            "pages/0007",
+            "0031_pages_0007_page_titles.sql",
+            "0818fa65d741d39c58b6cd2bde120c78d27834f727c2282ba0fd1a197ab8c52d",
+        ),
+        (
+            "github/0002",
+            "0032_github_0002_shared_app.sql",
+            "5bd3235d2478f5ed3117bb003cc8d8c3341cc708137b236e07ec90f4dbb81551",
+        ),
+        (
+            "workspaces/0006",
+            "0033_workspaces_0006_profiles.sql",
+            "d75f53116b83d03df857501b773f7a9fbf6f9eeef25b2802f3d62e0b2d569162",
+        ),
+        (
+            "coding-agents/0004",
+            "0034_coding-agents_0004_parallel.sql",
+            "0ed68a4aae1c0c01591daff2062df49c21c139de94c9883b0775b7277c16a8e1",
+        ),
+        (
+            "usage/0004",
+            "0035_usage_0004_concurrency.sql",
+            "cbc6032312f803183c645f459ecf510d13a2c0dcae88bd5a76f61c2ab35befa3",
+        ),
+        (
+            "models/0004",
+            "0036_models_0004_jev.sql",
+            "dd9ff4975145a6f0c7140b57def634e33bba7e5fb41b1980e1ed78d0ae8e06bf",
+        ),
+        (
+            "waitlist/0007",
+            "0037_waitlist_0007_lock_backfill.sql",
+            "6785fee9ba5dee4ab7eba92f36b42748facae3c92837df3f4b67ff5280a80006",
+        ),
+        (
+            "access/0001",
+            "0038_access_0001_service-accounts.sql",
+            "1b6a02f028fe3571806e3e2a627d61fe786344eab044aa431b8f27014a15c7be",
+        ),
+        (
+            "access/0002",
+            "0039_access_0002_grants.sql",
+            "f36a4321d0688232a00e8cd7b566b652a522bb15ad44147750bd27133d9aa8c4",
+        ),
+        (
+            "access/0003",
+            "0040_access_0003_audit.sql",
+            "30a09580794d2f4445f360d5db1db90edd709ac65e6a29898b0c8ec7011d5e90",
+        ),
+        (
+            "coding-agents/0005",
+            "0041_coding-agents_0005_requeue_bad_output.sql",
+            "fe2c0ed5118d0fc9aebd3cc18c4dc66120e462ac0f1f87451c5462a5692fa192",
+        ),
+        (
+            "pages/0008",
+            "0042_pages_0008_dreaming.sql",
+            "3f3048117a3c55f6ef0782ef5341c544094683c34ca13f6bfde473df1bdffc3c",
+        ),
+        (
+            "pages/0009",
+            "0043_pages_0009_dream_cursor.sql",
+            "382c8cc35ffe998fc93f7fd783c4d44b62141590a048de8911836d2c216fffe7",
+        ),
+        (
+            "pages/0010",
+            "0044_pages_0010_rule_scan.sql",
+            "209823941101ddd017f2f09acc6d7e7c8735a7dc2dba87537aa91d1c7899a678",
+        ),
+        (
+            "workspaces/0007",
+            "0045_workspaces_0007_delete_workspace.sql",
+            "3bb7dd52f91946bb6b07a4a892d81b0ec11e21b62a9f42ef8c3a04763b6443f7",
+        ),
+        (
+            "discord/0001",
+            "0046_discord_0001_init.sql",
+            "49474a0585db89c5801f1281fdb67868b596043a22f54439fde34b59e821a162",
+        ),
+        (
+            "coding-agents/0006",
+            "0047_coding-agents_0006_dreaming_settings.sql",
+            "cf5077af3b7ce774bb533bb766a4700273003cc91a63dcabcbf1212d8fce174e",
+        ),
+        (
+            "tokens/0002",
+            "0048_tokens_0002_expiry_audience.sql",
+            "f30abbc7cd219893851e75a86db43dfdf2336b1f892312b01f3f616ce596faa1",
+        ),
+        (
+            "oauth/0001",
+            "0049_oauth_0001_init.sql",
+            "006c64b0d37111553f2d91a7dc0635b620d7b5a7a85c05c6e5dbc58f9f432621",
+        ),
+        (
+            "coding-agents/0007",
+            "0050_coding-agents_0007_source_compile_jobs.sql",
+            "7cb342603c3517a407593e04902810dfaf0eff36271a37fc115e0702286d7858",
+        ),
+        (
+            "pages/0011",
+            "0051_pages_0011_activity.sql",
+            "961da0889149174c1a12b3a79d51eaf48b6e42f5a9247d45300d489538cdaa5b",
+        ),
+        (
+            "oauth/0002",
+            "0052_oauth_0002_metadata_expiry.sql",
+            "9d8925bdf22ba1867116e233cd06958565a7e92c21540a44f54e9e36c5492181",
+        ),
+        (
+            "pages/0012",
+            "0053_pages_0012_apps.sql",
+            "8ca3f25e78a59c108f67326b9ab1e85d6b70701cf26dc3ec6c5be2a29e626325",
+        ),
+        (
+            "coding-agents/0008",
+            "0054_coding-agents_0008_subject_aliases.sql",
+            "fe6b05c572d489b2239955bd675eec5847d0d46658e1055b77dfcd833d8dc48c",
+        ),
+    ];
+
+    /// Applied migrations never change. The guard checks two things: every
+    /// lock pin matches its file's bytes, and every migration that production
+    /// has applied still has the file and pin it shipped with. Editing an
+    /// applied migration (adding a column to `0054`, say) fails here, because
+    /// D1 skips a file it has already run and would never apply the edit: the
+    /// change belongs in a new, higher-numbered migration.
+    #[test]
+    fn applied_migrations_are_frozen_and_their_pins_match_their_files() {
+        use sha2::{Digest, Sha256};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let lock: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".harness-lock.json")).expect("the lock file"),
+        )
+        .expect("the lock is JSON");
+        let lock = lock.as_object().expect("the lock is an object");
+        let hash = |file: &str| -> Option<String> {
+            std::fs::read(dir.join(file))
+                .ok()
+                .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
+        };
+        let mut problems = Vec::new();
+        for (key, entry) in lock {
+            let file = entry
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let pin = entry
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            match hash(file) {
+                Some(actual) if actual == pin => {}
+                Some(actual) => problems.push(format!(
+                    "{key}: {file} hashes to {actual}, but the lock pins {pin}"
+                )),
+                None => problems.push(format!("{key}: {file} is missing")),
+            }
+        }
+        for (key, file, pin) in APPLIED_LOCK {
+            match lock
+                .get(*key)
+                .and_then(|entry| entry.get("file"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(now) if now == *file => {}
+                Some(now) => problems.push(format!(
+                    "{key} was applied as {file} and the lock now names {now}"
+                )),
+                None => problems.push(format!(
+                    "{key} was applied as {file} and is gone from the lock"
+                )),
+            }
+            let pinned = lock
+                .get(*key)
+                .and_then(|entry| entry.get("sha256"))
+                .and_then(serde_json::Value::as_str);
+            if pinned != Some(*pin) {
+                problems.push(format!(
+                    "{key} was applied with sha256 {pin} and the lock now pins {}",
+                    pinned.unwrap_or("nothing")
+                ));
+            }
+            if hash(file).as_deref() != Some(*pin) {
+                problems.push(format!("{file} no longer has the bytes production applied"));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "applied migrations changed; add a new migration instead:\n{}",
+            problems.join("\n")
+        );
+    }
+
     /// The avatar uploads and the read route take the rebinding stack, with
     /// or without a key ring; nothing near them does.
     #[test]
@@ -2249,7 +2765,7 @@ mod tests {
         ] {
             assert!(!serves_avatars(path), "{path}");
         }
-        let (harness, _, _) = build(unconfigured_mail(), None, None, None);
+        let (harness, _, _) = build(unconfigured_mail(), test_captcha(), None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"avatars"), "{names:?}");
 
@@ -2279,7 +2795,12 @@ mod tests {
     fn the_sources_route_diverts_with_its_id_segment() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         assert!(
             serves_cli(&harness, "/v1/sources/01HZZZBBBBBBBBBBBBBBBBBBB"),
             "a citation must divert to serve_cli"
@@ -2318,7 +2839,12 @@ mod tests {
     fn the_graph_route_diverts_and_its_module_is_mounted() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         assert!(serves_cli(&harness, "/v1/graph"), "the map must divert");
         assert!(
             harness.modules().iter().any(|m| m.name() == "graph"),
@@ -2345,7 +2871,7 @@ mod tests {
     /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
-        let (harness, _, _) = build(unconfigured_mail(), None, None, None);
+        let (harness, _, _) = build(unconfigured_mail(), test_captcha(), None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");

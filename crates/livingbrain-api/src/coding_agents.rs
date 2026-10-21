@@ -236,12 +236,21 @@ impl Module for CodingAgents {
                  the model's job slot) and a pending run request — nothing in it identifies \
                  or describes a person",
             ),
-            PersonalDataSet::none(
-                "fact_subject_aliases",
-                "the row maps one entity name a workspace uses to the name its facts are \
-                 filed under — the names of projects and systems, chosen by the workspace, \
-                 and when it was set; nothing about a person's facts, sources or sessions",
-            ),
+            // An alias names entities, and an owner may have named a person
+            // (`person/…`), so it is content keyed on the user who set or
+            // accepted it, like a fact is keyed on its writer. A proposal has
+            // no setter (`set_by` is blank) and is found by no user's erasure.
+            PersonalDataSet {
+                table: "fact_subject_aliases",
+                subject: "set_by",
+                kind: DataKind::Content,
+                disposition: Disposition::Erase,
+                description: "Each alias you set or accepted for a workspace: the entity name \
+                              it maps and the name its facts are filed under, and when. \
+                              Erasing you deletes the row.",
+                redacted: &[],
+                subject_via: None,
+            },
             PersonalDataSet::none(
                 "coding_agent_pool",
                 "the row is one workspace's compile pool — how many compiles run at once, a \
@@ -252,7 +261,7 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 8] = [
+        const SQLITE: [SqlMigration; 9] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
@@ -261,9 +270,10 @@ impl Module for CodingAgents {
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS,
             livingbrain_compiler::MIGRATION_SUBJECT_ALIASES,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIAS_STATE,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 8] = [
+        const POSTGRES: [SqlMigration; 9] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
@@ -272,6 +282,7 @@ impl Module for CodingAgents {
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS_POSTGRES,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS_POSTGRES,
             livingbrain_compiler::MIGRATION_SUBJECT_ALIASES_POSTGRES,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIAS_STATE_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
@@ -705,6 +716,16 @@ impl Dreams for StoreFacts {
     ) -> Result<Vec<(String, i64, String)>, String> {
         self.store
             .dream_vocabulary(scope, subject)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn subject_families(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<(String, Vec<String>, i64)>, String> {
+        self.store
+            .dream_subject_families(scope)
             .await
             .map_err(|_| "store error".to_owned())
     }

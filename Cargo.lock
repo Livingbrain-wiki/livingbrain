@@ -1870,9 +1870,11 @@ dependencies = [
  "cratefield-kms",
  "cratefield-module-orgs",
  "cratefield-testing",
+ "futures-util",
  "livingbrain-access",
  "livingbrain-accounts",
  "livingbrain-compiler",
+ "livingbrain-d1-fake",
  "livingbrain-mcp",
  "livingbrain-memory",
  "livingbrain-models",
@@ -1941,6 +1943,7 @@ name = "livingbrain-compiler"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cratefield-adapter-sqlite",
  "cratefield-core",
  "cratefield-kms",
  "cratefield-testing",
@@ -2250,6 +2253,7 @@ dependencies = [
  "cratefield-module-waitlist",
  "cratefield-runtime-cloudflare",
  "cratefield-testing",
+ "futures-util",
  "getrandom 0.4.3",
  "insta",
  "livingbrain-access",

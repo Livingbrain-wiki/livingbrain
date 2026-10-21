@@ -158,6 +158,14 @@ pub trait Dreams: Send + Sync {
         scope: &str,
         subject: &str,
     ) -> Result<Vec<(String, i64, String)>, String>;
+    /// Each subject of `scope` with its current attribute families and its
+    /// current fact count, for proposing aliases. The default has none.
+    async fn subject_families(
+        &self,
+        _scope: &str,
+    ) -> Result<Vec<(String, Vec<String>, i64)>, String> {
+        Ok(Vec::new())
+    }
     /// The subject's current facts in the attribute `families` that are not
     /// in `skip`, at most `limit`: the rest of the families a window touches.
     /// The default has none, so a store that cannot read families reviews
@@ -171,6 +179,175 @@ pub trait Dreams: Send + Sync {
         _limit: usize,
     ) -> Result<Vec<HeldFact>, String> {
         Ok(Vec::new())
+    }
+}
+
+/// Fewest attribute families two subjects must share before dreaming
+/// proposes one as an alias of the other.
+pub const ALIAS_MIN_SHARED: usize = 3;
+/// The share of the smaller subject's families the two must both hold.
+const ALIAS_SHARE_PERCENT: usize = 75;
+/// The most alias proposals one scope gets in one sweep.
+const ALIAS_PROPOSALS_PER_SCOPE: usize = 20;
+
+/// The alias proposals for one scope's subjects: each pair of subjects of the
+/// same entity type that share at least [`ALIAS_MIN_SHARED`] attribute
+/// families, and at least [`ALIAS_SHARE_PERCENT`] of the smaller one's. The
+/// subject with more current facts is the canonical one. A subject with any
+/// row already, or that would break the one-hop rule against the aliases in
+/// force, is left out. Answers `(alias, canonical, shared)`, most shared
+/// first.
+#[must_use]
+pub fn alias_proposals(
+    subjects: &[(String, Vec<String>, i64)],
+    rows: &[subject_aliases::AliasRow],
+) -> Vec<(String, String, i64)> {
+    let taken: HashSet<&str> = rows.iter().map(|row| row.alias.as_str()).collect();
+    let in_force_aliases: HashSet<&str> = rows
+        .iter()
+        .filter(|row| row.state == "set")
+        .map(|row| row.alias.as_str())
+        .collect();
+    let in_force_canonicals: HashSet<&str> = rows
+        .iter()
+        .filter(|row| row.state == "set")
+        .map(|row| row.canonical.as_str())
+        .collect();
+    let mut proposals: Vec<(String, String, i64)> = Vec::new();
+    let mut used: HashSet<&str> = HashSet::new();
+    for (i, (a, a_families, a_facts)) in subjects.iter().enumerate() {
+        for (b, b_families, b_facts) in &subjects[i + 1..] {
+            if a.split('/').next() != b.split('/').next() {
+                continue;
+            }
+            let shared = a_families.iter().filter(|f| b_families.contains(f)).count();
+            let smaller = a_families.len().min(b_families.len());
+            if shared < ALIAS_MIN_SHARED || shared * 100 < smaller * ALIAS_SHARE_PERCENT {
+                continue;
+            }
+            // The subject with more facts is canonical; a tie keeps the name first.
+            let (alias, canonical) = if (b_facts, b) > (a_facts, a) {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            if taken.contains(alias.as_str())
+                || used.contains(alias.as_str())
+                || in_force_aliases.contains(canonical.as_str())
+                || in_force_canonicals.contains(alias.as_str())
+            {
+                continue;
+            }
+            used.insert(alias.as_str());
+            proposals.push((alias.clone(), canonical.clone(), shared as i64));
+        }
+    }
+    proposals.sort_by(|x, y| y.2.cmp(&x.2).then_with(|| x.0.cmp(&y.0)));
+    proposals.truncate(ALIAS_PROPOSALS_PER_SCOPE);
+    proposals
+}
+
+#[cfg(test)]
+mod alias_proposal_tests {
+    use super::*;
+
+    fn subject(name: &str, families: &[&str], facts: i64) -> (String, Vec<String>, i64) {
+        (
+            name.to_owned(),
+            families.iter().map(|f| (*f).to_owned()).collect(),
+            facts,
+        )
+    }
+
+    #[test]
+    fn subjects_proposed_as_aliases_share_most_families_and_the_fuller_is_canonical() {
+        let subjects = vec![
+            subject("project/world369", &["host", "db", "auth"], 5),
+            subject("project/earthos", &["host", "db", "auth", "brand"], 9),
+            subject("project/aura", &["billing"], 30),
+            subject("person/nick", &["host", "db", "auth"], 50),
+        ];
+        let proposals = alias_proposals(&subjects, &[]);
+        // Only the same-type pair shares enough: person/nick is another type.
+        assert_eq!(
+            proposals,
+            vec![(
+                "project/world369".to_owned(),
+                "project/earthos".to_owned(),
+                3
+            )]
+        );
+    }
+
+    #[test]
+    fn two_shared_families_or_a_small_share_is_not_enough() {
+        let few = vec![
+            subject("project/a", &["host", "db"], 5),
+            subject("project/b", &["host", "db"], 9),
+        ];
+        assert!(
+            alias_proposals(&few, &[]).is_empty(),
+            "two families are too few"
+        );
+        // Three shared, but only half of the smaller subject's six families.
+        let thin = vec![
+            subject("project/a", &["host", "db", "auth", "x", "y", "z"], 5),
+            subject(
+                "project/b",
+                &["host", "db", "auth", "p", "q", "r", "s", "t"],
+                9,
+            ),
+        ];
+        assert!(
+            alias_proposals(&thin, &[]).is_empty(),
+            "3 of 6 is under three quarters"
+        );
+        // Three of three is the whole of the smaller one: proposed.
+        let whole = vec![
+            subject("project/a", &["host", "db", "auth"], 5),
+            subject("project/b", &["host", "db", "auth", "p", "q"], 9),
+        ];
+        assert_eq!(alias_proposals(&whole, &[]).len(), 1);
+    }
+
+    #[test]
+    fn a_subject_with_any_row_is_left_out_and_so_is_a_chain() {
+        let subjects = vec![
+            subject("project/world369", &["host", "db", "auth"], 5),
+            subject("project/earthos", &["host", "db", "auth"], 9),
+        ];
+        let dismissed = vec![subject_aliases::AliasRow {
+            alias: "project/world369".to_owned(),
+            canonical: "project/earthos".to_owned(),
+            state: "dismissed".to_owned(),
+            shared: 3,
+            set_by: "u1".to_owned(),
+            updated_at: String::new(),
+        }];
+        assert!(alias_proposals(&subjects, &dismissed).is_empty());
+        let in_force = vec![subject_aliases::AliasRow {
+            alias: "project/aura".to_owned(),
+            canonical: "project/earthos".to_owned(),
+            state: "set".to_owned(),
+            shared: 0,
+            set_by: "u1".to_owned(),
+            updated_at: String::new(),
+        }];
+        // earthos is already a canonical name in force, so it may still take
+        // aliases; world369 is fine. But aura (an alias) must not be a canonical.
+        assert_eq!(alias_proposals(&subjects, &in_force).len(), 1);
+        let chained = vec![subject_aliases::AliasRow {
+            alias: "project/earthos".to_owned(),
+            canonical: "project/aura".to_owned(),
+            state: "set".to_owned(),
+            shared: 0,
+            set_by: "u1".to_owned(),
+            updated_at: String::new(),
+        }];
+        assert!(
+            alias_proposals(&subjects, &chained).is_empty(),
+            "earthos is an alias in force"
+        );
     }
 }
 
@@ -528,6 +705,9 @@ impl Compiler {
         let now = self.clock.now();
         let mut sweep = Sweep::default();
         let mut plan = WorkspacePlan::default();
+        // The scopes a sweep reads, of workspaces with dreaming on: where
+        // alias proposals are looked for.
+        let mut proposing: BTreeSet<(String, String)> = BTreeSet::new();
         // The rule pass first: no model and no budget. It retracts what the
         // shared attribute rules refuse, so the candidates and the model
         // passes below see the cleaned subjects.
@@ -544,6 +724,7 @@ impl Compiler {
             if !settings.enabled {
                 continue;
             }
+            proposing.insert((workspace.clone(), candidate.scope.clone()));
             // A finished subject the rule pass just cleaned is read again, once:
             // the model re-reads the set without what was removed. Nothing is
             // queued again unless the rule pass retracted something.
@@ -657,7 +838,42 @@ impl Compiler {
                 break;
             }
         }
+        // Proposals are suggestions: a failure to find or store them never
+        // fails the sweep, and an accepted one is applied only by its owner.
+        for (workspace, scope) in proposing {
+            let _ = self
+                .propose_aliases(dreams.as_ref(), &workspace, &scope, now)
+                .await;
+        }
         Ok(sweep)
+    }
+
+    /// Stores the alias proposals one scope's subjects suggest, as
+    /// `proposed` rows. Nothing is applied here.
+    async fn propose_aliases(
+        &self,
+        dreams: &dyn Dreams,
+        workspace: &str,
+        scope: &str,
+        now: OffsetDateTime,
+    ) -> Result<usize, String> {
+        let subjects = dreams.subject_families(scope).await?;
+        if subjects.len() < 2 {
+            return Ok(0);
+        }
+        let db = &*self.queue.db;
+        let rows = subject_aliases::rows(db, workspace)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut stored = 0;
+        for (alias, canonical, shared) in alias_proposals(&subjects, &rows) {
+            if let Ok(true) =
+                subject_aliases::propose(db, workspace, &alias, &canonical, shared, now).await
+            {
+                stored += 1;
+            }
+        }
+        Ok(stored)
     }
 
     /// The rule pass: reads the next batch of current facts and retracts each

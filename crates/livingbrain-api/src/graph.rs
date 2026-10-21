@@ -31,13 +31,18 @@
 //! describe, folded into that node's `facts` count rather than drawn).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use cratefield_core::axum::Json;
+use cratefield_core::axum::body::Bytes;
 use cratefield_core::axum::extract::{Query, State};
-use cratefield_core::axum::http::{HeaderMap, Method};
+use cratefield_core::axum::http::{HeaderMap, HeaderValue, Method, header};
+use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::get;
-use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_core::{
+    Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem, ResponseStream,
+};
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_compiler::layout::segment;
 use livingbrain_compiler::{JobStatus, Queue};
@@ -146,8 +151,33 @@ pub struct GraphQuery {
     pub limit: usize,
 }
 
+/// The bytes of one chunk of a streamed answer. Small enough that no
+/// single frame is large, large enough that a map of thousands of nodes is a
+/// few hundred frames.
+const STREAM_CHUNK: usize = 64 * 1024;
+
+/// A JSON answer as a streamed body. The Worker bridge buffers an ordinary
+/// body under a fixed ceiling (1 MiB) and fails the request past it, so a
+/// map of a large brain could not be answered as one buffered body; a
+/// streamed body is carried chunk by chunk, and is bounded only by the
+/// handler that wrote it. The bytes are the same compact JSON `Json` writes.
+#[must_use]
+pub fn streamed_json(value: &Value) -> Response {
+    let body = Bytes::from(value.to_string());
+    let len = body.len();
+    let chunks = (0..len).step_by(STREAM_CHUNK).map(move |start| {
+        Ok::<Bytes, Infallible>(body.slice(start..(start + STREAM_CHUNK).min(len)))
+    });
+    let mut response = ResponseStream::new(futures_util::stream::iter(chunks)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
 /// `GET /?project=&kind=&limit=` — the map, as `{nodes, edges, counts,
-/// truncated}`.
+/// truncated}`, streamed (see [`streamed_json`]).
 ///
 /// # Errors
 ///
@@ -158,7 +188,7 @@ async fn graph(
     method: Method,
     headers: HeaderMap,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, Problem> {
+) -> Result<Response, Problem> {
     let asker = state.asker(&method, &headers).await?;
     let query = parse_query(&query)?;
     // The grants decide every table the map reads (ADR 0004): pages and
@@ -210,7 +240,12 @@ async fn graph(
             pages: job.pages,
         })
         .collect();
-    Ok(Json(build(&rows, &compiled, &query, &state.base())))
+    Ok(streamed_json(&build(
+        &rows,
+        &compiled,
+        &query,
+        &state.base(),
+    )))
 }
 
 /// The most events one live-feed answer carries; the newest are kept.

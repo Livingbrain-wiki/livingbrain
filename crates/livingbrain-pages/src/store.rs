@@ -167,6 +167,82 @@ pub struct SearchHit {
     pub slug: String,
 }
 
+/// How a search matched (issue #281). A query matches first with **every**
+/// word of it ([`MatchMode::All`]); only when no page holds them all does it
+/// fall back to pages holding **some** of them ([`MatchMode::Any`]), and only
+/// those that hold at least [`SEARCH_FLOOR_PERCENT`] of the query's weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchMode {
+    /// Every word of the query is on the page.
+    All,
+    /// The fallback: some of the words, enough of their weight to be
+    /// confident.
+    Any,
+}
+
+/// What a search answered: the hits, and how they matched. `mode` is `None`
+/// when nothing matched confidently: no page held every word, and no page
+/// held enough of the query's weight in any of them. That is an explicit
+/// answer, not an empty list to be read as "nothing exists" — callers say so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOutcome {
+    /// `None` is "no confident match"; `hits` is then empty.
+    pub mode: Option<MatchMode>,
+    /// Best first.
+    pub hits: Vec<SearchHit>,
+}
+
+impl SearchOutcome {
+    /// The answer for a search that matched nothing confidently.
+    #[must_use]
+    pub fn no_confident_match() -> Self {
+        Self {
+            mode: None,
+            hits: Vec::new(),
+        }
+    }
+}
+
+/// Options for [`PageStore::search_outcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// Include coding-agent session pages (`agent-log-*`, see
+    /// [`crate::is_session_slug`]). They are 30–45 KB transcripts, so a
+    /// search leaves them out unless the caller asks for them.
+    pub include_sessions: bool,
+    /// Apply the score floor to the fallback ([`MatchMode::Any`]). On by
+    /// default. Off for a caller that judges the candidates itself and only
+    /// wants the store's ranking of them, as the public-answer path does.
+    pub floor: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            include_sessions: false,
+            floor: true,
+        }
+    }
+}
+
+impl SearchOptions {
+    /// The store's ranked candidates with no floor: every page that holds
+    /// some of the query's words, best first, sessions still out.
+    #[must_use]
+    pub fn candidates() -> Self {
+        Self {
+            include_sessions: false,
+            floor: false,
+        }
+    }
+}
+
+/// The least share of a query's weight a page must hold to match under
+/// [`MatchMode::Any`], in percent. Weight is the IDF of each query word, so
+/// a rare word counts for more than a common one: a page holding only
+/// `codebase` out of `earthos codebase` is not a confident match for it.
+pub const SEARCH_FLOOR_PERCENT: i64 = 50;
+
 /// One scored candidate, before the cross-scope merge.
 struct Ranked {
     scope: String,
@@ -178,6 +254,21 @@ struct Ranked {
 /// How many times a word in a page's title or slug outweighs the same word
 /// in its body.
 const TITLE_BOOST: i64 = 3;
+
+/// `predicate` (a scope filter over `pages` or `page_terms`), with the
+/// session pages taken out unless the options include them (issue #281).
+/// Applied to the page count and the document frequencies as well as the
+/// ranking, so a word's weight is the one a session-free brain gives it.
+fn with_sessions(predicate: &str, options: SearchOptions) -> String {
+    if options.include_sessions {
+        return predicate.to_owned();
+    }
+    let n = titles::SESSION_SLUG_PREFIX.len();
+    format!(
+        "{predicate} AND NOT (substr(slug, 1, {n}) = '{}' AND length(slug) > {n})",
+        titles::SESSION_SLUG_PREFIX
+    )
+}
 
 /// A word's weight, in thousandths: BM25's inverse document frequency,
 /// `ln(1 + (N - df + 0.5) / (df + 0.5))`, for a word on `df` of `total`
@@ -1106,13 +1197,14 @@ impl PageStore {
         }))
     }
 
-    /// Pages in `scopes` whose current body mentions `query`, best first, as
-    /// `(scope, slug)` and never anything else.
+    /// Pages in `scopes` whose current body matches `query`, best first, as
+    /// `(scope, slug)` and never anything else. Session pages are left out
+    /// (see [`PageStore::search_outcome`] for the opt-in and for how a query
+    /// matches: every word first, then enough of its weight).
     ///
     /// The query is cut into words the way a body is indexed, its stopwords
     /// dropped and each word widened to its singular/plural forms
-    /// ([`crate::query_terms`]). A page matches when it holds **any** of the
-    /// words, and the pages are ranked in SQL by a BM25-style score: the sum,
+    /// ([`crate::query_terms`]). The pages are ranked in SQL by a BM25-style score: the sum,
     /// over the query words a page holds, of the word's inverse document
     /// frequency in the scope (`ln(1 + (N - df + 0.5) / (df + 0.5))`), a word
     /// in the page's title or slug counting [`TITLE_BOOST`] times. The blind
@@ -1154,6 +1246,9 @@ impl PageStore {
     /// asker may not read is never matched, weighed, counted against the
     /// limit or returned.
     ///
+    /// The hits only: [`PageStore::search_outcome`] also says how they matched
+    /// and answers "no confident match" explicitly.
+    ///
     /// # Errors
     ///
     /// As [`PageStore::search`].
@@ -1163,6 +1258,40 @@ impl PageStore {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>, PageError> {
+        Ok(self
+            .search_outcome(filters, query, limit, SearchOptions::default())
+            .await?
+            .hits)
+    }
+
+    /// The search itself (issue #281): every word first, the fallback second,
+    /// a score floor on the fallback, and session pages out unless
+    /// [`SearchOptions::include_sessions`].
+    ///
+    /// 1. **All words.** Pages holding every word of the query, ranked as
+    ///    below. If any exist, that is the answer ([`MatchMode::All`]).
+    /// 2. **Any word, above the floor.** Otherwise pages holding some words,
+    ///    kept only when their weight is at least [`SEARCH_FLOOR_PERCENT`] of
+    ///    the query's ([`MatchMode::Any`]). A question about something the
+    ///    brain does not hold matches a common word or two and nothing more,
+    ///    and that is dropped here rather than answered with a confident
+    ///    wrong page.
+    /// 3. **Otherwise** [`SearchOutcome::no_confident_match`].
+    ///
+    /// Both steps run over the same scopes and the same grant filters; the
+    /// floor and the all-words test are applied inside the ranking statement,
+    /// before the limit.
+    ///
+    /// # Errors
+    ///
+    /// As [`PageStore::search`].
+    pub async fn search_outcome(
+        &self,
+        filters: &[ScopeFilter],
+        query: &str,
+        limit: usize,
+        options: SearchOptions,
+    ) -> Result<SearchOutcome, PageError> {
         for filter in filters {
             if !entity::is_slug(&filter.scope) {
                 return Err(PageError::InvalidScope(filter.scope.clone()));
@@ -1170,32 +1299,43 @@ impl PageStore {
         }
         let terms = crate::query::query_terms(query);
         if terms.is_empty() || limit == 0 {
-            return Ok(Vec::new());
+            return Ok(SearchOutcome::no_confident_match());
         }
-
-        let mut ranked: Vec<Ranked> = Vec::new();
-        for filter in filters {
-            let index_keys = self.keys.index_keys(&filter.scope).await?;
-            if index_keys.is_empty() {
+        for mode in [MatchMode::All, MatchMode::Any] {
+            let mut ranked: Vec<Ranked> = Vec::new();
+            for filter in filters {
+                let index_keys = self.keys.index_keys(&filter.scope).await?;
+                if index_keys.is_empty() {
+                    continue;
+                }
+                ranked.extend(
+                    self.rank_scope(filter, &index_keys, &terms, limit, mode, options)
+                        .await?,
+                );
+            }
+            if ranked.is_empty() {
                 continue;
             }
-            ranked.extend(self.rank_scope(filter, &index_keys, &terms, limit).await?);
+            ranked.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| b.updated_at.cmp(&a.updated_at))
+                    .then_with(|| a.scope.cmp(&b.scope))
+                    .then_with(|| a.slug.cmp(&b.slug))
+            });
+            return Ok(SearchOutcome {
+                mode: Some(mode),
+                hits: ranked
+                    .into_iter()
+                    .take(limit)
+                    .map(|hit| SearchHit {
+                        scope: hit.scope,
+                        slug: hit.slug,
+                    })
+                    .collect(),
+            });
         }
-        ranked.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| b.updated_at.cmp(&a.updated_at))
-                .then_with(|| a.scope.cmp(&b.scope))
-                .then_with(|| a.slug.cmp(&b.slug))
-        });
-        Ok(ranked
-            .into_iter()
-            .take(limit)
-            .map(|hit| SearchHit {
-                scope: hit.scope,
-                slug: hit.slug,
-            })
-            .collect())
+        Ok(SearchOutcome::no_confident_match())
     }
 
     /// One scope's best `limit` pages for `terms`, scored in the database.
@@ -1220,6 +1360,8 @@ impl PageStore {
         index_keys: &[keys::IndexKey],
         terms: &[crate::QueryTerm],
         limit: usize,
+        mode: MatchMode,
+        options: SearchOptions,
     ) -> Result<Vec<Ranked>, PageError> {
         // (group, MAC) for every body form and every title form.
         let mut body: Vec<(usize, String)> = Vec::new();
@@ -1256,6 +1398,7 @@ impl PageStore {
         let mut frequencies: BTreeMap<String, i64> = BTreeMap::new();
         for piece in &pieces {
             let (predicate, values) = piece.predicate(None);
+            let predicate = with_sessions(&predicate, options);
             let counted = self
                 .db
                 .query(&Statement::with_values(
@@ -1270,6 +1413,7 @@ impl PageStore {
                 .unwrap_or(0)
                 .max(0);
             let (predicate, values) = piece.predicate(None);
+            let predicate = with_sessions(&predicate, options);
             let df_rows = self
                 .db
                 .query(&Statement::with_values(
@@ -1298,12 +1442,25 @@ impl PageStore {
         for (group, mac) in &body {
             df[*group] = df[*group].max(df_of.get(mac).copied().unwrap_or(0));
         }
-        // A word no body holds keeps its (high) weight: a page can still be
-        // named for it, through its title rows.
-        let weight: Vec<i64> = df.iter().map(|count| idf_weight(total, *count)).collect();
+        // A word no body holds is weighed as a word on one page, not as one on
+        // none: it is still a word the question is about, so a page holding
+        // only the rest of the question must not look confident for it, and
+        // a word that is in no page's body but in a title still finds that
+        // page. Weighing it as on none would make it swamp every other word.
+        let weight: Vec<i64> = df
+            .iter()
+            .map(|count| idf_weight(total, (*count).max(1)))
+            .collect();
 
+        // The query's whole weight, against which the floor is judged.
+        let total_weight: i64 = weight.iter().sum();
         let mut group_case = String::from("CASE term");
         let mut weight_case = String::from("CASE term");
+        let mut base_case = String::from("CASE term");
+        for (group, mac) in &body {
+            base_case.push_str(&format!(" WHEN '{mac}' THEN {}", weight[*group]));
+        }
+        base_case.push_str(" END");
         for (group, mac) in &body {
             group_case.push_str(&format!(" WHEN '{mac}' THEN {group}"));
             weight_case.push_str(&format!(" WHEN '{mac}' THEN {}", weight[*group]));
@@ -1317,10 +1474,20 @@ impl PageStore {
         }
         group_case.push_str(" END");
         weight_case.push_str(" END");
+        // All words: every query word's group on the page. Any words: the
+        // page's weight at or above the floor, as whole percentages.
+        let having = match mode {
+            MatchMode::All => format!("COUNT(*) = {}", terms.len()),
+            MatchMode::Any if options.floor => {
+                format!("SUM(g.bw) * 100 >= {total_weight} * {SEARCH_FLOOR_PERCENT}")
+            }
+            MatchMode::Any => "COUNT(*) >= 1".to_owned(),
+        };
         let scope = filter.scope.as_str();
         let mut ranked = Vec::new();
         for piece in &pieces {
             let (predicate, mut values) = piece.predicate(None);
+            let predicate = with_sessions(&predicate, options);
             values.push(SeaValue::BigInt(Some(
                 i64::try_from(limit).unwrap_or(i64::MAX),
             )));
@@ -1329,11 +1496,13 @@ impl PageStore {
                 .query(&Statement::with_values(
                     format!(
                         "SELECT g.slug AS slug, SUM(g.w) AS score, MAX(p.updated_at) AS recency \
-                         FROM (SELECT scope, slug, {group_case} AS grp, MAX({weight_case}) AS w \
+                         FROM (SELECT scope, slug, {group_case} AS grp, MAX({weight_case}) AS w, \
+                                      MAX({base_case}) AS bw \
                                FROM page_terms WHERE {predicate} AND term IN ({}) \
                                GROUP BY scope, slug, grp) g \
                          JOIN pages p ON p.scope = g.scope AND p.slug = g.slug \
                          GROUP BY g.slug \
+                         HAVING {having} \
                          ORDER BY score DESC, recency DESC, slug ASC LIMIT ?",
                         in_list(&mut body.iter().chain(&title).map(|(_, mac)| mac))
                     ),

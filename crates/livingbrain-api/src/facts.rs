@@ -5,6 +5,15 @@
 //! - `GET /v1/facts?subject=&attribute=&as_of=` — the timelines the asker
 //!   may read, with what was valid at `as_of` (default now).
 //! - `POST /v1/facts/{id}/retract` — mark one fact as never true.
+//! - `GET /v1/facts/aliases` — any member: the workspace's subject aliases
+//!   and the proposals dreaming made, with whether the caller may change them.
+//! - `PUT /v1/facts/aliases` — owner or admin: set an alias
+//!   (`{"alias", "canonical"}`); this also accepts a proposal for that alias.
+//! - `DELETE /v1/facts/aliases?alias=` — owner or admin: remove an alias or
+//!   dismiss a proposal. Writes are rate-limited per user.
+//!
+//! Aliases belong to the workspace of the credential, never to a scope: a
+//! route reads and writes only the asker's own workspace's rows.
 //!
 //! Every route answers to a bearer or the web app's session cookie
 //! ([`Service::asker`]), and a cookie write must pass the same-origin check.
@@ -21,9 +30,12 @@ use std::sync::Arc;
 use cratefield_core::axum::Json;
 use cratefield_core::axum::extract::{Path, Query, State};
 use cratefield_core::axum::http::{HeaderMap, Method, StatusCode};
-use cratefield_core::axum::response::IntoResponse;
+use cratefield_core::axum::response::{IntoResponse, Response};
 use cratefield_core::axum::routing::{get, post};
-use cratefield_core::{Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem};
+use cratefield_core::{
+    Config, ConfigError, Migrations, Module, ModuleContext, Port, Problem, ProblemDef, RateLimit,
+    RateLimitFailure, check_rate_limit, rate_limited,
+};
 use cratefield_module_orgs::grants::Permission;
 use livingbrain_access::{Scope, UserId};
 use livingbrain_mcp::{Asker, page_scope};
@@ -91,6 +103,10 @@ impl Module for Facts {
         cratefield_core::axum::Router::new()
             .route("/", get(read).post(write))
             .route("/{id}/retract", post(retract))
+            .route(
+                "/aliases",
+                get(list_aliases).put(put_alias).delete(delete_alias),
+            )
             .with_state(state)
     }
 }
@@ -295,6 +311,169 @@ async fn write(
             .await;
     }
     Ok((StatusCode::CREATED, Json(json!({ "facts": recorded }))))
+}
+
+/// Only an owner or an admin changes a workspace's aliases.
+const ALIAS_FORBIDDEN: ProblemDef = ProblemDef {
+    slug: "facts/aliases/forbidden",
+    status: StatusCode::FORBIDDEN,
+    title: "Owner or admin access required",
+    description: "Only a workspace owner or admin can set, accept or remove a subject alias. \
+                  Members can read them.",
+};
+
+/// An alias the table will not hold: the `detail` names the rule.
+const ALIAS_REFUSED: ProblemDef = ProblemDef {
+    slug: "facts/aliases/refused",
+    status: StatusCode::UNPROCESSABLE_ENTITY,
+    title: "That alias is not allowed",
+    description: "An alias needs two different entity subjects (`type/name`, with a name \
+                  that is not a date), and a subject cannot be both an alias and the name \
+                  others are filed under. Nothing was saved.",
+};
+
+/// No alias or proposal by that name in this workspace.
+const ALIAS_NOT_FOUND: ProblemDef = ProblemDef {
+    slug: "facts/aliases/not-found",
+    status: StatusCode::NOT_FOUND,
+    title: "No such alias",
+    description: "This workspace has no alias or proposal for that subject. Nothing changed.",
+};
+
+/// The body of `PUT /aliases`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AliasBody {
+    alias: String,
+    canonical: String,
+}
+
+/// Whether the caller may change the workspace's aliases: an owner or an
+/// admin, by a credential that is not narrowed to some scopes.
+async fn can_change(state: &Service, headers: &HeaderMap) -> bool {
+    livingbrain_tokens::authenticate(&state.ctx().ports, headers)
+        .await
+        .is_ok_and(|member| member.is_admin)
+}
+
+/// The per-user write limit on aliases: a denial is the limiter's own
+/// response, with its retry time. Reads are not limited.
+async fn alias_write_limited(state: &Service, asker: &Asker) -> Option<Response> {
+    let keys = vec![format!(
+        "facts-aliases:{}:{}",
+        asker.workspace_id, asker.user_id
+    )];
+    match check_rate_limit(
+        state.ctx().ports.rate_limiter.as_ref(),
+        &keys,
+        RateLimitFailure::FailClosed,
+    )
+    .await
+    {
+        RateLimit::Denied { decision } => Some(rate_limited(&decision)),
+        RateLimit::Allowed => None,
+    }
+}
+
+/// The alias row as a route answers it.
+fn alias_json(row: &livingbrain_compiler::subject_aliases::AliasRow) -> Value {
+    json!({
+        "alias": row.alias,
+        "canonical": row.canonical,
+        "state": row.state,
+        "shared": row.shared,
+        "set_by": row.set_by,
+        "updated_at": row.updated_at,
+    })
+}
+
+/// `GET /aliases` — the workspace's aliases in force and its proposals.
+async fn list_aliases(
+    State(state): State<Arc<Service>>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, Problem> {
+    let asker = state.asker(&method, &headers).await?;
+    Service::member_only(&asker)?;
+    let db = crate::port(state.ctx().ports.db.clone())?;
+    let rows = livingbrain_compiler::subject_aliases::rows(&*db, &asker.workspace_id)
+        .await
+        .map_err(|_| Problem::internal())?;
+    let aliases: Vec<Value> = rows
+        .iter()
+        .filter(|row| row.state != "dismissed")
+        .map(alias_json)
+        .collect();
+    let editable = can_change(&state, &headers).await;
+    Ok(Json(json!({ "aliases": aliases, "editable": editable })).into_response())
+}
+
+/// `PUT /aliases` — set an alias, or accept its proposal.
+async fn put_alias(
+    State(state): State<Arc<Service>>,
+    method: Method,
+    headers: HeaderMap,
+    Json(body): Json<AliasBody>,
+) -> Result<Response, Problem> {
+    let asker = state.asker(&method, &headers).await?;
+    Service::member_only(&asker)?;
+    if !can_change(&state, &headers).await {
+        return Err(Problem::new(&ALIAS_FORBIDDEN));
+    }
+    if let Some(limited) = alias_write_limited(&state, &asker).await {
+        return Ok(limited);
+    }
+    let db = crate::port(state.ctx().ports.db.clone())?;
+    let clock = crate::port(state.ctx().ports.clock.clone())?;
+    livingbrain_compiler::subject_aliases::set(
+        &*db,
+        &asker.workspace_id,
+        body.alias.trim(),
+        body.canonical.trim(),
+        &asker.user_id,
+        clock.now(),
+    )
+    .await
+    .map_err(|refused| Problem::new(&ALIAS_REFUSED).with_detail(refused.as_str()))?;
+    let row = livingbrain_compiler::subject_aliases::rows(&*db, &asker.workspace_id)
+        .await
+        .map_err(|_| Problem::internal())?
+        .into_iter()
+        .find(|row| row.alias == body.alias.trim());
+    Ok(Json(json!({ "alias": row.as_ref().map(alias_json) })).into_response())
+}
+
+/// `DELETE /aliases?alias=` — remove an alias, or dismiss a proposal.
+async fn delete_alias(
+    State(state): State<Arc<Service>>,
+    method: Method,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Response, Problem> {
+    let asker = state.asker(&method, &headers).await?;
+    Service::member_only(&asker)?;
+    if !can_change(&state, &headers).await {
+        return Err(Problem::new(&ALIAS_FORBIDDEN));
+    }
+    if let Some(limited) = alias_write_limited(&state, &asker).await {
+        return Ok(limited);
+    }
+    let alias = query.get("alias").map(|raw| raw.trim()).unwrap_or_default();
+    let db = crate::port(state.ctx().ports.db.clone())?;
+    let clock = crate::port(state.ctx().ports.clock.clone())?;
+    let removed = livingbrain_compiler::subject_aliases::remove(
+        &*db,
+        &asker.workspace_id,
+        alias,
+        &asker.user_id,
+        clock.now(),
+    )
+    .await
+    .map_err(|refused| Problem::new(&ALIAS_REFUSED).with_detail(refused.as_str()))?;
+    if !removed {
+        return Err(Problem::new(&ALIAS_NOT_FOUND));
+    }
+    Ok(Json(json!({ "removed": alias })).into_response())
 }
 
 /// `POST /{id}/retract` — mark one fact retracted.

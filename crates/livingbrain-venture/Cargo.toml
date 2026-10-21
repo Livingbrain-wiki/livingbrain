@@ -13,6 +13,16 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# Which deployment this build is compiled for (issue #143). `wrangler.toml`'s
+# `[env.staging.build]` and `[env.production.build]` pass one of these to
+# worker-build, so each deployed Worker carries the `VentureEnv` it serves and
+# the production readiness gate runs at build time against that environment.
+# The top-level build (`wrangler dev --local`, the dry run of it) passes none:
+# that is `VentureEnv::Development`. At most one may be set (see `lib.rs`).
+[features]
+staging = []
+production = []
+
 [lints]
 workspace = true
 
@@ -42,6 +52,8 @@ cratefield-module-device-auth = { workspace = true }
 cratefield-kms = { workspace = true }
 # `TokenBearer` below implements the module's `BearerAuth` seam.
 async-trait = { workspace = true }
+# `StreamExt` and `stream::iter`, for the bridge that carries a streamed body.
+futures-util = { workspace = true, features = ["std"] }
 # The CLI surface (issue #121): the four harness modules behind the client
 # contract — `/v1/notes`, `/v1/pages`, `/v1/search`, `/v1/ask`,
 # `/v1/export`. `fetch` diverts the four non-pages paths through the harness

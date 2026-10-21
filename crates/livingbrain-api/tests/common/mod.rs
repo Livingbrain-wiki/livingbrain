@@ -27,6 +27,7 @@ use livingbrain_api::{
     AppTools, Apps, Ask, CodingAgents, Export, Facts, Graph, ModelJobs, Notes, PagesRebind,
     PublicPages, ResumeParkedOnMain, Search, Sources, Wiki, pages_routes,
 };
+use livingbrain_d1_fake::BindLimited;
 use livingbrain_mcp::{Asker, AuthError, BearerAuth, page_scope};
 use livingbrain_pages::{
     Author, EntityType, Ingestor, Page, PageStore, PageWrite, Pages, SourceStore,
@@ -129,6 +130,9 @@ pub struct Fixture {
     blob: Arc<dyn Blob>,
     key: Arc<dyn Kms>,
     clock: Arc<dyn Clock>,
+    /// The database view the routes read through, when the fixture was built
+    /// by [`fixture_bind_limited`]: it counts the widest statement it saw.
+    pub limited: Option<Arc<BindLimited>>,
 }
 
 impl Fixture {
@@ -235,21 +239,29 @@ pub fn slug_in(url: &str) -> Option<&str> {
 /// One workspace with two people, and the first person's id again in a
 /// second workspace.
 pub fn fixture() -> Fixture {
-    fixture_with(None, None, None)
+    fixture_with(None, None, None, false)
+}
+
+/// [`fixture`], whose routes read through a database that refuses any
+/// statement past D1's bound-parameter ceiling ([`BindLimited`]). Seeding
+/// still goes straight to the database.
+#[allow(dead_code)]
+pub fn fixture_bind_limited() -> Fixture {
+    fixture_with(None, None, None, true)
 }
 
 /// [`fixture`], with Jev built through `connector` — the workspace's own
 /// switch and key decide whether it runs.
 #[allow(dead_code)]
 pub fn fixture_with_jev(connector: Arc<dyn livingbrain_models::jev::JevConnector>) -> Fixture {
-    fixture_with(None, None, Some(connector))
+    fixture_with(None, None, Some(connector), false)
 }
 
 /// [`fixture`], with `POST /v1/ask` answering through `model` — a test's
 /// scripted stand-in for the workspace's connected model.
 #[allow(dead_code)]
 pub fn fixture_with_ask_model(model: Arc<dyn livingbrain_api::AskModel>) -> Fixture {
-    fixture_with(Some(model), None, None)
+    fixture_with(Some(model), None, None, false)
 }
 
 /// [`fixture_with_ask_model`], also answering to a session cookie through
@@ -259,13 +271,14 @@ pub fn fixture_with_session(
     model: Arc<dyn livingbrain_api::AskModel>,
     session: Arc<dyn livingbrain_api::SessionAuth>,
 ) -> Fixture {
-    fixture_with(Some(model), Some(session), None)
+    fixture_with(Some(model), Some(session), None, false)
 }
 
 fn fixture_with(
     ask_model: Option<Arc<dyn livingbrain_api::AskModel>>,
     session: Option<Arc<dyn livingbrain_api::SessionAuth>>,
     jev: Option<Arc<dyn livingbrain_models::jev::JevConnector>>,
+    limit_binds: bool,
 ) -> Fixture {
     let mut askers = [
         (TOKEN_A, WORKSPACE, "user-a"),
@@ -409,6 +422,7 @@ fn fixture_with(
         Box::new(livingbrain_accounts::Access::new()),
     ];
 
+    let limited: std::sync::Mutex<Option<Arc<BindLimited>>> = std::sync::Mutex::new(None);
     let kit = TestHarness::with_ports(modules, |ports| {
         ports.blob = Some(Arc::new(PagesRebind::new(Arc::clone(&memory))) as Arc<dyn Blob>);
         // The deployment's own origin, which every page link is built under,
@@ -417,7 +431,13 @@ fn fixture_with(
             (livingbrain_pages::APP_BASE_KEY, APP_BASE),
             ("MODEL_KEYS_SECRET", MODEL_KEYS_SECRET),
         ]));
+        if limit_binds {
+            let view = BindLimited::new(ports.db.clone().expect("a database"));
+            ports.db = Some(view.clone());
+            *limited.lock().expect("uncontended") = Some(view);
+        }
     });
+    let limited = limited.into_inner().expect("uncontended");
     let clock: Arc<dyn Clock> = Arc::new(kit.clock.clone());
     Fixture {
         router: kit.router.clone(),
@@ -439,6 +459,7 @@ fn fixture_with(
         blob: memory,
         key,
         clock,
+        limited,
     }
 }
 

@@ -31,6 +31,9 @@ repository = "https://github.com/Livingbrain-wiki/livingbrain"
 cratefield-core = "=0.10.0"
 cratefield-runtime-cloudflare = "=0.5.0"
 cratefield-testing = "=0.5.3"
+# The SQLite adapter the migration tests open a database with (its `apply_migrations`
+# records each applied id and its checksum). The version `cratefield-testing` resolves.
+cratefield-adapter-sqlite = "=0.3.2"
 
 # The mail round (issue #63): `module-waitlist` ships the confirm mails,
 # `mail-templates` renders them in this venture's theme, and `adapter-owlpost`

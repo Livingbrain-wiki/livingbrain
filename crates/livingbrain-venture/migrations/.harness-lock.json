@@ -214,5 +214,9 @@
   "coding-agents/0008": {
     "file": "0054_coding-agents_0008_subject_aliases.sql",
     "sha256": "fe6b05c572d489b2239955bd675eec5847d0d46658e1055b77dfcd833d8dc48c"
+  },
+  "coding-agents/0009": {
+    "file": "0055_coding-agents_0009_subject_alias_state.sql",
+    "sha256": "4bb3cd6c36f8b9e5ca4b563cec149cb9a707363ccf3c05d41fc54a4f94c5e781"
   }
 }
