@@ -191,6 +191,21 @@ pub const MIGRATION_SUBJECT_ALIASES_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0008_subject_aliases.sql"),
 );
 
+/// The ninth migration: the alias table's state, setter and evidence columns.
+/// Forward-only: `0008` is applied in production and is not edited.
+pub const MIGRATION_SUBJECT_ALIAS_STATE: SqlMigration = SqlMigration::new(
+    "0009",
+    "subject_alias_state",
+    include_str!("../migrations/sqlite/0009_subject_alias_state.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_SUBJECT_ALIAS_STATE`].
+pub const MIGRATION_SUBJECT_ALIAS_STATE_POSTGRES: SqlMigration = SqlMigration::new(
+    "0009",
+    "subject_alias_state",
+    include_str!("../migrations/postgres/0009_subject_alias_state.sql"),
+);
+
 /// The tables the module that mounts the compiler owns.
 pub const TABLES: [&str; 10] = [
     "coding_agent_jobs",

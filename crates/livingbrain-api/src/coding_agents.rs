@@ -261,7 +261,7 @@ impl Module for CodingAgents {
     }
 
     fn migrations(&self) -> Migrations {
-        const SQLITE: [SqlMigration; 8] = [
+        const SQLITE: [SqlMigration; 9] = [
             livingbrain_compiler::MIGRATION_INIT,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER,
             livingbrain_compiler::MIGRATION_TRIAGE,
@@ -270,9 +270,10 @@ impl Module for CodingAgents {
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS,
             livingbrain_compiler::MIGRATION_SUBJECT_ALIASES,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIAS_STATE,
         ];
         const _: () = cratefield_core::assert_migration_set(&SQLITE);
-        const POSTGRES: [SqlMigration; 8] = [
+        const POSTGRES: [SqlMigration; 9] = [
             livingbrain_compiler::MIGRATION_INIT_POSTGRES,
             livingbrain_compiler::MIGRATION_WAITING_RUNNER_POSTGRES,
             livingbrain_compiler::MIGRATION_TRIAGE_POSTGRES,
@@ -281,6 +282,7 @@ impl Module for CodingAgents {
             livingbrain_compiler::MIGRATION_DREAMING_SETTINGS_POSTGRES,
             livingbrain_compiler::MIGRATION_SOURCE_UNITS_POSTGRES,
             livingbrain_compiler::MIGRATION_SUBJECT_ALIASES_POSTGRES,
+            livingbrain_compiler::MIGRATION_SUBJECT_ALIAS_STATE_POSTGRES,
         ];
         const _: () = cratefield_core::assert_migration_set(&POSTGRES);
         Migrations {
