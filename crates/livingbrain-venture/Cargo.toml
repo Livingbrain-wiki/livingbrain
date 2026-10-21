@@ -13,6 +13,16 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# Which deployment this build is compiled for (issue #143). `wrangler.toml`'s
+# `[env.staging.build]` and `[env.production.build]` pass one of these to
+# worker-build, so each deployed Worker carries the `VentureEnv` it serves and
+# the production readiness gate runs at build time against that environment.
+# The top-level build (`wrangler dev --local`, the dry run of it) passes none:
+# that is `VentureEnv::Development`. At most one may be set (see `lib.rs`).
+[features]
+staging = []
+production = []
+
 [lints]
 workspace = true
 

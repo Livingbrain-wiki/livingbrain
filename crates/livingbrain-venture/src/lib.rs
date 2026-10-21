@@ -47,7 +47,7 @@ use cratefield_core::axum::response::{IntoResponse as _, Response as AxumRespons
 use cratefield_core::{
     Blob, BoxStream, Classifier, Database, Harness, HarnessBuilder, Module, ModuleContext, Ports,
     Problem, RandomBytes, RandomError, Rendered, ResponseStream, ScheduledBudget, ScheduledLimits,
-    ScheduledSplit, StreamError, Template, Venture,
+    ScheduledSplit, StreamError, Template, Venture, VentureEnv,
 };
 use cratefield_kms::{Kms, WorkerSecretKms};
 use cratefield_mail_templates::{MailTheme, Message as MailBody};
@@ -101,6 +101,23 @@ const API_BASE: &str = "https://api.livingbrain.wiki";
 /// the allow-list.
 const DEVICE_CLIENT: &str = "livingbrain-cli";
 
+/// The `VentureEnv` this build is compiled for (issue #143). Each deployed
+/// environment builds with its own cargo feature, set by its `[env.*.build]`
+/// command in `wrangler.toml`, so the production readiness gate `Harness::build`
+/// runs at build time judges the environment the Worker actually serves. The
+/// deployment's `ENV` binding still answers for itself at boot; the stricter of
+/// the two wins, so a build that disagrees with its `ENV` is refused, not
+/// silently weakened.
+#[cfg(all(feature = "production", feature = "staging"))]
+compile_error!("the `production` and `staging` features are mutually exclusive");
+
+#[cfg(feature = "production")]
+const COMPILED_ENV: VentureEnv = VentureEnv::Production;
+#[cfg(feature = "staging")]
+const COMPILED_ENV: VentureEnv = VentureEnv::Staging;
+#[cfg(not(any(feature = "production", feature = "staging")))]
+const COMPILED_ENV: VentureEnv = VentureEnv::Development;
+
 /// The venture as this Worker serves it, and as a native test mounts it.
 ///
 /// The second argument is the **apex** domain. The `waitlist` module derives
@@ -109,15 +126,17 @@ const DEVICE_CLIENT: &str = "livingbrain-cli";
 /// double the label (`api.api…`, `send.api…`). `public_url` is the API's own
 /// address, spelled out rather than derived.
 ///
-/// The environment is left to the deployment, which declares it through
-/// `ENV` in `wrangler.toml` (`[vars] ENV = "production"`), not hardcoded
-/// here: `Harness::build` takes no config, so a compiled-in production would
-/// refuse to build rather than serve and say what it is missing.
+/// The environment is the one this build was compiled for ([`COMPILED_ENV`]),
+/// so a production build compiles `VentureEnv::Production` and the gate runs
+/// against production config at build time. A compiled-in production is safe
+/// to serve from: `Harness::build` checks what it needs and refuses a
+/// composition that cannot serve production, rather than serving it open.
 #[must_use]
 pub fn venture() -> Venture {
     Venture::new("livingbrain", "livingbrain.wiki")
         .public_url(API_BASE)
         .cors_origins(["https://livingbrain.wiki", "https://api.livingbrain.wiki"])
+        .env(COMPILED_ENV)
 }
 
 /// The waitlist module as this venture configures it: the single product
@@ -2097,7 +2116,12 @@ mod tests {
         let start = OffsetDateTime::UNIX_EPOCH;
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         let at = names
             .iter()
@@ -2165,6 +2189,42 @@ mod tests {
         }
     }
 
+    /// The captcha the Worker composes when `TURNSTILE_SECRET` is set
+    /// ([`build_captcha`]), over the kit's fakes. Every composition here
+    /// passes it, as a deployment does, so the same tests judge the build-time
+    /// production gate under `--features production` (`Harness::build` refuses
+    /// a production composition with no Captcha port) and under the default
+    /// build alike.
+    fn test_captcha() -> Option<Turnstile> {
+        Some(
+            Turnstile::new(
+                Arc::new(cratefield_testing::FakeHttpClient::ok_json(
+                    r#"{"success":true}"#,
+                )),
+                Arc::new(cratefield_testing::FixedClock(
+                    time::OffsetDateTime::UNIX_EPOCH,
+                )),
+                "test-secret",
+            )
+            .expected_hostname("livingbrain.wiki"),
+        )
+    }
+
+    /// The venture a build is compiled as is the one its deploy feature names
+    /// (`wrangler.toml`'s `[env.*.build]`): `production` for the production
+    /// Worker, `staging` for staging, neither for local development.
+    #[test]
+    fn the_venture_compiles_as_the_environment_its_feature_names() {
+        let expected = if cfg!(feature = "production") {
+            VentureEnv::Production
+        } else if cfg!(feature = "staging") {
+            VentureEnv::Staging
+        } else {
+            VentureEnv::Development
+        };
+        assert_eq!(venture().env, expected);
+    }
+
     /// `build()` panics if the composition is invalid, so reaching past it is
     /// the assertion: `workspaces` requires `Db`, `Signer`, `HttpClient`,
     /// `Clock` and `IdGen`, and `Harness::build` refuses a runtime that does
@@ -2173,7 +2233,12 @@ mod tests {
     fn the_composition_mounts_every_module() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let names: Vec<&str> = harness
             .modules()
             .iter()
@@ -2241,7 +2306,12 @@ mod tests {
     fn the_worker_composition_serves_the_tools_module_and_its_migration() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let module = harness
             .modules()
             .iter()
@@ -2280,7 +2350,12 @@ mod tests {
     fn every_module_migration_is_collected_for_d1() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let lock: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.join(".harness-lock.json")).expect("the lock file"),
@@ -2690,7 +2765,7 @@ mod tests {
         ] {
             assert!(!serves_avatars(path), "{path}");
         }
-        let (harness, _, _) = build(unconfigured_mail(), None, None, None);
+        let (harness, _, _) = build(unconfigured_mail(), test_captcha(), None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"avatars"), "{names:?}");
 
@@ -2720,7 +2795,12 @@ mod tests {
     fn the_sources_route_diverts_with_its_id_segment() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         assert!(
             serves_cli(&harness, "/v1/sources/01HZZZBBBBBBBBBBBBBBBBBBB"),
             "a citation must divert to serve_cli"
@@ -2759,7 +2839,12 @@ mod tests {
     fn the_graph_route_diverts_and_its_module_is_mounted() {
         let kek = LocalFileKms::from_key(Dek::generate().unwrap(), "test", "test")
             .expect("a well-formed key");
-        let (harness, _, _) = build(unconfigured_mail(), None, Some(Arc::new(kek)), None);
+        let (harness, _, _) = build(
+            unconfigured_mail(),
+            test_captcha(),
+            Some(Arc::new(kek)),
+            None,
+        );
         assert!(serves_cli(&harness, "/v1/graph"), "the map must divert");
         assert!(
             harness.modules().iter().any(|m| m.name() == "graph"),
@@ -2786,7 +2871,7 @@ mod tests {
     /// working — the CLI paths fall through to `serve`, which answers 404.
     #[test]
     fn a_missing_key_ring_leaves_the_rest_of_the_composition_serving() {
-        let (harness, _, _) = build(unconfigured_mail(), None, None, None);
+        let (harness, _, _) = build(unconfigured_mail(), test_captcha(), None, None);
         let names: Vec<&str> = harness.modules().iter().map(|m| m.name()).collect();
         assert!(names.contains(&"pages"), "{names:?}");
         assert!(names.contains(&"workspaces"), "{names:?}");
