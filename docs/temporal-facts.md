@@ -441,6 +441,14 @@ Worker's cron tick, after the compile drain.
   value and dates, then the original is retracted. A move is refused when the
   canonical subject already holds the attribute, and is retried each sweep.
   A moved copy takes the store's default cardinality.
+- **Alias proposals.** A dream sweep proposes an alias when two subjects of one
+  entity type share at least 3 attribute families and at least 75% of the
+  smaller one's. The subject with more current facts is canonical. A proposal
+  is stored `proposed` and applies nothing. `GET /v1/facts/aliases` lists the
+  aliases and proposals; `PUT` (owner or admin) sets an alias or accepts a
+  proposal; `DELETE ?alias=` removes one or dismisses a proposal, which is then
+  never proposed again. The dreaming page shows the proposals. Writes are
+  rate-limited per user. The table is erasable personal data keyed on `set_by`.
 - **Not listed.** A timeline whose every fact is retracted is not listed by
   the facts index, the search route, the MCP search or a brief.
 - **Log.** Every decision is written to `fact_dream_decisions` whether or not

@@ -340,12 +340,28 @@ async fn view(state: &Service, workspace: &str, editable: bool) -> Result<Value,
     let status = dream_settings::status(&*db, workspace, &week_start)
         .await
         .map_err(|_| Problem::internal())?;
+    // Alias proposals dreaming made: suggestions, applied only when an owner
+    // accepts them through `PUT /v1/facts/aliases`.
+    let suggestions: Vec<Value> = livingbrain_compiler::subject_aliases::rows(&*db, workspace)
+        .await
+        .map_err(|_| Problem::internal())?
+        .into_iter()
+        .filter(|row| row.state == "proposed")
+        .map(|row| {
+            json!({
+                "alias": row.alias,
+                "canonical": row.canonical,
+                "shared": row.shared,
+            })
+        })
+        .collect();
     Ok(json!({
         "enabled": settings.enabled,
         "rules_enabled": settings.rules_enabled,
         "model": current,
         "models": models,
         "editable": editable,
+        "alias_suggestions": suggestions,
         "status": {
             "queued": status.queued,
             "reviewed_week": status.reviewed_week,

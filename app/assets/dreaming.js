@@ -239,6 +239,54 @@ export async function dreamingPage(api, doc = globalThis.document, now = () => D
     strip.textContent = off + statusLine(view.status, now());
   }
 
+  // Alias proposals dreaming made. An owner accepts (PUT) or dismisses
+  // (DELETE) each; nothing is applied until accepted.
+  function paintAliases() {
+    const section = $("dream-aliases-section");
+    const list = $("dream-aliases");
+    if (!section || !list) return;
+    const rows = Array.isArray(view.alias_suggestions) ? view.alias_suggestions : [];
+    const items = rows.map((row) => {
+      const children = [
+        el(doc, "div", { className: "dream-item__what", text: `${row.alias} → ${row.canonical}` }),
+        el(doc, "div", {
+          className: "dream-item__meta",
+          text: `${row.shared} shared attribute ${row.shared === 1 ? "family" : "families"}`,
+        }),
+      ];
+      if (view.editable) {
+        const accept = el(doc, "button", { type: "button", text: "Accept", dataset: { variant: "primary" } });
+        const dismiss = el(doc, "button", { type: "button", text: "Dismiss" });
+        accept.addEventListener("click", async () => {
+          accept.disabled = true;
+          try {
+            await api("/v1/facts/aliases", { method: "PUT", body: { alias: row.alias, canonical: row.canonical } });
+            message(`Accepted: ${row.alias} is filed under ${row.canonical}.`, "ok");
+            await reload();
+          } catch (error) {
+            message(String(error && error.message ? error.message : error), "bad");
+            accept.disabled = false;
+          }
+        });
+        dismiss.addEventListener("click", async () => {
+          dismiss.disabled = true;
+          try {
+            await api(`/v1/facts/aliases?alias=${encodeURIComponent(row.alias)}`, { method: "DELETE" });
+            message(`Dismissed ${row.alias}.`, "ok");
+            await reload();
+          } catch (error) {
+            message(String(error && error.message ? error.message : error), "bad");
+            dismiss.disabled = false;
+          }
+        });
+        children.push(el(doc, "div", { className: "form-actions" }, [accept, dismiss]));
+      }
+      return el(doc, "li", { className: "dream-item" }, children);
+    });
+    list.replaceChildren(...items);
+    section.hidden = rows.length === 0;
+  }
+
   function paintItem(row) {
     const line = describeDecision(row, now());
     const sentence = el(doc, "div", { className: "dream-item__what" }, line.parts.map((part) =>
@@ -269,6 +317,7 @@ export async function dreamingPage(api, doc = globalThis.document, now = () => D
     view = await api("/v1/dreaming");
     paintSettings();
     paintStatus();
+    paintAliases();
   }
 
   form.addEventListener("submit", async (event) => {

@@ -236,12 +236,21 @@ impl Module for CodingAgents {
                  the model's job slot) and a pending run request — nothing in it identifies \
                  or describes a person",
             ),
-            PersonalDataSet::none(
-                "fact_subject_aliases",
-                "the row maps one entity name a workspace uses to the name its facts are \
-                 filed under — the names of projects and systems, chosen by the workspace, \
-                 and when it was set; nothing about a person's facts, sources or sessions",
-            ),
+            // An alias names entities, and an owner may have named a person
+            // (`person/…`), so it is content keyed on the user who set or
+            // accepted it, like a fact is keyed on its writer. A proposal has
+            // no setter (`set_by` is blank) and is found by no user's erasure.
+            PersonalDataSet {
+                table: "fact_subject_aliases",
+                subject: "set_by",
+                kind: DataKind::Content,
+                disposition: Disposition::Erase,
+                description: "Each alias you set or accepted for a workspace: the entity name \
+                              it maps and the name its facts are filed under, and when. \
+                              Erasing you deletes the row.",
+                redacted: &[],
+                subject_via: None,
+            },
             PersonalDataSet::none(
                 "coding_agent_pool",
                 "the row is one workspace's compile pool — how many compiles run at once, a \
@@ -705,6 +714,16 @@ impl Dreams for StoreFacts {
     ) -> Result<Vec<(String, i64, String)>, String> {
         self.store
             .dream_vocabulary(scope, subject)
+            .await
+            .map_err(|_| "store error".to_owned())
+    }
+
+    async fn subject_families(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<(String, Vec<String>, i64)>, String> {
+        self.store
+            .dream_subject_families(scope)
             .await
             .map_err(|_| "store error".to_owned())
     }
