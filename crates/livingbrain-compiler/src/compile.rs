@@ -1294,6 +1294,8 @@ impl Compiler {
                 }
                 // A refusal is per fact, and a sink that cannot try at all
                 // is a note in the log: neither fails the job.
+                crate::subject_aliases::canonicalize(&*self.queue.db, &job.workspace, &mut facts)
+                    .await;
                 match self.facts.emit(&job.workspace, &job.scope, &facts).await {
                     Ok(emitted) => {
                         tally.facts = tally
@@ -1854,7 +1856,7 @@ impl Compiler {
         me: Option<&str>,
         now: OffsetDateTime,
     ) -> Vec<Fact> {
-        let (observed, default_from) = fact_times(cite.started_at.as_deref(), now);
+        let (observed, default_from) = cite_times(cite, now);
         facts
             .iter()
             .map(|fact| Fact {
@@ -2314,6 +2316,10 @@ pub(crate) struct Cite {
     pub source_ids: Vec<String>,
     /// When the material happened, RFC 3339: facts are observed then.
     pub started_at: Option<String>,
+    /// The day the document itself is about (`YYYY-MM-DD`), when it has one.
+    /// A fact the model leaves undated is valid from this day, not from the
+    /// day the document was imported.
+    pub document_day: Option<String>,
 }
 
 /// How many citation lines one page gains when its body names none of the
@@ -2327,6 +2333,7 @@ impl Cite {
             label: format!("session {} · {}", head.day, head.agent_folder),
             source_ids: vec![head.source_id.clone()],
             started_at: head.started_at.clone(),
+            document_day: None,
         }
     }
 }
@@ -2393,6 +2400,14 @@ pub(crate) fn fact_times(
         }
         None => (now_text, None),
     }
+}
+
+/// When a citation's facts are observed, and the day an undated one is
+/// valid from: the document's own day when the citation has one, else the
+/// day the material happened.
+pub(crate) fn cite_times(cite: &Cite, now: OffsetDateTime) -> (String, Option<String>) {
+    let (observed, default_from) = fact_times(cite.started_at.as_deref(), now);
+    (observed, cite.document_day.clone().or(default_from))
 }
 
 fn log_line(head: &SessionHead, tally: &Tally, omitted: bool, now: OffsetDateTime) -> String {

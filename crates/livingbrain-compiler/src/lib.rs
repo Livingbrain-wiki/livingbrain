@@ -52,6 +52,7 @@ pub mod queue;
 pub mod record;
 pub mod source_compile;
 pub mod source_units;
+pub mod subject_aliases;
 pub mod triage;
 
 pub use compile::{
@@ -175,8 +176,23 @@ pub const MIGRATION_SOURCE_UNITS_POSTGRES: SqlMigration = SqlMigration::new(
     include_str!("../migrations/postgres/0007_source_compile_jobs.sql"),
 );
 
+/// The eighth migration: a workspace's subject aliases (`fact_subject_aliases`),
+/// one entity under several names filed under one subject.
+pub const MIGRATION_SUBJECT_ALIASES: SqlMigration = SqlMigration::new(
+    "0008",
+    "subject_aliases",
+    include_str!("../migrations/sqlite/0008_subject_aliases.sql"),
+);
+
+/// The Postgres form of [`MIGRATION_SUBJECT_ALIASES`].
+pub const MIGRATION_SUBJECT_ALIASES_POSTGRES: SqlMigration = SqlMigration::new(
+    "0008",
+    "subject_aliases",
+    include_str!("../migrations/postgres/0008_subject_aliases.sql"),
+);
+
 /// The tables the module that mounts the compiler owns.
-pub const TABLES: [&str; 9] = [
+pub const TABLES: [&str; 10] = [
     "coding_agent_jobs",
     "coding_agent_spend",
     "coding_agent_reservations",
@@ -186,4 +202,5 @@ pub const TABLES: [&str; 9] = [
     "source_compile_members",
     "source_compile_spend",
     "source_compile_cursor",
+    "fact_subject_aliases",
 ];
