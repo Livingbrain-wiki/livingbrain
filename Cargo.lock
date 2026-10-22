@@ -548,9 +548,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-adapter-postgres"
-version = "0.3.3"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f07fec45dd670672f36eaf5d91aeb14a11281d0d416e79365eca65f933b6f216"
+checksum = "45872e966cd1db8e04ef82cfc2b09ecb6c11a5d8dd81a4bd48895e9919c8d1bc"
 dependencies = [
  "async-trait",
  "cratefield-core",
@@ -564,9 +564,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-adapter-sqlite"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c60eb608f258be2ff8d4da675d4d7882b0f7fb72d578eaac50c57e6ad4918e70"
+checksum = "12e5597b20a79bf42627a974235e03c25dab41b392c33f07596edef95a4fbc7b"
 dependencies = [
  "async-trait",
  "cratefield-core",
@@ -609,9 +609,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-auth-client"
-version = "0.3.4"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4362370e247465ae1e97d035cf9f84152c7addbd66bc176dad106bb8db3a53d7"
+checksum = "dbed234c8e9b79941b66b40510271f0095874dc49910123329157482091dacd7"
 dependencies = [
  "async-trait",
  "axum",
@@ -630,9 +630,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-core"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb13274aadff22d6c20584314ea344ea3b6eeabd862a87ac639a9fa2d78649e1"
+checksum = "550a356621be58150851856a4c9c391347579ed3f078887363de9a7ba27477e9"
 dependencies = [
  "async-trait",
  "axum",
@@ -679,9 +679,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-mail-templates"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9b3e82f47a4534462770805ee17c529e3544c218aaf9a83658a91fbdd7a4ef4"
+checksum = "22be637d69b2e7a8f637548b7b06d1b28898c8c9fc84ca473c0d5651d65ede36"
 dependencies = [
  "cratefield-core",
  "getrandom 0.4.3",
@@ -692,9 +692,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-module-device-auth"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4545a2c6578914b9ce36a9ad981f9ae668305dae0fc8e7a6244b6c089c43d1e3"
+checksum = "280f5e828d393b2f759aa91d2a1ec03cc4fd34f6fe32ee13ff75b990189a6f03"
 dependencies = [
  "async-trait",
  "axum",
@@ -715,9 +715,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-module-orgs"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab19057fb58abe66d14825719d2cba00ffc3659e755b2707d4398c0722388073"
+checksum = "501316294b6086c50b749a128810e0d225e5a387c5e6ac21a94a21456bc179fc"
 dependencies = [
  "async-trait",
  "axum",
@@ -738,9 +738,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-module-waitlist"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b752bb7da09dbcc8d4613c525cd5ee3de303200a702f23506b7f75c0518fbd"
+checksum = "2c739a72f05969ce9967a07e8783c6fc0b3a59496b525365005c5db70b7cf6ae"
 dependencies = [
  "axum",
  "cratefield-core",
@@ -772,9 +772,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-runtime-cloudflare"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8925c8bfd5b5c8b99d122ee9823a00bccb4fc4fe58f72a934baeb3b493eda085"
+checksum = "478961b05ca4cdfd035fa8cf500c2c5e7ef1282ab3492a1ebc7ee7608a23c2d0"
 dependencies = [
  "async-trait",
  "axum",
@@ -801,9 +801,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-testing"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b23b737f163c30772e61e92727d263ec158bacc0f21fb130383ab8660bedf401"
+checksum = "5ce0886b550aad8f1bafbb27f06179c32bef3b51da92689cf330ad5b5e15da48"
 dependencies = [
  "async-trait",
  "axum",
@@ -2465,6 +2465,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "openssl-probe"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3027,6 +3033,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-native-certs"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a073f5dc7469f984c52ad2752b63b0807745133b6de880b7b64c1ac4c48aec4"
+dependencies = [
+ "openssl-probe",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework 3.7.0",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3077,6 +3095,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "schannel"
+version = "0.1.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cb23c424d8ee841bb4d813677ca237e2a610067d594fec130f87d6093495ab5"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3441,6 +3468,7 @@ dependencies = [
  "once_cell",
  "percent-encoding",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3450,7 +3478,6 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3902,7 +3929,7 @@ dependencies = [
  "serde_json",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -4125,15 +4152,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
