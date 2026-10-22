@@ -205,7 +205,7 @@ items sent, and it is observed at that item's time.
 **Queueing** is a bounded backlog pass in the same cron tick. It files up to
 200 stored sources that have no unit yet, oldest first (`source_compile_units`
 and `source_compile_members`, migration
-`0048_coding-agents_0007_source_compile_jobs`). A second pass files nothing,
+`0050_coding-agents_0007_source_compile_jobs`). A second pass files nothing,
 so the existing backlog is queued once and new sources are picked up on the
 next tick. A new item for a day already compiled reopens that unit, and only
 the new item is sent.
