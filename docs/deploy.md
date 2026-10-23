@@ -60,7 +60,7 @@ service worker's precache list point at those. `_headers` then caches
 as its cache version — so a deploy reaches every open tab on its next load
 (or as a "Living Brain was updated — Reload" notice), with nothing to bump by
 hand. No extra deploy step: CI, `~/lb-deploy.sh` and a hand-run
-`wrangler deploy` all get it from `[build]`. `node tools/stamp-assets.mjs
+`wrangler deploy` all get it from `[build]`. From the repo root, `node tools/stamp-assets.mjs
 --check` builds into a temp dir and verifies without writing `build/`; CI runs
 it, and `app/tests/stamp.test.mjs` pins the result.
 
