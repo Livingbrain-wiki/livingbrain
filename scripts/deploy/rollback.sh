@@ -39,9 +39,9 @@ case "$env_name" in
 esac
 
 # The version .github/workflows/deploy.yml pins, read from the environment
-# when the workflow ran this so the two cannot drift; npx, so no
+# when the workflow ran this so the two cannot drift; bunx, so no
 # package.json or node_modules lands in the repository.
-wrangler=(npx --yes "wrangler@${WRANGLER_VERSION:-4.147.0}")
+wrangler=(bunx "wrangler@${WRANGLER_VERSION:-4.147.0}")
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(cd -- "$script_dir/../.." && pwd)

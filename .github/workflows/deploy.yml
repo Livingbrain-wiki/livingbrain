@@ -28,7 +28,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # Pinned, because a floating wrangler changes the shape of the config
-  # between a green run and a failing one. Run through npx, so no
+  # between a green run and a failing one. Run through bunx, so no
   # package.json or node_modules lands in the repository.
   WRANGLER_VERSION: "4.147.0"
 
@@ -43,6 +43,11 @@ jobs:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.6"
+      # Node stays: wrangler is a Node CLI (its bin has a node shebang),
+      # and bunx only fetches and runs it. Nothing else in the job changes.
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
@@ -57,10 +62,10 @@ jobs:
           for env in local staging production; do
             echo "::group::wrangler deploy --dry-run ($env)"
             if [ "$env" = local ]; then
-              npx --yes "wrangler@$WRANGLER_VERSION" deploy --dry-run \
+              bunx "wrangler@$WRANGLER_VERSION" deploy --dry-run \
                 --outdir "$RUNNER_TEMP/dry-$env"
             else
-              npx --yes "wrangler@$WRANGLER_VERSION" deploy --dry-run \
+              bunx "wrangler@$WRANGLER_VERSION" deploy --dry-run \
                 --env "$env" --outdir "$RUNNER_TEMP/dry-$env"
             fi
             echo "::endgroup::"
@@ -105,6 +110,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         if: steps.gate.outputs.ok == 'true'
+      - uses: oven-sh/setup-bun@v2
+        if: steps.gate.outputs.ok == 'true'
+        with:
+          bun-version: "1.3.6"
+      # Node stays: wrangler is a Node CLI (its bin has a node shebang),
+      # and bunx only fetches and runs it. Nothing else in the job changes.
       - uses: actions/setup-node@v4
         if: steps.gate.outputs.ok == 'true'
         with:
@@ -116,17 +127,17 @@ jobs:
       - name: Apply D1 migrations
         if: steps.gate.outputs.ok == 'true'
         working-directory: crates/livingbrain-venture
-        run: npx --yes "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env staging --remote
+        run: bunx "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env staging --remote
       - name: Deploy to staging
         if: steps.gate.outputs.ok == 'true'
         id: deploy
         working-directory: crates/livingbrain-venture
-        run: npx --yes "wrangler@$WRANGLER_VERSION" deploy --env staging
+        run: bunx "wrangler@$WRANGLER_VERSION" deploy --env staging
       - name: Seed the smoke-test workspace
         if: steps.gate.outputs.ok == 'true'
         working-directory: crates/livingbrain-venture
         run: |
-          npx --yes "wrangler@$WRANGLER_VERSION" d1 execute DB --env staging --remote \
+          bunx "wrangler@$WRANGLER_VERSION" d1 execute DB --env staging --remote \
             --file ../../scripts/deploy/seed-staging.sql
       - name: Smoke test
         if: steps.gate.outputs.ok == 'true'
@@ -167,6 +178,11 @@ jobs:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.6"
+      # Node stays: wrangler is a Node CLI (its bin has a node shebang),
+      # and bunx only fetches and runs it. Nothing else in the job changes.
       - uses: actions/setup-node@v4
         with:
           node-version: lts/*
@@ -175,11 +191,11 @@ jobs:
         run: cargo install -q --locked worker-build
       - name: Apply D1 migrations
         working-directory: crates/livingbrain-venture
-        run: npx --yes "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env production --remote
+        run: bunx "wrangler@$WRANGLER_VERSION" d1 migrations apply DB --env production --remote
       - name: Deploy to production
         id: deploy
         working-directory: crates/livingbrain-venture
-        run: npx --yes "wrangler@$WRANGLER_VERSION" deploy --env production
+        run: bunx "wrangler@$WRANGLER_VERSION" deploy --env production
       - name: Smoke test
         # Health only: production is never seeded, and no production key is
         # ever handed to a runner, so there is no cookie to mint here.

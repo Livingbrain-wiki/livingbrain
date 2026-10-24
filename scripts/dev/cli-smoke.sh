@@ -52,7 +52,7 @@ boot_timeout_secs=300
 # wrangler-3 run answers 503 before any route is reached. v4's local runtime
 # provides the binding; its `dev` is local-only by design, so there is no
 # --local flag on it (the d1 commands keep theirs).
-wrangler=(npx --yes wrangler@4)
+wrangler=(bunx wrangler@4)
 
 tmp_dir=$(mktemp -d)
 wrangler_pid=
@@ -71,7 +71,7 @@ die() { echo "cli-smoke: FAILED: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # 1. Preflight: the tools this script drives.
 # ---------------------------------------------------------------------------
-for tool in node npx cargo curl python3 unzip openssl; do
+for tool in node bunx cargo curl python3 unzip openssl; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH; the smoke test needs it"
 done
 [ -d "$venture_dir" ] || die "missing $venture_dir (run from a checkout)"

@@ -81,9 +81,9 @@ the waitlist Worker; nothing reaches it without a human.
 
 ```sh
 # Resources, once each; the ids go into the matching [env.production] lines.
-npx wrangler d1 create livingbrain
-npx wrangler r2 bucket create livingbrain-blobs
-npx wrangler kv namespace create KV-production
+bunx wrangler d1 create livingbrain
+bunx wrangler r2 bucket create livingbrain-blobs
+bunx wrangler kv namespace create KV-production
 ```
 
 Paste the ids into `[env.production.d1_databases]` and
@@ -95,18 +95,18 @@ same Cloudflare account.
 ### Secrets — each set with `wrangler secret put NAME --env production`
 
 ```sh
-npx wrangler secret put HARNESS_SECRET --env production                   # signs sessions and confirm links
-npx wrangler secret put HARNESS_KEK_CURRENT --env production              # seals page bodies and Slack tokens; never staging's value
-npx wrangler secret put MODEL_KEYS_SECRET --env production                # wraps the BYOK model-key ciphertext; never staging's value
-npx wrangler secret put WORKSPACES_SLACK_CLIENT_SECRET --env production   # the production Slack app, not the staging one
-npx wrangler secret put WORKSPACES_SLACK_SIGNING_SECRET --env production  # verifies Slack's request signatures
-npx wrangler secret put OWLPOST_API_KEY --env production                  # sends the mail
-npx wrangler secret put TURNSTILE_SECRET --env production                 # captcha gate; absent = joins refused, fail-closed
-npx wrangler secret put ADMIN_TOKEN --env production                      # the waitlist CSV export
-npx wrangler secret put TYPESAFE_API_KEY --env production                 # optional: Jev triage for the coding-agents compiler
-npx wrangler secret put OAUTH_ACTIONS_CLIENT_ID --env production            # the predefined Custom GPT Actions client (docs/chatgpt.md)
-npx wrangler secret put OAUTH_ACTIONS_CLIENT_SECRET_SHA256 --env production # hex SHA-256 of that client's secret; the secret itself is never stored
-npx wrangler secret put OAUTH_ACTIONS_REDIRECT_URIS --env production        # space-separated GPT OAuth callback URLs the client accepts
+bunx wrangler secret put HARNESS_SECRET --env production                   # signs sessions and confirm links
+bunx wrangler secret put HARNESS_KEK_CURRENT --env production              # seals page bodies and Slack tokens; never staging's value
+bunx wrangler secret put MODEL_KEYS_SECRET --env production                # wraps the BYOK model-key ciphertext; never staging's value
+bunx wrangler secret put WORKSPACES_SLACK_CLIENT_SECRET --env production   # the production Slack app, not the staging one
+bunx wrangler secret put WORKSPACES_SLACK_SIGNING_SECRET --env production  # verifies Slack's request signatures
+bunx wrangler secret put OWLPOST_API_KEY --env production                  # sends the mail
+bunx wrangler secret put TURNSTILE_SECRET --env production                 # captcha gate; absent = joins refused, fail-closed
+bunx wrangler secret put ADMIN_TOKEN --env production                      # the waitlist CSV export
+bunx wrangler secret put TYPESAFE_API_KEY --env production                 # optional: Jev triage for the coding-agents compiler
+bunx wrangler secret put OAUTH_ACTIONS_CLIENT_ID --env production            # the predefined Custom GPT Actions client (docs/chatgpt.md)
+bunx wrangler secret put OAUTH_ACTIONS_CLIENT_SECRET_SHA256 --env production # hex SHA-256 of that client's secret; the secret itself is never stored
+bunx wrangler secret put OAUTH_ACTIONS_REDIRECT_URIS --env production        # space-separated GPT OAuth callback URLs the client accepts
 ```
 
 The Actions client's display name is the optional `OAUTH_ACTIONS_CLIENT_NAME`
@@ -255,17 +255,17 @@ placeholder until then, and a deploy with a placeholder id fails at
 
 ```sh
 # Resources, once each.
-npx wrangler d1 create livingbrain-staging
-npx wrangler d1 create livingbrain
-npx wrangler r2 bucket create livingbrain-blobs-staging
-npx wrangler r2 bucket create livingbrain-blobs
-npx wrangler kv namespace create KV-staging
-npx wrangler kv namespace create KV-production
+bunx wrangler d1 create livingbrain-staging
+bunx wrangler d1 create livingbrain
+bunx wrangler r2 bucket create livingbrain-blobs-staging
+bunx wrangler r2 bucket create livingbrain-blobs
+bunx wrangler kv namespace create KV-staging
+bunx wrangler kv namespace create KV-production
 ```
 
 Paste the printed ids into the matching `database_id` and `id` lines in
 `wrangler.toml` and commit that change. Secrets are per environment and go in
-Cloudflare, not in the file — `npx wrangler secret put HARNESS_SECRET --env
+Cloudflare, not in the file — `bunx wrangler secret put HARNESS_SECRET --env
 staging` (at least 32 bytes), then the same for
 `WORKSPACES_SLACK_CLIENT_SECRET` and `OWLPOST_API_KEY`, and the same three
 for `--env production` with different values.
@@ -331,7 +331,7 @@ the failure, not instead of it. Manual, when staging was green and production
 is not:
 
 ```sh
-npx wrangler deployments list --env production   # find the version to return to
+bunx wrangler deployments list --env production   # find the version to return to
 scripts/deploy/rollback.sh production <version-id>
 ```
 

@@ -1,5 +1,5 @@
 # The Living Brain Worker's Wrangler config, beside the venture crate. Run
-# `npx wrangler dev --local` from this directory (npx, so no package.json or
+# `bunx wrangler dev --local` from this directory (bunx, so no package.json or
 # node_modules lands in the repo). `worker-build` compiles the crate to wasm
 # and writes `build/worker/shim.mjs`, the Worker's entry point.
 #
@@ -20,7 +20,7 @@ compatibility_date = "2026-09-01"
 # production readiness gate runs against it at build time. Both steps run in
 # every build: the Worker, then the web app — `tools/stamp-assets.mjs`
 # content-hashes `app/` into `../../build/app`, which the environments'
-# `[assets]` serve. Node is already here (wrangler is run through npx), and the
+# `[assets]` serve. Node is already here (wrangler is run through bunx), and the
 # script needs nothing but Node's standard library.
 [build]
 command = "cargo install -q --locked worker-build && worker-build --release && node ../../tools/stamp-assets.mjs"

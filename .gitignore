@@ -6,7 +6,7 @@ build/
 .wrangler/
 .dev.vars
 
-# Node, if a tool ever pulls it in. Wrangler is run through `npx wrangler`,
+# Node, if a tool ever pulls it in. Wrangler is run through `bunx wrangler`,
 # so there is deliberately no package.json or node_modules committed.
 node_modules/
 
@@ -23,3 +23,6 @@ node_modules/
 
 # Swift package build output for the Mac app.
 macos/**/.build/
+
+# Lockfiles: this repo uses bun only; no npm lockfile is committed.
+package-lock.json

@@ -152,7 +152,7 @@ def rescue(env: str, pairs: list[tuple[str, str]], stderr: str) -> None:
     for name, _ in pairs:
         print(
             f"  python3 -c \"import json,sys; sys.stdout.write(json.load(open('{path}'))['{name}'])\""
-            f" | npx wrangler secret put {name} --env {env}",
+            f" | bunx wrangler secret put {name} --env {env}",
             file=sys.stderr,
         )
     print(f"  rm -rf {folder}", file=sys.stderr)
@@ -165,7 +165,7 @@ def main() -> int:
     parser.add_argument("--base", help="the web app's origin (default: the environment's)")
     parser.add_argument("--name", help="the app's name on GitHub (default: by environment)")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--wrangler", default="npx wrangler", help="how to run wrangler")
+    parser.add_argument("--wrangler", default="bunx wrangler", help="how to run wrangler")
     parser.add_argument("--print-manifest", action="store_true", help="print the manifest and exit")
     args = parser.parse_args()
 
@@ -184,7 +184,7 @@ def main() -> int:
     wrangler = shlex.split(args.wrangler)
     check = subprocess.run([*wrangler, "whoami"], cwd=VENTURE, capture_output=True, text=True, check=False)
     if check.returncode != 0 or "not authenticated" in (check.stdout + check.stderr).lower():
-        print("wrangler is not signed in (`npx wrangler login`), so the keys could not be stored. Stopping.")
+        print("wrangler is not signed in (`bunx wrangler login`), so the keys could not be stored. Stopping.")
         return 1
 
     state = secrets.token_urlsafe(32)

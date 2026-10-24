@@ -610,7 +610,7 @@ repositories and drops its queue.
 #### Creating the shared app (operator, once per environment)
 
 Run on the operator's machine, signed in to GitHub as an owner of
-`Livingbrain-wiki` and to Cloudflare with `npx wrangler login`:
+`Livingbrain-wiki` and to Cloudflare with `bunx wrangler login`:
 
 ```sh
 python3 scripts/github-shared-app/setup.py --env production   # app "Living Brain"

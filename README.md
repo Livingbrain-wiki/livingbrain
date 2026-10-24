@@ -98,8 +98,8 @@ cargo test --workspace                    # fmt, clippy and the parity matrix al
 cargo run -p livingbrain-cli -- --help    # the CLI: login, ask, search, note, page, export, mcp, import, view
 cargo run -p livingbrain-cli -- login     # device flow; the token goes in your OS keychain
 cd crates/livingbrain-venture
-npx wrangler d1 migrations apply livingbrain --local   # creates the tables (see below)
-npx wrangler dev --local                  # builds the Worker to wasm and serves it locally
+bunx wrangler d1 migrations apply livingbrain --local   # creates the tables (see below)
+bunx wrangler dev --local                  # builds the Worker to wasm and serves it locally
 curl -s http://127.0.0.1:8787/__health    # the harness health route
 curl -si http://127.0.0.1:8787/v1/workspaces/slack/start   # 302 to Slack, or 503 without credentials
 scripts/dev/cli-smoke.sh                  # or all of the above, end to end: boots the Worker and drives the CLI (issue #121)
@@ -116,7 +116,7 @@ Slack will only call back over HTTPS, so a local run needs a tunnel in front
 of it:
 
 ```sh
-npx cloudflared tunnel --url http://localhost:8787   # prints https://<name>.trycloudflare.com
+bunx cloudflared tunnel --url http://localhost:8787   # prints https://<name>.trycloudflare.com
 ```
 
 Then create a Slack app (From scratch) with **OpenID Connect** as the only
@@ -194,7 +194,7 @@ curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 The D1 schema is in `crates/livingbrain-venture/migrations/`, applied with
-`npx wrangler d1 migrations apply livingbrain`. The Worker secrets to set are
+`bunx wrangler d1 migrations apply livingbrain`. The Worker secrets to set are
 `HARNESS_SECRET`, `OWLPOST_API_KEY`, `TURNSTILE_SECRET` and `ADMIN_TOKEN`.
 
 ## How it will work
