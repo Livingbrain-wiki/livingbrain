@@ -111,6 +111,12 @@ pub trait TokenStore {
 pub struct Token(String);
 
 impl Token {
+    /// A token from a literal, for tests that need a signed-in client.
+    #[cfg(test)]
+    pub(crate) fn for_tests(raw: &str) -> Self {
+        Self(raw.to_owned())
+    }
+
     /// The raw token, for the `Authorization` header only.
     #[must_use]
     pub fn expose(&self) -> &str {
