@@ -363,12 +363,24 @@ fn re_syncing_sends_identical_bodies_and_reports_nothing_new() {
         .map(|body| body["body"].as_str().expect("a body").to_owned())
         .collect();
 
+    // The local ledger holds both sessions, so the re-run reads and sends
+    // nothing, and still counts them as unchanged.
     let second = sync(&home, &api_envs(&mock.base), &[]);
     assert!(second.status.success(), "stderr: {}", second.stderr);
     let second_report = json_of(&second);
     assert_eq!(second_report["uploaded"], 0, "{second_report}");
     assert_eq!(second_report["unchanged"], 2, "{second_report}");
+    assert_eq!(
+        source_bodies(&mock).len(),
+        first_bodies.len(),
+        "a re-run the ledger covers sent a body again"
+    );
 
+    // `--resync` ignores the ledger: the same bytes go again and the server
+    // answers them as already there.
+    let third = sync(&home, &api_envs(&mock.base), &["--resync"]);
+    assert!(third.status.success(), "stderr: {}", third.stderr);
+    assert_eq!(json_of(&third)["unchanged"], 2, "{}", third.stdout);
     let second_bodies: Vec<String> = source_bodies(&mock)
         .iter()
         .skip(first_bodies.len())
@@ -823,9 +835,16 @@ fn re_syncing_leaves_the_notes_unchanged() {
     assert_eq!(json_of(&first)["notes"], json!({ "written": 2 }));
     let first_notes = note_bodies(&mock);
 
+    // Covered by the ledger: no note is sent on a plain re-run.
     let second = sync(&home, &api_envs(&mock.base), &[]);
     assert!(second.status.success(), "stderr: {}", second.stderr);
-    let report = json_of(&second);
+    assert_eq!(json_of(&second)["notes"], json!({}), "{}", second.stdout);
+    assert_eq!(note_bodies(&mock).len(), first_notes.len());
+
+    // With `--resync` the notes go again and the server answers them unchanged.
+    let third = sync(&home, &api_envs(&mock.base), &["--resync"]);
+    assert!(third.status.success(), "stderr: {}", third.stderr);
+    let report = json_of(&third);
     assert_eq!(report["notes"], json!({ "unchanged": 2 }), "{report}");
     let second_notes: Vec<Value> = note_bodies(&mock)
         .into_iter()
@@ -2509,4 +2528,200 @@ fn a_newer_opt_in_file_is_refused_with_an_upgrade_hint() {
     let on_disk = std::fs::read_to_string(home.join("livingbrain").join("logs-allow.json"))
         .expect("the file is still there");
     assert_eq!(on_disk, body, "the file is not rewritten");
+}
+
+/// The planted demo session's file, as the sync reads it.
+fn demo_session_file(home: &Path) -> PathBuf {
+    PathBuf::from(claude_file(home, "-home-alice-code-demo", CLAUDE_SESSION))
+}
+
+/// The local sync ledger: `logs-synced.json`, beside the opt-in file.
+fn ledger_file(home: &Path) -> PathBuf {
+    home.join("livingbrain").join("logs-synced.json")
+}
+
+/// (q) A session the ledger holds, unchanged on disk, is skipped before its
+/// file is read: the file is made unreadable after the first sync, and the
+/// re-run still counts it as already in the ledger, with no error.
+#[cfg(unix)]
+#[test]
+fn an_unchanged_session_is_skipped_before_it_is_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    let first = sync(&home, &api_envs(&mock.base), &[]);
+    assert_eq!(json_of(&first)["uploaded"], 2, "{}", first.stdout);
+    let sent = mock.requests().len();
+
+    let file = demo_session_file(&home);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let second = sync(&home, &api_envs(&mock.base), &[]);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("restore");
+
+    assert!(second.status.success(), "stderr: {}", second.stderr);
+    let report = json_of(&second);
+    assert_eq!(report["unchanged"], 2, "{report}");
+    assert_eq!(
+        report["unreadable"], 0,
+        "the skipped file was read: {report}"
+    );
+    assert_eq!(
+        mock.requests().len(),
+        sent,
+        "a skipped session sent a request"
+    );
+}
+
+/// (r) A session file whose mtime moved is read and sent again, even though
+/// its bytes did not change: the server answers it as already there.
+#[test]
+fn a_touched_session_file_is_read_and_sent_again() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    let first = sync(&home, &api_envs(&mock.base), &[]);
+    assert_eq!(json_of(&first)["uploaded"], 2, "{}", first.stdout);
+    let before = source_bodies(&mock).len();
+
+    let file = demo_session_file(&home);
+    let handle = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .expect("open");
+    handle
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .expect("touch");
+    drop(handle);
+
+    let second = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(second.status.success(), "stderr: {}", second.stderr);
+    let report = json_of(&second);
+    assert_eq!(report["unchanged"], 2, "{report}");
+    assert_eq!(
+        source_bodies(&mock).len(),
+        before + 1,
+        "the touched file was not read and sent again"
+    );
+}
+
+/// (s) A revoked repository's sessions are not sent again, and nothing is
+/// sent for them once the allowance is gone.
+#[test]
+fn a_revoked_session_is_not_sent_again() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+    let first = sync(&home, &api_envs(&mock.base), &[]);
+    assert_eq!(json_of(&first)["uploaded"], 2, "{}", first.stdout);
+    let before = mock.requests().len();
+
+    let denied = run(
+        &temp_dir("logs-cwd"),
+        &home,
+        &["logs", "deny", DEMO_REPO, "--json"],
+        &[],
+        None,
+    );
+    assert!(denied.status.success(), "stderr: {}", denied.stderr);
+    let second = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(second.status.success(), "stderr: {}", second.stderr);
+    assert_eq!(mock.requests().len(), before, "a revoked session was sent");
+}
+
+/// (t) A dry run never writes the ledger; a corrupt ledger is tolerated (the
+/// sessions go again, the server dedupes) and replaced by the next real run.
+#[test]
+fn a_dry_run_writes_no_ledger_and_a_corrupt_one_is_replaced() {
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    plant(&home);
+    let allowed = allow(&home, DEMO_REPO);
+    assert!(allowed.status.success(), "stderr: {}", allowed.stderr);
+
+    let dry = sync(&home, &api_envs(&mock.base), &["--dry-run"]);
+    assert!(dry.status.success(), "stderr: {}", dry.stderr);
+    assert!(!ledger_file(&home).exists(), "a dry run wrote the ledger");
+    assert!(mock.requests().is_empty());
+
+    std::fs::write(ledger_file(&home), b"{ this is not a ledger").expect("corrupt it");
+    let real = sync(&home, &api_envs(&mock.base), &[]);
+    assert!(real.status.success(), "stderr: {}", real.stderr);
+    assert_eq!(json_of(&real)["uploaded"], 2, "{}", real.stdout);
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(ledger_file(&home)).expect("ledger")).expect("json");
+    assert_eq!(saved["version"], 1, "{saved}");
+    assert_eq!(saved["entries"].as_array().map(Vec::len), Some(2));
+}
+
+/// (u) `--max-sessions` stops reading colony transcripts once the cap is met:
+/// every transcript after the first (the oldest) is unreadable, so a read of
+/// any of them would be counted, and none is.
+#[cfg(unix)]
+#[test]
+fn max_sessions_does_not_read_colony_files_past_the_cap() {
+    use std::os::unix::fs::PermissionsExt;
+    let mock = sources_mock();
+    let home = temp_dir("logs-home");
+    let dir = plant_colonies(&home);
+    allow_colonies(&home);
+    let mut envs = api_envs(&mock.base);
+    envs.push(("LIVINGBRAIN_TOKEN_WS_CHI", WS_CHI_TOKEN));
+    envs.push(("LIVINGBRAIN_TOKEN_WS_FZ", WS_FZ_TOKEN));
+
+    // Order the transcripts oldest first, so the first is the one read.
+    let mut transcripts = Vec::new();
+    let mut pending = vec![dir.clone()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).expect("read dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                transcripts.push(path);
+            }
+        }
+    }
+    transcripts.sort();
+    assert!(
+        transcripts.len() >= 3,
+        "the fixtures plant several colonies"
+    );
+    let base = std::time::SystemTime::now() - std::time::Duration::from_secs(10_000);
+    for (index, path) in transcripts.iter().enumerate() {
+        let handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open");
+        let when = base + std::time::Duration::from_secs(index as u64 * 10);
+        handle.set_modified(when).expect("order");
+    }
+    for path in transcripts.iter().skip(1) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    }
+
+    let output = sync(&home, &envs, &["--max-sessions", "1"]);
+    for path in transcripts.iter().skip(1) {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    assert!(output.status.success(), "stderr: {}", output.stderr);
+    let report = json_of(&output);
+    assert_eq!(report["uploaded"], 1, "{report}");
+    assert_eq!(
+        report["unreadable"], 0,
+        "a transcript past the cap was read: {report}"
+    );
+    assert!(
+        report["skipped_max_sessions"][0]["sessions"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "{report}"
+    );
 }

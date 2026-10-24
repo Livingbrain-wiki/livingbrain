@@ -227,6 +227,10 @@ pub enum Command {
         /// Claude Code, Codex or Colonizer directory, and its repo must still be opted in
         #[arg(long = "session", value_name = "FILE")]
         sessions: Vec<PathBuf>,
+        /// Ignore the local sync ledger and send every opted-in session again
+        /// (the server still answers the ones it has as unchanged)
+        #[arg(long)]
+        resync: bool,
     },
     /// Print the redacted record `logs sync` would send for one session file,
     /// opted in or not. Local only: never touches the network
@@ -264,6 +268,7 @@ pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
             dry_run,
             max_sessions,
             sessions,
+            resync,
         } => sync(
             SyncArgs {
                 claude_dir: claude_dir.as_deref(),
@@ -272,6 +277,7 @@ pub fn run(command: &Command, api_url: &str, out: &Out) -> CliResult<()> {
                 dry_run: *dry_run,
                 max_sessions: *max_sessions,
                 only: sessions,
+                resync: *resync,
             },
             api_url,
             out,
@@ -1372,7 +1378,12 @@ fn cwd_opted_in(cwd: &str, allowed: &BTreeSet<String>) -> bool {
 /// must be opted in — fail closed, so a session that `cd`'d into another
 /// repository does not ride the first repo's allowance.
 fn opted_in(record: &SessionRecord, allowed: &BTreeSet<String>) -> bool {
-    !record.cwds.is_empty() && record.cwds.iter().all(|cwd| cwd_opted_in(cwd, allowed))
+    opted_in_cwds(&record.cwds, allowed)
+}
+
+/// [`opted_in`] on a session's working directories alone.
+fn opted_in_cwds(cwds: &[String], allowed: &BTreeSet<String>) -> bool {
+    !cwds.is_empty() && cwds.iter().all(|cwd| cwd_opted_in(cwd, allowed))
 }
 
 /// The level a session is sent at: for each working directory, the level
@@ -1380,9 +1391,12 @@ fn opted_in(record: &SessionRecord, allowed: &BTreeSet<String>) -> bool {
 /// across directories the most restrictive of those. Only meaningful for a
 /// session [`opted_in`] already admitted.
 fn detail_for(record: &SessionRecord, allowlist: &AllowlistFile) -> Detail {
-    record
-        .cwds
-        .iter()
+    detail_for_cwds(&record.cwds, allowlist)
+}
+
+/// [`detail_for`] on a session's working directories alone.
+fn detail_for_cwds(cwds: &[String], allowlist: &AllowlistFile) -> Detail {
+    cwds.iter()
         .filter_map(|cwd| {
             let resolved = std::fs::canonicalize(cwd)
                 .map(|path| path.to_string_lossy().into_owned())
@@ -1781,6 +1795,13 @@ struct Prepared {
     redacted: usize,
     /// The tool-call count, computed once for both reports.
     tool_calls: usize,
+    /// The turn count, kept after the turns themselves are dropped.
+    turn_count: usize,
+    /// The working directories as the log recorded them, before anything is
+    /// rewritten for the wire: what the ledger keys the opt-in on.
+    cwds: Vec<String>,
+    /// The level the session was sent at (or would be).
+    detail: Detail,
     uploaded: Option<String>,
     /// Whether the upload created the row (201) or read one back (200).
     created: bool,
@@ -1808,38 +1829,50 @@ struct SyncArgs<'a> {
     dry_run: bool,
     max_sessions: Option<u64>,
     only: &'a [PathBuf],
+    resync: bool,
 }
 
-/// `livingbrain logs sync`: everything before [`upload`] is local — walk,
-/// parse, decide, elide, redact — so a machine with nothing opted in runs the
-/// whole command without a single packet, the auth request included.
-/// `--dry-run` stops after the report for the same reason.
+/// `livingbrain logs sync`: everything before the first request is local —
+/// list, read, parse, decide, elide, redact. Each session is sent as soon as
+/// it is built and its body dropped, so a run never holds the whole backlog.
+/// A session the local ledger already holds is skipped before its file is
+/// read. `--dry-run` never reaches the socket, the keychain or the ledger.
 fn sync(args: SyncArgs<'_>, api_url: &str, out: &Out) -> CliResult<()> {
     let (home, claude_dir, codex_dir, colonizer_dir) =
         session_dirs(args.claude_dir, args.codex_dir, args.colonizer_dir)?;
     let only = resolve_only(args.only)?;
     let allowlist = read_allowlist()?;
-    let (mut sessions, unreadable, unparsed) = collect_sessions(
+    let listed = list_files(
         &claude_dir,
         &codex_dir,
         colonizer_dir.as_deref(),
         &allowlist,
-        &home,
-        only.as_ref(),
         false,
     )?;
-    let held = upload(&mut sessions, args.dry_run, api_url, args.max_sessions)?;
+    // A named file that is not a session is refused before anything is read or sent.
+    check_named(&listed, only.as_ref(), &claude_dir, &codex_dir)?;
+    let spawns = CodexSpawns::index(&codex_dir);
+    let from_env = std::env::var(DEFAULT_WORKSPACE_ENV)
+        .ok()
+        .filter(|id| !id.is_empty());
+    let mut run = Run::new(&allowlist, api_url, &args, from_env);
+    let walked = run.walk(&listed, only.as_ref(), &spawns, &home);
+    // Saved whatever happened above: a re-run skips what already landed.
+    let saved = run.ledger.flush(args.dry_run);
+    walked?;
+    let held = run.held_list();
     report(
-        &sessions,
-        unreadable,
-        unparsed,
+        &run.sessions,
+        &run.tally,
         args.dry_run,
         (&claude_dir, &codex_dir),
         &held,
         out,
     );
+    saved?;
     // The report has said which sessions failed; the exit code says that one did.
-    let failed = sessions
+    let failed = run
+        .sessions
         .iter()
         .filter(|session| session.failure.is_some())
         .count();
@@ -1849,6 +1882,464 @@ fn sync(args: SyncArgs<'_>, api_url: &str, out: &Out) -> CliResult<()> {
         )));
     }
     Ok(())
+}
+
+/// One sync run's state: the ledger, each workspace's sign-in as it is first
+/// needed, and what has been sent so far.
+struct Run<'a> {
+    allowlist: &'a AllowlistFile,
+    api_url: &'a str,
+    dry_run: bool,
+    max_sessions: Option<u64>,
+    resync: bool,
+    /// The routing a ledger entry was recorded under (see [`routing_of`]).
+    routing: String,
+    expectation: DefaultExpectation,
+    ledger: Ledger,
+    /// Each workspace's sign-in, read on first use: a client, or the status
+    /// the workspace's sessions are held with.
+    signed_in: BTreeMap<String, Result<Client, &'static str>>,
+    repos: Repos,
+    sessions: Vec<Prepared>,
+    /// Sessions held per (workspace, status), for the report.
+    held: BTreeMap<(String, &'static str), usize>,
+    /// New colony sessions the server created this run: the `--max-sessions` count.
+    new_colony: u64,
+    tally: Tally,
+}
+
+/// The files a run did not read, and the failures it counted without a session.
+#[derive(Debug, Default)]
+struct Tally {
+    unreadable: usize,
+    unparsed: usize,
+    /// Sessions the ledger already holds, skipped before their file was read.
+    unchanged: usize,
+    /// Colony transcripts past `--max-sessions`, counted from metadata only.
+    capped: usize,
+}
+
+impl<'a> Run<'a> {
+    fn new(
+        allowlist: &'a AllowlistFile,
+        api_url: &'a str,
+        args: &SyncArgs<'_>,
+        from_env: Option<String>,
+    ) -> Self {
+        Self {
+            allowlist,
+            api_url,
+            dry_run: args.dry_run,
+            max_sessions: args.max_sessions,
+            resync: args.resync,
+            routing: routing_of(allowlist, &from_env),
+            expectation: default_expectation(from_env, allowlist),
+            ledger: Ledger::load(),
+            signed_in: BTreeMap::new(),
+            repos: Repos::default(),
+            sessions: Vec::new(),
+            held: BTreeMap::new(),
+            new_colony: 0,
+            tally: Tally::default(),
+        }
+    }
+
+    /// Decide each listed file in order, reading only what must be read.
+    fn walk(
+        &mut self,
+        listed: &[Listed],
+        only: Option<&BTreeSet<PathBuf>>,
+        spawns: &CodexSpawns,
+        home: &Option<PathBuf>,
+    ) -> CliResult<()> {
+        let allowlist = self.allowlist;
+        let reader = Reader {
+            spawns,
+            allowlist,
+            home,
+            show_all: false,
+        };
+        for (agent, file, colony) in listed {
+            if let Some(only) = only
+                && !only.contains(&resolved_path(file))
+            {
+                continue;
+            }
+            // A spawned rollout travels inside its spawner — unless it was named on its own.
+            if matches!(agent, Agent::Codex) && only.is_none() && spawns.nested.contains(file) {
+                continue;
+            }
+            let stamp = Stamp::of(file);
+            if self.skips(file, stamp) {
+                self.tally.unchanged += 1;
+                continue;
+            }
+            // Past the cap, a colony transcript is counted without being read.
+            if colony.is_some() && self.max_sessions.is_some_and(|cap| self.new_colony >= cap) {
+                self.tally.capped += 1;
+                continue;
+            }
+            match reader.read(&mut self.repos, *agent, file, colony.as_ref())? {
+                Read::Unreadable => self.tally.unreadable += 1,
+                Read::Unparsed => self.tally.unparsed += 1,
+                Read::Session(session) => {
+                    self.dispatch(*session, stamp, colony.is_some())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the ledger already holds this file's session as it is now: the
+    /// file's size and mtime, the routing, and the level it was sent at are
+    /// unchanged. A session whose path the allowlist has since revoked is
+    /// skipped too, since nothing would be sent for it.
+    fn skips(&self, file: &Path, stamp: Option<Stamp>) -> bool {
+        let Some(stamp) = stamp else { return false };
+        if self.resync {
+            return false;
+        }
+        let Some(entry) = self.ledger.get(self.api_url, &canonical_text(file)) else {
+            return false;
+        };
+        entry.stamp() == stamp
+            && entry.routing == self.routing
+            && (!opted_in_cwds(&entry.cwds, &self.allowlist.allowed)
+                || detail_for_cwds(&entry.cwds, self.allowlist) == entry.detail)
+    }
+
+    /// Send one decided session (or hold it), record it in the ledger when the
+    /// server has it, and drop its body and turns: only the summary is kept.
+    fn dispatch(
+        &mut self,
+        mut session: Prepared,
+        stamp: Option<Stamp>,
+        colony: bool,
+    ) -> CliResult<()> {
+        let workspace = match &session.destination {
+            Destination::Default => Some(route::DEFAULT.to_owned()),
+            Destination::Workspace(id) => Some(id.clone()),
+            Destination::Unroutable(_) | Destination::Mixed => None,
+        };
+        if let Some(workspace) = workspace
+            && session.opted_in
+            && !self.dry_run
+        {
+            let outcome = match self.sign_in(&workspace)? {
+                Ok(client) => Ok(send(client, &mut session)),
+                Err(status) => Err(status),
+            };
+            match outcome {
+                Err(status) => {
+                    session.held = Some(status);
+                    *self.held.entry((workspace, status)).or_default() += 1;
+                }
+                // A session that still fails after its retries is recorded, and the
+                // loop goes on: one bad upload must not hold back the rest. Nothing
+                // was written for it, so the next run sends it again.
+                Ok(Ok(())) => {
+                    if colony && session.created {
+                        self.new_colony += 1;
+                    }
+                    self.remember(&session, stamp)?;
+                }
+                Ok(Err(error)) => session.failure = Some(error.to_string()),
+            }
+        }
+        session.body = None;
+        session.record.turns = Vec::new();
+        self.sessions.push(session);
+        Ok(())
+    }
+
+    /// Record a session the server has (created or already there) and its
+    /// note, when one was planned: the next run skips it while it is unchanged.
+    fn remember(&mut self, session: &Prepared, stamp: Option<Stamp>) -> CliResult<()> {
+        if !note::accepted(session.note.as_ref()) {
+            return Ok(());
+        }
+        let (Some(stamp), Some(source_id)) = (stamp, session.uploaded.clone()) else {
+            return Ok(());
+        };
+        self.ledger.insert(LedgerEntry {
+            api_url: self.api_url.to_owned(),
+            path: canonical_text(&session.file),
+            size: stamp.size,
+            mtime_secs: stamp.secs,
+            mtime_nanos: stamp.nanos,
+            detail: session.detail,
+            cwds: session.cwds.clone(),
+            destination: session.destination.key().to_owned(),
+            routing: self.routing.clone(),
+            source_id,
+        });
+        if self.ledger.dirty >= LEDGER_FLUSH_EVERY {
+            self.ledger.flush(self.dry_run)?;
+        }
+        Ok(())
+    }
+
+    /// The workspace's sign-in, read the first time a session needs it. A
+    /// failure of the default workspace's own keychain read is the run's
+    /// failure; any other missing or unreadable sign-in holds only its own
+    /// sessions, as before.
+    fn sign_in(&mut self, workspace: &str) -> CliResult<Result<&Client, &'static str>> {
+        if !self.signed_in.contains_key(workspace) {
+            let api_url = self.api_url;
+            let entry = match lookup_one(workspace, |name| token_of(name, api_url))? {
+                Lookup::Ready(token) => {
+                    if workspace == route::DEFAULT
+                        && default_unconfirmed(&self.expectation, api_url, &token)
+                    {
+                        Err("skipped_default_mismatch")
+                    } else {
+                        Ok(Client::new(api_url).with_token(token))
+                    }
+                }
+                Lookup::NoToken => Err("skipped_no_token"),
+                Lookup::KeychainDenied => Err("skipped_keychain_denied"),
+            };
+            self.signed_in.insert(workspace.to_owned(), entry);
+        }
+        Ok(self.signed_in[workspace].as_ref().map_err(|status| *status))
+    }
+
+    fn held_list(&self) -> Vec<Held> {
+        self.held
+            .iter()
+            .map(|((workspace, status), sessions)| Held {
+                workspace: workspace.clone(),
+                sessions: *sessions,
+                status,
+            })
+            .collect()
+    }
+}
+
+/// The token of one workspace, for [`lookup_one`]: the default workspace's
+/// (with the keychain off, a missing default sign-in is `None`) or a routed
+/// workspace's.
+fn token_of(workspace: &str, api_url: &str) -> CliResult<Option<Token>> {
+    if workspace == route::DEFAULT {
+        return match crate::auth::token_for(api_url) {
+            Ok(token) => Ok(Some(token)),
+            // Keychain off: a run with no default sign-in holds that group.
+            Err(CliError::NotLoggedIn(_)) if crate::auth::keychain_gate_process().is_err() => {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        };
+    }
+    crate::auth::workspace_token(api_url, workspace)
+}
+
+/// The routing a ledger entry was recorded under: the workspace of each
+/// allowed root, the routes, the default workspace and the app's default. A
+/// change to any of them makes every entry stale, so those sessions go again.
+fn routing_of(allowlist: &AllowlistFile, from_env: &Option<String>) -> String {
+    json!({
+        "workspace": allowlist.workspace,
+        "routes": allowlist.routes,
+        "default_workspace": allowlist.default_workspace,
+        "app_default": from_env,
+    })
+    .to_string()
+}
+
+/// A file's size and last write, read before the file is, so a file that
+/// changes during a run is re-read next time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    size: u64,
+    secs: u64,
+    nanos: u32,
+}
+
+impl Stamp {
+    fn of(file: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(file).ok()?;
+        let written = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            size: meta.len(),
+            secs: written.as_secs(),
+            nanos: written.subsec_nanos(),
+        })
+    }
+}
+
+/// The ledger's file, under [`config_dir`].
+const LEDGER_FILE: &str = "logs-synced.json";
+
+/// The ledger's shape version: any other version is started over, not read.
+const LEDGER_VERSION: u32 = 1;
+
+/// Save the ledger every this many new entries, so an interrupted run keeps
+/// most of its progress (an unsaved entry only costs a re-send, which the
+/// server dedupes).
+const LEDGER_FLUSH_EVERY: usize = 50;
+
+/// One session the server has: keyed by its file and destination API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct LedgerEntry {
+    api_url: String,
+    /// The canonical path of the session file.
+    path: String,
+    size: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    /// The level the session was sent at.
+    detail: Detail,
+    /// The working directories the session was opted in on, as recorded.
+    cwds: Vec<String>,
+    /// The workspace the session was sent to.
+    destination: String,
+    routing: String,
+    /// The source id the server answered with.
+    source_id: String,
+}
+
+impl LedgerEntry {
+    fn stamp(&self) -> Stamp {
+        Stamp {
+            size: self.size,
+            secs: self.mtime_secs,
+            nanos: self.mtime_nanos,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LedgerFile {
+    version: u32,
+    entries: Vec<LedgerEntry>,
+}
+
+/// The local record of what `logs sync` has sent. It is an optimisation only:
+/// the server's dedupe makes a lost or unreadable ledger safe, just slower.
+#[derive(Clone)]
+struct Ledger {
+    /// `None` when no config directory can be found: nothing is skipped or saved.
+    path: Option<PathBuf>,
+    entries: BTreeMap<(String, String), LedgerEntry>,
+    /// Entries added since the last save.
+    dirty: usize,
+    /// The file was corrupt, unreadable or another version: save it fresh.
+    rewrite: bool,
+}
+
+impl Ledger {
+    /// Read the ledger. A missing file is an empty one; a corrupt, unreadable
+    /// or other-version file is treated as empty and replaced on the next save.
+    /// (The `load_from` below is the one the tests use.)
+    fn load() -> Self {
+        Self::load_from(config_dir().ok().map(|dir| dir.join(LEDGER_FILE)))
+    }
+
+    /// [`Ledger::load`] from a given file (`None`: no ledger at all).
+    fn load_from(path: Option<PathBuf>) -> Self {
+        let mut ledger = Self {
+            path: path.clone(),
+            entries: BTreeMap::new(),
+            dirty: 0,
+            rewrite: false,
+        };
+        let Some(path) = path else {
+            return ledger;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<LedgerFile>(&bytes) {
+                Ok(file) if file.version == LEDGER_VERSION => {
+                    for entry in file.entries {
+                        ledger
+                            .entries
+                            .insert((entry.api_url.clone(), entry.path.clone()), entry);
+                    }
+                }
+                _ => ledger.rewrite = true,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => ledger.rewrite = true,
+        }
+        ledger
+    }
+
+    fn get(&self, api_url: &str, path: &str) -> Option<&LedgerEntry> {
+        self.entries.get(&(api_url.to_owned(), path.to_owned()))
+    }
+
+    fn insert(&mut self, entry: LedgerEntry) {
+        self.entries
+            .insert((entry.api_url.clone(), entry.path.clone()), entry);
+        self.dirty += 1;
+    }
+
+    /// Save the ledger atomically, when it changed or needs replacing. A dry
+    /// run never writes it.
+    fn flush(&mut self, dry_run: bool) -> CliResult<()> {
+        if dry_run || (self.dirty == 0 && !self.rewrite) {
+            return Ok(());
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let file = LedgerFile {
+            version: LEDGER_VERSION,
+            entries: self.entries.values().cloned().collect(),
+        };
+        let body = serde_json::to_vec_pretty(&file).expect("a ledger always serialises");
+        write_private(path, &body)?;
+        self.dirty = 0;
+        self.rewrite = false;
+        Ok(())
+    }
+}
+
+/// Write a file atomically — a temp file beside it, then a rename — readable
+/// by its owner only on unix.
+fn write_private(path: &Path, body: &[u8]) -> CliResult<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| err("the ledger path has no parent"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| err(format!("could not create {}: {error}", parent.display())))?;
+    let name = path.file_name().map_or_else(
+        || "ledger".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let temp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    let written = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    written.map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        err(format!("could not write {}: {error}", path.display()))
+    })
+}
+
+/// A path as the ledger and the `--session` filter compare it: canonical when
+/// the filesystem resolves it, as given otherwise.
+fn resolved_path(file: &Path) -> PathBuf {
+    std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf())
+}
+
+fn canonical_text(file: &Path) -> String {
+    resolved_path(file).to_string_lossy().into_owned()
 }
 
 /// `$HOME`, the two agents' session directories and the Colonizer directory:
@@ -1916,21 +2407,38 @@ fn show(
         session_dirs(claude_dir, codex_dir, colonizer_dir)?;
     let only = resolve_only(&[file.to_path_buf()])?;
     let allowlist = read_allowlist()?;
-    let (sessions, _, _) = collect_sessions(
+    let listed = list_files(
         &claude_dir,
         &codex_dir,
         colonizer_dir.as_deref(),
         &allowlist,
-        &home,
-        only.as_ref(),
         true,
     )?;
-    let Some(session) = sessions.into_iter().next() else {
+    check_named(&listed, only.as_ref(), &claude_dir, &codex_dir)?;
+    let spawns = CodexSpawns::index(&codex_dir);
+    let reader = Reader {
+        spawns: &spawns,
+        allowlist: &allowlist,
+        home: &home,
+        show_all: true,
+    };
+    let picked = listed.iter().find(|(_, path, _)| {
+        only.as_ref()
+            .is_some_and(|only| only.contains(&resolved_path(path)))
+    });
+    let read = match picked {
+        Some((agent, path, colony)) => {
+            reader.read(&mut Repos::default(), *agent, path, colony.as_ref())?
+        }
+        None => Read::Unparsed,
+    };
+    let Read::Session(session) = read else {
         return Err(err(format!(
             "{}: no agent session in this file",
             file.display()
         )));
     };
+    let session = *session;
     let redacted = session.redacted;
     let body = session
         .body
@@ -2076,34 +2584,21 @@ fn destination_for(
     Destination::combine(destinations.into_iter())
 }
 
-/// Walk both agents' directories, parse every session file, and decide the
-/// opt-in — in that order: a session that is not opted in never produces
-/// bytes, unless `show_all` (`logs show`, which prints and sends nothing)
-/// asks for every body; a session that is not opted in is shown at `full`.
-/// Returns the sessions plus two kinds of failure: `unreadable` files could
-/// not be read at all, `unparsed` ones were read but yielded no session
-/// (empty or foreign `.jsonl`).
-fn collect_sessions(
+/// One session file a run may read: its agent, its path and, for a colony
+/// transcript, the colony it came from.
+type Listed = (Agent, PathBuf, Option<Colony>);
+
+/// The files this run may read, in the order it decides them: Claude Code's
+/// and Codex's trees, then the opted-in colonies' transcripts, oldest first.
+/// Lists paths only; nothing is read.
+fn list_files(
     claude_dir: &Path,
     codex_dir: &Path,
     colonizer_dir: Option<&Path>,
     allowlist: &AllowlistFile,
-    home: &Option<PathBuf>,
-    only: Option<&BTreeSet<PathBuf>>,
     show_all: bool,
-) -> CliResult<(Vec<Prepared>, usize, usize)> {
-    let mut sessions = Vec::new();
-    let (mut unreadable, mut unparsed) = (0usize, 0usize);
-    let mut matched: BTreeSet<PathBuf> = BTreeSet::new();
-    // Codex writes a spawned agent's rollout as a file of its own; it is
-    // read as part of the session that spawned it, not as one more.
-    let spawns = CodexSpawns::index(codex_dir);
-    // One repository probe per top level for the whole run, and only when a
-    // route needs it.
-    let mut repos = Repos::default();
-    // Every file this run may read, in the order it decides them: Claude Code's
-    // and Codex's trees, then the opted-in colonies' transcripts, oldest first.
-    let mut files: Vec<(Agent, PathBuf, Option<Colony>)> = Vec::new();
+) -> CliResult<Vec<Listed>> {
+    let mut files: Vec<Listed> = Vec::new();
     for (agent, dir, levels) in [
         // Claude Code lays sessions out one directory per project — walk into
         // exactly that one level; Codex nests them by date, so its walk goes
@@ -2124,82 +2619,26 @@ fn collect_sessions(
                 .map(|(file, colony)| (Agent::ClaudeCode, file, Some(colony))),
         );
     }
-    for (agent, file, colony) in files {
-        // `--session`: only the named files, matched on their resolved
-        // path. The agent is still decided by which tree the file is in.
-        let named = only.is_some_and(|only| {
-            only.contains(&std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone()))
-        });
-        if let Some(only) = only {
-            let resolved = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
-            if !only.contains(&resolved) {
-                continue;
-            }
-            matched.insert(resolved);
-        }
-        // A spawned rollout whose spawner is here travels inside it —
-        // unless it was named on its own.
-        if matches!(agent, Agent::Codex) && spawns.nested.contains(&file) && !named {
-            continue;
-        }
-        let text = match std::fs::read_to_string(&file) {
-            Ok(text) => text,
-            Err(_) => {
-                unreadable += 1;
-                continue;
-            }
-        };
-        let Some(mut record) = collect(&text, agent) else {
-            unparsed += 1;
-            continue;
-        };
-        match agent {
-            Agent::ClaudeCode => claude::attach(&mut record, claude::children(&file)),
-            Agent::Codex => spawns.attach(&mut record, 0),
-        }
-        // A colony's records name the guest's `/workspace`; the session
-        // happened in the colony's repository, so that is its one directory.
-        if let Some(colony) = &colony {
-            record.cwds = vec![colony.url.clone()];
-            record.repo = colony.url.clone();
-        }
-        // Opt-in is decided on the cwds as the log recorded them, before
-        // anything is rewritten for the wire.
-        let opted = opted_in(&record, &allowlist.allowed);
-        let detail = if opted {
-            detail_for(&record, allowlist)
-        } else {
-            Detail::Full
-        };
-        let built = prepare(&mut record, detail, home, opted || show_all, &file)?;
-        let (body, redacted) = match built {
-            Some((body, redacted)) => (Some(body), redacted),
-            None => (None, 0),
-        };
-        let tool_calls = tool_call_count(&record);
-        let planned_note = if opted { note::plan(&record) } else { None };
-        let destination = if opted {
-            destination_for(&record, allowlist, &mut repos)
-        } else {
-            Destination::Default
-        };
-        sessions.push(Prepared {
-            record,
-            file,
-            opted_in: opted,
-            body,
-            redacted,
-            tool_calls,
-            uploaded: None,
-            created: false,
-            note: planned_note,
-            destination,
-            held: None,
-            failure: None,
-            origin_ref: colony.map(|colony| colony.id),
-        });
-    }
-    if let Some(stray) = only.and_then(|only| only.difference(&matched).next()) {
+    Ok(files)
+}
+
+/// Refuse a `--session` that is not one of the listed files. Checked before
+/// any file is read, so a stray name sends nothing.
+fn check_named(
+    listed: &[Listed],
+    only: Option<&BTreeSet<PathBuf>>,
+    claude_dir: &Path,
+    codex_dir: &Path,
+) -> CliResult<()> {
+    let Some(only) = only else {
+        return Ok(());
+    };
+    let matched: BTreeSet<PathBuf> = listed
+        .iter()
+        .map(|(_, file, _)| resolved_path(file))
+        .filter(|file| only.contains(file))
+        .collect();
+    if let Some(stray) = only.difference(&matched).next() {
         return Err(err(format!(
             "--session {}: not a session file under {} or {}, or in an opted-in colony",
             stray.display(),
@@ -2207,7 +2646,96 @@ fn collect_sessions(
             codex_dir.display()
         )));
     }
-    Ok((sessions, unreadable, unparsed))
+    Ok(())
+}
+
+/// What reading one listed file produced.
+enum Read {
+    /// The file could not be read at all.
+    Unreadable,
+    /// The file was read but yields no session (empty or foreign `.jsonl`).
+    Unparsed,
+    /// A session, decided. Its body is built only for an opted-in session
+    /// (or for `show`, which prints every one).
+    Session(Box<Prepared>),
+}
+
+/// How a listed file is read and decided: the Codex spawn index, the opt-in,
+/// the home directory, and whether every session's body is built (`show`).
+struct Reader<'a> {
+    spawns: &'a CodexSpawns,
+    allowlist: &'a AllowlistFile,
+    home: &'a Option<PathBuf>,
+    show_all: bool,
+}
+
+impl Reader<'_> {
+    /// Read and decide one file: parse, attach its children, opt-in, detail,
+    /// elide and redact, and the destination. Opt-in is decided on the cwds
+    /// as the log recorded them, before anything is rewritten for the wire.
+    fn read(
+        &self,
+        repos: &mut Repos,
+        agent: Agent,
+        file: &Path,
+        colony: Option<&Colony>,
+    ) -> CliResult<Read> {
+        let text = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(_) => return Ok(Read::Unreadable),
+        };
+        let Some(mut record) = collect(&text, agent) else {
+            return Ok(Read::Unparsed);
+        };
+        match agent {
+            Agent::ClaudeCode => claude::attach(&mut record, claude::children(file)),
+            Agent::Codex => self.spawns.attach(&mut record, 0),
+        }
+        // A colony's records name the guest's `/workspace`; the session
+        // happened in the colony's repository, so that is its one directory.
+        if let Some(colony) = colony {
+            record.cwds = vec![colony.url.clone()];
+            record.repo = colony.url.clone();
+        }
+        let opted = opted_in(&record, &self.allowlist.allowed);
+        let detail = if opted {
+            detail_for(&record, self.allowlist)
+        } else {
+            Detail::Full
+        };
+        let cwds = record.cwds.clone();
+        let built = prepare(&mut record, detail, self.home, opted || self.show_all, file)?;
+        let (body, redacted) = match built {
+            Some((body, redacted)) => (Some(body), redacted),
+            None => (None, 0),
+        };
+        let tool_calls = tool_call_count(&record);
+        let turn_count = record.turns.len();
+        let planned_note = if opted { note::plan(&record) } else { None };
+        let destination = if opted {
+            destination_for(&record, self.allowlist, repos)
+        } else {
+            Destination::Default
+        };
+        Ok(Read::Session(Box::new(Prepared {
+            record,
+            file: file.to_path_buf(),
+            opted_in: opted,
+            body,
+            redacted,
+            tool_calls,
+            turn_count,
+            cwds,
+            detail,
+            uploaded: None,
+            created: false,
+            destination,
+            held: None,
+            note: planned_note,
+            failure: None,
+            origin_ref: colony.map(|colony| colony.id.clone()),
+        })))
+    }
 }
 
 /// The transcripts of the colonies whose repository is opted in, each with its
@@ -2321,9 +2849,6 @@ struct Held {
     status: &'static str,
 }
 
-/// One workspace group's sessions and how its token was decided.
-type Plan<T> = Vec<(String, Lookup<T>, Vec<usize>)>;
-
 /// The token situation of one workspace group.
 enum Lookup<T> {
     Ready(T),
@@ -2331,158 +2856,20 @@ enum Lookup<T> {
     KeychainDenied,
 }
 
-/// Decide each group's token. With the keychain on, the default workspace's own
-/// failure is the run's failure, as it always was. With it off (the Mac app's
-/// runs) a missing default token is only a held group, decided in `upload`. A
-/// routed workspace whose keychain item cannot be read holds only its own
-/// sessions (its error text is dropped, it may name the item but never a
-/// secret).
-fn plan_tokens<T>(
-    groups: BTreeMap<String, Vec<usize>>,
+/// One workspace's token outcome: the default workspace's own failure is the
+/// run's failure (with the keychain on, as it always was); a routed
+/// workspace's unreadable keychain item holds only its own sessions (its error
+/// text is dropped, it may name the item but never a secret).
+fn lookup_one<T>(
+    workspace: &str,
     mut lookup: impl FnMut(&str) -> CliResult<Option<T>>,
-) -> CliResult<Plan<T>> {
-    let mut plan = Vec::new();
-    for (workspace, indices) in groups {
-        let outcome = match lookup(&workspace) {
-            Ok(Some(token)) => Lookup::Ready(token),
-            Ok(None) => Lookup::NoToken,
-            Err(error) if workspace == route::DEFAULT => return Err(error),
-            Err(_) => Lookup::KeychainDenied,
-        };
-        plan.push((workspace, outcome, indices));
+) -> CliResult<Lookup<T>> {
+    match lookup(workspace) {
+        Ok(Some(token)) => Ok(Lookup::Ready(token)),
+        Ok(None) => Ok(Lookup::NoToken),
+        Err(error) if workspace == route::DEFAULT => Err(error),
+        Err(_) => Ok(Lookup::KeychainDenied),
     }
-    Ok(plan)
-}
-
-/// Upload the opted-in sessions, one POST each, grouped by workspace: each
-/// group goes with its own token. This is the command's first socket and its
-/// first read of any token; both sit after all the local work on purpose, and
-/// `--dry-run` never gets here at all. Every token is read before the first
-/// request. With the keychain on, a missing default sign-in fails the run
-/// before anything is sent, as it always has; with it off (the Mac app's runs)
-/// only the default group is held. The default token must belong to the
-/// workspace the app or the opt-in file names, or that group is held too. A
-/// session whose workspace cannot be signed into is held (never sent to
-/// another workspace) and reported. Unroutable and mixed sessions are never
-/// grouped at all.
-fn upload(
-    sessions: &mut [Prepared],
-    dry_run: bool,
-    api_url: &str,
-    max_sessions: Option<u64>,
-) -> CliResult<Vec<Held>> {
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (index, session) in sessions.iter().enumerate() {
-        if !session.opted_in {
-            continue;
-        }
-        if matches!(
-            session.destination,
-            Destination::Default | Destination::Workspace(_)
-        ) {
-            groups
-                .entry(session.destination.key().to_owned())
-                .or_default()
-                .push(index);
-        }
-    }
-    if dry_run || groups.is_empty() {
-        return Ok(Vec::new());
-    }
-    let from_env = std::env::var(DEFAULT_WORKSPACE_ENV)
-        .ok()
-        .filter(|id| !id.is_empty());
-    let expectation = default_expectation(from_env, &read_allowlist()?);
-    let plan = plan_tokens(groups, |workspace| {
-        if workspace == route::DEFAULT {
-            return match crate::auth::token_for(api_url) {
-                Ok(token) => Ok(Some(token)),
-                // Keychain off: a run with no default sign-in holds that group.
-                Err(CliError::NotLoggedIn(_)) if crate::auth::keychain_gate_process().is_err() => {
-                    Ok(None)
-                }
-                Err(error) => Err(error),
-            };
-        }
-        crate::auth::workspace_token(api_url, workspace)
-    })?;
-    let mut held = Vec::new();
-    // Each workspace's client, for the workspaces whose token is ready.
-    let mut clients: BTreeMap<String, Client> = BTreeMap::new();
-    for (workspace, outcome, indices) in plan {
-        let token = match outcome {
-            Lookup::Ready(token) => token,
-            Lookup::NoToken => {
-                hold(sessions, &indices, "skipped_no_token");
-                held.push(Held {
-                    workspace,
-                    sessions: indices.len(),
-                    status: "skipped_no_token",
-                });
-                continue;
-            }
-            Lookup::KeychainDenied => {
-                hold(sessions, &indices, "skipped_keychain_denied");
-                held.push(Held {
-                    workspace,
-                    sessions: indices.len(),
-                    status: "skipped_keychain_denied",
-                });
-                continue;
-            }
-        };
-        if workspace == route::DEFAULT && default_unconfirmed(&expectation, api_url, &token) {
-            hold(sessions, &indices, "skipped_default_mismatch");
-            held.push(Held {
-                workspace,
-                sessions: indices.len(),
-                status: "skipped_default_mismatch",
-            });
-            continue;
-        }
-        clients.insert(workspace, Client::new(api_url).with_token(token));
-    }
-    // Sent in collection order, which puts the colonies' transcripts last and
-    // oldest first. `max_sessions` counts only the sessions the ledger takes as
-    // new, and stops at the cap: a re-run skips what is already there, so
-    // successive runs work through the backlog from the oldest end.
-    let mut new_colony = 0u64;
-    let mut waiting: BTreeMap<String, usize> = BTreeMap::new();
-    for session in sessions.iter_mut() {
-        if !session.opted_in || session.held.is_some() {
-            continue;
-        }
-        let workspace = match &session.destination {
-            Destination::Default => route::DEFAULT.to_owned(),
-            Destination::Workspace(id) => id.clone(),
-            Destination::Unroutable(_) | Destination::Mixed => continue,
-        };
-        let Some(client) = clients.get(&workspace) else {
-            continue;
-        };
-        let colony = session.origin_ref.is_some();
-        if colony && max_sessions.is_some_and(|cap| new_colony >= cap) {
-            session.held = Some("skipped_max_sessions");
-            *waiting.entry(workspace).or_default() += 1;
-            continue;
-        }
-        // A session that still fails after its retries is recorded, and the
-        // loop goes on: one bad upload must not hold back the rest. Nothing
-        // was written for it, so the next run sends it again.
-        match send(client, session) {
-            Ok(()) if colony && session.created => new_colony += 1,
-            Ok(()) => {}
-            Err(error) => session.failure = Some(error.to_string()),
-        }
-    }
-    for (workspace, sessions) in waiting {
-        held.push(Held {
-            workspace,
-            sessions,
-            status: "skipped_max_sessions",
-        });
-    }
-    Ok(held)
 }
 
 /// What the default token must belong to in this run.
@@ -2522,13 +2909,6 @@ fn default_unconfirmed(expectation: &DefaultExpectation, api_url: &str, token: &
                 Err(_) => true,
             }
         }
-    }
-}
-
-/// Mark sessions as held at upload, with the status they report.
-fn hold(sessions: &mut [Prepared], indices: &[usize], status: &'static str) {
-    for &index in indices {
-        sessions[index].held = Some(status);
     }
 }
 
@@ -2599,15 +2979,20 @@ fn project_of(repo: &str) -> Option<String> {
 /// The report, JSON or human: one line per session, then the counts.
 fn report(
     sessions: &[Prepared],
-    unreadable: usize,
-    unparsed: usize,
+    tally: &Tally,
     dry_run: bool,
     dirs: (&Path, &Path),
     held: &[Held],
     out: &Out,
 ) {
+    let Tally {
+        unreadable,
+        unparsed,
+        unchanged: ledger_unchanged,
+        capped,
+    } = *tally;
     let (mut uploaded, mut unchanged, mut skipped, mut mixed, mut unroutable) =
-        (0usize, 0usize, 0usize, 0usize, 0usize);
+        (0usize, ledger_unchanged, 0usize, 0usize, 0usize);
     let mut failed = 0usize;
     let mut would_upload = 0usize;
     let mut redacted_total = 0usize;
@@ -2660,7 +3045,7 @@ fn report(
             "session_id": session.record.session_id,
             "repo": session.record.repo,
             "models": session.record.models,
-            "turns": session.record.turns.len(),
+            "turns": session.turn_count,
             "tool_calls": session.tool_calls,
             "totals": serde_json::to_value(&session.record.totals)
                 .expect("totals always serialise"),
@@ -2727,7 +3112,7 @@ fn report(
             .collect()
     };
     let report = json!({
-        "scanned": sessions.len(),
+        "scanned": sessions.len() + ledger_unchanged + capped,
         "uploaded": uploaded,
         "unchanged": unchanged,
         "skipped": skipped,
@@ -2736,7 +3121,12 @@ fn report(
         "skipped_no_token": held_list("skipped_no_token"),
         "skipped_keychain_denied": held_list("skipped_keychain_denied"),
         "skipped_default_mismatch": held_list("skipped_default_mismatch"),
-        "skipped_max_sessions": held_list("skipped_max_sessions"),
+        // Not read, so no workspace is known for them.
+        "skipped_max_sessions": if capped > 0 {
+            json!([{"workspace": null, "sessions": capped}])
+        } else {
+            json!([])
+        },
         "failed": failed,
         "failures": sessions
             .iter()
@@ -2769,7 +3159,12 @@ fn report(
             println!("  {line}");
         }
         let mut summary = if dry_run {
-            format!("{would_upload} would upload, {skipped} skipped: repo not opted in")
+            let known = if unchanged > 0 {
+                format!(", {unchanged} already in the ledger")
+            } else {
+                String::new()
+            };
+            format!("{would_upload} would upload{known}, {skipped} skipped: repo not opted in")
         } else {
             format!(
                 "{uploaded} uploaded, {unchanged} already in the ledger, {skipped} skipped: repo not opted in"
@@ -2808,15 +3203,16 @@ fn report(
                     "  {} session(s) held: the default sign-in is not confirmed as workspace {}; choose the default workspace again in Living Brain for Mac (Settings → Workspace).",
                     held.sessions, held.workspace
                 ),
-                "skipped_max_sessions" => println!(
-                    "  {} session(s) left for a later run: --max-sessions reached for workspace {}.",
-                    held.sessions, held.workspace
-                ),
                 _ => println!(
                     "  {} session(s) held: not signed in to workspace {}; sign in to sync them.",
                     held.sessions, held.workspace
                 ),
             }
+        }
+        if capped > 0 {
+            println!(
+                "  {capped} session(s) left for a later run: --max-sessions reached (not read this run)."
+            );
         }
         if !notes.is_empty() {
             let parts: Vec<String> = notes
@@ -2926,7 +3322,7 @@ fn human_line(session: &Prepared, status: &str) -> String {
         short_id(&session.record.session_id),
         session.record.repo,
         models,
-        session.record.turns.len(),
+        session.turn_count,
         session.tool_calls,
         totals.input_tokens,
         totals.output_tokens,
@@ -3720,18 +4116,13 @@ mod tests {
     /// such, and the default workspace's failure still fails the run.
     #[test]
     fn a_keychain_error_holds_only_its_workspace() {
-        let mut groups = std::collections::BTreeMap::new();
-        groups.insert("default".to_owned(), vec![0]);
-        groups.insert("ws-a".to_owned(), vec![1]);
-        groups.insert("ws-b".to_owned(), vec![2]);
-        let plan = super::plan_tokens(groups.clone(), |workspace| match workspace {
+        let lookup_for = |workspace: &str| match workspace {
             "ws-a" => Err(crate::err("denied")),
             "ws-b" => Ok(None),
             _ => Ok(Some(())),
-        })
-        .expect("the default workspace succeeded");
+        };
         let outcome = |name: &str| {
-            let (_, lookup, _) = plan.iter().find(|(w, _, _)| w == name).expect("planned");
+            let lookup = super::lookup_one(name, lookup_for).expect("the default succeeded");
             match lookup {
                 super::Lookup::Ready(_) => "ready",
                 super::Lookup::NoToken => "no_token",
@@ -3742,12 +4133,8 @@ mod tests {
         assert_eq!(outcome("ws-a"), "denied");
         assert_eq!(outcome("ws-b"), "no_token");
 
-        let failed = super::plan_tokens(groups, |workspace| {
-            if workspace == "default" {
-                Err(crate::err("not logged in"))
-            } else {
-                Ok(Some(()))
-            }
+        let failed = super::lookup_one("default", |_| {
+            Err::<Option<()>, _>(crate::err("not logged in"))
         });
         assert!(
             failed.is_err(),
@@ -4404,5 +4791,313 @@ mod tests {
             "colonizer://CHI-Ecosystem"
         );
         assert!(super::target_of("colonizer://a/b/c").is_err());
+    }
+}
+
+#[cfg(test)]
+mod sync_ledger_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("livingbrain-ledger-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn entry(path: &str, size: u64) -> LedgerEntry {
+        LedgerEntry {
+            api_url: "https://api.example".to_owned(),
+            path: path.to_owned(),
+            size,
+            mtime_secs: 1_700_000_000,
+            mtime_nanos: 5,
+            detail: Detail::Full,
+            cwds: vec!["/work/demo".to_owned()],
+            destination: "default".to_owned(),
+            routing: "{}".to_owned(),
+            source_id: "src-1".to_owned(),
+        }
+    }
+
+    fn ledger_at(path: Option<PathBuf>) -> Ledger {
+        Ledger {
+            path,
+            entries: BTreeMap::new(),
+            dirty: 0,
+            rewrite: false,
+        }
+    }
+
+    fn allowlist_for(root: &str) -> AllowlistFile {
+        AllowlistFile {
+            version: ALLOWLIST_VERSION,
+            allowed: BTreeSet::from([root.to_owned()]),
+            ..AllowlistFile::default()
+        }
+    }
+
+    fn run_with<'a>(allowlist: &'a AllowlistFile, ledger: Ledger) -> Run<'a> {
+        Run {
+            allowlist,
+            api_url: "https://api.example",
+            dry_run: false,
+            max_sessions: None,
+            resync: false,
+            routing: routing_of(allowlist, &None),
+            expectation: DefaultExpectation::Unset,
+            ledger,
+            signed_in: BTreeMap::new(),
+            repos: Repos::default(),
+            sessions: Vec::new(),
+            held: BTreeMap::new(),
+            new_colony: 0,
+            tally: Tally::default(),
+        }
+    }
+
+    #[test]
+    fn the_ledger_round_trips_through_an_atomic_private_write() {
+        let dir = scratch("round-trip");
+        let path = dir.join(LEDGER_FILE);
+        let mut ledger = ledger_at(Some(path.clone()));
+        ledger.insert(entry("/work/demo/a.jsonl", 10));
+        ledger.insert(entry("/work/demo/b.jsonl", 20));
+        assert_eq!(ledger.dirty, 2);
+        ledger.flush(false).expect("flush");
+        assert_eq!(ledger.dirty, 0, "a saved ledger has nothing pending");
+
+        let loaded = Ledger::load_from(Some(path.clone()));
+        assert_eq!(
+            loaded.get("https://api.example", "/work/demo/a.jsonl"),
+            Some(&entry("/work/demo/a.jsonl", 10))
+        );
+        assert_eq!(loaded.entries.len(), 2);
+        assert!(!loaded.rewrite);
+
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .map(|item| {
+                item.expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec![LEDGER_FILE.to_owned()], "no temp file is left");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the ledger is private to its owner");
+        }
+    }
+
+    #[test]
+    fn a_corrupt_or_other_version_ledger_is_empty_and_is_replaced() {
+        for (name, body) in [
+            ("garbage", &b"{ not json"[..]),
+            ("old", &br#"{"version":0,"entries":[]}"#[..]),
+        ] {
+            let dir = scratch(name);
+            let path = dir.join(LEDGER_FILE);
+            std::fs::write(&path, body).expect("write");
+            let mut loaded = Ledger::load_from(Some(path.clone()));
+            assert!(loaded.entries.is_empty(), "{name}: read as empty");
+            assert!(loaded.rewrite, "{name}: marked for replacement");
+            // Nothing new was sent, but the bad file is still replaced.
+            loaded.flush(false).expect("flush");
+            let fresh: LedgerFile =
+                serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("parses");
+            assert_eq!(fresh.version, LEDGER_VERSION, "{name}");
+            assert!(fresh.entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_missing_ledger_is_empty_and_a_dry_run_never_writes_it() {
+        let dir = scratch("dry-run");
+        let path = dir.join(LEDGER_FILE);
+        let mut ledger = Ledger::load_from(Some(path.clone()));
+        assert!(ledger.entries.is_empty());
+        assert!(!ledger.rewrite, "a missing file is not a corrupt one");
+        ledger.insert(entry("/work/demo/a.jsonl", 10));
+        ledger.flush(true).expect("a dry run saves nothing");
+        assert!(!path.exists(), "a dry run wrote the ledger");
+        assert_eq!(ledger.dirty, 1, "the entry stays pending");
+    }
+
+    #[test]
+    fn a_changed_size_or_mtime_is_a_new_stamp() {
+        let dir = scratch("stamp");
+        let file = dir.join("session.jsonl");
+        std::fs::write(&file, b"one\n").expect("write");
+        let first = Stamp::of(&file).expect("stamp");
+        std::fs::write(&file, b"one\ntwo\n").expect("append");
+        assert_ne!(Stamp::of(&file).expect("stamp"), first);
+        assert_eq!(Stamp::of(&dir.join("missing.jsonl")), None);
+    }
+
+    #[test]
+    fn a_recorded_unchanged_file_is_skipped_and_anything_else_is_read() {
+        let dir = scratch("skip");
+        let file = dir.join("session.jsonl");
+        std::fs::write(&file, b"one\n").expect("write");
+        let stamp = Stamp::of(&file).expect("stamp");
+        let root = dir.to_string_lossy().into_owned();
+        let allowlist = allowlist_for(&root);
+        let mut recorded = entry(&canonical_text(&file), stamp.size);
+        recorded.api_url = "https://api.example".to_owned();
+        recorded.mtime_secs = stamp.secs;
+        recorded.mtime_nanos = stamp.nanos;
+        recorded.cwds = vec![root.clone()];
+        recorded.routing = routing_of(&allowlist, &None);
+        let mut ledger = ledger_at(None);
+        ledger.entries.insert(
+            (recorded.api_url.clone(), recorded.path.clone()),
+            recorded.clone(),
+        );
+        let run = run_with(&allowlist, ledger);
+        assert!(run.skips(&file, Some(stamp)), "unchanged: skipped");
+
+        std::fs::write(&file, b"one\ntwo\n").expect("append");
+        let changed = Stamp::of(&file);
+        assert!(!run.skips(&file, changed), "changed size: read again");
+
+        let mut resync = run_with(&allowlist, run.ledger.clone());
+        resync.resync = true;
+        assert!(
+            !resync.skips(&file, Some(stamp)),
+            "--resync reads everything"
+        );
+
+        let mut rerouted = run_with(&allowlist, ledger_at(None));
+        rerouted.ledger.entries = run.ledger.entries.clone();
+        rerouted.routing = "{\"other\":true}".to_owned();
+        assert!(
+            !rerouted.skips(&file, Some(stamp)),
+            "new routing: read again"
+        );
+    }
+
+    /// A one-shot HTTP stub: answers the first request with `201` and `reply`.
+    fn serve_once(reply: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(head_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..head_end]).to_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        base
+    }
+
+    #[test]
+    fn a_sent_session_drops_its_body_and_turns_and_is_remembered() {
+        let dir = scratch("drop");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/logs/claude/projects/-home-alice-code-demo/3f2a9c1e-5b7d-4e8a-9c1f-2a4b6d8e0f1a.jsonl",
+        );
+        let root = "/home/alice/code/demo".to_owned();
+        let allowlist = allowlist_for(&root);
+        let spawns = CodexSpawns::index(&dir);
+        let reader = Reader {
+            spawns: &spawns,
+            allowlist: &allowlist,
+            home: &None,
+            show_all: false,
+        };
+        let Read::Session(session) = reader
+            .read(&mut Repos::default(), Agent::ClaudeCode, &fixture, None)
+            .expect("reads")
+        else {
+            panic!("the fixture is a session");
+        };
+        let turns = session.turn_count;
+        assert!(session.body.is_some() && turns > 0, "built for sending");
+        let mut session = *session;
+        // No note, so the one request is the source's.
+        session.note = None;
+
+        let base = serve_once(r#"{"id":"src-9","created":true}"#);
+        let ledger_path = dir.join(LEDGER_FILE);
+        let mut run = run_with(&allowlist, ledger_at(Some(ledger_path.clone())));
+        run.api_url = "https://api.example";
+        run.signed_in.insert(
+            route::DEFAULT.to_owned(),
+            Ok(Client::new(&base).with_token(crate::auth::Token::for_tests("tok"))),
+        );
+        let stamp = Stamp::of(&fixture);
+        run.dispatch(session, stamp, false).expect("dispatch");
+
+        let sent = &run.sessions[0];
+        assert_eq!(sent.failure, None, "the stub accepted the source");
+        assert_eq!(sent.uploaded.as_deref(), Some("src-9"));
+        assert!(sent.body.is_none(), "the body was dropped after the send");
+        assert!(sent.record.turns.is_empty(), "the turns were dropped too");
+        assert_eq!(sent.turn_count, turns, "the count survives for the report");
+        assert_eq!(run.ledger.dirty, 1, "the sent session is remembered");
+        assert_eq!(run.ledger.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_session_held_for_its_workspace_is_never_sent_or_remembered() {
+        let dir = scratch("held");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/logs/claude/projects/-home-alice-code-demo/3f2a9c1e-5b7d-4e8a-9c1f-2a4b6d8e0f1a.jsonl",
+        );
+        let allowlist = allowlist_for("/home/alice/code/demo");
+        let spawns = CodexSpawns::index(&dir);
+        let reader = Reader {
+            spawns: &spawns,
+            allowlist: &allowlist,
+            home: &None,
+            show_all: false,
+        };
+        let Read::Session(session) = reader
+            .read(&mut Repos::default(), Agent::ClaudeCode, &fixture, None)
+            .expect("reads")
+        else {
+            panic!("the fixture is a session");
+        };
+        let mut run = run_with(&allowlist, ledger_at(None));
+        run.signed_in
+            .insert(route::DEFAULT.to_owned(), Err("skipped_no_token"));
+        run.dispatch(*session, Stamp::of(&fixture), false)
+            .expect("dispatch");
+        assert_eq!(run.sessions[0].held, Some("skipped_no_token"));
+        assert!(run.ledger.entries.is_empty());
+        assert_eq!(run.ledger.dirty, 0);
     }
 }

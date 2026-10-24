@@ -33,7 +33,8 @@ livingbrain logs deny
 |---|---|
 | `--claude-dir <dir>` | read Claude Code sessions from here instead of `~/.claude/projects` |
 | `--codex-dir <dir>` | read Codex sessions from here instead of `~/.codex/sessions` |
-| `--dry-run` | parse, normalise and report, but never touch the network |
+| `--dry-run` | parse, normalise and report, but never touch the network (nor the local sync ledger) |
+| `--resync` | `logs sync` only: ignore the local sync ledger and send every opted-in session again (see [The local sync ledger](#the-local-sync-ledger)) |
 | `--session <file>` | `logs sync` only: scan just this session file (repeatable). It must sit under one of the two trees, and its repo must still be opted in |
 
 `--json` prints one object: `scanned`, `uploaded`, `unchanged`, `skipped`,
@@ -306,7 +307,10 @@ case-insensitively, as GitHub's do. A colony whose repository is not opted in is
 not read at all. The project is the repository's basename, and the source's
 `origin_ref` is the colony id. `--max-sessions N` uploads at most N new
 colony sessions per run, oldest first; sessions already in the ledger do not
-count, so repeated runs work through the backlog. `--dry-run` reports the
+count, so repeated runs work through the backlog. Once the cap is met, the
+remaining transcripts are not read or parsed at all: they are counted from
+their metadata as `skipped_max_sessions` (`workspace: null`, since nothing
+about them was read). `--dry-run` reports the
 counts per workspace and project. A colony routes like any repository: it is
 never sent to the default workspace on a route that cannot judge it.
 
@@ -454,8 +458,34 @@ yields the same bytes, and re-running `logs sync` reads rows back (`200`,
 A session whose record changed — it grew, its repository's detail level
 changed, or a CLI upgrade changed the schema — yields different bytes, so the
 next sync uploads it as a new source (`201`) and rewrites its note in place
-(same slug, a new version). There is no local cache that could skip it: the
-ledger's own key is the only dedupe.
+(same slug, a new version). The server's ledger is still the dedupe of record. The
+local sync ledger (below) only spares the re-reading and re-sending of sessions
+that have not changed since the server accepted them.
+
+## The local sync ledger
+
+`logs sync` keeps a record of what it has sent in `logs-synced.json`, beside
+the opt-in file (`$XDG_CONFIG_HOME/livingbrain`, else `~/.config/livingbrain`).
+An entry is written only after the server has the session's source and its
+note (created or already there), and is keyed by the canonical file path and
+the API URL. It holds the file's size and mtime, the level it was sent at, the
+working directories it was opted in on, its workspace, and the routing (the
+workspaces, routes and default workspace) it was sent under.
+
+On the next run, a file whose size and mtime are unchanged, under the same API
+URL and the same routing, is skipped **before it is read**: it is counted in
+`unchanged` ("already in the ledger") and nothing is sent for it. A file that
+changed, a new file, or any session under a changed route or API URL is read
+and sent as before. A session whose repository was revoked is also skipped,
+since nothing would be sent for it. `--resync` ignores the ledger for the run
+and sends everything opted in again; the server answers what it already has
+as `unchanged`.
+
+The file is written atomically (a temp file, then a rename) and is private to
+its owner on unix. A corrupt, unreadable or other-version file is treated as
+empty and replaced on the next save: the sessions it held are sent again and
+the server dedupes them. Deleting the file has the same effect. `--dry-run`
+never writes it.
 
 ## Projects, and listing what was synced
 

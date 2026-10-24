@@ -705,6 +705,18 @@ pub(super) fn write(
     planned.outcome = Some(outcome);
 }
 
+/// Whether a session's note is on the server, or none was planned: the
+/// session's ledger entry may then be written.
+pub(super) fn accepted(planned: Option<&Planned>) -> bool {
+    match planned {
+        None => true,
+        Some(planned) => matches!(
+            planned.outcome,
+            Some(Outcome::Written { .. } | Outcome::Unchanged { .. })
+        ),
+    }
+}
+
 /// The note's entry in the `--json` report, and its status word:
 /// `would_write` (dry run), `written`, `unchanged`, `failed`, `no_repo`, or
 /// `not_written` (an upload before it failed).
