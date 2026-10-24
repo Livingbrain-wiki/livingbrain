@@ -49,7 +49,7 @@ build" below) on the same custom domain as the API. Mail leaves from
 
 `wrangler deploy` (and `--dry-run`) runs `[build]` in
 `crates/livingbrain-venture/wrangler.toml`: `worker-build`, then
-`node ../../tools/stamp-assets.mjs`, which writes `build/app/` — the directory
+(from within that directory) `node ../../tools/stamp-assets.mjs`, which writes `build/app/` — the directory
 both environments' `[assets]` serve. It copies `app/` (minus `tests/` and the
 README) and adds a content-hashed copy of every cacheable file under `assets/` at
 `static/assets/<name>.<hash>.<ext>`; the pages' scripts and stylesheets, every
